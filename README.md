@@ -15,6 +15,13 @@ Then open `http://localhost:3000`.
 
 - `CLAWBOARD_TOKEN`: if set, write actions require the matching `X-Clawboard-Token` header.
 - `CLAWBOARD_DATA_PATH`: JSON storage path (defaults to `./data/portal.json`).
+- `NEXT_PUBLIC_CLAWBOARD_API_BASE`: base URL for the FastAPI backend (e.g. `http://localhost:8000`).
+- `CLAWBOARD_DB_URL`: database URL for FastAPI (defaults to `sqlite:///./data/clawboard.db`).
+
+## FastAPI backend (recommended)
+
+The backend API now lives in FastAPI (Swagger docs at `http://localhost:8000/docs`).
+By default it uses SQLite at `./data/clawboard.db` and supports the same schema as the UI.
 
 ## Tests (Playwright)
 
@@ -53,6 +60,18 @@ cp -R skills/clawboard ~/.openclaw/skills/clawboard
 ```
 
 Then point your OpenClaw instance at the Clawboard base URL and token (if required).
+
+## Docker compose (web + api)
+
+```bash
+docker compose up -d --build
+```
+
+Or use the helper:
+
+```bash
+bash deploy.sh
+```
 
 ## Chutes provider bootstrap (optional)
 

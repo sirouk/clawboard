@@ -15,7 +15,7 @@ Code-path guarantee: the **Clawboard logger plugin** performs the always‑on lo
 
 ## Onboarding Questions (ask once, keep it brief)
 
-- What is the Clawboard base URL (local or Tailscale)?
+- What is the Clawboard API base URL (FastAPI, local or Tailscale)?
 - Does the Clawboard server require a token? If yes, provide it.
 - What instance name should Clawboard display?
 - Which integration level should we use?
@@ -64,7 +64,7 @@ Set plugin config with the Clawboard base URL and token (if required):
 - `GET /api/health`
 - `GET /api/config`
 
-If the host is on Tailscale, use the tailnet hostname or IP (example: `http://clawboard-node:3000`). If the request fails, ask the user to confirm the Tailscale hostname, port, and that Clawboard is running.
+If the host is on Tailscale, use the tailnet hostname or IP (example: `http://clawboard-node:8000`). If the request fails, ask the user to confirm the Tailscale hostname, port, and that Clawboard API is running.
 
 ### 2) Seed Clawboard
 
