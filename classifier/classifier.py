@@ -63,10 +63,10 @@ def release_lock():
         pass
 
 
-def list_pending(limit=500):
+def list_pending_page(limit=500, offset=0):
     r = requests.get(
         f"{CLAWBOARD_API_BASE}/api/log",
-        params={"classificationStatus": "pending", "limit": limit},
+        params={"classificationStatus": "pending", "limit": limit, "offset": offset},
         timeout=10,
     )
     r.raise_for_status()
@@ -169,10 +169,11 @@ def process_one(log_entry: dict):
 
         # Deterministic, non-ugly buckets for well-known sources.
         if session_key.startswith("channel:discord"):
-            topic_id = "topic-discord"
+            # Prefer keeping existing topic IDs stable; just ensure they have a friendly name.
+            topic_id = log_entry.get("topicId") or "topic-session-channel-discord"
             topic_name = "Discord"
         elif session_key.startswith("agent:main:main"):
-            topic_id = "topic-openclaw"
+            topic_id = log_entry.get("topicId") or "topic-session-agent-main-main"
             topic_name = "OpenClaw"
         else:
             cands = topic_candidates()
@@ -213,7 +214,19 @@ def main():
             continue
         try:
             try:
-                pending = list_pending(limit=50)
+                pending: list[dict] = []
+                offset = 0
+                # Pull a bigger window so conversations don't get starved by tool spam.
+                while True:
+                    page = list_pending_page(limit=500, offset=offset)
+                    if not page:
+                        break
+                    pending.extend(page)
+                    if len(page) < 500:
+                        break
+                    offset += 500
+                    if offset >= 2000:
+                        break
             except Exception as e:
                 # API not ready yet (common on container start). Don't crash.
                 print(f"classifier: clawboard api unavailable: {e}")
