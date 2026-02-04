@@ -167,3 +167,8 @@ iwr -useb https://raw.githubusercontent.com/sirouk/Clawboard/main/inference-prov
 ```
 
 No repo cloning is required.
+
+Model list refresh:
+- The installer writes `~/.openclaw/update_chutes_models.sh`.
+- A cron job runs it every 4 hours (if `crontab` is available).
+- You can run the script manually at any time to refresh Chutes models.

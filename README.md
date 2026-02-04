@@ -14,9 +14,12 @@ Then open `http://localhost:3000` (or `http://localhost:3010` if running via Doc
 ## Configuration
 
 - `CLAWBOARD_TOKEN`: if set, write actions require the matching `X-Clawboard-Token` header.
-- `CLAWBOARD_DATA_PATH`: JSON storage path (defaults to `./data/portal.json`).
 - `NEXT_PUBLIC_CLAWBOARD_API_BASE`: base URL for the FastAPI backend (e.g. `http://localhost:8010`).
 - `CLAWBOARD_DB_URL`: database URL for FastAPI (defaults to `sqlite:///./data/clawboard.db`).
+
+Clawboard does not read local JSON for runtime data. All UI data is fetched from the FastAPI-backed SQLite database.
+Live updates use an SSE stream (`/api/stream`) so OpenClaw writes are reflected instantly without manual refresh.
+The UI will reconcile on reconnect using `/api/changes?since=...` to avoid missing events if the stream blips.
 
 ## FastAPI backend (recommended)
 
@@ -89,6 +92,11 @@ PowerShell (requires Git Bash or WSL):
 ```powershell
 iwr -useb https://raw.githubusercontent.com/sirouk/Clawboard/main/inference-providers/add_chutes.sh | bash
 ```
+
+Model list refresh:
+- The installer creates `~/.openclaw/update_chutes_models.sh`.
+- A cron job runs it every 4 hours (if `crontab` is available).
+- You can run it manually at any time to refresh Chutes models.
 
 ## OpenClaw logger plugin (always-on)
 
