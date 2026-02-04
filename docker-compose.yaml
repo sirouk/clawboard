@@ -3,10 +3,12 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    env_file:
+      - .env
     environment:
       CLAWBOARD_DB_URL: sqlite:///./data/clawboard.db
       CLAWBOARD_CORS_ORIGINS: "*"
-      # CLAWBOARD_TOKEN: "your-token"
+      # CLAWBOARD_TOKEN is read from .env via env_file
     volumes:
       - ./data:/app/data
     ports:

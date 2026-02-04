@@ -48,6 +48,8 @@ Once I have those, I’ll validate /api/health and /api/config and start logging
 
 ## Workflow
 
+See also: `SEED.md` in the Clawboard repo root for bootstrap notes (token, instance config, and quick curl checks).
+
 ### 0) Install the skill (manual now, Clawhub later)
 
 Clawhub is **coming soon**. Until the skill is published there, use the manual install path.
