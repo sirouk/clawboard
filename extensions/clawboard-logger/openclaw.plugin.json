@@ -1,0 +1,23 @@
+{
+  "id": "clawboard-logger",
+  "name": "Clawboard Logger",
+  "description": "Always-on logging bridge from OpenClaw to Clawboard.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": { "type": "string" },
+      "token": { "type": "string" },
+      "enabled": { "type": "boolean" },
+      "queuePath": { "type": "string" }
+    },
+    "required": ["baseUrl"]
+  },
+  "uiHints": {
+    "baseUrl": { "label": "Clawboard Base URL", "placeholder": "http://clawboard:3000" },
+    "token": { "label": "Clawboard Token", "sensitive": true },
+    "queuePath": { "label": "Queue file path" },
+    "enabled": { "label": "Enabled" }
+  }
+}
