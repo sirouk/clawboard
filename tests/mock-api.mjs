@@ -10,6 +10,10 @@ const PORT = Number(process.env.MOCK_API_PORT || 3051);
 const fixturePath = process.env.CLAWBOARD_FIXTURE_PATH || join(__dirname, "fixtures", "portal.json");
 
 const store = JSON.parse(readFileSync(fixturePath, "utf8"));
+const subscribers = new Set();
+const eventBuffer = [];
+const MAX_EVENTS = 200;
+let nextEventId = 0;
 
 function nowIso() {
   return new Date().toISOString();
@@ -23,6 +27,23 @@ function sendJson(res, status, body) {
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   });
   res.end(JSON.stringify(body));
+}
+
+function pushEvent(type, data) {
+  nextEventId += 1;
+  const payload = {
+    type,
+    data,
+    eventId: String(nextEventId),
+    eventTs: data?.updatedAt || data?.createdAt || nowIso(),
+  };
+  const record = { id: nextEventId, payload };
+  eventBuffer.push(record);
+  if (eventBuffer.length > MAX_EVENTS) eventBuffer.shift();
+  for (const res of subscribers) {
+    res.write(`id: ${record.id}\n`);
+    res.write(`data: ${JSON.stringify(record.payload)}\n\n`);
+  }
 }
 
 function parseBody(req) {
@@ -56,6 +77,38 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/health") return sendJson(res, 200, { status: "ok" });
 
+  if (url.pathname === "/api/stream") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.write("event: ready\ndata: {}\n\n");
+    const lastEvent = req.headers["last-event-id"];
+    const lastId = lastEvent ? Number(lastEvent) : null;
+    const oldest = eventBuffer.length ? eventBuffer[0].id : null;
+    if (lastId && oldest && lastId < oldest) {
+      res.write(`data: ${JSON.stringify({ type: "stream.reset" })}\n\n`);
+    } else if (lastId) {
+      for (const record of eventBuffer) {
+        if (record.id > lastId) {
+          res.write(`id: ${record.id}\n`);
+          res.write(`data: ${JSON.stringify(record.payload)}\n\n`);
+        }
+      }
+    }
+    subscribers.add(res);
+    const interval = setInterval(() => {
+      res.write(": ping\n\n");
+    }, 20000);
+    req.on("close", () => {
+      clearInterval(interval);
+      subscribers.delete(res);
+    });
+    return;
+  }
+
   if (url.pathname === "/api/config") {
     if (req.method === "GET") {
       return sendJson(res, 200, { instance: store.instance, tokenRequired: false });
@@ -67,8 +120,22 @@ const server = http.createServer(async (req, res) => {
         ...payload,
         updatedAt: nowIso(),
       };
+      pushEvent("config.updated", store.instance);
       return sendJson(res, 200, { instance: store.instance, tokenRequired: false });
     }
+  }
+
+  if (url.pathname === "/api/changes") {
+    const since = url.searchParams.get("since");
+    const filterSince = (items, key) => {
+      if (!since) return items;
+      return items.filter((item) => (item[key] || "") >= since);
+    };
+    return sendJson(res, 200, {
+      topics: filterSince(store.topics, "updatedAt"),
+      tasks: filterSince(store.tasks, "updatedAt"),
+      logs: filterSince(store.logs, "createdAt"),
+    });
   }
 
   if (url.pathname === "/api/topics") {
@@ -99,6 +166,7 @@ const server = http.createServer(async (req, res) => {
         };
         store.topics.push(topic);
       }
+      pushEvent("topic.upserted", topic);
       return sendJson(res, 200, topic);
     }
   }
@@ -132,6 +200,7 @@ const server = http.createServer(async (req, res) => {
         };
         store.tasks.push(task);
       }
+      pushEvent("task.upserted", task);
       return sendJson(res, 200, task);
     }
   }
@@ -157,6 +226,7 @@ const server = http.createServer(async (req, res) => {
         createdAt: now,
       };
       store.logs.push(entry);
+      pushEvent("log.appended", entry);
       return sendJson(res, 200, entry);
     }
   }
