@@ -63,7 +63,7 @@ def release_lock():
         pass
 
 
-def list_pending(limit=50):
+def list_pending(limit=500):
     r = requests.get(
         f"{CLAWBOARD_API_BASE}/api/log",
         params={"classificationStatus": "pending", "limit": limit},
@@ -206,6 +206,8 @@ def main():
                 print(f"classifier: clawboard api unavailable: {e}")
                 pending = []
 
+            # Prioritize user/assistant conversation before tool/action noise.
+            pending.sort(key=lambda e: 0 if e.get("type") == "conversation" else 1)
             for entry in pending:
                 process_one(entry)
         finally:
