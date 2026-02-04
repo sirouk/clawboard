@@ -32,15 +32,53 @@ Code-path guarantee: the **Clawboard logger plugin** performs the always‑on lo
 
 If the user declines any item, skip it and continue.
 
+## Connect prompt (use verbatim)
+
+Use this exact prompt when first connecting OpenClaw to a Clawboard instance:
+
+```
+To connect OpenClaw to Clawboard, I need:
+1) Clawboard API base URL (FastAPI, local or Tailscale).
+2) Does the server require a write token? If yes, paste it.
+3) Instance display name.
+4) Integration level: manual / write / full backfill.
+
+Once I have those, I’ll validate /api/health and /api/config and start logging.
+```
+
 ## Workflow
 
-### 0) Install the always-on logger plugin (required)
+### 0) Install the skill (manual now, Clawhub later)
+
+Clawhub is **coming soon**. Until the skill is published there, use the manual install path.
+
+Manual install (current):
+
+- Clone the repo to a stable local path and copy the skill folder to `~/.openclaw/skills/` or `<workspace>/skills/`.
+
+```
+git clone https://github.com/sirouk/clawboard ~/clawboard
+mkdir -p ~/.openclaw/skills
+cp -R ~/clawboard/skills/clawboard ~/.openclaw/skills/clawboard
+```
+- Priority: workspace > local > bundled.
+
+OpenClaw loads skills from workspace and local folders automatically on the next session.
+
+### 1) Install the always-on logger plugin (required)
 
 Install and enable the Clawboard logger plugin so every turn is captured even if the agent misses a call:
 
 ```
-openclaw plugins install -l /path/to/clawboard/extensions/clawboard-logger
+openclaw plugins install -l ~/clawboard/extensions/clawboard-logger
 openclaw plugins enable clawboard-logger
+```
+
+If you see `extracted package missing package.json`, update your local repo:
+
+```
+cd ~/clawboard
+git pull
 ```
 
 Set plugin config with the Clawboard base URL and token (if required):
@@ -59,14 +97,18 @@ Set plugin config with the Clawboard base URL and token (if required):
 }
 ```
 
-### 1) Validate connectivity
+Token note:
+- If your API server sets `CLAWBOARD_TOKEN`, use the same value here.
+- If no token is required, omit the `token` field or leave it empty.
+
+### 2) Validate connectivity
 
 - `GET /api/health`
 - `GET /api/config`
 
 If the host is on Tailscale, use the tailnet hostname or IP (example: `http://clawboard-node:8000`). If the request fails, ask the user to confirm the Tailscale hostname, port, and that Clawboard API is running.
 
-### 2) Seed Clawboard
+### 3) Seed Clawboard
 
 - Ensure core topics exist using `POST /api/topics`.
 - Set instance title and integration level with `POST /api/config`.
@@ -74,14 +116,14 @@ If the host is on Tailscale, use the tailnet hostname or IP (example: `http://cl
 - Create an **onboarding topic** (if missing) and an **onboarding task** pinned by default.
 - When onboarding is complete, mark the onboarding task as `done`.
 
-### 2a) Task-scoped conversations
+### 3a) Task-scoped conversations
 
 - When a message clearly relates to a specific task, include `taskId` in the log entry.
 - The task view shows only logs with `taskId` set (task-specific conversation timeline).
 - The topic view shows the full topic timeline newest → oldest.
 - **Curated notes:** users can append notes to any log entry. These are sent as `type: "note"` with `relatedLogId` pointing at the original entry. When OpenClaw builds context for a topic/task, include these curated notes as “user annotations” alongside the conversation history.
 
-### 3) Always-on tracking
+### 4) Always-on tracking
 
 - Log every user message as a `conversation` entry.
 - Log every assistant reply as a `conversation` entry.
@@ -92,12 +134,12 @@ If the host is on Tailscale, use the tailnet hostname or IP (example: `http://cl
 - Clawboard UI shows summaries by default; users can click “...” or “Show full prompts.”
 - Tasks support **pinning**. Use `pinned: true` to keep priority tasks at the top; users and OpenClaw can toggle it via `POST /api/tasks`.
 
-### 3b) API awareness (mandatory)
+### 4a) API awareness (mandatory)
 
 - Treat `references/clawboard-api.md` as the **authoritative API contract**.
 - Use it to know all fields OpenClaw can control: topics, tasks (including `pinned`), and log entries.
 
-### 3a) Never skip a beat (mandatory logging)
+### 4b) Never skip a beat (mandatory logging)
 
 Wire OpenClaw to emit log events on every turn and tool interaction. Do **not** treat logging as optional.
 
@@ -112,7 +154,7 @@ Wire OpenClaw to emit log events on every turn and tool interaction. Do **not** 
 
 See `references/openclaw-hooks.md` for hook locations, CLI commands, and lifecycle event names.
 
-### 4) Topic routing with minimal questions
+### 5) Topic routing with minimal questions
 
 - Use recency, keywords, and active tasks to pick a topic.
 - Ask the user only if confidence is low.
@@ -121,7 +163,7 @@ See `references/openclaw-hooks.md` for hook locations, CLI commands, and lifecyc
 
 See `references/routing-rules.md`.
 
-### 5) Optional: local memory search (privacy-first)
+### 6) Optional: local memory search (privacy-first)
 
 If the user wants local embeddings and session memory search, run the helper:
 
@@ -138,7 +180,7 @@ This configures:
 
 See `references/openclaw-memory-local.md` for details and caveats.
 
-### 6) Backfill (when requested)
+### 7) Backfill (when requested)
 
 - Import historical conversations and memory into Clawboard.
 - Use stable IDs so re-runs are idempotent.
@@ -150,7 +192,7 @@ See `references/openclaw-memory-local.md` for details and caveats.
 - `references/routing-rules.md`
 - `references/openclaw-memory-local.md`
 - `references/openclaw-hooks.md`
-### 7) Optional: enable Chutes provider (recommended)
+### 8) Optional: enable Chutes provider (recommended)
 
 Use the helper scripts (self-contained: install OpenClaw if needed, add Chutes auth, configure the provider, and set the agent primary model only):
 

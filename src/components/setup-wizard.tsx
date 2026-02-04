@@ -24,16 +24,21 @@ export function SetupWizard() {
     if (typeof window === "undefined") return "";
     return window.location.origin;
   }, []);
+  const apiBase = useMemo(() => getApiBase() || origin, [origin]);
 
   const connectionSnippet = useMemo(() => {
-    const apiBase = getApiBase();
-    const target = apiBase || origin;
-    if (!target) return "Use $clawboard to connect my OpenClaw instance to <clawboard-url>.";
-    if (token && token.trim().length > 0) {
-      return `Use $clawboard to connect my OpenClaw instance to ${target} with token ${token.trim()}.`;
-    }
-    return `Use $clawboard to connect my OpenClaw instance to ${target}.`;
-  }, [origin, token]);
+    const target = apiBase || "<clawboard-api-url>";
+    const safeToken = token && token.trim().length > 0 ? token.trim() : "<optional-token>";
+    const name = localTitle?.trim() || "Clawboard";
+    const level = localIntegration || "manual";
+    return `To connect OpenClaw to Clawboard, I need:
+1) Clawboard API base URL (FastAPI, local or Tailscale). -> ${target}
+2) Does the server require a write token? If yes, paste it. -> ${safeToken}
+3) Instance display name. -> ${name}
+4) Integration level: manual / write / full backfill. -> ${level}
+
+Once I have those, I’ll validate /api/health and /api/config and start logging.`;
+  }, [apiBase, localIntegration, localTitle, token]);
 
   const saveInstance = async () => {
     setSaving(true);
@@ -75,6 +80,32 @@ export function SetupWizard() {
     await navigator.clipboard.writeText(value);
     setMessage("Copied to clipboard.");
   };
+
+  const clipboardIcon = (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 4h6l1 2h3v14H5V6h3l1-2z" />
+      <path d="M9 4h6v2H9z" />
+    </svg>
+  );
+
+  const skillInstallSnippet = `git clone https://github.com/sirouk/clawboard ~/clawboard
+mkdir -p ~/.openclaw/skills
+cp -R ~/clawboard/skills/clawboard ~/.openclaw/skills/clawboard`;
+
+  const pluginInstallSnippet = `openclaw plugins install -l ~/clawboard/extensions/clawboard-logger
+openclaw plugins enable clawboard-logger`;
+
+  const pluginConfigSnippet = `"plugins": {
+  "entries": {
+    "clawboard-logger": {
+      "enabled": true,
+      "config": {
+        "baseUrl": "${apiBase || "<clawboard-api-url>"}",
+        "token": "${token && token.trim().length > 0 ? token.trim() : "YOUR_TOKEN"}"
+      }
+    }
+  }
+}`;
 
   return (
     <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
@@ -174,26 +205,63 @@ export function SetupWizard() {
               <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="text-sm font-semibold">Clawboard URL</div>
-                    <div className="text-xs text-[rgb(var(--claw-muted))]">Use this in the OpenClaw skill prompt.</div>
+                    <div className="text-sm font-semibold">Clawboard API base URL</div>
+                    <div className="text-xs text-[rgb(var(--claw-muted))]">FastAPI base URL used by OpenClaw.</div>
                   </div>
-                  <Button size="sm" variant="secondary" onClick={() => copyToClipboard(origin)}>
+                  <Button size="sm" variant="secondary" onClick={() => copyToClipboard(apiBase)}>
                     Copy
                   </Button>
                 </div>
-                <div className="mt-2 text-sm text-[rgb(var(--claw-text))]">{origin || "(open this page in a browser)"}</div>
+                <div className="mt-2 text-sm text-[rgb(var(--claw-text))]">{apiBase || "(set NEXT_PUBLIC_CLAWBOARD_API_BASE)"}</div>
               </div>
 
               <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
-                <div className="text-sm font-semibold">Skill install</div>
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold">Skill install</div>
+                  <Button size="sm" variant="secondary" onClick={() => copyToClipboard(skillInstallSnippet)} aria-label="Copy skill install commands">
+                    <span className="h-4 w-4">{clipboardIcon}</span>
+                  </Button>
+                </div>
                 <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                  Clone the repo and copy `skills/clawboard` into your OpenClaw skills folder.
+                  Clawhub is coming soon. For now, install manually.
                 </p>
                 <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
-{`git clone <your-clawboard-repo>
-mkdir -p ~/.openclaw/skills
-cp -R <repo>/skills/clawboard ~/.openclaw/skills/clawboard`}
+{skillInstallSnippet}
                 </pre>
+                <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
+                  OpenClaw picks up new skills on the next turn.
+                </p>
+              </div>
+
+              <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold">Always‑on logger plugin (required)</div>
+                  <Button size="sm" variant="secondary" onClick={() => copyToClipboard(pluginInstallSnippet)} aria-label="Copy logger plugin commands">
+                    <span className="h-4 w-4">{clipboardIcon}</span>
+                  </Button>
+                </div>
+                <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
+                  The plugin ensures every turn is logged even if the agent misses a tool call.
+                </p>
+                <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+{pluginInstallSnippet}
+                </pre>
+                <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
+                  If you see <code>extracted package missing package.json</code>, update your repo: <code>cd ~/clawboard && git pull</code>.
+                </p>
+                <div className="mt-3 flex items-center justify-between">
+                  <div className="text-xs font-semibold uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Plugin config</div>
+                  <Button size="sm" variant="secondary" onClick={() => copyToClipboard(pluginConfigSnippet)} aria-label="Copy logger plugin config">
+                    <span className="h-4 w-4">{clipboardIcon}</span>
+                  </Button>
+                </div>
+                <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+{pluginConfigSnippet}
+                </pre>
+                <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
+                  Use the same token as your API server&apos;s <code>CLAWBOARD_TOKEN</code>. If the server does not require a token,
+                  remove the <code>token</code> field or leave it empty.
+                </p>
               </div>
 
               <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
