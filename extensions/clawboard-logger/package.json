@@ -1,0 +1,8 @@
+{
+  "name": "clawboard-logger",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.js",
+  "files": ["index.js", "openclaw.plugin.json"],
+  "description": "Always-on logging bridge from OpenClaw to Clawboard."
+}
