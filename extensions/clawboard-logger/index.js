@@ -54,7 +54,9 @@ export default function register(api) {
   const queuePath = rawConfig.queuePath ?? DEFAULT_QUEUE;
   const defaultTopicId = rawConfig.defaultTopicId;
   const defaultTaskId = rawConfig.defaultTaskId;
-  const autoTopicBySession = rawConfig.autoTopicBySession !== false;
+  // Default OFF: session buckets are not meaningful topics.
+  // Stage-2 classifier will attach real topics asynchronously.
+  const autoTopicBySession = rawConfig.autoTopicBySession === true;
 
   if (!enabled) {
     api.logger.warn("[clawboard-logger] disabled by config");
@@ -216,16 +218,8 @@ export default function register(api) {
       },
     });
 
-    if (!topicId) {
-      await send({
-        type: "action",
-        content: "clawboard-logger: missing routing context",
-        summary: "clawboard-logger: missing routing context",
-        raw: JSON.stringify({ meta: redact(meta), ctx: redact(ctx) }, null, 2),
-        agentId: "system",
-        agentLabel: "Clawboard Logger",
-      });
-    }
+    // Intentionally allow topicId to be null/undefined. Stage-2 classifier
+    // will attach this log to a real topic based on conversation context.
   });
 
   api.on("message_sent", async (event, ctx) => {
