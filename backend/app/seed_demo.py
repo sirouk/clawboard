@@ -33,15 +33,15 @@ def seed_from_fixture(session, fixture: dict):
     )
     session.add(inst)
 
-    for topic in fixture.get("topics", []):
-        session.add(Topic(**topic))
+    topics = [Topic(**topic) for topic in fixture.get("topics", [])]
+    tasks = [Task(**task) for task in fixture.get("tasks", [])]
+    logs = [LogEntry(**log) for log in fixture.get("logs", [])]
 
-    for task in fixture.get("tasks", []):
-        session.add(Task(**task))
+    session.add_all(topics)
+    session.add_all(tasks)
+    session.commit()
 
-    for log in fixture.get("logs", []):
-        session.add(LogEntry(**log))
-
+    session.add_all(logs)
     session.commit()
 
 
