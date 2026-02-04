@@ -320,6 +320,16 @@ def upsert_task(
 def list_logs(
     topicId: str | None = Query(default=None, description="Filter logs by topic ID.", example="topic-1"),
     taskId: str | None = Query(default=None, description="Filter logs by task ID.", example="task-1"),
+    sessionKey: str | None = Query(
+        default=None,
+        description="Filter logs by source.sessionKey.",
+        example="channel:discord",
+    ),
+    type: str | None = Query(
+        default=None,
+        description="Filter logs by type (conversation|action|note|system|import).",
+        example="conversation",
+    ),
     classificationStatus: str | None = Query(
         default=None,
         description="Filter logs by classification status (pending|classified|failed).",
@@ -335,6 +345,15 @@ def list_logs(
             logs = [l for l in logs if l.topicId == topicId]
         if taskId:
             logs = [l for l in logs if l.taskId == taskId]
+        if sessionKey:
+            logs = [
+                l
+                for l in logs
+                if isinstance(getattr(l, "source", None), dict)
+                and (l.source or {}).get("sessionKey") == sessionKey
+            ]
+        if type:
+            logs = [l for l in logs if l.type == type]
         if classificationStatus:
             logs = [l for l in logs if getattr(l, "classificationStatus", "pending") == classificationStatus]
         logs = sorted(logs, key=lambda l: l.createdAt, reverse=True)
