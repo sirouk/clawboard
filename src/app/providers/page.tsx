@@ -36,13 +36,13 @@ export default function ProvidersPage() {
               <div>
                 <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">macOS / Linux / WSL / Git Bash</div>
                 <pre className="mt-2 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
-{`curl -fsSL https://raw.githubusercontent.com/sirouk/Clawboard/main/inference-providers/add_chutes.sh | bash`}
+{`curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash`}
                 </pre>
               </div>
               <div>
                 <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Windows (PowerShell + Git Bash/WSL)</div>
                 <pre className="mt-2 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
-{`iwr -useb https://raw.githubusercontent.com/sirouk/Clawboard/main/inference-providers/add_chutes.sh | bash`}
+{`iwr -useb https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash`}
                 </pre>
               </div>
             </div>

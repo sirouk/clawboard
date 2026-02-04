@@ -157,13 +157,13 @@ Use the helper scripts (self-contained: install OpenClaw if needed, add Chutes a
 **macOS / Linux / WSL / Git Bash:**
 
 ```
-curl -fsSL https://raw.githubusercontent.com/sirouk/Clawboard/main/inference-providers/add_chutes.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash
 ```
 
 **Windows (PowerShell + Git Bash/WSL):**
 
 ```
-iwr -useb https://raw.githubusercontent.com/sirouk/Clawboard/main/inference-providers/add_chutes.sh | bash
+iwr -useb https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash
 ```
 
 No repo cloning is required.

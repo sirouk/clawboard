@@ -84,13 +84,13 @@ bash deploy.sh
 Self-contained installer (no repo cloning):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sirouk/Clawboard/main/inference-providers/add_chutes.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash
 ```
 
 PowerShell (requires Git Bash or WSL):
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/sirouk/Clawboard/main/inference-providers/add_chutes.sh | bash
+iwr -useb https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash
 ```
 
 Model list refresh:
