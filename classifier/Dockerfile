@@ -5,6 +5,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir requests fastembed numpy
 
 COPY classifier.py /app/classifier.py
+COPY embeddings_store.py /app/embeddings_store.py
 
 ENV PYTHONUNBUFFERED=1
 
