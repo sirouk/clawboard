@@ -2,7 +2,6 @@
 set -euo pipefail
 
 COMPOSE="docker compose"
-PROJECT_NAME="clawboard"
 
 usage() {
   cat <<'USAGE'
@@ -16,6 +15,8 @@ Commands:
   status     Show container status
   logs       Tail logs
   pull       Pull images (if using registry images)
+  demo-load  Load demo data into SQLite (from tests/fixtures)
+  demo-clear Clear all SQLite data
 
 If no command is provided, an interactive menu is shown.
 USAGE
@@ -50,6 +51,14 @@ pull() {
   $COMPOSE pull
 }
 
+demo_load() {
+  bash tests/load_or_remove_fixtures.sh load
+}
+
+demo_clear() {
+  bash tests/load_or_remove_fixtures.sh remove
+}
+
 run_interactive() {
   echo "Clawboard deploy menu"
   echo "1) Up (build + start)"
@@ -59,7 +68,9 @@ run_interactive() {
   echo "5) Status"
   echo "6) Logs"
   echo "7) Pull images"
-  echo "8) Quit"
+  echo "8) Load demo data"
+  echo "9) Clear demo data"
+  echo "10) Quit"
   read -r -p "Select an option: " choice
 
   case "$choice" in
@@ -70,7 +81,9 @@ run_interactive() {
     5) status ;;
     6) logs ;;
     7) pull ;;
-    8) exit 0 ;;
+    8) demo_load ;;
+    9) demo_clear ;;
+    10) exit 0 ;;
     *) echo "Invalid choice"; exit 1 ;;
   esac
 }
@@ -84,6 +97,8 @@ case "$cmd" in
   status) status ;;
   logs) logs ;;
   pull) pull ;;
+  demo-load) demo_load ;;
+  demo-clear) demo_clear ;;
   "") run_interactive ;;
   -h|--help) usage ;;
   *)

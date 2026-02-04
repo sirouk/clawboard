@@ -39,16 +39,16 @@ npm run test
 ```
 
 Playwright uses `tests/fixtures/portal.json` as its data source for deterministic UI assertions.
-To load fixtures locally into `data/portal.json`, run:
+To load demo data into the SQLite database:
 
 ```bash
-bash tests/load_or_remove_fixtures.sh load
+bash deploy.sh demo-load
 ```
 
-To remove them:
+To clear demo data:
 
 ```bash
-bash tests/load_or_remove_fixtures.sh remove
+bash deploy.sh demo-clear
 ```
 
 ## OpenClaw skill
