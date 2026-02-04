@@ -177,6 +177,16 @@ export default function register(api) {
 
   flushQueue().catch(() => undefined);
 
+  // Startup marker (helps verify the running code version and routing behavior).
+  send({
+    type: "action",
+    content: "clawboard-logger startup: routing enabled",
+    summary: "clawboard-logger startup",
+    raw: JSON.stringify({ autoTopicBySession, defaultTopicId, defaultTaskId }, null, 2),
+    agentId: "system",
+    agentLabel: "Clawboard Logger",
+  }).catch(() => undefined);
+
   api.on("message_received", async (event, ctx) => {
     const raw = event.content ?? "";
     const meta = event.metadata ?? undefined;
