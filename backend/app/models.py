@@ -6,47 +6,130 @@ from sqlalchemy import Column, JSON
 
 
 class InstanceConfig(SQLModel, table=True):
-    id: Optional[int] = Field(default=1, primary_key=True)
-    title: str
-    integrationLevel: str
-    updatedAt: str
+    id: Optional[int] = Field(
+        default=1,
+        primary_key=True,
+        description="Singleton config row ID (always 1).",
+    )
+    title: str = Field(
+        description="Instance title displayed in the UI.",
+    )
+    integrationLevel: str = Field(
+        description="Integration depth (manual | write | full).",
+    )
+    updatedAt: str = Field(
+        description="ISO timestamp of the last config update.",
+    )
 
 
 class Topic(SQLModel, table=True):
-    id: str = Field(primary_key=True)
-    name: str
-    description: Optional[str] = None
-    priority: Optional[str] = "medium"
-    status: Optional[str] = "active"
-    tags: List[str] = Field(default_factory=list, sa_column=Column(JSON))
-    parentId: Optional[str] = None
-    pinned: Optional[bool] = False
-    createdAt: str
-    updatedAt: str
+    id: str = Field(primary_key=True, description="Topic ID.")
+    name: str = Field(description="Topic name.")
+    description: Optional[str] = Field(
+        default=None,
+        description="Topic description.",
+    )
+    priority: Optional[str] = Field(
+        default="medium",
+        description="Priority level (low | medium | high).",
+    )
+    status: Optional[str] = Field(
+        default="active",
+        description="Status (active | archived).",
+    )
+    tags: List[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON),
+        description="Freeform tags.",
+    )
+    parentId: Optional[str] = Field(
+        default=None,
+        description="Parent topic ID (for subtopics).",
+    )
+    pinned: Optional[bool] = Field(
+        default=False,
+        description="Pinned topics sort to the top.",
+    )
+    createdAt: str = Field(
+        description="ISO timestamp when the topic was created.",
+    )
+    updatedAt: str = Field(
+        description="ISO timestamp of last activity/update.",
+    )
 
 
 class Task(SQLModel, table=True):
-    id: str = Field(primary_key=True)
-    topicId: Optional[str] = Field(default=None, foreign_key="topic.id")
-    title: str
-    status: str
-    pinned: Optional[bool] = False
-    priority: Optional[str] = "medium"
-    dueDate: Optional[str] = None
-    createdAt: str
-    updatedAt: str
+    id: str = Field(primary_key=True, description="Task ID.")
+    topicId: Optional[str] = Field(
+        default=None,
+        foreign_key="topic.id",
+        description="Parent topic ID (nullable).",
+    )
+    title: str = Field(description="Task title.")
+    status: str = Field(
+        description="Task status (todo | doing | blocked | done).",
+    )
+    pinned: Optional[bool] = Field(
+        default=False,
+        description="Pinned tasks sort to the top within their topic.",
+    )
+    priority: Optional[str] = Field(
+        default="medium",
+        description="Priority level (low | medium | high).",
+    )
+    dueDate: Optional[str] = Field(
+        default=None,
+        description="Optional due date (ISO).",
+    )
+    createdAt: str = Field(
+        description="ISO timestamp when the task was created.",
+    )
+    updatedAt: str = Field(
+        description="ISO timestamp of last update.",
+    )
 
 
 class LogEntry(SQLModel, table=True):
-    id: str = Field(primary_key=True)
-    topicId: Optional[str] = Field(default=None, foreign_key="topic.id")
-    taskId: Optional[str] = Field(default=None, foreign_key="task.id")
-    relatedLogId: Optional[str] = None
-    type: str
-    content: str
-    summary: Optional[str] = None
-    raw: Optional[str] = None
-    createdAt: str
-    agentId: Optional[str] = None
-    agentLabel: Optional[str] = None
-    source: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
+    id: str = Field(primary_key=True, description="Log entry ID.")
+    topicId: Optional[str] = Field(
+        default=None,
+        foreign_key="topic.id",
+        description="Associated topic ID (nullable).",
+    )
+    taskId: Optional[str] = Field(
+        default=None,
+        foreign_key="task.id",
+        description="Associated task ID (nullable).",
+    )
+    relatedLogId: Optional[str] = Field(
+        default=None,
+        description="If this is a curated note, link to the original log ID.",
+    )
+    type: str = Field(
+        description="Log type (conversation | action | note | system | import).",
+    )
+    content: str = Field(description="Full log content.")
+    summary: Optional[str] = Field(
+        default=None,
+        description="Concise summary for list view.",
+    )
+    raw: Optional[str] = Field(
+        default=None,
+        description="Raw prompt/response payload if available.",
+    )
+    createdAt: str = Field(
+        description="ISO timestamp when the log was created.",
+    )
+    agentId: Optional[str] = Field(
+        default=None,
+        description="Agent identifier (main, coding, web, social, system).",
+    )
+    agentLabel: Optional[str] = Field(
+        default=None,
+        description="Human-readable agent label.",
+    )
+    source: Optional[Dict[str, Any]] = Field(
+        default=None,
+        sa_column=Column(JSON),
+        description="Source metadata (channel, sessionKey, messageId).",
+    )

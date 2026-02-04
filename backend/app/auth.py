@@ -4,7 +4,14 @@ import os
 from fastapi import Header, HTTPException, status
 
 
-def require_token(x_clawboard_token: str | None = Header(default=None)) -> None:
+def require_token(
+    x_clawboard_token: str | None = Header(
+        default=None,
+        alias="X-Clawboard-Token",
+        description="Write token (required when CLAWBOARD_TOKEN is set).",
+        example="your-token-here",
+    )
+) -> None:
     token = os.getenv("CLAWBOARD_TOKEN")
     if not token:
         return
