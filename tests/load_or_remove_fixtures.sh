@@ -25,6 +25,9 @@ if ! $COMPOSE ps >/dev/null 2>&1; then
   exit 1
 fi
 
+# Ensure the API container is up-to-date with the seed helper
+$COMPOSE up -d --build api >/dev/null
+
 api_id="$($COMPOSE ps -q api)"
 if [[ -z "$api_id" ]]; then
   echo "API container is not running. Start it with: docker compose up -d api" >&2
