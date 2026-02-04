@@ -79,7 +79,9 @@ export default function register(api: OpenClawPluginApi) {
   const queuePath = rawConfig.queuePath ?? DEFAULT_QUEUE;
   const defaultTopicId = rawConfig.defaultTopicId;
   const defaultTaskId = rawConfig.defaultTaskId;
-  const autoTopicBySession = rawConfig.autoTopicBySession !== false;
+  // Default OFF: session buckets are not meaningful topics.
+  // Stage-2 classifier will attach real topics asynchronously.
+  const autoTopicBySession = rawConfig.autoTopicBySession === true;
 
   if (!enabled) {
     api.logger.warn("[clawboard-logger] disabled by config");
@@ -213,8 +215,8 @@ export default function register(api: OpenClawPluginApi) {
     const meta = (event.metadata as Record<string, unknown> | undefined) ?? undefined;
     const sessionKey = (meta?.sessionKey as string | undefined) ?? (ctx as unknown as { sessionKey?: string })?.sessionKey;
 
-    // Fallback routing: if OpenClaw does not provide a sessionKey for inbound
-    // messages, bucket by channel so we still get stable topic grouping.
+    // Preserve a stable sessionKey for Stage-2 grouping, but DO NOT
+    // create or attach session-bucket topics (those aren't real topics).
     const fallbackKey = (ctx as unknown as { channelId?: string })?.channelId;
     const effectiveSessionKey = sessionKey ?? (fallbackKey ? `channel:${fallbackKey}` : undefined);
     const topicId = await resolveTopicId(effectiveSessionKey);
@@ -239,16 +241,8 @@ export default function register(api: OpenClawPluginApi) {
       },
     });
 
-    if (!topicId) {
-      await send({
-        type: "action",
-        content: "clawboard-logger: missing routing context",
-        summary: "clawboard-logger: missing routing context",
-        raw: JSON.stringify({ meta: redact(meta), ctx: redact(ctx) }, null, 2),
-        agentId: "system",
-        agentLabel: "Clawboard Logger",
-      });
-    }
+    // Intentionally allow topicId to be null/undefined. Stage-2 classifier
+    // will attach this log to a real topic based on conversation context.
   });
 
   api.on("message_sent", async (event: PluginHookMessageSentEvent, ctx: PluginHookMessageContext) => {
