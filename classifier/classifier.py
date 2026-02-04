@@ -374,17 +374,22 @@ def main():
         try:
             # Fetch pending conversations (paged) and group by sessionKey.
             pending: list[dict] = []
-            offset = 0
-            while True:
-                page = list_pending_conversations(limit=500, offset=offset)
-                if not page:
-                    break
-                pending.extend(page)
-                if len(page) < 500:
-                    break
-                offset += 500
-                if offset >= 5000:
-                    break
+            try:
+                offset = 0
+                while True:
+                    page = list_pending_conversations(limit=500, offset=offset)
+                    if not page:
+                        break
+                    pending.extend(page)
+                    if len(page) < 500:
+                        break
+                    offset += 500
+                    if offset >= 5000:
+                        break
+            except Exception as e:
+                # Common on startup when api container isn't ready.
+                print(f"classifier: clawboard api unavailable: {e}")
+                pending = []
 
             session_keys: list[str] = []
             seen = set()
@@ -397,7 +402,6 @@ def main():
                 seen.add(sk)
                 session_keys.append(sk)
 
-            # Process newest sessions first.
             session_keys = session_keys[:50]
             for sk in session_keys:
                 try:
