@@ -34,7 +34,19 @@ def oc_headers():
 
 
 def acquire_lock():
-    # extremely simple single-flight: atomic create
+    """Single-flight lock with stale-lock recovery."""
+    # If the lock exists but is stale (container crashed / restarted), remove it.
+    try:
+        st = os.stat(LOCK_PATH)
+        age = time.time() - st.st_mtime
+        if age > max(60, INTERVAL * 3):
+            try:
+                os.unlink(LOCK_PATH)
+            except FileNotFoundError:
+                pass
+    except FileNotFoundError:
+        pass
+
     try:
         fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.write(fd, str(os.getpid()).encode("utf-8"))
