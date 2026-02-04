@@ -24,6 +24,9 @@
 
 # clawboard data
 /data
+*.db
+backend/__pycache__/
+backend/.venv/
 
 # misc
 .DS_Store

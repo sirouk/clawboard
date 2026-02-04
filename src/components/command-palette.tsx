@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Badge, Input } from "@/components/ui";
 import type { Topic } from "@/lib/types";
 import { buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
+import { apiUrl } from "@/lib/api";
 
 type ActionItem = {
   label: string;
@@ -42,7 +43,7 @@ export function CommandPalette() {
 
   useEffect(() => {
     if (!open) return;
-    fetch("/api/topics")
+    fetch(apiUrl("/api/topics"))
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data?.topics)) {

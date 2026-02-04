@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import type { Task } from "@/lib/types";
 import { useAppConfig } from "@/components/providers";
 import { cn } from "@/lib/cn";
+import { apiUrl } from "@/lib/api";
 
 export function TaskPinToggle({
   task,
@@ -24,7 +25,7 @@ export function TaskPinToggle({
     event.stopPropagation();
     if (readOnly || saving) return;
     setSaving(true);
-    const res = await fetch("/api/tasks", {
+    const res = await fetch(apiUrl("/api/tasks"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

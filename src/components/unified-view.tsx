@@ -11,6 +11,7 @@ import { PinToggle } from "@/components/pin-toggle";
 import { TaskPinToggle } from "@/components/task-pin-toggle";
 import { decodeSlugId, encodeTaskSlug, encodeTopicSlug, slugify } from "@/lib/slug";
 import { cn } from "@/lib/cn";
+import { apiUrl } from "@/lib/api";
 
 const STATUS_TONE: Record<string, "muted" | "accent" | "accent2" | "warning" | "success"> = {
   todo: "muted",
@@ -228,7 +229,7 @@ export function UnifiedView({
     if (readOnly) return;
     const current = taskState.find((task) => task.id === taskId);
     if (!current) return;
-    const res = await fetch("/api/tasks", {
+    const res = await fetch(apiUrl("/api/tasks"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -414,9 +415,9 @@ export function UnifiedView({
     const refresh = async () => {
       try {
         const [topicsRes, tasksRes, logsRes] = await Promise.all([
-          fetch("/api/topics", { cache: "no-store" }),
-          fetch("/api/tasks", { cache: "no-store" }),
-          fetch("/api/log", { cache: "no-store" }),
+          fetch(apiUrl("/api/topics"), { cache: "no-store" }),
+          fetch(apiUrl("/api/tasks"), { cache: "no-store" }),
+          fetch(apiUrl("/api/log"), { cache: "no-store" }),
         ]);
 
         if (!mounted) return;

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import type { Topic } from "@/lib/types";
 import { useAppConfig } from "@/components/providers";
 import { cn } from "@/lib/cn";
+import { apiUrl } from "@/lib/api";
 
 export function PinToggle({
   topic,
@@ -24,7 +25,7 @@ export function PinToggle({
     event.stopPropagation();
     if (readOnly || saving) return;
     setSaving(true);
-    const res = await fetch("/api/topics", {
+    const res = await fetch(apiUrl("/api/topics"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

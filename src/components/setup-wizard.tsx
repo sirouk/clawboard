@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { Button, Input, Select, Badge, Card } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import type { IntegrationLevel } from "@/lib/types";
+import { apiUrl, getApiBase } from "@/lib/api";
 
 const STEPS = [
   { id: 1, title: "Instance", description: "Name your Clawboard and set integration depth." },
@@ -25,18 +26,20 @@ export function SetupWizard() {
   }, []);
 
   const connectionSnippet = useMemo(() => {
-    if (!origin) return "Use $clawboard to connect my OpenClaw instance to <clawboard-url>.";
+    const apiBase = getApiBase();
+    const target = apiBase || origin;
+    if (!target) return "Use $clawboard to connect my OpenClaw instance to <clawboard-url>.";
     if (token && token.trim().length > 0) {
-      return `Use $clawboard to connect my OpenClaw instance to ${origin} with token ${token.trim()}.`;
+      return `Use $clawboard to connect my OpenClaw instance to ${target} with token ${token.trim()}.`;
     }
-    return `Use $clawboard to connect my OpenClaw instance to ${origin}.`;
+    return `Use $clawboard to connect my OpenClaw instance to ${target}.`;
   }, [origin, token]);
 
   const saveInstance = async () => {
     setSaving(true);
     setMessage(null);
     try {
-      const res = await fetch("/api/config", {
+      const res = await fetch(apiUrl("/api/config"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

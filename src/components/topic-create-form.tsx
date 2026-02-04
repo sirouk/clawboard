@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Input, Select, TextArea } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
+import { apiUrl } from "@/lib/api";
 
 export function TopicCreateForm() {
   const router = useRouter();
@@ -26,7 +27,7 @@ export function TopicCreateForm() {
 
     setSaving(true);
     try {
-      const res = await fetch("/api/topics", {
+      const res = await fetch(apiUrl("/api/topics"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

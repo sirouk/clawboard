@@ -7,6 +7,7 @@ import { Badge, Button, Input, Select } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
 import { useAppConfig } from "@/components/providers";
+import { apiUrl } from "@/lib/api";
 
 const TYPE_LABELS: Record<string, string> = {
   note: "Note",
@@ -164,7 +165,7 @@ export function LogList({
       agentLabel: "User",
     };
 
-    const res = await fetch("/api/log", {
+    const res = await fetch(apiUrl("/api/log"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

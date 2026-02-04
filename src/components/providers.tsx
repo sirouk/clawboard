@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { IntegrationLevel } from "@/lib/types";
+import { apiUrl } from "@/lib/api";
 
 export type AppConfig = {
   instanceTitle: string;
@@ -35,7 +36,7 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const storedTitle = window.localStorage.getItem("clawboard.instanceTitle");
-    fetch("/api/config")
+    fetch(apiUrl("/api/config"))
       .then((res) => res.json())
       .then((data) => {
         if (!storedTitle && data?.instance?.title) {

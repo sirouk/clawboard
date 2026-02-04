@@ -7,6 +7,7 @@ import { Button, StatusPill } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { formatRelativeTime } from "@/lib/format";
 import { buildTaskUrl } from "@/lib/url";
+import { apiUrl } from "@/lib/api";
 
 const STATUS_TONE: Record<TaskStatus, "muted" | "accent" | "accent2" | "warning" | "success"> = {
   todo: "muted",
@@ -35,7 +36,7 @@ export function NowPanel({
     if (!allowStatusUpdate) return;
     const current = tasks.find((task) => task.id === taskId);
     if (!current) return;
-    const res = await fetch("/api/tasks", {
+    const res = await fetch(apiUrl("/api/tasks"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

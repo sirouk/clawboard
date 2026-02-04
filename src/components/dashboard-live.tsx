@@ -7,6 +7,7 @@ import { NowPanel } from "@/components/now-panel";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
 import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
 import type { LogEntry, Task, Topic } from "@/lib/types";
+import { apiUrl } from "@/lib/api";
 
 const REFRESH_MS = 10000;
 
@@ -28,9 +29,9 @@ export function DashboardLive({
     const refresh = async () => {
       try {
         const [tasksRes, logsRes, topicsRes] = await Promise.all([
-          fetch("/api/tasks"),
-          fetch("/api/log"),
-          fetch("/api/topics"),
+          fetch(apiUrl("/api/tasks")),
+          fetch(apiUrl("/api/log")),
+          fetch(apiUrl("/api/topics")),
         ]);
 
         if (!mounted) return;
