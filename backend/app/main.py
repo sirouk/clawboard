@@ -386,10 +386,25 @@ def append_log(
     """Append a timeline entry."""
     with get_session() as session:
         timestamp = payload.createdAt or now_iso()
+        # Allow stage-1 logging to append without pre-creating topics/tasks.
+        # Stage-2 classifier will attach valid topic/task IDs later.
+        topic_id = payload.topicId
+        task_id = payload.taskId
+
+        if topic_id:
+            exists = session.get(Topic, topic_id)
+            if not exists:
+                topic_id = None
+
+        if task_id:
+            exists = session.get(Task, task_id)
+            if not exists:
+                task_id = None
+
         entry = LogEntry(
             id=create_id("log"),
-            topicId=payload.topicId,
-            taskId=payload.taskId,
+            topicId=topic_id,
+            taskId=task_id,
             relatedLogId=payload.relatedLogId,
             type=payload.type,
             content=payload.content,
