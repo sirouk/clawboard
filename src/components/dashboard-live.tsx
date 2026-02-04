@@ -1,58 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import Link from "next/link";
 import { Card, CardHeader, Badge } from "@/components/ui";
 import { NowPanel } from "@/components/now-panel";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
 import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
-import type { LogEntry, Task, Topic } from "@/lib/types";
-import { apiUrl } from "@/lib/api";
+import type { LogEntry } from "@/lib/types";
+import { useDataStore } from "@/components/data-provider";
 
-const REFRESH_MS = 10000;
-
-export function DashboardLive({
-  initialTasks,
-  initialLogs,
-  initialTopics,
-}: {
-  initialTasks: Task[];
-  initialLogs: LogEntry[];
-  initialTopics: Topic[];
-}) {
-  const [tasks, setTasks] = useState<Task[]>(initialTasks);
-  const [logs, setLogs] = useState<LogEntry[]>(initialLogs);
-  const [topics, setTopics] = useState<Topic[]>(initialTopics);
-
-  useEffect(() => {
-    let mounted = true;
-    const refresh = async () => {
-      try {
-        const [tasksRes, logsRes, topicsRes] = await Promise.all([
-          fetch(apiUrl("/api/tasks")),
-          fetch(apiUrl("/api/log")),
-          fetch(apiUrl("/api/topics")),
-        ]);
-
-        if (!mounted) return;
-        const tasksData = await tasksRes.json().catch(() => null);
-        const logsData = await logsRes.json().catch(() => null);
-        const topicsData = await topicsRes.json().catch(() => null);
-
-        if (Array.isArray(tasksData?.tasks)) setTasks(tasksData.tasks);
-        if (Array.isArray(logsData?.logs)) setLogs(logsData.logs);
-        if (Array.isArray(topicsData?.topics)) setTopics(topicsData.topics);
-      } catch {
-        // ignore refresh errors
-      }
-    };
-
-    const interval = window.setInterval(refresh, REFRESH_MS);
-    return () => {
-      mounted = false;
-      window.clearInterval(interval);
-    };
-  }, []);
+export function DashboardLive() {
+  const { tasks, logs, topics } = useDataStore();
 
   const sortedLogs = useMemo(() => [...logs].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)), [logs]);
   const sortedTopics = useMemo(() => [...topics].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1)), [topics]);

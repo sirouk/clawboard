@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import type { LogEntry, Task, Topic } from "@/lib/types";
+import type { LogEntry, Task } from "@/lib/types";
 import { Badge, Button, Input, Select, StatusPill } from "@/components/ui";
 import { LogList } from "@/components/log-list";
 import { formatRelativeTime } from "@/lib/format";
@@ -12,6 +11,7 @@ import { TaskPinToggle } from "@/components/task-pin-toggle";
 import { decodeSlugId, encodeTaskSlug, encodeTopicSlug, slugify } from "@/lib/slug";
 import { cn } from "@/lib/cn";
 import { apiUrl } from "@/lib/api";
+import { useDataStore } from "@/components/data-provider";
 
 const STATUS_TONE: Record<string, "muted" | "accent" | "accent2" | "warning" | "success"> = {
   todo: "muted",
@@ -29,36 +29,85 @@ const STATUS_LABELS: Record<string, string> = {
 
 const DEFAULT_TIMELINE_LIMIT = 5;
 
-export function UnifiedView({
-  topics,
-  tasks,
-  logs,
-  basePath = "/u",
-}: {
-  topics: Topic[];
-  tasks: Task[];
-  logs: LogEntry[];
-  basePath?: string;
-}) {
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
+type UrlState = {
+  search: string;
+  raw: boolean;
+  done: boolean;
+  page: number;
+  topics: string[];
+  tasks: string[];
+};
+
+function getInitialUrlState(basePath: string): UrlState {
+  if (typeof window === "undefined") {
+    return { search: "", raw: false, done: false, page: 1, topics: [], tasks: [] };
+  }
+  const url = new URL(window.location.href);
+  const params = url.searchParams;
+  const segments = url.pathname.startsWith(basePath)
+    ? url.pathname.slice(basePath.length).split("/").filter(Boolean)
+    : [];
+  const parsedTopics: string[] = [];
+  const parsedTasks: string[] = [];
+  for (let i = 0; i < segments.length; i += 1) {
+    const key = segments[i];
+    const value = segments[i + 1];
+    if (!value) continue;
+    if (key === "topic") {
+      parsedTopics.push(decodeSlugId(value));
+      i += 1;
+    } else if (key === "task") {
+      parsedTasks.push(decodeSlugId(value));
+      i += 1;
+    }
+  }
+  let nextTopics = parsedTopics;
+  let nextTasks = parsedTasks;
+  if (nextTopics.length === 0) {
+    nextTopics = params.getAll("topic").map((value) => decodeSlugId(value)).filter(Boolean);
+  }
+  if (nextTasks.length === 0) {
+    nextTasks = params.getAll("task").map((value) => decodeSlugId(value)).filter(Boolean);
+  }
+  if (nextTopics.length === 0) {
+    const legacyTopics = params.get("topics")?.split(",").filter(Boolean) ?? [];
+    nextTopics = legacyTopics.map((value) => decodeSlugId(value)).filter(Boolean);
+  }
+  if (nextTasks.length === 0) {
+    const legacyTasks = params.get("tasks")?.split(",").filter(Boolean) ?? [];
+    nextTasks = legacyTasks.map((value) => decodeSlugId(value)).filter(Boolean);
+  }
+  return {
+    search: params.get("q") ?? "",
+    raw: params.get("raw") === "1",
+    done: params.get("done") === "1",
+    page: Math.max(1, Number(params.get("page") ?? 1)),
+    topics: nextTopics,
+    tasks: nextTasks,
+  };
+}
+
+export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const { token, tokenRequired } = useAppConfig();
+  const { topics, tasks, logs, setTopics, setTasks } = useDataStore();
   const readOnly = tokenRequired && !token;
-  const [expandedTopics, setExpandedTopics] = useState<Set<string>>(new Set());
-  const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
-  const [showRaw, setShowRaw] = useState(false);
-  const [search, setSearch] = useState("");
-  const [taskState, setTaskState] = useState<Task[]>(tasks);
-  const [topicState, setTopicState] = useState<Topic[]>(topics);
-  const [logState, setLogState] = useState<LogEntry[]>(logs);
-  const [showDone, setShowDone] = useState(false);
+  const scrollMemory = useRef<Record<string, number>>({});
+  const [initialUrlState] = useState(() => getInitialUrlState(basePath));
+  const [expandedTopics, setExpandedTopics] = useState<Set<string>>(new Set(initialUrlState.topics));
+  const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set(initialUrlState.tasks));
+  const [showRaw, setShowRaw] = useState(initialUrlState.raw);
+  const [search, setSearch] = useState(initialUrlState.search);
+  const [showDone, setShowDone] = useState(initialUrlState.done);
   const [timelineLimits, setTimelineLimits] = useState<Record<string, number>>({});
   const [moveTaskId, setMoveTaskId] = useState<string | null>(null);
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useState(initialUrlState.page);
   const [isSticky, setIsSticky] = useState(false);
-  const committedSearch = useRef("");
-  const basePathRef = useRef(basePath);
+  const committedSearch = useRef(initialUrlState.search);
+
+  const currentUrlKey = useCallback(() => {
+    if (typeof window === "undefined") return basePath;
+    return `${window.location.pathname}${window.location.search}`;
+  }, [basePath]);
 
   useEffect(() => {
     const handle = () => {
@@ -70,46 +119,28 @@ export function UnifiedView({
   }, []);
 
   useEffect(() => {
-    setTaskState(tasks);
-  }, [tasks]);
+    if (typeof window === "undefined") return;
+    const store = () => {
+      scrollMemory.current[currentUrlKey()] = window.scrollY;
+    };
+    store();
+    window.addEventListener("scroll", store, { passive: true });
+    return () => window.removeEventListener("scroll", store);
+  }, [currentUrlKey]);
 
-  useEffect(() => {
-    setTopicState(topics);
-  }, [topics]);
+  const expandedTopicsSafe = useMemo(() => {
+    const topicIds = new Set(topics.map((topic) => topic.id));
+    return new Set([...expandedTopics].filter((id) => topicIds.has(id)));
+  }, [expandedTopics, topics]);
 
-  useEffect(() => {
-    setLogState(logs);
-  }, [logs]);
-
-  const taskRef = useRef(taskState);
-  const topicRef = useRef(topicState);
-  const logRef = useRef(logState);
-
-  useEffect(() => {
-    taskRef.current = taskState;
-  }, [taskState]);
-
-  useEffect(() => {
-    topicRef.current = topicState;
-  }, [topicState]);
-
-  useEffect(() => {
-    logRef.current = logState;
-  }, [logState]);
-
-  useEffect(() => {
-    const topicIds = new Set(topicState.map((topic) => topic.id));
-    setExpandedTopics((prev) => new Set([...prev].filter((id) => topicIds.has(id))));
-  }, [topicState]);
-
-  useEffect(() => {
-    const taskIds = new Set(taskState.map((task) => task.id));
-    setExpandedTasks((prev) => new Set([...prev].filter((id) => taskIds.has(id))));
-  }, [taskState]);
+  const expandedTasksSafe = useMemo(() => {
+    const taskIds = new Set(tasks.map((task) => task.id));
+    return new Set([...expandedTasks].filter((id) => taskIds.has(id)));
+  }, [expandedTasks, tasks]);
 
   const tasksByTopic = useMemo(() => {
     const map = new Map<string, Task[]>();
-    for (const task of taskState) {
+    for (const task of tasks) {
       const key = task.topicId ?? "unassigned";
       const list = map.get(key) ?? [];
       list.push(task);
@@ -123,11 +154,11 @@ export function UnifiedView({
       });
     }
     return map;
-  }, [taskState]);
+  }, [tasks]);
 
   const logsByTask = useMemo(() => {
     const map = new Map<string, LogEntry[]>();
-    for (const entry of logState) {
+    for (const entry of logs) {
       if (!entry.taskId) continue;
       const list = map.get(entry.taskId) ?? [];
       list.push(entry);
@@ -137,11 +168,11 @@ export function UnifiedView({
       list.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     }
     return map;
-  }, [logState]);
+  }, [logs]);
 
   const logsByTopic = useMemo(() => {
     const map = new Map<string, LogEntry[]>();
-    for (const entry of logState) {
+    for (const entry of logs) {
       if (!entry.topicId) continue;
       const list = map.get(entry.topicId) ?? [];
       list.push(entry);
@@ -151,7 +182,7 @@ export function UnifiedView({
       list.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     }
     return map;
-  }, [logState]);
+  }, [logs]);
 
   const normalizedSearch = search.trim().toLowerCase();
 
@@ -169,7 +200,7 @@ export function UnifiedView({
   }, [logsByTask, matchesLogSearch, normalizedSearch]);
 
   const orderedTopics = useMemo(() => {
-    const base = [...topicState]
+    const base = [...topics]
       .map((topic) => ({
         ...topic,
         lastActivity: logsByTopic.get(topic.id)?.[0]?.createdAt ?? topic.updatedAt,
@@ -207,27 +238,16 @@ export function UnifiedView({
     }
 
     return filtered;
-  }, [topicState, tasksByTopic, normalizedSearch, logsByTopic, matchesLogSearch, matchesTaskSearch]);
+  }, [topics, tasksByTopic, normalizedSearch, logsByTopic, matchesLogSearch, matchesTaskSearch]);
 
   const pageSize = 10;
   const pageCount = Math.ceil(orderedTopics.length / pageSize);
-  const pagedTopics = pageCount > 1 ? orderedTopics.slice((page - 1) * pageSize, page * pageSize) : orderedTopics;
-
-  useEffect(() => {
-    if (pageCount <= 1) {
-      setPage(1);
-      return;
-    }
-    if (page > pageCount) setPage(pageCount);
-  }, [page, pageCount]);
-
-  useEffect(() => {
-    setPage(1);
-  }, [normalizedSearch, showDone]);
+  const safePage = pageCount <= 1 ? 1 : Math.min(page, pageCount);
+  const pagedTopics = pageCount > 1 ? orderedTopics.slice((safePage - 1) * pageSize, safePage * pageSize) : orderedTopics;
 
   const updateTask = async (taskId: string, updates: Partial<Task>) => {
     if (readOnly) return;
-    const current = taskState.find((task) => task.id === taskId);
+    const current = tasks.find((task) => task.id === taskId);
     if (!current) return;
     const res = await fetch(apiUrl("/api/tasks"), {
       method: "POST",
@@ -242,14 +262,14 @@ export function UnifiedView({
       return;
     }
 
-    setTaskState((prev) =>
+    setTasks((prev) =>
       prev.map((task) => (task.id === taskId ? { ...task, ...updates, updatedAt: new Date().toISOString() } : task))
     );
   };
 
   const expandAll = () => {
     setExpandedTopics(new Set(orderedTopics.map((topic) => topic.id)));
-    setExpandedTasks(new Set(taskState.map((task) => task.id)));
+    setExpandedTasks(new Set(tasks.map((task) => task.id)));
   };
 
   const collapseAll = () => {
@@ -266,40 +286,40 @@ export function UnifiedView({
     (value: string) => {
       if (!value) return "";
       const raw = decodeSlugId(value);
-      if (topicState.some((topic) => topic.id === raw)) return raw;
+      if (topics.some((topic) => topic.id === raw)) return raw;
       const slug = value.includes("--") ? value.slice(0, value.lastIndexOf("--")) : value;
-      const match = topicState.find((topic) => slugify(topic.name) === slug);
+      const match = topics.find((topic) => slugify(topic.name) === slug);
       return match?.id ?? raw;
     },
-    [topicState]
+    [topics]
   );
 
   const resolveTaskId = useCallback(
     (value: string) => {
       if (!value) return "";
       const raw = decodeSlugId(value);
-      if (taskState.some((task) => task.id === raw)) return raw;
+      if (tasks.some((task) => task.id === raw)) return raw;
       const slug = value.includes("--") ? value.slice(0, value.lastIndexOf("--")) : value;
-      const match = taskState.find((task) => slugify(task.title) === slug);
+      const match = tasks.find((task) => slugify(task.title) === slug);
       return match?.id ?? raw;
     },
-    [taskState]
+    [tasks]
   );
 
   const encodeTopicParam = useCallback(
     (topicId: string) => {
-      const topic = topicState.find((item) => item.id === topicId);
+      const topic = topics.find((item) => item.id === topicId);
       return topic ? encodeTopicSlug(topic) : topicId;
     },
-    [topicState]
+    [topics]
   );
 
   const encodeTaskParam = useCallback(
     (taskId: string) => {
-      const task = taskState.find((item) => item.id === taskId);
+      const task = tasks.find((item) => item.id === taskId);
       return task ? encodeTaskSlug(task) : taskId;
     },
-    [taskState]
+    [tasks]
   );
 
   const parseSegments = (segments: string[]) => {
@@ -320,11 +340,12 @@ export function UnifiedView({
     return { topics, tasks };
   };
 
-  useEffect(() => {
-    const basePathValue = basePathRef.current;
-    const params = new URLSearchParams(searchParams.toString());
-    const segments = pathname.startsWith(basePathValue)
-      ? pathname.slice(basePathValue.length).split("/").filter(Boolean)
+  const syncFromUrl = useCallback(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    const params = url.searchParams;
+    const segments = url.pathname.startsWith(basePath)
+      ? url.pathname.slice(basePath.length).split("/").filter(Boolean)
       : [];
     const parsed = parseSegments(segments);
     const hasPathSelections = parsed.topics.length > 0 || parsed.tasks.length > 0;
@@ -360,7 +381,21 @@ export function UnifiedView({
     setPage(Number.isNaN(nextPage) ? 1 : nextPage);
     setExpandedTopics(new Set(nextTopics));
     setExpandedTasks(new Set(nextTasks));
-  }, [pathname, resolveTaskId, resolveTopicId, searchParams]);
+
+    const key = `${url.pathname}${url.search}`;
+    const y = scrollMemory.current[key];
+    if (typeof y === "number") {
+      window.requestAnimationFrame(() => {
+        window.scrollTo({ top: y, left: 0, behavior: "auto" });
+      });
+    }
+  }, [basePath, resolveTaskId, resolveTopicId]);
+
+  useEffect(() => {
+    const handlePop = () => syncFromUrl();
+    window.addEventListener("popstate", handlePop);
+    return () => window.removeEventListener("popstate", handlePop);
+  }, [syncFromUrl]);
 
   const pushUrl = useCallback(
     (
@@ -371,9 +406,9 @@ export function UnifiedView({
       const nextSearch = overrides.q ?? search;
       const nextRaw = overrides.raw ?? (showRaw ? "1" : "0");
       const nextDone = overrides.done ?? (showDone ? "1" : "0");
-      const nextPage = overrides.page ?? String(page);
-      const nextTopics = overrides.topics ?? Array.from(expandedTopics);
-      const nextTasks = overrides.tasks ?? Array.from(expandedTasks);
+      const nextPage = overrides.page ?? String(safePage);
+      const nextTopics = overrides.topics ?? Array.from(expandedTopicsSafe);
+      const nextTasks = overrides.tasks ?? Array.from(expandedTasksSafe);
 
       if (nextSearch) params.set("q", nextSearch);
       if (nextRaw === "1") params.set("raw", "1");
@@ -387,81 +422,37 @@ export function UnifiedView({
         segments.push("task", encodeTaskParam(taskId));
       }
 
-      const basePathValue = basePathRef.current;
       const trimmedBase =
-        basePathValue.endsWith("/") && basePathValue.length > 1 ? basePathValue.slice(0, -1) : basePathValue;
+        basePath.endsWith("/") && basePath.length > 1 ? basePath.slice(0, -1) : basePath;
       const nextPath = segments.length > 0 ? `${trimmedBase}/${segments.join("/")}` : trimmedBase;
       const query = params.toString();
       const nextUrl = query ? `${nextPath}?${query}` : nextPath;
-      if (mode === "replace") {
-        router.replace(nextUrl, { scroll: false });
-      } else {
-        router.push(nextUrl, { scroll: false });
+      if (typeof window !== "undefined") {
+        const currentKey = currentUrlKey();
+        scrollMemory.current[currentKey] = window.scrollY;
+        scrollMemory.current[nextUrl] = window.scrollY;
+        if (mode === "replace") {
+          window.history.replaceState({ clawboard: true }, "", nextUrl);
+        } else {
+          window.history.pushState({ clawboard: true }, "", nextUrl);
+        }
       }
     },
-    [encodeTaskParam, encodeTopicParam, expandedTasks, expandedTopics, page, router, search, showDone, showRaw]
+    [
+      currentUrlKey,
+      encodeTaskParam,
+      encodeTopicParam,
+      expandedTasksSafe,
+      expandedTopicsSafe,
+      safePage,
+      search,
+      showDone,
+      showRaw,
+      basePath,
+    ]
   );
 
-  const REFRESH_MS = 12000;
 
-  useEffect(() => {
-    let mounted = true;
-    const maxTimestamp = (items: Array<{ updatedAt?: string; createdAt?: string }>, key: "updatedAt" | "createdAt") =>
-      items.reduce((max, item) => {
-        const value = item[key] ?? "";
-        return value > max ? value : max;
-      }, "");
-
-    const refresh = async () => {
-      try {
-        const [topicsRes, tasksRes, logsRes] = await Promise.all([
-          fetch(apiUrl("/api/topics"), { cache: "no-store" }),
-          fetch(apiUrl("/api/tasks"), { cache: "no-store" }),
-          fetch(apiUrl("/api/log"), { cache: "no-store" }),
-        ]);
-
-        if (!mounted) return;
-        const topicsData = await topicsRes.json().catch(() => null);
-        const tasksData = await tasksRes.json().catch(() => null);
-        const logsData = await logsRes.json().catch(() => null);
-
-        if (Array.isArray(topicsData?.topics)) {
-          const nextTopics = topicsData.topics as Topic[];
-          const nextFingerprint = `${nextTopics.length}:${maxTimestamp(nextTopics, "updatedAt")}`;
-          const currentFingerprint = `${topicRef.current.length}:${maxTimestamp(topicRef.current, "updatedAt")}`;
-          if (nextFingerprint !== currentFingerprint) {
-            setTopicState(nextTopics);
-          }
-        }
-
-        if (Array.isArray(tasksData?.tasks)) {
-          const nextTasks = tasksData.tasks as Task[];
-          const nextFingerprint = `${nextTasks.length}:${maxTimestamp(nextTasks, "updatedAt")}`;
-          const currentFingerprint = `${taskRef.current.length}:${maxTimestamp(taskRef.current, "updatedAt")}`;
-          if (nextFingerprint !== currentFingerprint) {
-            setTaskState(nextTasks);
-          }
-        }
-
-        if (Array.isArray(logsData?.logs)) {
-          const nextLogs = logsData.logs as LogEntry[];
-          const nextFingerprint = `${nextLogs.length}:${maxTimestamp(nextLogs, "createdAt")}`;
-          const currentFingerprint = `${logRef.current.length}:${maxTimestamp(logRef.current, "createdAt")}`;
-          if (nextFingerprint !== currentFingerprint) {
-            setLogState(nextLogs);
-          }
-        }
-      } catch {
-        // ignore refresh errors
-      }
-    };
-
-    const interval = window.setInterval(refresh, REFRESH_MS);
-    return () => {
-      mounted = false;
-      window.clearInterval(interval);
-    };
-  }, []);
 
   return (
     <div className="space-y-6">
@@ -489,7 +480,8 @@ export function UnifiedView({
             onChange={(event) => {
               const value = event.target.value;
               setSearch(value);
-              pushUrl({ q: value }, "replace");
+              setPage(1);
+              pushUrl({ q: value, page: "1" }, "replace");
             }}
             onBlur={() => {
               if (committedSearch.current !== search) {
@@ -535,7 +527,7 @@ export function UnifiedView({
               size="sm"
               onClick={() => {
                 expandAll();
-              pushUrl({ topics: orderedTopics.map((topic) => topic.id), tasks: taskState.map((task) => task.id) });
+              pushUrl({ topics: orderedTopics.map((topic) => topic.id), tasks: tasks.map((task) => task.id) });
               }}
             >
               Expand all
@@ -566,7 +558,7 @@ export function UnifiedView({
           const blockedCount = taskList.filter((task) => task.status === "blocked").length;
           const lastActivity = logsByTopic.get(topicId)?.[0]?.createdAt ?? topic.updatedAt;
           const showTasks = !normalizedSearch || taskList.length > 0;
-          const isExpanded = expandedTopics.has(topicId);
+          const isExpanded = expandedTopicsSafe.has(topicId);
 
           return (
             <div key={topicId} className="rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] bg-[rgba(16,19,24,0.88)] p-5">
@@ -576,7 +568,7 @@ export function UnifiedView({
                 className="flex flex-wrap items-start justify-between gap-4 text-left"
                 onClick={(event) => {
                   if (!allowToggle(event.target as HTMLElement)) return;
-                  const next = new Set(expandedTopics);
+                  const next = new Set(expandedTopicsSafe);
                   if (next.has(topicId)) {
                     next.delete(topicId);
                   } else {
@@ -588,7 +580,7 @@ export function UnifiedView({
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    const next = new Set(expandedTopics);
+                    const next = new Set(expandedTopicsSafe);
                     if (next.has(topicId)) {
                       next.delete(topicId);
                     } else {
@@ -607,7 +599,7 @@ export function UnifiedView({
                       topic={topic}
                       size="sm"
                       onToggled={(nextPinned) =>
-                        setTopicState((prev) =>
+                        setTopics((prev) =>
                           prev.map((item) =>
                             item.id === topic.id ? { ...item, pinned: nextPinned, updatedAt: new Date().toISOString() } : item
                           )
@@ -640,7 +632,7 @@ export function UnifiedView({
                         return null;
                       }
                       const taskLogs = logsByTask.get(task.id) ?? [];
-                      const taskExpanded = expandedTasks.has(task.id);
+                      const taskExpanded = expandedTasksSafe.has(task.id);
                       const visibleLogs = taskLogs.filter(matchesLogSearch);
                       const limit = timelineLimits[task.id] ?? DEFAULT_TIMELINE_LIMIT;
                       const limitedLogs = visibleLogs.slice(0, limit);
@@ -653,7 +645,7 @@ export function UnifiedView({
                           className="flex flex-wrap items-center justify-between gap-3 text-left"
                           onClick={(event) => {
                             if (!allowToggle(event.target as HTMLElement)) return;
-                            const next = new Set(expandedTasks);
+                            const next = new Set(expandedTasksSafe);
                             if (next.has(task.id)) {
                               next.delete(task.id);
                             } else {
@@ -665,7 +657,7 @@ export function UnifiedView({
                           onKeyDown={(event) => {
                             if (event.key === "Enter" || event.key === " ") {
                               event.preventDefault();
-                              const next = new Set(expandedTasks);
+                              const next = new Set(expandedTasksSafe);
                               if (next.has(task.id)) {
                                 next.delete(task.id);
                               } else {
@@ -684,7 +676,7 @@ export function UnifiedView({
                                 task={task}
                                 size="sm"
                                 onToggled={(nextPinned) =>
-                                  setTaskState((prev) =>
+                                  setTasks((prev) =>
                                     prev.map((item) =>
                                       item.id === task.id ? { ...item, pinned: nextPinned, updatedAt: new Date().toISOString() } : item
                                     )
@@ -728,7 +720,7 @@ export function UnifiedView({
                                     onClick={(event) => event.stopPropagation()}
                                   >
                                     <option value="">Unassigned</option>
-                                    {topicState.map((topicOption) => (
+                                    {topics.map((topicOption) => (
                                       <option key={topicOption.id} value={topicOption.id}>
                                         {topicOption.name}
                                       </option>
@@ -753,7 +745,7 @@ export function UnifiedView({
                               <>
                                 <LogList
                                   logs={limitedLogs}
-                                  topics={topicState}
+                                  topics={topics}
                                   showFilters={false}
                                   showRawToggle={false}
                                   showRawAll={showRaw}
@@ -802,18 +794,18 @@ export function UnifiedView({
       {pageCount > 1 && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-4 py-3 text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">
           <span>
-            Page {page} of {pageCount}
+            Page {safePage} of {pageCount}
           </span>
           <div className="flex items-center gap-2">
             <Button
               size="sm"
               variant="secondary"
               onClick={() => {
-                const next = Math.max(1, page - 1);
+                const next = Math.max(1, safePage - 1);
                 setPage(next);
                 pushUrl({ page: String(next) });
               }}
-              disabled={page === 1}
+              disabled={safePage === 1}
             >
               Prev
             </Button>
@@ -821,11 +813,11 @@ export function UnifiedView({
               size="sm"
               variant="secondary"
               onClick={() => {
-                const next = Math.min(pageCount, page + 1);
+                const next = Math.min(pageCount, safePage + 1);
                 setPage(next);
                 pushUrl({ page: String(next) });
               }}
-              disabled={page === pageCount}
+              disabled={safePage === pageCount}
             >
               Next
             </Button>
