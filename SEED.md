@@ -15,10 +15,17 @@ Read endpoints (e.g. `/api/health`, `/api/config` GET, list endpoints) remain op
 
 ### Docker Compose
 
-The recommended setup is to store the token in `.env` and load it into the API container.
+The recommended setup is to store settings in `.env` and load them into containers.
 
 - Create `.env` (see `.env.example`)
 - Compose loads it via `env_file:` in `docker-compose.yaml`
+
+**Important for Tailscale / remote access:** the web UI calls the API from the browser.
+If `NEXT_PUBLIC_CLAWBOARD_API_BASE` is set to `http://localhost:8010`, then anyone
+opening the UI from another machine will try to call *their own* localhost.
+
+Set `CLAWBOARD_PUBLIC_API_BASE` in `.env` to your tailnet address, e.g.
+`http://100.91.119.30:8010`.
 
 ## Instance config
 

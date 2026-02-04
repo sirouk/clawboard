@@ -19,9 +19,12 @@ services:
       context: .
       dockerfile: Dockerfile.web
       args:
-        NEXT_PUBLIC_CLAWBOARD_API_BASE: http://localhost:8010
+        # IMPORTANT: this value is baked into the browser bundle.
+        # For remote (Tailscale) access, set CLAWBOARD_PUBLIC_API_BASE in .env
+        NEXT_PUBLIC_CLAWBOARD_API_BASE: ${CLAWBOARD_PUBLIC_API_BASE:-http://localhost:8010}
     environment:
-      NEXT_PUBLIC_CLAWBOARD_API_BASE: http://localhost:8010
+      # IMPORTANT: this is used client-side; must be reachable from the browser.
+      NEXT_PUBLIC_CLAWBOARD_API_BASE: ${CLAWBOARD_PUBLIC_API_BASE:-http://localhost:8010}
     depends_on:
       - api
     ports:
