@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import asyncio
 from fastapi import Request
 from uuid import uuid4
-from fastapi import FastAPI, Depends, Query, Body
+from fastapi import FastAPI, Depends, Query, Body, HTTPException
 from fastapi.responses import StreamingResponse
 from typing import List
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +24,7 @@ from .schemas import (
     TaskOut,
     LogAppend,
     LogOut,
+    LogPatch,
     ChangesResponse,
 )
 from .events import event_hub
@@ -319,6 +320,11 @@ def upsert_task(
 def list_logs(
     topicId: str | None = Query(default=None, description="Filter logs by topic ID.", example="topic-1"),
     taskId: str | None = Query(default=None, description="Filter logs by task ID.", example="task-1"),
+    classificationStatus: str | None = Query(
+        default=None,
+        description="Filter logs by classification status (pending|classified|failed).",
+        example="pending",
+    ),
     limit: int = Query(default=200, ge=1, le=1000, description="Max results.", example=200),
     offset: int = Query(default=0, ge=0, description="Offset for pagination.", example=0),
 ):
@@ -329,6 +335,8 @@ def list_logs(
             logs = [l for l in logs if l.topicId == topicId]
         if taskId:
             logs = [l for l in logs if l.taskId == taskId]
+        if classificationStatus:
+            logs = [l for l in logs if getattr(l, "classificationStatus", "pending") == classificationStatus]
         logs = sorted(logs, key=lambda l: l.createdAt, reverse=True)
         return logs[offset : offset + limit]
 
@@ -368,6 +376,9 @@ def append_log(
             content=payload.content,
             summary=payload.summary,
             raw=payload.raw,
+            classificationStatus=payload.classificationStatus or "pending",
+            classificationAttempts=0,
+            classificationError=None,
             createdAt=timestamp,
             agentId=payload.agentId,
             agentLabel=payload.agentLabel,
@@ -377,6 +388,38 @@ def append_log(
         session.commit()
         session.refresh(entry)
         event_hub.publish({"type": "log.appended", "data": entry.model_dump(), "eventTs": entry.createdAt})
+        return entry
+
+
+@app.patch("/api/log/{log_id}", dependencies=[Depends(require_token)], response_model=LogOut, tags=["logs"])
+def patch_log(log_id: str, payload: LogPatch = Body(...)):
+    """Patch an existing log entry (used by async classifier; idempotent)."""
+    with get_session() as session:
+        entry = session.get(LogEntry, log_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail="Log not found")
+
+        if payload.topicId is not None:
+            entry.topicId = payload.topicId
+        if payload.taskId is not None:
+            entry.taskId = payload.taskId
+        if payload.relatedLogId is not None:
+            entry.relatedLogId = payload.relatedLogId
+        if payload.summary is not None:
+            entry.summary = payload.summary
+        if payload.raw is not None:
+            entry.raw = payload.raw
+        if payload.classificationStatus is not None:
+            entry.classificationStatus = payload.classificationStatus
+        if payload.classificationAttempts is not None:
+            entry.classificationAttempts = payload.classificationAttempts
+        if payload.classificationError is not None:
+            entry.classificationError = payload.classificationError
+
+        session.add(entry)
+        session.commit()
+        session.refresh(entry)
+        event_hub.publish({"type": "log.patched", "data": entry.model_dump(), "eventTs": entry.createdAt})
         return entry
 
 

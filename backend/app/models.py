@@ -117,6 +117,21 @@ class LogEntry(SQLModel, table=True):
         default=None,
         description="Raw prompt/response payload if available.",
     )
+
+    # Async classification metadata (stage-2 classifier updates these fields).
+    classificationStatus: str = Field(
+        default="pending",
+        description="Classification status (pending | classified | failed).",
+    )
+    classificationAttempts: int = Field(
+        default=0,
+        description="Number of classifier attempts.",
+    )
+    classificationError: Optional[str] = Field(
+        default=None,
+        description="Last classifier error (if any).",
+    )
+
     createdAt: str = Field(
         description="ISO timestamp when the log was created.",
     )

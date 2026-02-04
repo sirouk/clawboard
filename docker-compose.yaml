@@ -14,6 +14,24 @@ services:
     ports:
       - "8010:8000"
 
+  classifier:
+    build:
+      context: ./classifier
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      CLAWBOARD_API_BASE: http://api:8000
+      OPENCLAW_BASE_URL: ${OPENCLAW_BASE_URL:-http://host.docker.internal:18789}
+      OPENCLAW_MODEL: ${OPENCLAW_MODEL:-openai-codex/gpt-5.2}
+      CLASSIFIER_INTERVAL_SECONDS: ${CLASSIFIER_INTERVAL_SECONDS:-10}
+      CLASSIFIER_MAX_ATTEMPTS: ${CLASSIFIER_MAX_ATTEMPTS:-3}
+    depends_on:
+      - api
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
   web:
     build:
       context: .

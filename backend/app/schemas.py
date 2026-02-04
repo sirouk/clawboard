@@ -79,6 +79,11 @@ class LogOut(ModelBase):
     content: str = Field(description="Full log content.", examples=["Defined onboarding wizard steps and token flow."])
     summary: Optional[str] = Field(description="Concise summary.", examples=["Defined onboarding wizard steps."])
     raw: Optional[str] = Field(description="Raw prompt/response payload.", examples=["User: ...\nAssistant: ..."])
+
+    classificationStatus: str = Field(description="Classification status.", examples=["pending"])
+    classificationAttempts: int = Field(description="Classifier attempt count.", examples=[0])
+    classificationError: Optional[str] = Field(description="Last classifier error.", examples=[None])
+
     createdAt: str = Field(description="ISO timestamp when the log was created.", examples=["2026-02-02T10:05:00.000Z"])
     agentId: Optional[str] = Field(description="Agent identifier.", examples=["main"])
     agentLabel: Optional[str] = Field(description="Agent label.", examples=["User"])
@@ -158,6 +163,14 @@ class LogAppend(BaseModel):
     topicId: Optional[str] = Field(default=None, description="Topic ID (nullable).", examples=["topic-1"])
     taskId: Optional[str] = Field(default=None, description="Task ID (nullable).", examples=["task-1"])
     relatedLogId: Optional[str] = Field(default=None, description="Link to original log (for notes).", examples=["log-12"])
+
+    # Stage-1 capture should leave logs as pending; stage-2 classifier PATCHes.
+    classificationStatus: Optional[str] = Field(
+        default=None,
+        description="Optional override: classification status (pending|classified|failed).",
+        examples=["pending"],
+    )
+
     type: str = Field(
         description="Log type (conversation | action | note | system | import).",
         examples=["conversation"],
@@ -173,6 +186,19 @@ class LogAppend(BaseModel):
         description="Source metadata (channel, sessionKey, messageId).",
         examples=[{"channel": "discord", "sessionKey": "main", "messageId": "msg-001"}],
     )
+
+
+class LogPatch(BaseModel):
+    """Patch fields on an existing log entry (idempotent reclassification)."""
+
+    topicId: Optional[str] = Field(default=None, description="Topic ID.")
+    taskId: Optional[str] = Field(default=None, description="Task ID.")
+    relatedLogId: Optional[str] = Field(default=None, description="Related log ID.")
+    summary: Optional[str] = Field(default=None, description="Summary override.")
+    raw: Optional[str] = Field(default=None, description="Raw override.")
+    classificationStatus: Optional[str] = Field(default=None, description="pending|classified|failed")
+    classificationAttempts: Optional[int] = Field(default=None, description="Attempt count")
+    classificationError: Optional[str] = Field(default=None, description="Last error")
 
 
 class ChangesResponse(BaseModel):
