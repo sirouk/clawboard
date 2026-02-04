@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-Then open `http://localhost:3000`.
+Then open `http://localhost:3000` (or `http://localhost:3010` if running via Docker Compose).
 
 ## Configuration
 
@@ -67,6 +67,8 @@ Then point your OpenClaw instance at the Clawboard base URL and token (if requir
 ```bash
 docker compose up -d --build
 ```
+
+Compose maps the web UI to `http://localhost:3010` and the API to `http://localhost:8010`.
 
 Or use the helper:
 
