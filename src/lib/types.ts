@@ -36,6 +36,12 @@ export type LogEntry = {
   content: string;
   summary?: string;
   raw?: string;
+
+  // Async classifier metadata
+  classificationStatus?: "pending" | "classified" | "failed";
+  classificationAttempts?: number;
+  classificationError?: string | null;
+
   createdAt: string;
   agentId?: string;
   agentLabel?: string;

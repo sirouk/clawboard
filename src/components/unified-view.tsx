@@ -104,6 +104,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [isSticky, setIsSticky] = useState(false);
   const committedSearch = useRef(initialUrlState.search);
 
+  // Hide unclassified logs from the unified view by default.
+  // Use ?raw=1 to include everything (raw / debugging view).
+  const visibleLogs = useMemo(() => {
+    if (showRaw) return logs;
+    return logs.filter((entry) => (entry.classificationStatus ?? "pending") === "classified");
+  }, [logs, showRaw]);
+
   const currentUrlKey = useCallback(() => {
     if (typeof window === "undefined") return basePath;
     return `${window.location.pathname}${window.location.search}`;
@@ -158,7 +165,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const logsByTask = useMemo(() => {
     const map = new Map<string, LogEntry[]>();
-    for (const entry of logs) {
+    for (const entry of visibleLogs) {
       if (!entry.taskId) continue;
       const list = map.get(entry.taskId) ?? [];
       list.push(entry);
@@ -168,11 +175,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       list.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     }
     return map;
-  }, [logs]);
+  }, [visibleLogs]);
 
   const logsByTopic = useMemo(() => {
     const map = new Map<string, LogEntry[]>();
-    for (const entry of logs) {
+    for (const entry of visibleLogs) {
       if (!entry.topicId) continue;
       const list = map.get(entry.topicId) ?? [];
       list.push(entry);
@@ -182,7 +189,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       list.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     }
     return map;
-  }, [logs]);
+  }, [visibleLogs]);
 
   const normalizedSearch = search.trim().toLowerCase();
 
