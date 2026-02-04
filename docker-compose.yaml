@@ -10,16 +10,16 @@ services:
     volumes:
       - ./data:/app/data
     ports:
-      - "8000:8000"
+      - "8010:8000"
 
   web:
     build:
       context: .
       dockerfile: Dockerfile.web
       args:
-        NEXT_PUBLIC_CLAWBOARD_API_BASE: http://localhost:8000
+        NEXT_PUBLIC_CLAWBOARD_API_BASE: http://localhost:8010
     environment:
-      NEXT_PUBLIC_CLAWBOARD_API_BASE: http://localhost:8000
+      NEXT_PUBLIC_CLAWBOARD_API_BASE: http://localhost:8010
     depends_on:
       - api
     ports:

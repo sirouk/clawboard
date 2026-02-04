@@ -15,12 +15,12 @@ Then open `http://localhost:3000`.
 
 - `CLAWBOARD_TOKEN`: if set, write actions require the matching `X-Clawboard-Token` header.
 - `CLAWBOARD_DATA_PATH`: JSON storage path (defaults to `./data/portal.json`).
-- `NEXT_PUBLIC_CLAWBOARD_API_BASE`: base URL for the FastAPI backend (e.g. `http://localhost:8000`).
+- `NEXT_PUBLIC_CLAWBOARD_API_BASE`: base URL for the FastAPI backend (e.g. `http://localhost:8010`).
 - `CLAWBOARD_DB_URL`: database URL for FastAPI (defaults to `sqlite:///./data/clawboard.db`).
 
 ## FastAPI backend (recommended)
 
-The backend API now lives in FastAPI (Swagger docs at `http://localhost:8000/docs`).
+The backend API now lives in FastAPI (Swagger docs at `http://localhost:8010/docs`).
 By default it uses SQLite at `./data/clawboard.db` and supports the same schema as the UI.
 The Next.js API routes have been removed; set `NEXT_PUBLIC_CLAWBOARD_API_BASE` for the UI to function.
 
