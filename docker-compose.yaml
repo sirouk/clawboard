@@ -1,0 +1,26 @@
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      CLAWBOARD_DB_URL: sqlite:///./data/clawboard.db
+      CLAWBOARD_CORS_ORIGINS: "*"
+      # CLAWBOARD_TOKEN: "your-token"
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        NEXT_PUBLIC_CLAWBOARD_API_BASE: http://localhost:8000
+    environment:
+      NEXT_PUBLIC_CLAWBOARD_API_BASE: http://localhost:8000
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
