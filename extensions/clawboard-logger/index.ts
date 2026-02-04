@@ -19,6 +19,12 @@ type ClawboardLoggerConfig = {
   token?: string;
   enabled?: boolean;
   queuePath?: string;
+  /** Optional: force all logs into a single topic. */
+  defaultTopicId?: string;
+  /** Optional: force all logs into a single task. */
+  defaultTaskId?: string;
+  /** When true (default), auto-create a topic per OpenClaw sessionKey and attach logs to it. */
+  autoTopicBySession?: boolean;
 };
 
 const DEFAULT_QUEUE = path.join(os.homedir(), ".openclaw", "clawboard-queue.jsonl");
@@ -71,6 +77,9 @@ export default function register(api: OpenClawPluginApi) {
   const baseUrl = rawConfig.baseUrl ? normalizeBaseUrl(rawConfig.baseUrl) : "";
   const token = rawConfig.token;
   const queuePath = rawConfig.queuePath ?? DEFAULT_QUEUE;
+  const defaultTopicId = rawConfig.defaultTopicId;
+  const defaultTaskId = rawConfig.defaultTaskId;
+  const autoTopicBySession = rawConfig.autoTopicBySession !== false;
 
   if (!enabled) {
     api.logger.warn("[clawboard-logger] disabled by config");
@@ -83,6 +92,56 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   let flushing = false;
+
+  const topicCache = new Map<string, string>();
+
+  function safeId(prefix: string, raw: string) {
+    const cleaned = raw
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60);
+    return `${prefix}-${cleaned || "unknown"}`;
+  }
+
+  async function upsertTopic(topicId: string, name: string) {
+    try {
+      const res = await fetch(`${baseUrl}/api/topics`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { "X-Clawboard-Token": token } : {}),
+        },
+        body: JSON.stringify({
+          id: topicId,
+          name,
+          tags: ["openclaw"],
+        }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function resolveTopicId(sessionKey: string | undefined | null) {
+    if (defaultTopicId) return defaultTopicId;
+    if (!autoTopicBySession) return undefined;
+    if (!sessionKey) return undefined;
+
+    const cached = topicCache.get(sessionKey);
+    if (cached) return cached;
+
+    const topicId = safeId("topic-session", sessionKey);
+    // Best-effort create; even if it fails, we still attach logs to the same id.
+    await upsertTopic(topicId, `Session ${sessionKey}`).catch(() => undefined);
+    topicCache.set(sessionKey, topicId);
+    return topicId;
+  }
+
+  function resolveTaskId() {
+    return defaultTaskId;
+  }
 
   async function enqueue(payload: unknown) {
     await ensureDir(queuePath);
@@ -151,9 +210,17 @@ export default function register(api: OpenClawPluginApi) {
 
   api.on("message_received", async (event: PluginHookMessageReceivedEvent, ctx: PluginHookMessageContext) => {
     const raw = event.content ?? "";
-    const metaSummary = (event.metadata as Record<string, unknown> | undefined)?.summary;
+    const meta = (event.metadata as Record<string, unknown> | undefined) ?? undefined;
+    const sessionKey = (meta?.sessionKey as string | undefined) ?? undefined;
+    const topicId = await resolveTopicId(sessionKey);
+    const taskId = resolveTaskId();
+
+    const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? metaSummary : summarize(raw);
+
     await send({
+      topicId,
+      taskId,
       type: "conversation",
       content: raw,
       summary,
@@ -162,17 +229,25 @@ export default function register(api: OpenClawPluginApi) {
       agentLabel: "User",
       source: {
         channel: ctx.channelId,
-        sessionKey: (event.metadata as Record<string, unknown> | undefined)?.sessionKey,
-        messageId: (event.metadata as Record<string, unknown> | undefined)?.messageId,
+        sessionKey,
+        messageId: meta?.messageId,
       },
     });
   });
 
   api.on("message_sent", async (event: PluginHookMessageSentEvent, ctx: PluginHookMessageContext) => {
     const raw = event.content ?? "";
-    const metaSummary = (event as unknown as Record<string, unknown>)?.summary;
+    const meta = (event as unknown as Record<string, unknown>) ?? {};
+    const sessionKey = (meta?.sessionKey as string | undefined) ?? (ctx as unknown as { sessionKey?: string })?.sessionKey;
+    const topicId = await resolveTopicId(sessionKey);
+    const taskId = resolveTaskId();
+
+    const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? metaSummary : summarize(raw);
+
     await send({
+      topicId,
+      taskId,
       type: "conversation",
       content: raw,
       summary,
@@ -181,14 +256,19 @@ export default function register(api: OpenClawPluginApi) {
       agentLabel: "OpenClaw",
       source: {
         channel: ctx.channelId,
-        sessionKey: (event as unknown as Record<string, unknown>)?.sessionKey,
+        sessionKey,
       },
     });
   });
 
   api.on("before_tool_call", async (event: PluginHookBeforeToolCallEvent, ctx: PluginHookToolContext) => {
     const redacted = redact(event.params);
+    const topicId = await resolveTopicId(ctx.sessionKey);
+    const taskId = resolveTaskId();
+
     await send({
+      topicId,
+      taskId,
       type: "action",
       content: `Tool call: ${event.toolName}`,
       summary: `Tool call: ${event.toolName}`,
@@ -206,7 +286,12 @@ export default function register(api: OpenClawPluginApi) {
       ? { error: event.error }
       : { result: redact(event.result), durationMs: event.durationMs };
 
+    const topicId = await resolveTopicId(ctx.sessionKey);
+    const taskId = resolveTaskId();
+
     await send({
+      topicId,
+      taskId,
       type: "action",
       content: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
       summary: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
@@ -227,7 +312,12 @@ export default function register(api: OpenClawPluginApi) {
       messageCount: event.messages?.length ?? 0,
     };
 
+    const topicId = await resolveTopicId(ctx.sessionKey);
+    const taskId = resolveTaskId();
+
     await send({
+      topicId,
+      taskId,
       type: "action",
       content: event.success ? "Agent run complete" : "Agent run failed",
       summary: event.success ? "Agent run complete" : "Agent run failed",

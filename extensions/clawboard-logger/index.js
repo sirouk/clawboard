@@ -52,6 +52,9 @@ export default function register(api) {
   const baseUrl = rawConfig.baseUrl ? normalizeBaseUrl(rawConfig.baseUrl) : "";
   const token = rawConfig.token;
   const queuePath = rawConfig.queuePath ?? DEFAULT_QUEUE;
+  const defaultTopicId = rawConfig.defaultTopicId;
+  const defaultTaskId = rawConfig.defaultTaskId;
+  const autoTopicBySession = rawConfig.autoTopicBySession !== false;
 
   if (!enabled) {
     api.logger.warn("[clawboard-logger] disabled by config");
@@ -64,10 +67,71 @@ export default function register(api) {
   }
 
   let flushing = false;
+  const topicCache = new Map();
+
+  function safeId(prefix, raw) {
+    const cleaned = String(raw)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60);
+    return `${prefix}-${cleaned || "unknown"}`;
+  }
+
+  async function upsertTopic(topicId, name) {
+    try {
+      const res = await fetch(`${baseUrl}/api/topics`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { "X-Clawboard-Token": token } : {}),
+        },
+        body: JSON.stringify({ id: topicId, name, tags: ["openclaw"] }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function resolveTopicId(sessionKey) {
+    if (defaultTopicId) return defaultTopicId;
+    if (!autoTopicBySession) return undefined;
+    if (!sessionKey) return undefined;
+
+    const cached = topicCache.get(sessionKey);
+    if (cached) return cached;
+
+    const topicId = safeId("topic-session", sessionKey);
+    await upsertTopic(topicId, `Session ${sessionKey}`).catch(() => undefined);
+    topicCache.set(sessionKey, topicId);
+    return topicId;
+  }
+
+  function resolveTaskId() {
+    return defaultTaskId;
+  }
 
   async function enqueue(payload) {
     await ensureDir(queuePath);
     await fs.appendFile(queuePath, `${JSON.stringify(payload)}\n`, "utf8");
+  }
+
+  async function postLog(payload) {
+    try {
+      const res = await fetch(`${baseUrl}/api/log`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { "X-Clawboard-Token": token } : {}),
+        },
+        body: JSON.stringify(payload),
+      });
+      return res.ok;
+    } catch (err) {
+      api.logger.warn(`[clawboard-logger] failed to send log: ${String(err)}`);
+      return false;
+    }
   }
 
   async function flushQueue() {
@@ -95,27 +159,10 @@ export default function register(api) {
       if (remaining.length === 0) {
         await fs.unlink(queuePath).catch(() => undefined);
       } else {
-        await fs.writeFile(queuePath, `${remaining.join("\n")}\n`, "utf8");
+        await fs.writeFile(queuePath, remaining.join("\n") + "\n", "utf8");
       }
     } finally {
       flushing = false;
-    }
-  }
-
-  async function postLog(payload) {
-    try {
-      const res = await fetch(`${baseUrl}/api/log`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { "X-Clawboard-Token": token } : {}),
-        },
-        body: JSON.stringify(payload),
-      });
-      return res.ok;
-    } catch (err) {
-      api.logger.warn(`[clawboard-logger] failed to send log: ${String(err)}`);
-      return false;
     }
   }
 
@@ -132,9 +179,17 @@ export default function register(api) {
 
   api.on("message_received", async (event, ctx) => {
     const raw = event.content ?? "";
-    const metaSummary = event.metadata?.summary;
+    const meta = event.metadata ?? undefined;
+    const sessionKey = meta?.sessionKey;
+    const topicId = await resolveTopicId(sessionKey);
+    const taskId = resolveTaskId();
+
+    const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? metaSummary : summarize(raw);
+
     await send({
+      topicId,
+      taskId,
       type: "conversation",
       content: raw,
       summary,
@@ -143,17 +198,25 @@ export default function register(api) {
       agentLabel: "User",
       source: {
         channel: ctx.channelId,
-        sessionKey: event.metadata?.sessionKey,
-        messageId: event.metadata?.messageId,
+        sessionKey,
+        messageId: meta?.messageId,
       },
     });
   });
 
   api.on("message_sent", async (event, ctx) => {
     const raw = event.content ?? "";
-    const metaSummary = event?.summary;
+    const meta = event ?? {};
+    const sessionKey = meta?.sessionKey ?? ctx?.sessionKey;
+    const topicId = await resolveTopicId(sessionKey);
+    const taskId = resolveTaskId();
+
+    const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? metaSummary : summarize(raw);
+
     await send({
+      topicId,
+      taskId,
       type: "conversation",
       content: raw,
       summary,
@@ -162,14 +225,19 @@ export default function register(api) {
       agentLabel: "OpenClaw",
       source: {
         channel: ctx.channelId,
-        sessionKey: event?.sessionKey,
+        sessionKey,
       },
     });
   });
 
   api.on("before_tool_call", async (event, ctx) => {
     const redacted = redact(event.params);
+    const topicId = await resolveTopicId(ctx.sessionKey);
+    const taskId = resolveTaskId();
+
     await send({
+      topicId,
+      taskId,
       type: "action",
       content: `Tool call: ${event.toolName}`,
       summary: `Tool call: ${event.toolName}`,
@@ -183,11 +251,13 @@ export default function register(api) {
   });
 
   api.on("after_tool_call", async (event, ctx) => {
-    const payload = event.error
-      ? { error: event.error }
-      : { result: redact(event.result), durationMs: event.durationMs };
+    const payload = event.error ? { error: event.error } : { result: redact(event.result), durationMs: event.durationMs };
+    const topicId = await resolveTopicId(ctx.sessionKey);
+    const taskId = resolveTaskId();
 
     await send({
+      topicId,
+      taskId,
       type: "action",
       content: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
       summary: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
@@ -208,7 +278,12 @@ export default function register(api) {
       messageCount: event.messages?.length ?? 0,
     };
 
+    const topicId = await resolveTopicId(ctx.sessionKey);
+    const taskId = resolveTaskId();
+
     await send({
+      topicId,
+      taskId,
       type: "action",
       content: event.success ? "Agent run complete" : "Agent run failed",
       summary: event.success ? "Agent run complete" : "Agent run failed",
