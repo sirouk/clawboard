@@ -180,7 +180,7 @@ export default function register(api) {
   api.on("message_received", async (event, ctx) => {
     const raw = event.content ?? "";
     const meta = event.metadata ?? undefined;
-    const sessionKey = meta?.sessionKey;
+    const sessionKey = meta?.sessionKey ?? ctx?.sessionKey;
     const topicId = await resolveTopicId(sessionKey);
     const taskId = resolveTaskId();
 

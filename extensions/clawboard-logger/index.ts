@@ -211,7 +211,7 @@ export default function register(api: OpenClawPluginApi) {
   api.on("message_received", async (event: PluginHookMessageReceivedEvent, ctx: PluginHookMessageContext) => {
     const raw = event.content ?? "";
     const meta = (event.metadata as Record<string, unknown> | undefined) ?? undefined;
-    const sessionKey = (meta?.sessionKey as string | undefined) ?? undefined;
+    const sessionKey = (meta?.sessionKey as string | undefined) ?? (ctx as unknown as { sessionKey?: string })?.sessionKey;
     const topicId = await resolveTopicId(sessionKey);
     const taskId = resolveTaskId();
 
