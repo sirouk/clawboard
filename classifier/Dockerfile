@@ -8,5 +8,6 @@ COPY classifier.py /app/classifier.py
 COPY embeddings_store.py /app/embeddings_store.py
 
 ENV PYTHONUNBUFFERED=1
+ENV CLASSIFIER_LOCK_PATH=/data/classifier.lock
 
 CMD ["python", "/app/classifier.py"]
