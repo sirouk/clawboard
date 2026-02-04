@@ -38,6 +38,8 @@ def seed_from_fixture(session, fixture: dict):
     logs = [LogEntry(**log) for log in fixture.get("logs", [])]
 
     session.add_all(topics)
+    session.commit()
+
     session.add_all(tasks)
     session.commit()
 
