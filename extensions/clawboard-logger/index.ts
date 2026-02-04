@@ -212,7 +212,12 @@ export default function register(api: OpenClawPluginApi) {
     const raw = event.content ?? "";
     const meta = (event.metadata as Record<string, unknown> | undefined) ?? undefined;
     const sessionKey = (meta?.sessionKey as string | undefined) ?? (ctx as unknown as { sessionKey?: string })?.sessionKey;
-    const topicId = await resolveTopicId(sessionKey);
+
+    // Fallback routing: if OpenClaw does not provide a sessionKey for inbound
+    // messages, bucket by channel so we still get stable topic grouping.
+    const fallbackKey = (ctx as unknown as { channelId?: string })?.channelId;
+    const effectiveSessionKey = sessionKey ?? (fallbackKey ? `channel:${fallbackKey}` : undefined);
+    const topicId = await resolveTopicId(effectiveSessionKey);
     const taskId = resolveTaskId();
 
     const metaSummary = meta?.summary;
@@ -229,10 +234,21 @@ export default function register(api: OpenClawPluginApi) {
       agentLabel: "User",
       source: {
         channel: ctx.channelId,
-        sessionKey,
+        sessionKey: effectiveSessionKey,
         messageId: meta?.messageId,
       },
     });
+
+    if (!topicId) {
+      await send({
+        type: "action",
+        content: "clawboard-logger: missing routing context",
+        summary: "clawboard-logger: missing routing context",
+        raw: JSON.stringify({ meta: redact(meta), ctx: redact(ctx) }, null, 2),
+        agentId: "system",
+        agentLabel: "Clawboard Logger",
+      });
+    }
   });
 
   api.on("message_sent", async (event: PluginHookMessageSentEvent, ctx: PluginHookMessageContext) => {

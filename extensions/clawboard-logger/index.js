@@ -181,7 +181,10 @@ export default function register(api) {
     const raw = event.content ?? "";
     const meta = event.metadata ?? undefined;
     const sessionKey = meta?.sessionKey ?? ctx?.sessionKey;
-    const topicId = await resolveTopicId(sessionKey);
+
+    const fallbackKey = ctx?.channelId;
+    const effectiveSessionKey = sessionKey ?? (fallbackKey ? `channel:${fallbackKey}` : undefined);
+    const topicId = await resolveTopicId(effectiveSessionKey);
     const taskId = resolveTaskId();
 
     const metaSummary = meta?.summary;
@@ -198,10 +201,21 @@ export default function register(api) {
       agentLabel: "User",
       source: {
         channel: ctx.channelId,
-        sessionKey,
+        sessionKey: effectiveSessionKey,
         messageId: meta?.messageId,
       },
     });
+
+    if (!topicId) {
+      await send({
+        type: "action",
+        content: "clawboard-logger: missing routing context",
+        summary: "clawboard-logger: missing routing context",
+        raw: JSON.stringify({ meta: redact(meta), ctx: redact(ctx) }, null, 2),
+        agentId: "system",
+        agentLabel: "Clawboard Logger",
+      });
+    }
   });
 
   api.on("message_sent", async (event, ctx) => {
