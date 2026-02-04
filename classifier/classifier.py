@@ -148,12 +148,13 @@ def topic_candidates():
     return [{"id": t["id"], "name": t["name"], "updatedAt": t.get("updatedAt")} for t in topics[:25]]
 
 
-def stable_topic_id(channel: str):
-    base = channel.lower().replace("/", "-").replace(":", "-")
+def stable_topic_id(key: str):
+    """Stable topic id from a routing key (sessionKey/channel/etc)."""
+    base = key.lower().replace("/", "-").replace(":", "-")
     base = "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in base)
     base = "-".join([p for p in base.split("-") if p])[:50]
     if not base:
-        base = hashlib.sha1(channel.encode()).hexdigest()[:10]
+        base = hashlib.sha1(key.encode()).hexdigest()[:10]
     return f"topic-{base}"
 
 
@@ -163,15 +164,27 @@ def process_one(log_entry: dict):
         return
 
     try:
-        cands = topic_candidates()
-        result = call_classifier(log_entry, cands)
-        topic_id = result.get("topicId")
-        topic_name = result.get("topicName")
-        if not topic_id:
-            # deterministic fallback: bucket by channel
-            src = log_entry.get("source") or {}
-            topic_id = stable_topic_id(src.get("channel") or "unknown")
-            topic_name = f"Channel {src.get('channel') or 'unknown'}"
+        src = log_entry.get("source") or {}
+        session_key = src.get("sessionKey") or ""
+
+        # Deterministic, non-ugly buckets for well-known sources.
+        if session_key.startswith("channel:discord"):
+            topic_id = "topic-discord"
+            topic_name = "Discord"
+        elif session_key.startswith("agent:main:main"):
+            topic_id = "topic-openclaw"
+            topic_name = "OpenClaw"
+        else:
+            cands = topic_candidates()
+            result = call_classifier(log_entry, cands)
+            topic_id = result.get("topicId")
+            topic_name = result.get("topicName")
+
+            if not topic_id:
+                # deterministic fallback: bucket by sessionKey/channel
+                key = session_key or (src.get("channel") or "unknown")
+                topic_id = stable_topic_id(key)
+                topic_name = "General"
 
         upsert_topic(topic_id, topic_name or topic_id)
         patch_log(
