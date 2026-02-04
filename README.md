@@ -22,6 +22,7 @@ Then open `http://localhost:3000`.
 
 The backend API now lives in FastAPI (Swagger docs at `http://localhost:8000/docs`).
 By default it uses SQLite at `./data/clawboard.db` and supports the same schema as the UI.
+The Next.js API routes have been removed; set `NEXT_PUBLIC_CLAWBOARD_API_BASE` for the UI to function.
 
 ## Tests (Playwright)
 

@@ -15,7 +15,7 @@ Code-path guarantee: the **Clawboard logger plugin** performs the always‑on lo
 
 ## Onboarding Questions (ask once, keep it brief)
 
-- What is the Clawboard API base URL (FastAPI, local or Tailscale)?
+- What is the Clawboard API base URL (FastAPI, local or Tailscale)? The Next.js API is removed.
 - Does the Clawboard server require a token? If yes, provide it.
 - What instance name should Clawboard display?
 - Which integration level should we use?
