@@ -1,0 +1,446 @@
+{
+  "instance": {
+    "title": "Clawboard Ops",
+    "integrationLevel": "manual",
+    "updatedAt": "2026-02-03T21:00:00.000Z"
+  },
+  "topics": [
+    {
+      "id": "topic-1",
+      "name": "Clawboard",
+      "description": "Product and platform work.",
+      "pinned": true,
+      "createdAt": "2026-02-01T14:00:00.000Z",
+      "updatedAt": "2026-02-03T20:05:00.000Z",
+      "status": "active",
+      "priority": "high",
+      "tags": [
+        "product",
+        "platform"
+      ],
+      "parentId": null
+    },
+    {
+      "id": "topic-2",
+      "name": "Clawboard \u00b7 Integration",
+      "description": "Hooks, plugin, and backfill.",
+      "pinned": false,
+      "createdAt": "2026-02-02T09:30:00.000Z",
+      "updatedAt": "2026-02-03T19:15:00.000Z",
+      "status": "active",
+      "priority": "high",
+      "tags": [
+        "hooks",
+        "skills"
+      ],
+      "parentId": "topic-1"
+    },
+    {
+      "id": "topic-3",
+      "name": "Product & UX",
+      "description": "Narrative, roadmap, and experience design.",
+      "pinned": true,
+      "createdAt": "2026-02-01T14:10:00.000Z",
+      "updatedAt": "2026-02-03T18:10:00.000Z",
+      "status": "active",
+      "priority": "high",
+      "tags": [
+        "ux",
+        "roadmap"
+      ],
+      "parentId": null
+    },
+    {
+      "id": "topic-4",
+      "name": "Engineering",
+      "description": "Infrastructure and reliability work.",
+      "pinned": true,
+      "createdAt": "2026-02-01T14:15:00.000Z",
+      "updatedAt": "2026-02-03T19:50:00.000Z",
+      "status": "active",
+      "priority": "high",
+      "tags": [
+        "infra",
+        "reliability"
+      ],
+      "parentId": null
+    },
+    {
+      "id": "topic-5",
+      "name": "Operations",
+      "description": "Admin, finance, and operations.",
+      "pinned": false,
+      "createdAt": "2026-02-01T14:20:00.000Z",
+      "updatedAt": "2026-02-03T16:45:00.000Z",
+      "status": "active",
+      "priority": "medium",
+      "tags": [
+        "ops"
+      ],
+      "parentId": null
+    },
+    {
+      "id": "topic-6",
+      "name": "Research",
+      "description": "Exploration and prototyping.",
+      "pinned": false,
+      "createdAt": "2026-02-01T14:25:00.000Z",
+      "updatedAt": "2026-02-03T17:30:00.000Z",
+      "status": "active",
+      "priority": "medium",
+      "tags": [
+        "experiments"
+      ],
+      "parentId": null
+    },
+    {
+      "id": "topic-7",
+      "name": "Personal",
+      "description": "Personal tasks and goals.",
+      "pinned": false,
+      "createdAt": "2026-02-01T14:30:00.000Z",
+      "updatedAt": "2026-02-03T16:20:00.000Z",
+      "status": "active",
+      "priority": "medium",
+      "tags": [
+        "life"
+      ],
+      "parentId": null
+    },
+    {
+      "id": "topic-8",
+      "name": "Clients",
+      "description": "Client communications and deliverables.",
+      "pinned": false,
+      "createdAt": "2026-02-01T14:35:00.000Z",
+      "updatedAt": "2026-02-03T17:10:00.000Z",
+      "status": "active",
+      "priority": "medium",
+      "tags": [
+        "external"
+      ],
+      "parentId": null
+    }
+  ],
+  "tasks": [
+    {
+      "id": "task-1",
+      "topicId": "topic-1",
+      "title": "Ship onboarding wizard",
+      "status": "doing",
+      "pinned": true,
+      "priority": "high",
+      "dueDate": "2026-02-05T00:00:00.000Z",
+      "createdAt": "2026-02-02T10:00:00.000Z",
+      "updatedAt": "2026-02-03T19:55:00.000Z"
+    },
+    {
+      "id": "task-2",
+      "topicId": "topic-1",
+      "title": "Add coverage view for backfill",
+      "status": "todo",
+      "pinned": false,
+      "priority": "medium",
+      "dueDate": null,
+      "createdAt": "2026-02-02T11:15:00.000Z",
+      "updatedAt": "2026-02-03T18:20:00.000Z"
+    },
+    {
+      "id": "task-3",
+      "topicId": "topic-2",
+      "title": "Wire logger hook",
+      "status": "done",
+      "pinned": false,
+      "priority": "high",
+      "dueDate": null,
+      "createdAt": "2026-02-02T12:30:00.000Z",
+      "updatedAt": "2026-02-03T18:45:00.000Z"
+    },
+    {
+      "id": "task-4",
+      "topicId": "topic-4",
+      "title": "Audit webhook flow",
+      "status": "blocked",
+      "pinned": false,
+      "priority": "high",
+      "dueDate": null,
+      "createdAt": "2026-02-02T09:15:00.000Z",
+      "updatedAt": "2026-02-03T19:30:00.000Z"
+    },
+    {
+      "id": "task-5",
+      "topicId": "topic-5",
+      "title": "Refresh monthly status report",
+      "status": "todo",
+      "pinned": false,
+      "priority": "medium",
+      "dueDate": null,
+      "createdAt": "2026-02-02T08:45:00.000Z",
+      "updatedAt": "2026-02-03T16:10:00.000Z"
+    },
+    {
+      "id": "task-6",
+      "topicId": "topic-3",
+      "title": "Draft release notes",
+      "status": "doing",
+      "pinned": false,
+      "priority": "medium",
+      "dueDate": "2026-02-06T00:00:00.000Z",
+      "createdAt": "2026-02-02T13:00:00.000Z",
+      "updatedAt": "2026-02-03T17:40:00.000Z"
+    },
+    {
+      "id": "task-7",
+      "topicId": "topic-1",
+      "title": "Prepare demo dataset",
+      "status": "done",
+      "pinned": false,
+      "priority": "medium",
+      "dueDate": null,
+      "createdAt": "2026-02-02T15:00:00.000Z",
+      "updatedAt": "2026-02-03T17:55:00.000Z"
+    },
+    {
+      "id": "task-8",
+      "topicId": "topic-7",
+      "title": "Plan weekly focus",
+      "status": "todo",
+      "pinned": false,
+      "priority": "low",
+      "dueDate": null,
+      "createdAt": "2026-02-02T16:15:00.000Z",
+      "updatedAt": "2026-02-03T16:25:00.000Z"
+    },
+    {
+      "id": "task-9",
+      "topicId": "topic-8",
+      "title": "Client status update",
+      "status": "doing",
+      "pinned": false,
+      "priority": "medium",
+      "dueDate": null,
+      "createdAt": "2026-02-02T17:20:00.000Z",
+      "updatedAt": "2026-02-03T17:05:00.000Z"
+    },
+    {
+      "id": "task-10",
+      "topicId": "topic-6",
+      "title": "Evaluate memory search ranking",
+      "status": "todo",
+      "pinned": true,
+      "priority": "medium",
+      "dueDate": null,
+      "createdAt": "2026-02-02T18:00:00.000Z",
+      "updatedAt": "2026-02-03T17:20:00.000Z"
+    }
+  ],
+  "logs": [
+    {
+      "id": "log-1",
+      "topicId": "topic-1",
+      "type": "system",
+      "content": "Clawboard instance seeded with default topics.",
+      "summary": "Instance seeded with default topics.",
+      "createdAt": "2026-02-01T14:00:00.000Z",
+      "agentId": "system",
+      "agentLabel": "System"
+    },
+    {
+      "id": "log-2",
+      "topicId": "topic-1",
+      "taskId": "task-1",
+      "type": "conversation",
+      "content": "We need an onboarding wizard that asks for instance name, integration level, and token once.",
+      "summary": "Requested onboarding wizard inputs.",
+      "raw": "User: We need an onboarding wizard that asks for instance name, integration level, and token once.\nAssistant: Got it. We'll build a multi-step setup with a token gate and a quick connection snippet.",
+      "createdAt": "2026-02-02T10:05:00.000Z",
+      "agentId": "main",
+      "agentLabel": "User",
+      "source": {
+        "channel": "discord",
+        "sessionKey": "main",
+        "messageId": "msg-001"
+      }
+    },
+    {
+      "id": "log-3",
+      "topicId": "topic-1",
+      "taskId": "task-1",
+      "type": "action",
+      "content": "Scaffolded onboarding wizard layout.",
+      "summary": "Scaffolded onboarding wizard layout.",
+      "createdAt": "2026-02-02T10:25:00.000Z",
+      "agentId": "coding",
+      "agentLabel": "Coding Agent",
+      "source": {
+        "channel": "terminal",
+        "sessionKey": "coding"
+      }
+    },
+    {
+      "id": "log-4",
+      "topicId": "topic-1",
+      "taskId": "task-2",
+      "type": "conversation",
+      "content": "Add a coverage view so we can verify backfill completeness.",
+      "summary": "Requested backfill coverage view.",
+      "raw": "User: Add a coverage view so we can verify backfill completeness.\nAssistant: We\u2019ll add coverage stats, import counts, and any failures in one panel.",
+      "createdAt": "2026-02-02T11:20:00.000Z",
+      "agentId": "main",
+      "agentLabel": "User",
+      "source": {
+        "channel": "discord",
+        "sessionKey": "main",
+        "messageId": "msg-002"
+      }
+    },
+    {
+      "id": "log-5",
+      "topicId": "topic-1",
+      "type": "import",
+      "content": "Imported 24 historical entries.",
+      "summary": "Imported 24 historical entries.",
+      "createdAt": "2026-02-02T12:10:00.000Z",
+      "agentId": "system",
+      "agentLabel": "System"
+    },
+    {
+      "id": "log-6",
+      "topicId": "topic-4",
+      "taskId": "task-4",
+      "type": "conversation",
+      "content": "Audit the webhook flow and confirm it won't double-fire.",
+      "summary": "Asked for webhook audit.",
+      "raw": "User: Audit the webhook flow and confirm it won't double-fire.\nAssistant: Will review the handler and add guardrails.",
+      "createdAt": "2026-02-02T13:40:00.000Z",
+      "agentId": "main",
+      "agentLabel": "User",
+      "source": {
+        "channel": "discord",
+        "sessionKey": "main",
+        "messageId": "msg-003"
+      }
+    },
+    {
+      "id": "log-7",
+      "topicId": "topic-4",
+      "taskId": "task-4",
+      "type": "action",
+      "content": "Added idempotency guard to webhook handler.",
+      "summary": "Added idempotency guard to webhook handler.",
+      "createdAt": "2026-02-02T14:05:00.000Z",
+      "agentId": "coding",
+      "agentLabel": "Coding Agent",
+      "source": {
+        "channel": "terminal",
+        "sessionKey": "coding"
+      }
+    },
+    {
+      "id": "log-8",
+      "topicId": "topic-3",
+      "taskId": "task-6",
+      "type": "note",
+      "content": "Release notes should emphasize privacy-first design and local-first reliability.",
+      "summary": "Capture privacy-first emphasis for release notes.",
+      "createdAt": "2026-02-02T15:30:00.000Z",
+      "agentId": "main",
+      "agentLabel": "User"
+    },
+    {
+      "id": "log-9",
+      "topicId": "topic-8",
+      "taskId": "task-9",
+      "type": "conversation",
+      "content": "Send a status update to the client by Friday.",
+      "summary": "Requested client status update.",
+      "raw": "User: Send a status update to the client by Friday.\nAssistant: Will draft the update and confirm delivery time.",
+      "createdAt": "2026-02-02T16:20:00.000Z",
+      "agentId": "main",
+      "agentLabel": "User"
+    },
+    {
+      "id": "log-10",
+      "topicId": "topic-5",
+      "taskId": "task-5",
+      "type": "action",
+      "content": "Generated monthly status report draft.",
+      "summary": "Generated monthly status report draft.",
+      "createdAt": "2026-02-02T17:10:00.000Z",
+      "agentId": "system",
+      "agentLabel": "System"
+    },
+    {
+      "id": "log-11",
+      "topicId": "topic-6",
+      "taskId": "task-10",
+      "type": "conversation",
+      "content": "Evaluate memory search ranking improvements for session queries.",
+      "summary": "Requested evaluation of memory search ranking.",
+      "raw": "User: Evaluate memory search ranking improvements for session queries.\nAssistant: We'll run ranking tests and compare the top-5 results.",
+      "createdAt": "2026-02-02T18:05:00.000Z",
+      "agentId": "main",
+      "agentLabel": "User"
+    },
+    {
+      "id": "log-12",
+      "topicId": "topic-6",
+      "taskId": "task-10",
+      "type": "action",
+      "content": "Ran ranking tests on sample queries.",
+      "summary": "Ran ranking tests on sample queries.",
+      "createdAt": "2026-02-02T19:15:00.000Z",
+      "agentId": "coding",
+      "agentLabel": "Coding Agent",
+      "source": {
+        "channel": "terminal",
+        "sessionKey": "coding"
+      }
+    },
+    {
+      "id": "log-13",
+      "topicId": "topic-7",
+      "taskId": "task-8",
+      "type": "conversation",
+      "content": "Plan a focused week with three priorities.",
+      "summary": "Asked to plan a focused week.",
+      "raw": "User: Plan a focused week with three priorities.\nAssistant: We'll define three outcomes and map them to tasks.",
+      "createdAt": "2026-02-03T09:20:00.000Z",
+      "agentId": "main",
+      "agentLabel": "User"
+    },
+    {
+      "id": "log-14",
+      "topicId": "topic-2",
+      "taskId": "task-3",
+      "type": "system",
+      "content": "Logger hook enabled and streaming to Clawboard.",
+      "summary": "Logger hook enabled.",
+      "createdAt": "2026-02-03T10:40:00.000Z",
+      "agentId": "system",
+      "agentLabel": "System"
+    },
+    {
+      "id": "log-15",
+      "topicId": "topic-1",
+      "taskId": "task-7",
+      "type": "action",
+      "content": "Prepared demo dataset with 8 topics and 16 logs.",
+      "summary": "Prepared demo dataset for testing.",
+      "createdAt": "2026-02-03T11:15:00.000Z",
+      "agentId": "coding",
+      "agentLabel": "Coding Agent"
+    },
+    {
+      "id": "log-16",
+      "topicId": "topic-1",
+      "type": "conversation",
+      "content": "Make unified view the default navigation surface.",
+      "summary": "Requested unified view as default.",
+      "raw": "User: Make unified view the default navigation surface.\nAssistant: We'll update routes and keep deep links intact.",
+      "createdAt": "2026-02-03T12:30:00.000Z",
+      "agentId": "main",
+      "agentLabel": "User"
+    }
+  ]
+}
