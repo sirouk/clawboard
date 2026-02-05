@@ -114,6 +114,16 @@ export default function register(api) {
     return defaultTaskId;
   }
 
+  function resolveAgent(agentId) {
+    if (agentId) {
+      if (agentId === "main") {
+        return { agentId: "main", agentLabel: "OpenClaw" };
+      }
+      return { agentId, agentLabel: `Agent ${agentId}` };
+    }
+    return { agentId: "assistant", agentLabel: "OpenClaw" };
+  }
+
   async function enqueue(payload) {
     await ensureDir(queuePath);
     await fs.appendFile(queuePath, `${JSON.stringify(payload)}\n`, "utf8");
@@ -228,6 +238,9 @@ export default function register(api) {
     const sessionKey = meta?.sessionKey ?? ctx?.sessionKey;
     const topicId = await resolveTopicId(sessionKey);
     const taskId = resolveTaskId();
+    const metaAgentId = typeof meta?.agentId === "string" ? meta.agentId : void 0;
+    const ctxAgentId = ctx?.agentId;
+    const { agentId, agentLabel } = resolveAgent(ctxAgentId ?? metaAgentId);
 
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? metaSummary : summarize(raw);
@@ -239,8 +252,8 @@ export default function register(api) {
       content: raw,
       summary,
       raw,
-      agentId: "assistant",
-      agentLabel: "OpenClaw",
+      agentId,
+      agentLabel,
       source: {
         channel: ctx.channelId,
         sessionKey,
@@ -300,6 +313,9 @@ export default function register(api) {
     const taskId = resolveTaskId();
 
     const messages = Array.isArray(event.messages) ? event.messages : [];
+    const ctxAgentId = ctx?.agentId;
+    const eventAgentId = typeof event?.agentId === "string" ? event.agentId : void 0;
+    const { agentId, agentLabel } = resolveAgent(ctxAgentId ?? eventAgentId);
 
     const extractText = (value) => {
       if (!value) return void 0;
@@ -341,8 +357,8 @@ export default function register(api) {
         content,
         summary,
         raw: truncateRaw(content),
-        agentId: "assistant",
-        agentLabel: "OpenClaw",
+        agentId,
+        agentLabel,
         source: {
           sessionKey: ctx.sessionKey
         }

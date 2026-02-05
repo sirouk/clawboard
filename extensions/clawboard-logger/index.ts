@@ -145,6 +145,16 @@ export default function register(api: OpenClawPluginApi) {
     return defaultTaskId;
   }
 
+  function resolveAgent(agentId?: string | null) {
+    if (agentId) {
+      if (agentId === "main") {
+        return { agentId: "main", agentLabel: "OpenClaw" };
+      }
+      return { agentId, agentLabel: `Agent ${agentId}` };
+    }
+    return { agentId: "assistant", agentLabel: "OpenClaw" };
+  }
+
   async function enqueue(payload: unknown) {
     await ensureDir(queuePath);
     await fs.appendFile(queuePath, `${JSON.stringify(payload)}\n`, "utf8");
@@ -251,6 +261,9 @@ export default function register(api: OpenClawPluginApi) {
     const sessionKey = (meta?.sessionKey as string | undefined) ?? (ctx as unknown as { sessionKey?: string })?.sessionKey;
     const topicId = await resolveTopicId(sessionKey);
     const taskId = resolveTaskId();
+    const metaAgentId = typeof meta?.agentId === "string" ? (meta.agentId as string) : undefined;
+    const ctxAgentId = (ctx as unknown as { agentId?: string })?.agentId;
+    const { agentId, agentLabel } = resolveAgent(ctxAgentId ?? metaAgentId);
 
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? metaSummary : summarize(raw);
@@ -262,8 +275,8 @@ export default function register(api: OpenClawPluginApi) {
       content: raw,
       summary,
       raw,
-      agentId: "assistant",
-      agentLabel: "OpenClaw",
+      agentId,
+      agentLabel,
       source: {
         channel: ctx.channelId,
         sessionKey,
@@ -328,6 +341,9 @@ export default function register(api: OpenClawPluginApi) {
     // Some channels/providers don't emit message_sent reliably for assistant output.
     // As a fallback, capture assistant messages from the agent_end payload.
     const messages = Array.isArray(event.messages) ? (event.messages as Array<Record<string, unknown>>) : [];
+    const ctxAgentId = (ctx as unknown as { agentId?: string })?.agentId;
+    const eventAgentId = typeof (event as Record<string, unknown>)?.agentId === "string" ? (event as Record<string, unknown>).agentId : undefined;
+    const { agentId, agentLabel } = resolveAgent(ctxAgentId ?? (eventAgentId as string | undefined));
 
     const extractText = (value: unknown): string | undefined => {
       if (!value) return undefined;
@@ -369,8 +385,8 @@ export default function register(api: OpenClawPluginApi) {
         content,
         summary,
         raw: truncateRaw(content),
-        agentId: "assistant",
-        agentLabel: "OpenClaw",
+        agentId,
+        agentLabel,
         source: {
           sessionKey: ctx.sessionKey,
         },
