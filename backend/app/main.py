@@ -434,6 +434,7 @@ def append_log(
             classificationAttempts=0,
             classificationError=None,
             createdAt=timestamp,
+            updatedAt=timestamp,
             agentId=payload.agentId,
             agentLabel=payload.agentLabel,
             source=payload.source,
@@ -441,7 +442,7 @@ def append_log(
         session.add(entry)
         session.commit()
         session.refresh(entry)
-        event_hub.publish({"type": "log.appended", "data": entry.model_dump(), "eventTs": entry.createdAt})
+        event_hub.publish({"type": "log.appended", "data": entry.model_dump(), "eventTs": entry.updatedAt})
         return entry
 
 
@@ -470,10 +471,12 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
         if payload.classificationError is not None:
             entry.classificationError = payload.classificationError
 
+        entry.updatedAt = now_iso()
+
         session.add(entry)
         session.commit()
         session.refresh(entry)
-        event_hub.publish({"type": "log.patched", "data": entry.model_dump(), "eventTs": entry.createdAt})
+        event_hub.publish({"type": "log.patched", "data": entry.model_dump(), "eventTs": entry.updatedAt})
         return entry
 
 
@@ -494,7 +497,7 @@ def list_changes(
         else:
             topics = session.exec(select(Topic).where(Topic.updatedAt >= since)).all()
             tasks = session.exec(select(Task).where(Task.updatedAt >= since)).all()
-            logs = session.exec(select(LogEntry).where(LogEntry.createdAt >= since)).all()
+            logs = session.exec(select(LogEntry).where(LogEntry.updatedAt >= since)).all()
 
         topics.sort(key=lambda t: t.updatedAt, reverse=True)
         tasks.sort(key=lambda t: t.updatedAt, reverse=True)

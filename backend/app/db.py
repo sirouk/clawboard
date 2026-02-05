@@ -36,6 +36,8 @@ def init_db() -> None:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN classificationAttempts INTEGER NOT NULL DEFAULT 0;")
             if "classificationError" not in existing:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN classificationError TEXT;")
+            if "updatedAt" not in existing:
+                conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN updatedAt TEXT NOT NULL DEFAULT '';")
 
 
 def get_session() -> Session:

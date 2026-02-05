@@ -85,6 +85,7 @@ class LogOut(ModelBase):
     classificationError: Optional[str] = Field(description="Last classifier error.", examples=[None])
 
     createdAt: str = Field(description="ISO timestamp when the log was created.", examples=["2026-02-02T10:05:00.000Z"])
+    updatedAt: str = Field(description="ISO timestamp when the log was last updated.", examples=["2026-02-02T10:05:00.000Z"])
     agentId: Optional[str] = Field(description="Agent identifier.", examples=["main"])
     agentLabel: Optional[str] = Field(description="Agent label.", examples=["User"])
     source: Optional[Dict[str, Any]] = Field(

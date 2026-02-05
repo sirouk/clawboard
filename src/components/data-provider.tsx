@@ -27,7 +27,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const upsertTopic = (topic: Topic) => setTopics((prev) => upsertById(prev, topic));
   const upsertTask = (task: Task) => setTasks((prev) => upsertById(prev, task));
-  const appendLog = (log: LogEntry) => setLogs((prev) => prependUnique(prev, log));
+  const appendLog = (log: LogEntry) => setLogs((prev) => upsertById(prev, log));
 
   const reconcile = async (since?: string) => {
     const url = since ? `/api/changes?since=${encodeURIComponent(since)}` : "/api/changes";
@@ -53,7 +53,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         upsertTask(event.data as Task);
         return;
       }
-      if (event.type === "log.appended" && event.data && typeof event.data === "object") {
+      if (
+        (event.type === "log.appended" || event.type === "log.patched") &&
+        event.data &&
+        typeof event.data === "object"
+      ) {
         appendLog(event.data as LogEntry);
       }
     },

@@ -135,6 +135,9 @@ class LogEntry(SQLModel, table=True):
     createdAt: str = Field(
         description="ISO timestamp when the log was created.",
     )
+    updatedAt: str = Field(
+        description="ISO timestamp when the log was last updated.",
+    )
     agentId: Optional[str] = Field(
         default=None,
         description="Agent identifier (main, coding, web, social, system).",

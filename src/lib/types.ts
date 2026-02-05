@@ -43,6 +43,7 @@ export type LogEntry = {
   classificationError?: string | null;
 
   createdAt: string;
+  updatedAt?: string;
   agentId?: string;
   agentLabel?: string;
   source?: {

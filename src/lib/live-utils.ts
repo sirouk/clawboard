@@ -4,6 +4,7 @@ export type LiveEvent =
   | { type: "topic.upserted"; data: Topic }
   | { type: "task.upserted"; data: Task }
   | { type: "log.appended"; data: LogEntry }
+  | { type: "log.patched"; data: LogEntry }
   | { type: "config.updated"; data: unknown }
   | { type: "stream.reset" }
   | { type: string; data?: unknown };
@@ -40,8 +41,7 @@ export function mergeLogs(items: LogEntry[], incoming: LogEntry[]): LogEntry[] {
   if (incoming.length === 0) return items;
   let next = items;
   for (const entry of incoming) {
-    if (next.some((item) => item.id === entry.id)) continue;
-    next = [entry, ...next];
+    next = upsertById(next, entry);
   }
   return next.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }
