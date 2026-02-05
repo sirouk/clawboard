@@ -199,6 +199,9 @@ export default function register(api) {
     agentLabel: "Clawboard Logger",
   }).catch(() => undefined);
 
+  let lastChannelId;
+  let lastEffectiveSessionKey;
+
   api.on("message_received", async (event, ctx) => {
     const raw = event.content ?? "";
     const meta = event.metadata ?? undefined;
@@ -401,7 +404,8 @@ export default function register(api) {
         agentId,
         agentLabel,
         source: {
-          sessionKey: ctx.sessionKey
+          channel: inferredChannelId,
+          sessionKey: inferredSessionKey
         }
       });
     }

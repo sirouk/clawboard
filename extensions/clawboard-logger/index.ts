@@ -220,6 +220,11 @@ export default function register(api: OpenClawPluginApi) {
 
   flushQueue().catch(() => undefined);
 
+  // Track last seen channel so we can attribute agent_end output when the
+  // provider doesn't emit outbound message hooks.
+  let lastChannelId: string | undefined;
+  let lastEffectiveSessionKey: string | undefined;
+
   api.on("message_received", async (event: PluginHookMessageReceivedEvent, ctx: PluginHookMessageContext) => {
     const raw = event.content ?? "";
     const meta = (event.metadata as Record<string, unknown> | undefined) ?? undefined;
@@ -229,6 +234,8 @@ export default function register(api: OpenClawPluginApi) {
     // create or attach session-bucket topics (those aren't real topics).
     const fallbackKey = (ctx as unknown as { channelId?: string })?.channelId;
     const effectiveSessionKey = sessionKey ?? (fallbackKey ? `channel:${fallbackKey}` : undefined);
+    lastChannelId = ctx.channelId;
+    lastEffectiveSessionKey = effectiveSessionKey;
     const topicId = await resolveTopicId(effectiveSessionKey);
     const taskId = resolveTaskId();
 
@@ -439,7 +446,8 @@ export default function register(api: OpenClawPluginApi) {
         agentId,
         agentLabel,
         source: {
-          sessionKey: ctx.sessionKey,
+          channel: inferredChannelId,
+          sessionKey: inferredSessionKey,
         },
       });
     }
