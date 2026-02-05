@@ -328,11 +328,37 @@ export default function register(api: OpenClawPluginApi) {
     // Some channels/providers don't emit message_sent reliably for assistant output.
     // As a fallback, capture assistant messages from the agent_end payload.
     const messages = Array.isArray(event.messages) ? (event.messages as Array<Record<string, unknown>>) : [];
+
+    const extractText = (value: unknown): string | undefined => {
+      if (!value) return undefined;
+      if (typeof value === "string") return value;
+      if (Array.isArray(value)) {
+        const parts = value
+          .map((part) => {
+            if (typeof part === "string") return part;
+            if (part && typeof part === "object") {
+              const obj = part as Record<string, unknown>;
+              if (typeof obj.text === "string") return obj.text;
+              if (typeof obj.content === "string") return obj.content;
+            }
+            return "";
+          })
+          .filter(Boolean);
+        return parts.join("\n");
+      }
+      if (typeof value === "object") {
+        const obj = value as Record<string, unknown>;
+        if (typeof obj.text === "string") return obj.text;
+        if (typeof obj.content === "string") return obj.content;
+      }
+      return undefined;
+    };
+
     for (const msg of messages) {
       const role = typeof msg.role === "string" ? msg.role : undefined;
       if (role !== "assistant") continue;
 
-      const content = typeof msg.content === "string" ? msg.content : undefined;
+      const content = extractText(msg.content);
       if (!content || !content.trim()) continue;
 
       const summary = summarize(content);

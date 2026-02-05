@@ -300,11 +300,39 @@ export default function register(api) {
     const taskId = resolveTaskId();
 
     const messages = Array.isArray(event.messages) ? event.messages : [];
+
+    const extractText = (value) => {
+      if (!value) return void 0;
+      if (typeof value === "string") return value;
+      if (Array.isArray(value)) {
+        const parts = value
+          .map((part) => {
+            if (typeof part === "string") return part;
+            if (part && typeof part === "object") {
+              const obj = part;
+              if (typeof obj.text === "string") return obj.text;
+              if (typeof obj.content === "string") return obj.content;
+            }
+            return "";
+          })
+          .filter(Boolean);
+        return parts.join("\n");
+      }
+      if (typeof value === "object") {
+        const obj = value;
+        if (typeof obj.text === "string") return obj.text;
+        if (typeof obj.content === "string") return obj.content;
+      }
+      return void 0;
+    };
+
     for (const msg of messages) {
       const role = typeof msg?.role === "string" ? msg.role : void 0;
-      if (role !== "assistant") continue;
-      const content = typeof msg?.content === "string" ? msg.content : void 0;
-      if (!content || !content.trim()) continue;
+      if (role !== "assistant")
+        continue;
+      const content = extractText(msg.content);
+      if (!content || !content.trim())
+        continue;
       const summary = summarize(content);
       await send({
         topicId,
@@ -316,8 +344,8 @@ export default function register(api) {
         agentId: "assistant",
         agentLabel: "OpenClaw",
         source: {
-          sessionKey: ctx.sessionKey,
-        },
+          sessionKey: ctx.sessionKey
+        }
       });
     }
 
