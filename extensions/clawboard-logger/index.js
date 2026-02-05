@@ -232,19 +232,30 @@ export default function register(api) {
     // will attach this log to a real topic based on conversation context.
   });
 
-  api.on("message_sent", async (event, ctx) => {
+  const recentOutgoing = /* @__PURE__ */ new Set();
+  const rememberOutgoing = (key) => {
+    recentOutgoing.add(key);
+    if (recentOutgoing.size > 200) {
+      const first = recentOutgoing.values().next().value;
+      if (first)
+        recentOutgoing.delete(first);
+    }
+    setTimeout(() => recentOutgoing.delete(key), 30e3).unref?.();
+  };
+
+  api.on("message_sending", async (event, ctx) => {
     const raw = event.content ?? "";
-    const meta = event ?? {};
+    const meta = event.metadata ?? void 0;
     const sessionKey = meta?.sessionKey ?? ctx?.sessionKey;
     const topicId = await resolveTopicId(sessionKey);
     const taskId = resolveTaskId();
     const metaAgentId = typeof meta?.agentId === "string" ? meta.agentId : void 0;
     const ctxAgentId = ctx?.agentId;
     const { agentId, agentLabel } = resolveAgent(ctxAgentId ?? metaAgentId);
-
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? metaSummary : summarize(raw);
-
+    const dedupeKey = `sending:${ctx.channelId}:${sessionKey ?? ""}:${summary}`;
+    rememberOutgoing(dedupeKey);
     await send({
       topicId,
       taskId,
@@ -256,9 +267,19 @@ export default function register(api) {
       agentLabel,
       source: {
         channel: ctx.channelId,
-        sessionKey,
-      },
+        sessionKey
+      }
     });
+  });
+
+  api.on("message_sent", async (event, ctx) => {
+    const raw = event.content ?? "";
+    const meta = event ?? {};
+    const sessionKey = meta?.sessionKey ?? ctx?.sessionKey;
+    const summary = summarize(raw);
+    const dedupeKey = `sending:${ctx.channelId}:${sessionKey ?? ""}:${summary}`;
+    if (recentOutgoing.has(dedupeKey))
+      return;
   });
 
   api.on("before_tool_call", async (event, ctx) => {

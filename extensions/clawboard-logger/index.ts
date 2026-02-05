@@ -255,18 +255,33 @@ export default function register(api: OpenClawPluginApi) {
     // will attach this log to a real topic based on conversation context.
   });
 
-  api.on("message_sent", async (event: PluginHookMessageSentEvent, ctx: PluginHookMessageContext) => {
+  // Outbound assistant logging: message_sending is the reliable hook.
+  const recentOutgoing = new Set<string>();
+  const rememberOutgoing = (key: string) => {
+    recentOutgoing.add(key);
+    if (recentOutgoing.size > 200) {
+      const first = recentOutgoing.values().next().value;
+      if (first) recentOutgoing.delete(first);
+    }
+    (setTimeout(() => recentOutgoing.delete(key), 30_000) as unknown as { unref?: () => void })?.unref?.();
+  };
+
+  api.on("message_sending", async (event: any, ctx: PluginHookMessageContext) => {
     const raw = event.content ?? "";
-    const meta = (event as unknown as Record<string, unknown>) ?? {};
+    const meta = (event.metadata as Record<string, unknown> | undefined) ?? undefined;
     const sessionKey = (meta?.sessionKey as string | undefined) ?? (ctx as unknown as { sessionKey?: string })?.sessionKey;
     const topicId = await resolveTopicId(sessionKey);
     const taskId = resolveTaskId();
+
     const metaAgentId = typeof meta?.agentId === "string" ? (meta.agentId as string) : undefined;
     const ctxAgentId = (ctx as unknown as { agentId?: string })?.agentId;
     const { agentId, agentLabel } = resolveAgent(ctxAgentId ?? metaAgentId);
 
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? metaSummary : summarize(raw);
+
+    const dedupeKey = `sending:${ctx.channelId}:${sessionKey ?? ""}:${summary}`;
+    rememberOutgoing(dedupeKey);
 
     await send({
       topicId,
@@ -282,6 +297,17 @@ export default function register(api: OpenClawPluginApi) {
         sessionKey,
       },
     });
+  });
+
+  api.on("message_sent", async (event: PluginHookMessageSentEvent, ctx: PluginHookMessageContext) => {
+    // Avoid double-logging the actual message content; we log it at message_sending.
+    // This hook is kept for future delivery status tracking.
+    const raw = event.content ?? "";
+    const meta = (event as unknown as Record<string, unknown>) ?? {};
+    const sessionKey = (meta?.sessionKey as string | undefined) ?? (ctx as unknown as { sessionKey?: string })?.sessionKey;
+    const summary = summarize(raw);
+    const dedupeKey = `sending:${ctx.channelId}:${sessionKey ?? ""}:${summary}`;
+    if (recentOutgoing.has(dedupeKey)) return;
   });
 
   api.on("before_tool_call", async (event: PluginHookBeforeToolCallEvent, ctx: PluginHookToolContext) => {
