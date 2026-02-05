@@ -270,12 +270,13 @@ export default function register(api: OpenClawPluginApi) {
     const raw = event.content ?? "";
     const meta = (event.metadata as Record<string, unknown> | undefined) ?? undefined;
     const sessionKey = (meta?.sessionKey as string | undefined) ?? (ctx as unknown as { sessionKey?: string })?.sessionKey;
-    const topicId = await resolveTopicId(sessionKey);
+    const effectiveSessionKey = sessionKey ?? (ctx.channelId ? `channel:${ctx.channelId}` : undefined);
+    const topicId = await resolveTopicId(effectiveSessionKey);
     const taskId = resolveTaskId();
 
-    const metaAgentId = typeof meta?.agentId === "string" ? (meta.agentId as string) : undefined;
-    const ctxAgentId = (ctx as unknown as { agentId?: string })?.agentId;
-    const { agentId, agentLabel } = resolveAgent(ctxAgentId ?? metaAgentId);
+    // Outbound message content is always assistant-side.
+    const agentId = "assistant";
+    const agentLabel = "OpenClaw";
 
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? metaSummary : summarize(raw);
@@ -294,7 +295,7 @@ export default function register(api: OpenClawPluginApi) {
       agentLabel,
       source: {
         channel: ctx.channelId,
-        sessionKey,
+        sessionKey: effectiveSessionKey,
       },
     });
   });
@@ -305,8 +306,9 @@ export default function register(api: OpenClawPluginApi) {
     const raw = event.content ?? "";
     const meta = (event as unknown as Record<string, unknown>) ?? {};
     const sessionKey = (meta?.sessionKey as string | undefined) ?? (ctx as unknown as { sessionKey?: string })?.sessionKey;
+    const effectiveSessionKey = sessionKey ?? (ctx.channelId ? `channel:${ctx.channelId}` : undefined);
     const summary = summarize(raw);
-    const dedupeKey = `sending:${ctx.channelId}:${sessionKey ?? ""}:${summary}`;
+    const dedupeKey = `sending:${ctx.channelId}:${effectiveSessionKey ?? ""}:${summary}`;
     if (recentOutgoing.has(dedupeKey)) return;
   });
 

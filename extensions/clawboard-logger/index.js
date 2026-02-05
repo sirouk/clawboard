@@ -247,11 +247,11 @@ export default function register(api) {
     const raw = event.content ?? "";
     const meta = event.metadata ?? void 0;
     const sessionKey = meta?.sessionKey ?? ctx?.sessionKey;
-    const topicId = await resolveTopicId(sessionKey);
+    const effectiveSessionKey = sessionKey ?? (ctx.channelId ? `channel:${ctx.channelId}` : void 0);
+    const topicId = await resolveTopicId(effectiveSessionKey);
     const taskId = resolveTaskId();
-    const metaAgentId = typeof meta?.agentId === "string" ? meta.agentId : void 0;
-    const ctxAgentId = ctx?.agentId;
-    const { agentId, agentLabel } = resolveAgent(ctxAgentId ?? metaAgentId);
+    const agentId = "assistant";
+    const agentLabel = "OpenClaw";
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? metaSummary : summarize(raw);
     const dedupeKey = `sending:${ctx.channelId}:${sessionKey ?? ""}:${summary}`;
@@ -267,7 +267,7 @@ export default function register(api) {
       agentLabel,
       source: {
         channel: ctx.channelId,
-        sessionKey
+        sessionKey: effectiveSessionKey
       }
     });
   });
@@ -276,8 +276,9 @@ export default function register(api) {
     const raw = event.content ?? "";
     const meta = event ?? {};
     const sessionKey = meta?.sessionKey ?? ctx?.sessionKey;
+    const effectiveSessionKey = sessionKey ?? (ctx.channelId ? `channel:${ctx.channelId}` : void 0);
     const summary = summarize(raw);
-    const dedupeKey = `sending:${ctx.channelId}:${sessionKey ?? ""}:${summary}`;
+    const dedupeKey = `sending:${ctx.channelId}:${effectiveSessionKey ?? ""}:${summary}`;
     if (recentOutgoing.has(dedupeKey))
       return;
   });
