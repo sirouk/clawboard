@@ -92,7 +92,16 @@ def list_logs(params: dict):
 
 
 def list_pending_conversations(limit=500, offset=0):
-    return list_logs({"classificationStatus": "pending", "type": "conversation", "limit": limit, "offset": offset})
+    # Only classify user/assistant conversations from real message threads.
+    # Skip classifier/agent internal convo-like logs that can be present.
+    return list_logs(
+        {
+            "classificationStatus": "pending",
+            "type": "conversation",
+            "limit": limit,
+            "offset": offset,
+        }
+    )
 
 
 def list_logs_by_session(session_key: str, limit: int = 200, offset: int = 0, classificationStatus: str | None = None):
@@ -396,6 +405,9 @@ def main():
             for e in pending:
                 sk = ((e.get("source") or {}) or {}).get("sessionKey")
                 if not sk:
+                    continue
+                # Only classify real channel threads for now.
+                if not sk.startswith("channel:"):
                     continue
                 if sk in seen:
                     continue
