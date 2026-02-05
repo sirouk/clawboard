@@ -392,7 +392,7 @@ def append_log(
         if payload.source and isinstance(payload.source, dict):
             msg_id = payload.source.get("messageId")
             if msg_id and payload.type == "conversation":
-                existing = session.exec(select(LogEntry)).all()
+                existing = session.exec(select(LogEntry).where(LogEntry.type == payload.type)).all()
                 for entry in existing:
                     src = getattr(entry, "source", None) or {}
                     if not isinstance(src, dict):
