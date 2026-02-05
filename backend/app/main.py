@@ -386,6 +386,26 @@ def append_log(
     """Append a timeline entry."""
     with get_session() as session:
         timestamp = payload.createdAt or now_iso()
+
+        # Idempotency guard: if the source messageId is present, avoid duplicating
+        # logs when the logger retries / replays its queue.
+        if payload.source and isinstance(payload.source, dict):
+            msg_id = payload.source.get("messageId")
+            if msg_id and payload.type == "conversation":
+                existing = session.exec(select(LogEntry)).all()
+                for entry in existing:
+                    src = getattr(entry, "source", None) or {}
+                    if not isinstance(src, dict):
+                        continue
+                    if src.get("messageId") != msg_id:
+                        continue
+                    if entry.type != payload.type:
+                        continue
+                    if (entry.agentId or None) != (payload.agentId or None):
+                        continue
+                    # Found duplicate; return existing row without appending.
+                    return entry
+
         # Allow stage-1 logging to append without pre-creating topics/tasks.
         # Stage-2 classifier will attach valid topic/task IDs later.
         topic_id = payload.topicId
