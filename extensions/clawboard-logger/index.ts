@@ -325,6 +325,32 @@ export default function register(api: OpenClawPluginApi) {
     const topicId = await resolveTopicId(ctx.sessionKey);
     const taskId = resolveTaskId();
 
+    // Some channels/providers don't emit message_sent reliably for assistant output.
+    // As a fallback, capture assistant messages from the agent_end payload.
+    const messages = Array.isArray(event.messages) ? (event.messages as Array<Record<string, unknown>>) : [];
+    for (const msg of messages) {
+      const role = typeof msg.role === "string" ? msg.role : undefined;
+      if (role !== "assistant") continue;
+
+      const content = typeof msg.content === "string" ? msg.content : undefined;
+      if (!content || !content.trim()) continue;
+
+      const summary = summarize(content);
+      await send({
+        topicId,
+        taskId,
+        type: "conversation",
+        content,
+        summary,
+        raw: truncateRaw(content),
+        agentId: "assistant",
+        agentLabel: "OpenClaw",
+        source: {
+          sessionKey: ctx.sessionKey,
+        },
+      });
+    }
+
     await send({
       topicId,
       taskId,
