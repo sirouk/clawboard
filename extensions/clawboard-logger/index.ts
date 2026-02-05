@@ -369,9 +369,32 @@ export default function register(api: OpenClawPluginApi) {
     // Some channels/providers don't emit message_sent reliably for assistant output.
     // As a fallback, capture assistant messages from the agent_end payload.
     const messages = Array.isArray(event.messages) ? (event.messages as Array<Record<string, unknown>>) : [];
-    const ctxAgentId = (ctx as unknown as { agentId?: string })?.agentId;
-    const eventAgentId = typeof (event as Record<string, unknown>)?.agentId === "string" ? (event as Record<string, unknown>).agentId : undefined;
-    const { agentId, agentLabel } = resolveAgent(ctxAgentId ?? (eventAgentId as string | undefined));
+
+    // agent_end is always this agent's run: treat assistant-role messages as assistant output.
+    const agentId = "assistant";
+    const agentLabel = "OpenClaw";
+
+    // DEBUG (temporary): log message shapes so we can fix extraction for all providers.
+    try {
+      const shape = messages.slice(-20).map((m) => ({
+        role: typeof (m as any)?.role === "string" ? (m as any).role : typeof (m as any)?.role,
+        contentType: Array.isArray((m as any)?.content) ? "array" : typeof (m as any)?.content,
+        keys: m && typeof m === "object" ? Object.keys(m as any).slice(0, 12) : [],
+      }));
+      await send({
+        topicId,
+        taskId,
+        type: "action",
+        content: "clawboard-logger: agent_end message shape",
+        summary: "clawboard-logger: agent_end message shape",
+        raw: JSON.stringify(shape, null, 2),
+        agentId: "system",
+        agentLabel: "Clawboard Logger",
+        source: { sessionKey: ctx.sessionKey },
+      });
+    } catch {
+      // ignore
+    }
 
     const extractText = (value: unknown): string | undefined => {
       if (!value) return undefined;

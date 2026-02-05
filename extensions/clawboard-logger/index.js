@@ -335,9 +335,28 @@ export default function register(api) {
     const taskId = resolveTaskId();
 
     const messages = Array.isArray(event.messages) ? event.messages : [];
-    const ctxAgentId = ctx?.agentId;
-    const eventAgentId = typeof event?.agentId === "string" ? event.agentId : void 0;
-    const { agentId, agentLabel } = resolveAgent(ctxAgentId ?? eventAgentId);
+    const agentId = "assistant";
+    const agentLabel = "OpenClaw";
+
+    try {
+      const shape = messages.slice(-20).map((m) => ({
+        role: typeof m?.role === "string" ? m.role : typeof m?.role,
+        contentType: Array.isArray(m?.content) ? "array" : typeof m?.content,
+        keys: m && typeof m === "object" ? Object.keys(m).slice(0, 12) : []
+      }));
+      await send({
+        topicId,
+        taskId,
+        type: "action",
+        content: "clawboard-logger: agent_end message shape",
+        summary: "clawboard-logger: agent_end message shape",
+        raw: JSON.stringify(shape, null, 2),
+        agentId: "system",
+        agentLabel: "Clawboard Logger",
+        source: { sessionKey: ctx.sessionKey }
+      });
+    } catch {
+    }
 
     const extractText = (value) => {
       if (!value) return void 0;
