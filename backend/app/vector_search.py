@@ -47,6 +47,8 @@ _MODEL = None
 _MODEL_LOCK = threading.Lock()
 _QDRANT_SEED_ATTEMPTED: set[str] = set()
 _QDRANT_COLLECTION_READY = False
+_SQLITE_CACHE_LOCK = threading.Lock()
+_SQLITE_VECTOR_CACHE: dict[str, object] = {"signature": None, "rows": []}
 
 STOP_WORDS = {
     "the",
@@ -79,6 +81,21 @@ STOP_WORDS = {
     "should",
     "please",
     "just",
+}
+
+SLASH_COMMANDS = {
+    "/new",
+    "/topic",
+    "/topics",
+    "/task",
+    "/tasks",
+    "/log",
+    "/logs",
+    "/board",
+    "/graph",
+    "/help",
+    "/reset",
+    "/clear",
 }
 
 
@@ -217,6 +234,36 @@ def _log_text(log: dict) -> str:
     content = _normalize_text(str(log.get("content") or ""))
     raw = _normalize_text(str(log.get("raw") or ""))
     return _clip(" ".join(part for part in [summary, content, raw] if part), 1200)
+
+
+def _is_memory_action_log(log: dict) -> bool:
+    if str(log.get("type") or "") != "action":
+        return False
+    combined = " ".join(
+        part
+        for part in [
+            str(log.get("summary") or ""),
+            str(log.get("content") or ""),
+            str(log.get("raw") or ""),
+        ]
+        if part
+    ).lower()
+    if "tool call:" in combined or "tool result:" in combined or "tool error:" in combined:
+        if re.search(r"\bmemory[_-]?(search|get|query|fetch|retrieve|read|write|store|list|prune|delete)\b", combined):
+            return True
+    return False
+
+
+def _is_command_log(log: dict) -> bool:
+    if str(log.get("type") or "") != "conversation":
+        return False
+    text = _normalize_text(str(log.get("content") or log.get("summary") or log.get("raw") or ""))
+    if not text.startswith("/"):
+        return False
+    command = text.split(None, 1)[0].lower()
+    if command in SLASH_COMMANDS:
+        return True
+    return bool(re.fullmatch(r"/[a-z0-9_-]{2,}", command))
 
 
 def _prepare_docs(kind: str, rows: Iterable[dict], text_builder) -> list[SearchDocument]:
@@ -547,26 +594,46 @@ def _load_vectors(kind_exact: str | None = None, kind_prefix: str | None = None)
     db_path = os.path.abspath(EMBED_DB_PATH)
     if not os.path.exists(db_path):
         return []
-    conn = sqlite3.connect(db_path)
+
+    wal_path = f"{db_path}-wal"
     try:
-        if kind_exact:
-            rows = conn.execute("SELECT kind, id, vector, dim FROM embeddings WHERE kind=?", (kind_exact,)).fetchall()
-        elif kind_prefix:
-            rows = conn.execute("SELECT kind, id, vector, dim FROM embeddings WHERE kind LIKE ?", (f"{kind_prefix}%",)).fetchall()
-        else:
-            rows = conn.execute("SELECT kind, id, vector, dim FROM embeddings").fetchall()
+        db_mtime = os.path.getmtime(db_path)
     except Exception:
-        rows = []
-    finally:
-        conn.close()
+        db_mtime = 0.0
+    try:
+        wal_mtime = os.path.getmtime(wal_path) if os.path.exists(wal_path) else 0.0
+    except Exception:
+        wal_mtime = 0.0
+    signature = (db_mtime, wal_mtime)
+
+    with _SQLITE_CACHE_LOCK:
+        cached_signature = _SQLITE_VECTOR_CACHE.get("signature")
+        cached_rows = _SQLITE_VECTOR_CACHE.get("rows")
+        if cached_signature == signature and isinstance(cached_rows, list):
+            rows = cached_rows
+        else:
+            conn = sqlite3.connect(db_path)
+            try:
+                rows = conn.execute("SELECT kind, id, vector, dim FROM embeddings").fetchall()
+            except Exception:
+                rows = []
+            finally:
+                conn.close()
+            _SQLITE_VECTOR_CACHE["signature"] = signature
+            _SQLITE_VECTOR_CACHE["rows"] = rows
 
     output: list[tuple[str, str, "np.ndarray"]] = []
     for kind, item_id, blob, dim in rows:
+        kind_text = str(kind)
+        if kind_exact and kind_text != kind_exact:
+            continue
+        if kind_prefix and not kind_text.startswith(kind_prefix):
+            continue
         try:
             vec = np.frombuffer(blob, dtype=np.float32, count=int(dim))
             if vec.size == 0:
                 continue
-            output.append((str(kind), str(item_id), vec))
+            output.append((kind_text, str(item_id), vec))
         except Exception:
             continue
     return output
@@ -804,7 +871,14 @@ def semantic_search(
 
     topic_docs = _prepare_docs("topic", topics, lambda row: f"{row.get('name') or ''}\n{row.get('description') or ''}")
     task_docs = _prepare_docs("task", tasks, lambda row: f"{row.get('title') or ''}\n{row.get('status') or ''}")
-    log_docs = _prepare_docs("log", logs, _log_text)
+    filtered_logs = [
+        row
+        for row in logs
+        if str(row.get("type") or "") not in ("system", "import")
+        and not _is_memory_action_log(row)
+        and not _is_command_log(row)
+    ]
+    log_docs = _prepare_docs("log", filtered_logs, _log_text)
 
     query_vec = _embed_query(q)
     topic_dense, topic_backend = _vector_topk(query_vec, kind_exact="topic", limit=max(topic_limit * 4, 80))
@@ -817,7 +891,7 @@ def semantic_search(
 
     topic_map = {str(item.get("id") or ""): item for item in topics}
     task_map = {str(item.get("id") or ""): item for item in tasks}
-    log_map = {str(item.get("id") or ""): item for item in logs}
+    log_map = {str(item.get("id") or ""): item for item in filtered_logs}
 
     topic_rows: list[dict] = []
     for item in topic_ranked:

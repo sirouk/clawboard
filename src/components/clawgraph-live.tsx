@@ -29,6 +29,7 @@ const EDGE_COLORS: Record<string, string> = {
 
 const MIN_ZOOM = 0.38;
 const MAX_ZOOM = 2.6;
+const MAX_NODE_DRAG = 140;
 
 const NODE_THEME: Record<ClawgraphNodeType, { color: string; glow: string }> = {
   topic: { color: "#FF8A4A", glow: "#FF8A4A" },
@@ -43,6 +44,15 @@ type DragState = {
   startY: number;
   panX: number;
   panY: number;
+};
+
+type NodeDragState = {
+  pointerId: number;
+  nodeId: string;
+  startX: number;
+  startY: number;
+  offsetX: number;
+  offsetY: number;
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -101,15 +111,19 @@ export function ClawgraphLive() {
   const [query, setQuery] = useState("");
   const [showAdvancedControls, setShowAdvancedControls] = useState(false);
   const [strengthPercent, setStrengthPercent] = useState(50);
-  const [showEntityLinks, setShowEntityLinks] = useState(false);
+  const [showEntityLinks, setShowEntityLinks] = useState(true);
   const [showLabels, setShowLabels] = useState(true);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [remoteGraph, setRemoteGraph] = useState<ClawgraphData | null>(null);
   const [graphMode, setGraphMode] = useState<"api" | "local">("local");
   const [isFetching, setIsFetching] = useState(false);
+  const [isMapFullScreen, setIsMapFullScreen] = useState(false);
+  const [nodeOffsets, setNodeOffsets] = useState<Record<string, { x: number; y: number }>>({});
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const nodeDragRef = useRef<NodeDragState | null>(null);
   const didDragRef = useRef(false);
   const [viewportSize, setViewportSize] = useState({ width: 1080, height: 680 });
   const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
@@ -165,12 +179,29 @@ export function ClawgraphLive() {
       const entry = entries[0];
       if (!entry) return;
       const width = Math.max(440, Math.floor(entry.contentRect.width));
-      const height = Math.max(420, Math.floor(Math.min(window.innerHeight * 0.7, width * 0.72)));
+      const preferredHeight = isMapFullScreen ? window.innerHeight - 220 : Math.min(window.innerHeight * 0.7, width * 0.72);
+      const height = Math.max(420, Math.floor(preferredHeight));
       setViewportSize({ width, height });
     });
     observer.observe(node);
     return () => observer.disconnect();
-  }, []);
+  }, [isMapFullScreen]);
+
+  useEffect(() => {
+    if (!isMapFullScreen) return;
+    const prevOverflow = document.body.style.overflow;
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsMapFullScreen(false);
+      }
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", handleKey);
+    };
+  }, [isMapFullScreen]);
 
   const graph = remoteGraph ?? localGraph;
   const nodeById = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph.nodes]);
@@ -214,10 +245,36 @@ export function ClawgraphLive() {
     }
   }, [displayNodeById, selectedNodeId]);
 
-  const positions = useMemo(
+  const basePositions = useMemo(
     () => layoutClawgraph(displayNodes, filteredEdges, viewportSize.width, viewportSize.height),
     [displayNodes, filteredEdges, viewportSize.height, viewportSize.width]
   );
+
+  const positions = useMemo(() => {
+    if (Object.keys(nodeOffsets).length === 0) return basePositions;
+    const next = new Map(basePositions);
+    Object.entries(nodeOffsets).forEach(([id, offset]) => {
+      const base = next.get(id);
+      if (!base) return;
+      next.set(id, { x: base.x + offset.x, y: base.y + offset.y });
+    });
+    return next;
+  }, [basePositions, nodeOffsets]);
+
+  useEffect(() => {
+    if (Object.keys(nodeOffsets).length === 0) return;
+    const visibleIds = new Set(displayNodes.map((node) => node.id));
+    let changed = false;
+    const next: Record<string, { x: number; y: number }> = {};
+    Object.entries(nodeOffsets).forEach(([id, offset]) => {
+      if (visibleIds.has(id)) {
+        next[id] = offset;
+      } else {
+        changed = true;
+      }
+    });
+    if (changed) setNodeOffsets(next);
+  }, [displayNodes, nodeOffsets]);
 
   const normalizedQuery = query.trim().toLowerCase();
   const semanticRefreshKey = useMemo(() => {
@@ -315,8 +372,6 @@ export function ClawgraphLive() {
 
   const selectedTopicUrl = selectedTopic ? buildTopicUrl(selectedTopic, topics) : null;
   const selectedTaskUrl = selectedTask ? buildTaskUrl(selectedTask, topics) : null;
-  const selectedSearchUrl = selectedNode ? `${UNIFIED_BASE}?q=${encodeURIComponent(selectedNode.label)}` : null;
-  const selectedLogUrl = selectedNode ? `/log?q=${encodeURIComponent(selectedNode.label)}` : null;
 
   const connectedEdgeRows = useMemo(() => {
     if (!selectedNodeId || !selectedNode) return [] as Array<{
@@ -331,21 +386,35 @@ export function ClawgraphLive() {
       const oppositeTopic = topicFromNode(oppositeNode, topics);
       const oppositeTask = taskFromNode(oppositeNode, tasks);
       const params = new URLSearchParams();
-      const terms = [selectedNode.label, oppositeNode?.label ?? ""].filter(Boolean).join(" ").trim();
-      if (terms) params.set("q", terms);
-      if (oppositeTopic?.id) {
-        params.set("topic", oppositeTopic.id);
-      } else if (selectedTopic?.id) {
-        params.set("topic", selectedTopic.id);
-      } else if (oppositeTask?.topicId) {
-        params.set("topic", oppositeTask.topicId);
-      } else if (selectedTask?.topicId) {
-        params.set("topic", selectedTask.topicId);
+      const topicIds = new Set<string>();
+      const taskIds = new Set<string>();
+      const pushTopic = (id?: string | null) => {
+        if (id) topicIds.add(id);
+      };
+      const pushTask = (task?: Task | null) => {
+        if (!task) return;
+        taskIds.add(task.id);
+        if (task.topicId) topicIds.add(task.topicId);
+      };
+
+      if (oppositeTask) {
+        pushTask(oppositeTask);
+      } else if (oppositeTopic) {
+        pushTopic(oppositeTopic.id);
+      } else if (selectedTask) {
+        pushTask(selectedTask);
+      } else if (selectedTopic) {
+        pushTopic(selectedTopic.id);
       }
-      if (oppositeNode?.type === "agent") {
-        params.set("agent", oppositeNode.label);
+
+      topicIds.forEach((id) => params.append("topic", id));
+      taskIds.forEach((id) => params.append("task", id));
+      if (topicIds.size === 0 && taskIds.size === 0) {
+        const queryHint = oppositeNode?.label ?? selectedNode.label;
+        if (queryHint) params.set("q", queryHint);
       }
-      const href = params.size > 0 ? `/log?${params.toString()}` : "/log";
+
+      const href = params.size > 0 ? `${UNIFIED_BASE}?${params.toString()}` : UNIFIED_BASE;
 
       return {
         edge,
@@ -354,6 +423,19 @@ export function ClawgraphLive() {
       };
     });
   }, [connectedEdges, displayNodeById, nodeById, selectedNode, selectedNodeId, selectedTask, selectedTopic, tasks, topics]);
+
+  const pointerToGraph = (event: { clientX: number; clientY: number }) => {
+    const rect = canvasRef.current?.getBoundingClientRect() ?? containerRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    const localX = event.clientX - rect.left;
+    const localY = event.clientY - rect.top;
+    return {
+      x: (localX - view.x) / view.scale,
+      y: (localY - view.y) / view.scale,
+    };
+  };
+
+  const clampNodeOffset = (value: number) => clamp(value, -MAX_NODE_DRAG, MAX_NODE_DRAG);
 
   const resetView = () => setView({ x: 0, y: 0, scale: 1 });
 
@@ -380,6 +462,23 @@ export function ClawgraphLive() {
     });
   };
 
+  const beginNodeDrag = (event: React.PointerEvent<SVGGElement>, nodeId: string) => {
+    if (event.button !== 0) return;
+    const point = pointerToGraph(event);
+    const offset = nodeOffsets[nodeId] ?? { x: 0, y: 0 };
+    didDragRef.current = false;
+    dragRef.current = null;
+    nodeDragRef.current = {
+      pointerId: event.pointerId,
+      nodeId,
+      startX: point.x,
+      startY: point.y,
+      offsetX: offset.x,
+      offsetY: offset.y,
+    };
+    canvasRef.current?.setPointerCapture(event.pointerId);
+  };
+
   const handlePointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
     if (event.button !== 0) return;
     didDragRef.current = false;
@@ -394,6 +493,23 @@ export function ClawgraphLive() {
   };
 
   const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
+    const nodeDrag = nodeDragRef.current;
+    if (nodeDrag && nodeDrag.pointerId === event.pointerId) {
+      const point = pointerToGraph(event);
+      const deltaX = point.x - nodeDrag.startX;
+      const deltaY = point.y - nodeDrag.startY;
+      if (Math.abs(deltaX) > 1 || Math.abs(deltaY) > 1) {
+        didDragRef.current = true;
+      }
+      setNodeOffsets((prev) => ({
+        ...prev,
+        [nodeDrag.nodeId]: {
+          x: clampNodeOffset(nodeDrag.offsetX + deltaX),
+          y: clampNodeOffset(nodeDrag.offsetY + deltaY),
+        },
+      }));
+      return;
+    }
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     const deltaX = event.clientX - drag.startX;
@@ -405,6 +521,12 @@ export function ClawgraphLive() {
   };
 
   const handlePointerUp = (event: React.PointerEvent<SVGSVGElement>) => {
+    const nodeDrag = nodeDragRef.current;
+    if (nodeDrag && nodeDrag.pointerId === event.pointerId) {
+      nodeDragRef.current = null;
+      event.currentTarget.releasePointerCapture(event.pointerId);
+      return;
+    }
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     dragRef.current = null;
@@ -498,57 +620,76 @@ export function ClawgraphLive() {
         )}
       </Card>
 
-      <div className="grid gap-6 xl:grid-cols-[2.2fr_1fr]">
-        <Card className="overflow-hidden">
-          <CardHeader>
-            <h2 className="text-lg font-semibold">Memory Map</h2>
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              {(
-                [
-                  { type: "topic", label: "Topics" },
-                  { type: "task", label: "Tasks" },
-                  { type: "entity", label: "Entities" },
-                  { type: "agent", label: "Agents" },
-                ] as Array<{ type: ClawgraphNodeType; label: string }>
-              ).map((chip) => {
-                const theme = NODE_THEME[chip.type];
-                return (
-                  <span
-                    key={chip.type}
-                    className="rounded-full border px-2 py-1 text-[rgb(var(--claw-muted))]"
-                    style={{
-                      borderColor: toRgba(theme.color, 0.55),
-                      background: `linear-gradient(145deg, ${toRgba(theme.color, 0.16)}, rgba(16,19,24,0.88))`,
-                      boxShadow: `0 0 0 1px ${toRgba(theme.color, 0.18)}, 0 0 18px ${toRgba(theme.glow, 0.16)}`,
-                    }}
-                  >
-                    {chip.label}
-                  </span>
-                );
-              })}
-            </div>
-          </CardHeader>
-          <div ref={containerRef} className="relative px-3 pb-3">
-            <svg
-              data-testid="clawgraph-canvas"
-              viewBox={`0 0 ${viewportSize.width} ${viewportSize.height}`}
-              className="h-[68vh] min-h-[420px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[radial-gradient(circle_at_18%_14%,rgba(255,138,74,0.17),transparent_44%),radial-gradient(circle_at_82%_18%,rgba(78,161,255,0.15),transparent_44%),radial-gradient(circle_at_56%_86%,rgba(89,195,166,0.13),transparent_48%),radial-gradient(circle_at_90%_80%,rgba(244,181,95,0.1),transparent_46%),rgba(10,12,16,0.95)]"
-              onWheel={handleWheel}
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerUp}
-              onPointerCancel={handlePointerUp}
-              onClick={() => {
-                if (didDragRef.current) {
-                  didDragRef.current = false;
-                  return;
-                }
-                setSelectedNodeId(null);
-              }}
-              role="img"
-              aria-label="Clawgraph node relationship map"
+      {isMapFullScreen && (
+        <div
+          className="fixed inset-0 z-40 bg-[rgba(7,9,12,0.82)] backdrop-blur-sm"
+          onClick={() => setIsMapFullScreen(false)}
+        />
+      )}
+      <div className={cn("grid gap-6 xl:grid-cols-[2.2fr_1fr]", isMapFullScreen && "block")}>
+        <div className={cn(isMapFullScreen && "fixed inset-4 z-50")}>
+          <Card className={cn("overflow-hidden", isMapFullScreen && "h-full w-full")}>
+            <CardHeader className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">Memory Map</h2>
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                  {(
+                    [
+                      { type: "topic", label: "Topics" },
+                      { type: "task", label: "Tasks" },
+                      { type: "entity", label: "Entities" },
+                      { type: "agent", label: "Agents" },
+                    ] as Array<{ type: ClawgraphNodeType; label: string }>
+                  ).map((chip) => {
+                    const theme = NODE_THEME[chip.type];
+                    return (
+                      <span
+                        key={chip.type}
+                        className="rounded-full border px-2 py-1 text-[rgb(var(--claw-muted))]"
+                        style={{
+                          borderColor: toRgba(theme.color, 0.55),
+                          background: `linear-gradient(145deg, ${toRgba(theme.color, 0.16)}, rgba(16,19,24,0.88))`,
+                          boxShadow: `0 0 0 1px ${toRgba(theme.color, 0.18)}, 0 0 18px ${toRgba(theme.glow, 0.16)}`,
+                        }}
+                      >
+                        {chip.label}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+              <Button size="sm" variant="secondary" onClick={() => setIsMapFullScreen((prev) => !prev)}>
+                {isMapFullScreen ? "Exit full screen" : "Full screen"}
+              </Button>
+            </CardHeader>
+            <div
+              ref={containerRef}
+              className={cn("relative px-3 pb-3", isMapFullScreen && "h-[calc(100vh-260px)]")}
             >
-              <g transform={`translate(${view.x.toFixed(2)} ${view.y.toFixed(2)}) scale(${view.scale.toFixed(3)})`}>
+              <svg
+                data-testid="clawgraph-canvas"
+                ref={canvasRef}
+                viewBox={`0 0 ${viewportSize.width} ${viewportSize.height}`}
+                className={cn(
+                  "w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[radial-gradient(circle_at_18%_14%,rgba(255,138,74,0.17),transparent_44%),radial-gradient(circle_at_82%_18%,rgba(78,161,255,0.15),transparent_44%),radial-gradient(circle_at_56%_86%,rgba(89,195,166,0.13),transparent_48%),radial-gradient(circle_at_90%_80%,rgba(244,181,95,0.1),transparent_46%),rgba(10,12,16,0.95)]",
+                  isMapFullScreen ? "h-[calc(100vh-260px)] min-h-[520px]" : "h-[68vh] min-h-[420px]"
+                )}
+                onWheel={handleWheel}
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                onPointerCancel={handlePointerUp}
+                onClick={() => {
+                  if (didDragRef.current) {
+                    didDragRef.current = false;
+                    return;
+                  }
+                  setSelectedNodeId(null);
+                }}
+                role="img"
+                aria-label="Clawgraph node relationship map"
+              >
+                <g transform={`translate(${view.x.toFixed(2)} ${view.y.toFixed(2)}) scale(${view.scale.toFixed(3)})`}>
                 {filteredEdges.map((edge) => {
                   const source = positions.get(edge.source);
                   const target = positions.get(edge.target);
@@ -594,12 +735,19 @@ export function ClawgraphLive() {
                       key={node.id}
                       data-node-id={node.id}
                       transform={`translate(${pos.x} ${pos.y})`}
-                      className="cursor-pointer"
-                      onPointerDown={(event) => event.stopPropagation()}
+                      className="cursor-grab active:cursor-grabbing"
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        beginNodeDrag(event, node.id);
+                      }}
                       onMouseEnter={() => setHoveredNodeId(node.id)}
                       onMouseLeave={() => setHoveredNodeId((prev) => (prev === node.id ? null : prev))}
                       onClick={(event) => {
                         event.stopPropagation();
+                        if (didDragRef.current) {
+                          didDragRef.current = false;
+                          return;
+                        }
                         setSelectedNodeId((prev) => (prev === node.id ? null : node.id));
                       }}
                     >
@@ -631,74 +779,68 @@ export function ClawgraphLive() {
                     </g>
                   );
                 })}
-              </g>
-            </svg>
-          </div>
-        </Card>
+                </g>
+              </svg>
+            </div>
+          </Card>
+        </div>
 
-        <div className="space-y-4">
-          <Card data-testid="clawgraph-detail">
-            <CardHeader>
-              <h2 className="text-lg font-semibold">Node Detail</h2>
-              <Badge tone={selectedNode ? "accent2" : "muted"}>{selectedNode ? selectedNode.type : "Select a node"}</Badge>
-            </CardHeader>
-            {!selectedNode && (
-              <p className="text-sm text-[rgb(var(--claw-muted))]">
-                Click any node to inspect its relationships and strongest links.
-              </p>
-            )}
-            {selectedNode && (
-              <div className="space-y-3">
-                <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-3">
-                  <div className="text-sm font-semibold">{selectedNode.label}</div>
-                  <div className="mt-1 text-xs uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">{selectedNode.type}</div>
-                  <div className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                    Score {selectedNode.score.toFixed(2)} · size {selectedNode.size.toFixed(1)}
+        {!isMapFullScreen && (
+          <div className="space-y-4">
+            <Card data-testid="clawgraph-detail">
+              <CardHeader>
+                <h2 className="text-lg font-semibold">Node Detail</h2>
+                <Badge tone={selectedNode ? "accent2" : "muted"}>{selectedNode ? selectedNode.type : "Select a node"}</Badge>
+              </CardHeader>
+              {!selectedNode && (
+                <p className="text-sm text-[rgb(var(--claw-muted))]">
+                  Click any node to inspect its relationships and strongest links.
+                </p>
+              )}
+              {selectedNode && (
+                <div className="space-y-3">
+                  <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-3">
+                    <div className="text-sm font-semibold">{selectedNode.label}</div>
+                    <div className="mt-1 text-xs uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
+                      {selectedNode.type}
+                    </div>
+                    <div className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
+                      Score {selectedNode.score.toFixed(2)} · size {selectedNode.size.toFixed(1)}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {selectedTopicUrl && (
+                      <Button size="sm" variant="secondary" onClick={() => router.push(selectedTopicUrl)}>
+                        Open topic
+                      </Button>
+                    )}
+                    {selectedTaskUrl && (
+                      <Button size="sm" variant="secondary" onClick={() => router.push(selectedTaskUrl)}>
+                        Open task
+                      </Button>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <div className="text-xs uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">Strongest links</div>
+                    {connectedEdgeRows.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No visible links.</p>}
+                    {connectedEdgeRows.map((row) => (
+                      <button
+                        key={row.edge.id}
+                        type="button"
+                        data-testid="strongest-link-action"
+                        className="w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2 text-left transition hover:border-[rgba(255,90,45,0.35)]"
+                        onClick={() => router.push(row.href)}
+                      >
+                        <div className="text-xs text-[rgb(var(--claw-text))]">{row.summary}</div>
+                        <div className="mt-1 text-[11px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
+                          {row.edge.type} · {row.edge.weight.toFixed(2)} · evidence {row.edge.evidence}
+                        </div>
+                      </button>
+                    ))}
                   </div>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  {selectedTopicUrl && (
-                    <Button size="sm" variant="secondary" onClick={() => router.push(selectedTopicUrl)}>
-                      Open topic
-                    </Button>
-                  )}
-                  {selectedTaskUrl && (
-                    <Button size="sm" variant="secondary" onClick={() => router.push(selectedTaskUrl)}>
-                      Open task
-                    </Button>
-                  )}
-                  {selectedSearchUrl && (
-                    <Button size="sm" variant="secondary" onClick={() => router.push(selectedSearchUrl)}>
-                      Search board
-                    </Button>
-                  )}
-                  {selectedLogUrl && (
-                    <Button size="sm" variant="secondary" onClick={() => router.push(selectedLogUrl)}>
-                      Filter related logs
-                    </Button>
-                  )}
-                </div>
-                <div className="space-y-2">
-                  <div className="text-xs uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">Strongest links</div>
-                  {connectedEdgeRows.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No visible links.</p>}
-                  {connectedEdgeRows.map((row) => (
-                    <button
-                      key={row.edge.id}
-                      type="button"
-                      data-testid="strongest-link-action"
-                      className="w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2 text-left transition hover:border-[rgba(255,90,45,0.35)]"
-                      onClick={() => router.push(row.href)}
-                    >
-                      <div className="text-xs text-[rgb(var(--claw-text))]">{row.summary}</div>
-                      <div className="mt-1 text-[11px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
-                        {row.edge.type} · {row.edge.weight.toFixed(2)} · evidence {row.edge.evidence}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </Card>
+              )}
+            </Card>
 
           <Card>
             <CardHeader>
@@ -753,6 +895,7 @@ export function ClawgraphLive() {
             )}
           </Card>
         </div>
+      )}
       </div>
     </div>
   );

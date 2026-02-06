@@ -158,6 +158,7 @@ run_security_checks
 
 log "Running backend unit tests"
 docker compose run --rm -T \
+  -v "${ROOT_DIR}/backend/app:/app/app:ro" \
   -v "${ROOT_DIR}/backend/tests:/app/tests:ro" \
   api \
   sh -lc 'PIP_DISABLE_PIP_VERSION_CHECK=1 pip install --quiet --root-user-action=ignore httpx && python -m unittest discover -s /app/tests -p "test_*.py"'

@@ -115,6 +115,62 @@ def upsert(kind: str, item_id: str, vector: Iterable[float]):
         return
 
 
+def delete(kind: str, item_id: str):
+    # Always remove from sqlite fallback store.
+    with _conn() as conn:
+        conn.execute("DELETE FROM embeddings WHERE kind=? AND id=?", (kind, item_id))
+        conn.commit()
+
+    if _use_qdrant():
+        try:
+            _ensure_qdrant_collection()
+            payload = {"points": [_qdrant_point_id(kind, item_id)]}
+            requests.post(
+                f"{QDRANT_URL}/collections/{QDRANT_COLLECTION}/points/delete",
+                headers=_qdrant_headers(),
+                json=payload,
+                timeout=QDRANT_TIMEOUT,
+            ).raise_for_status()
+        except Exception:
+            pass
+
+
+def delete_task_other_namespaces(item_id: str, keep_kind: str | None = None):
+    with _conn() as conn:
+        if keep_kind:
+            conn.execute(
+                "DELETE FROM embeddings WHERE id=? AND kind LIKE 'task:%' AND kind<>?",
+                (item_id, keep_kind),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM embeddings WHERE id=? AND kind LIKE 'task:%'",
+                (item_id,),
+            )
+        conn.commit()
+
+    if _use_qdrant():
+        try:
+            _ensure_qdrant_collection()
+            flt = {
+                "must": [
+                    {"key": "kindRoot", "match": {"value": "task"}},
+                    {"key": "id", "match": {"value": item_id}},
+                ]
+            }
+            if keep_kind:
+                flt["must_not"] = [{"key": "kind", "match": {"value": keep_kind}}]
+            payload = {"filter": flt}
+            requests.post(
+                f"{QDRANT_URL}/collections/{QDRANT_COLLECTION}/points/delete",
+                headers=_qdrant_headers(),
+                json=payload,
+                timeout=QDRANT_TIMEOUT,
+            ).raise_for_status()
+        except Exception:
+            pass
+
+
 def get_all(kind: str):
     if _use_qdrant():
         _ensure_qdrant_collection()

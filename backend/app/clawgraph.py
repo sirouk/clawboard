@@ -44,6 +44,21 @@ STOP_WORDS = {
     "agent",
 }
 
+SLASH_COMMANDS = {
+    "/new",
+    "/topic",
+    "/topics",
+    "/task",
+    "/tasks",
+    "/log",
+    "/logs",
+    "/board",
+    "/graph",
+    "/help",
+    "/reset",
+    "/clear",
+}
+
 ENTITY_NOISE_TOKENS = {
     "ok",
     "okay",
@@ -144,6 +159,38 @@ def _normalize_text(value: str) -> str:
     text = re.sub(r"(?i)\[message[_\s-]?id:[^\]]+\]", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _is_memory_action_log(row: Any) -> bool:
+    log_type = str(getattr(row, "type", "") or "")
+    if log_type != "action":
+        return False
+    combined = " ".join(
+        part
+        for part in [
+            str(getattr(row, "summary", "") or ""),
+            str(getattr(row, "content", "") or ""),
+            str(getattr(row, "raw", "") or ""),
+        ]
+        if part
+    ).lower()
+    if "tool call:" in combined or "tool result:" in combined or "tool error:" in combined:
+        if re.search(r"\bmemory[_-]?(search|get|query|fetch|retrieve|read|write|store|list|prune|delete)\b", combined):
+            return True
+    return False
+
+
+def _is_command_log(row: Any) -> bool:
+    log_type = str(getattr(row, "type", "") or "")
+    if log_type != "conversation":
+        return False
+    text = _normalize_text(str(getattr(row, "content", "") or getattr(row, "summary", "") or getattr(row, "raw", "") or ""))
+    if not text.startswith("/"):
+        return False
+    command = text.split(None, 1)[0].lower()
+    if command in SLASH_COMMANDS:
+        return True
+    return bool(re.fullmatch(r"/[a-z0-9_-]{2,}", command))
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -437,7 +484,9 @@ def build_clawgraph(
     for row in log_rows:
         log_id = str(getattr(row, "id", "") or "")
         log_type = str(getattr(row, "type", "") or "")
-        if log_type == "note":
+        if log_type in ("note", "system", "import"):
+            continue
+        if _is_memory_action_log(row) or _is_command_log(row):
             continue
 
         summary = str(getattr(row, "summary", "") or "")

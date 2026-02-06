@@ -5,13 +5,19 @@ import re
 import sqlite3
 import time
 import shutil
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 import requests
 import numpy as np
 
 from fastembed import TextEmbedding
 
-from embeddings_store import topk as embed_topk, upsert as embed_upsert
+from embeddings_store import (
+    delete as embed_delete,
+    delete_task_other_namespaces,
+    topk as embed_topk,
+    upsert as embed_upsert,
+)
 
 CLAWBOARD_API_BASE = os.environ.get("CLAWBOARD_API_BASE", "http://localhost:8010").rstrip("/")
 CLAWBOARD_TOKEN = os.environ.get("CLAWBOARD_TOKEN")
@@ -35,6 +41,7 @@ SUMMARY_MAX = int(os.environ.get("CLASSIFIER_SUMMARY_MAX", "56"))
 
 LOCK_PATH = os.environ.get("CLASSIFIER_LOCK_PATH", "/data/classifier.lock")
 REINDEX_QUEUE_PATH = os.environ.get("CLASSIFIER_REINDEX_QUEUE_PATH", "/data/reindex-queue.jsonl")
+CREATION_AUDIT_PATH = os.environ.get("CLASSIFIER_CREATION_AUDIT_PATH", "/data/creation-gate.jsonl")
 
 OPENCLAW_MEMORY_DB_PATH = os.environ.get("OPENCLAW_MEMORY_DB_PATH")
 OPENCLAW_MEMORY_DB_FALLBACK = os.environ.get("OPENCLAW_MEMORY_DB_FALLBACK", "/data/openclaw-memory/main.sqlite")
@@ -88,6 +95,107 @@ SUMMARY_DROP_WORDS = {
     "please",
     "just",
     "very",
+}
+
+GENERIC_TOPIC_NAMES = {
+    "general",
+    "misc",
+    "miscellaneous",
+    "new",
+    "topic",
+    "topics",
+    "task",
+    "tasks",
+    "todo",
+    "note",
+    "notes",
+    "log",
+    "logs",
+    "board",
+    "graph",
+    "clawgraph",
+    "clawboard",
+}
+
+GENERIC_TASK_TITLES = {
+    "todo",
+    "task",
+    "new task",
+    "follow up",
+    "next step",
+    "action item",
+}
+
+SLASH_COMMANDS = {
+    "/new",
+    "/topic",
+    "/topics",
+    "/task",
+    "/tasks",
+    "/log",
+    "/logs",
+    "/board",
+    "/graph",
+    "/help",
+    "/reset",
+    "/clear",
+}
+
+TOPIC_INTENT_CUES = {
+    "topic",
+    "project",
+    "initiative",
+    "area",
+    "stream",
+    "workstream",
+    "track",
+    "focus",
+    "category",
+    "theme",
+    "bucket",
+}
+
+TASK_INTENT_CUES = {
+    "todo",
+    "to do",
+    "next step",
+    "action item",
+    "follow up",
+    "please",
+    "need to",
+    "should",
+    "must",
+    "fix",
+    "build",
+    "create",
+    "implement",
+    "update",
+    "check",
+    "review",
+    "investigate",
+    "test",
+    "deploy",
+    "refactor",
+    "add",
+    "remove",
+    "restore",
+    "restart",
+    "audit",
+}
+
+AFFIRMATIONS = {
+    "yes",
+    "y",
+    "yep",
+    "yeah",
+    "ok",
+    "okay",
+    "sounds good",
+    "do it",
+    "please do",
+    "go ahead",
+    "ship it",
+    "works for me",
 }
 
 
@@ -249,8 +357,29 @@ def _is_noise_conversation(entry: dict) -> bool:
     return _is_classifier_payload(text) or _is_injected_context_artifact(text)
 
 
+def _is_memory_action(entry: dict) -> bool:
+    if entry.get("type") != "action":
+        return False
+    text = _log_text(entry).lower()
+    if "tool call:" in text or "tool result:" in text or "tool error:" in text:
+        if re.search(r"\bmemory[_-]?(search|get|query|fetch|retrieve|read|write|store|list|prune|delete)\b", text):
+            return True
+    return False
+
+
+def _is_command_conversation(entry: dict) -> bool:
+    if entry.get("type") != "conversation":
+        return False
+    text = _strip_transport_noise(entry.get("content") or entry.get("summary") or entry.get("raw") or "")
+    if not text:
+        return False
+    return _is_command_text(text)
+
+
 def _is_context_log(entry: dict) -> bool:
     if entry.get("type") not in ("conversation", "note"):
+        return False
+    if _is_command_conversation(entry):
         return False
     if _is_noise_conversation(entry):
         return False
@@ -427,6 +556,82 @@ def _strip_transport_noise(text: str) -> str:
     return clean.strip()
 
 
+def _strip_slash_command(text: str) -> str:
+    cleaned = (text or "").strip()
+    if not cleaned.startswith("/"):
+        return cleaned
+    parts = cleaned.split(None, 1)
+    command = parts[0].lower()
+    if command in SLASH_COMMANDS:
+        return parts[1].strip() if len(parts) > 1 else ""
+    return ""
+
+
+def _is_command_text(text: str) -> bool:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    if not cleaned.startswith("/"):
+        return False
+    command = cleaned.split(None, 1)[0].lower()
+    if command in SLASH_COMMANDS:
+        return True
+    return bool(re.fullmatch(r"/[a-z0-9_-]{2,}", command))
+
+
+def _is_system_artifact_text(text: str) -> bool:
+    if not text:
+        return False
+    lower = text.lower()
+    if "tool call:" in lower or "tool result:" in lower or "tool error:" in lower:
+        return True
+    if "openclaw" in lower or "clawboard" in lower:
+        return True
+    if "classifier" in lower and "payload" in lower:
+        return True
+    if re.search(r"\bmemory[_-]?(search|get|query|fetch|retrieve|read|write|store|list|prune|delete)\b", lower):
+        return True
+    return False
+
+
+def _is_affirmation(text: str) -> bool:
+    cleaned = _strip_transport_noise(text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
+    if not cleaned:
+        return False
+    if len(cleaned) > 24:
+        return False
+    return cleaned in AFFIRMATIONS
+
+
+def _latest_user_text(window: list[dict]) -> tuple[str, int]:
+    for idx in range(len(window) - 1, -1, -1):
+        item = window[idx]
+        if item.get("type") != "conversation":
+            continue
+        agent = str(item.get("agentId") or "").lower()
+        if agent != "user":
+            continue
+        text = _strip_transport_noise(item.get("content") or item.get("summary") or item.get("raw") or "")
+        if text:
+            return text, idx
+    return "", -1
+
+
+def _latest_assistant_text_before(window: list[dict], idx: int) -> str:
+    for j in range(min(idx - 1, len(window) - 1), -1, -1):
+        item = window[j]
+        if item.get("type") != "conversation":
+            continue
+        agent = str(item.get("agentId") or "").lower()
+        if agent and agent != "assistant":
+            continue
+        text = _strip_transport_noise(item.get("content") or item.get("summary") or item.get("raw") or "")
+        if text:
+            return text
+    return ""
+
+
 def _dense_clause(text: str) -> str:
     clauses = [c.strip() for c in re.split(r"[.!?;\n]+", text) if c.strip()]
     if not clauses:
@@ -476,37 +681,14 @@ def _concise_summary(text: str) -> str:
 
 
 def _looks_actionable(text: str) -> bool:
-    t = _normalize_text(text)
+    t = _strip_transport_noise(text)
+    t = _strip_slash_command(t)
     if not t:
         return False
-    cues = [
-        "todo",
-        "to do",
-        "next step",
-        "action item",
-        "follow up",
-        "please",
-        "need to",
-        "should",
-        "must",
-        "fix",
-        "build",
-        "create",
-        "implement",
-        "update",
-        "check",
-        "review",
-        "investigate",
-        "test",
-        "deploy",
-        "refactor",
-        "add",
-        "remove",
-        "restore",
-        "restart",
-        "audit",
-    ]
-    return any(cue in t for cue in cues)
+    if _is_system_artifact_text(t):
+        return False
+    lower = t.lower()
+    return any(cue in lower for cue in TASK_INTENT_CUES)
 
 
 def _latest_conversation_text(window: list[dict]) -> str:
@@ -520,10 +702,15 @@ def _latest_conversation_text(window: list[dict]) -> str:
 
 
 def _derive_topic_name(window: list[dict]) -> str:
-    text = _latest_conversation_text(window)
+    user_text, _idx = _latest_user_text(window)
+    if user_text:
+        user_text = _strip_slash_command(user_text)
+    text = user_text or _latest_conversation_text(window)
     if not text:
         return "General"
     text = _strip_transport_noise(text)
+    if _is_command_text(text) or _is_system_artifact_text(text):
+        return "General"
     # Favor all-caps tokens like THOMAS when present.
     caps = re.findall(r"\b[A-Z][A-Z0-9_-]{2,}\b", text)
     if caps:
@@ -536,12 +723,18 @@ def _derive_topic_name(window: list[dict]) -> str:
 
 
 def _derive_task_title(window: list[dict]) -> str | None:
-    text = _latest_conversation_text(window)
-    if not text:
+    user_text, idx = _latest_user_text(window)
+    base_text = _strip_slash_command(user_text) if user_text else ""
+    if base_text and _is_affirmation(base_text):
+        assistant_text = _latest_assistant_text_before(window, idx)
+        base_text = assistant_text or base_text
+    if not base_text:
+        base_text = _latest_conversation_text(window)
+    if not base_text or _is_command_text(base_text) or _is_system_artifact_text(base_text):
         return None
-    if not _looks_actionable(text):
+    if not _looks_actionable(base_text):
         return None
-    title = _concise_summary(text)
+    title = _concise_summary(base_text)
     if len(title) < 8:
         return None
     return title[:120]
@@ -557,6 +750,72 @@ def _latest_classified_task_for_topic(ctx_logs: list[dict], topic_id: str) -> st
         if tid:
             return tid
     return None
+
+
+def _has_topic_intent(window: list[dict], text: str) -> bool:
+    user_text, _ = _latest_user_text(window)
+    candidate = _strip_slash_command(user_text) if user_text else text
+    candidate = _strip_transport_noise(candidate)
+    if not candidate:
+        return False
+    lower = candidate.lower()
+    if any(cue in lower for cue in TOPIC_INTENT_CUES):
+        return True
+    tokens = [
+        t
+        for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9'/_-]*", lower)
+        if t not in SUMMARY_DROP_WORDS
+    ]
+    return len(tokens) >= 3 and len(lower) >= 24
+
+
+def _topic_creation_allowed(
+    window: list[dict],
+    derived_name: str,
+    topic_cands: list[dict],
+    text: str,
+    topics: list[dict],
+) -> bool:
+    if not derived_name:
+        return False
+    if _is_command_text(derived_name):
+        return False
+    if derived_name.strip().lower() in GENERIC_TOPIC_NAMES:
+        return False
+    if _is_system_artifact_text(text):
+        return False
+    if topic_cands and float(topic_cands[0].get("score") or 0.0) >= max(0.48, TOPIC_SIM_THRESHOLD - 0.12):
+        return False
+    if topics and not _has_topic_intent(window, text):
+        return False
+    return True
+
+
+def _task_creation_allowed(
+    window: list[dict],
+    task_title: str | None,
+    task_cands: list[dict],
+) -> bool:
+    if not task_title:
+        return False
+    if task_title.strip().lower() in GENERIC_TASK_TITLES:
+        return False
+    user_text, idx = _latest_user_text(window)
+    user_text = _strip_slash_command(user_text or "")
+    if not user_text:
+        return False
+    if _is_system_artifact_text(user_text) or _is_command_text(user_text):
+        return False
+    if _is_affirmation(user_text):
+        assistant_text = _latest_assistant_text_before(window, idx)
+        if not assistant_text or not _looks_actionable(assistant_text):
+            return False
+    else:
+        if not _looks_actionable(user_text):
+            return False
+    if task_cands and float(task_cands[0].get("score") or 0.0) >= max(0.5, TASK_SIM_THRESHOLD - 0.1):
+        return False
+    return True
 
 
 def acquire_lock():
@@ -628,30 +887,71 @@ def process_reindex_queue():
     # Keep the latest request per target.
     latest: dict[tuple[str, str, str], dict] = {}
     for item in pending:
+        op = str(item.get("op") or "upsert").strip().lower()
         kind = str(item.get("kind") or "").strip().lower()
         item_id = str(item.get("id") or "").strip()
         topic_id = str(item.get("topicId") or "").strip()
+        if op not in ("upsert", "delete"):
+            continue
         if not kind or not item_id:
             continue
-        latest[(kind, item_id, topic_id)] = item
+        latest[(op, kind, item_id)] = {"op": op, "kind": kind, "id": item_id, "topicId": topic_id, **item}
 
-    for (kind, item_id, topic_id), item in latest.items():
-        text = str(item.get("text") or "").strip()
-        if not text:
-            continue
-        vec = embed_text(text)
-        if vec is None:
-            continue
+    for (_op, kind, item_id), item in latest.items():
+        op = str(item.get("op") or "upsert")
+        topic_id = str(item.get("topicId") or "").strip()
         try:
+            if op == "delete":
+                if kind == "topic":
+                    embed_delete("topic", item_id)
+                elif kind == "task":
+                    if topic_id:
+                        embed_delete(f"task:{topic_id}", item_id)
+                    else:
+                        delete_task_other_namespaces(item_id, keep_kind=None)
+                elif kind == "log":
+                    embed_delete("log", item_id)
+                continue
+
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            vec = embed_text(text)
+            if vec is None:
+                continue
+
             if kind == "topic":
                 embed_upsert("topic", item_id, vec)
             elif kind == "task":
                 namespace = f"task:{topic_id or 'unassigned'}"
                 embed_upsert(namespace, item_id, vec)
+                delete_task_other_namespaces(item_id, keep_kind=namespace)
             elif kind == "log":
                 embed_upsert("log", item_id, vec)
         except Exception as exc:
-            print(f"classifier: reindex update failed for {kind}:{item_id}: {exc}")
+            print(f"classifier: reindex {op} failed for {kind}:{item_id}: {exc}")
+
+
+def _record_creation_gate(kind: str, decision: str, proposed: str | None, selected_id: str | None = None):
+    if not CREATION_AUDIT_PATH:
+        return
+    try:
+        ts = datetime.now(timezone.utc).isoformat()
+    except Exception:
+        ts = str(time.time())
+    payload = {
+        "ts": ts,
+        "kind": kind,
+        "decision": decision,
+        "proposed": proposed,
+        "selectedId": selected_id,
+    }
+    try:
+        os.makedirs(os.path.dirname(CREATION_AUDIT_PATH), exist_ok=True)
+        with open(CREATION_AUDIT_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
 
 
 def list_logs(params: dict):
@@ -1028,7 +1328,10 @@ def call_classifier(
                 "(8) Each summary must be ultra concise <=56 chars, 4-10 words, telegraphic style; "
                 "sacrifice grammar for brevity; "
                 "(9) Do not copy first sentence verbatim, rewrite semantically; "
-                "(10) Never prefix with 'SUMMARY:' and never include transport metadata."
+                "(10) Never prefix with 'SUMMARY:' and never include transport metadata; "
+                "(11) Do NOT create topics from system/tool/memory artifacts or slash commands like /new; "
+                "(12) Only create tasks when user intent is explicit or user confirms an assistant suggestion; "
+                "(13) If unsure, set create=false and task=null."
             ),
         }
 
@@ -1063,6 +1366,93 @@ def call_classifier(
             if compact:
                 raise
             continue
+
+
+def call_creation_gate(
+    window: list[dict],
+    candidate_topics: list[dict],
+    candidate_tasks: list[dict],
+    proposed_topic: str | None,
+    proposed_task: str | None,
+):
+    if not proposed_topic and not proposed_task:
+        return {"createTopic": False, "createTask": False, "topicId": None, "taskId": None}
+
+    recent = []
+    for entry in window[-8:]:
+        if entry.get("type") != "conversation":
+            continue
+        text = _strip_transport_noise(entry.get("content") or entry.get("summary") or "")
+        if not text:
+            continue
+        recent.append(
+            {
+                "agentLabel": entry.get("agentLabel") or entry.get("agentId"),
+                "content": text[:260],
+            }
+        )
+        if len(recent) >= 6:
+            break
+
+    def compact_rows(rows: list[dict], key: str) -> list[dict]:
+        out = []
+        for item in rows[:8]:
+            label = item.get(key) or ""
+            out.append(
+                {
+                    "id": item.get("id"),
+                    key: label,
+                    "score": round(float(item.get("score") or 0.0), 4),
+                }
+            )
+        return out
+
+    payload = {
+        "recent": recent,
+        "proposed": {
+            "topic": proposed_topic,
+            "task": proposed_task,
+        },
+        "candidateTopics": compact_rows(candidate_topics, "name"),
+        "candidateTasks": compact_rows(candidate_tasks, "title"),
+        "instructions": (
+            "Return STRICT JSON only with shape: "
+            "{\"createTopic\": boolean, \"topicId\": string|null, "
+            "\"createTask\": boolean, \"taskId\": string|null}. "
+            "Rules: (1) Only allow creation if user intent is explicit or user confirmed an assistant suggestion; "
+            "(2) If an existing candidate is a close fit, set create=false and provide its id; "
+            "(3) Never create from system/tool/memory artifacts or slash commands like /new; "
+            "(4) If uncertain, set create=false."
+        ),
+    }
+
+    body = {
+        "model": OPENCLAW_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a cautious gatekeeper for topic/task creation. STRICT JSON only.",
+            },
+            {"role": "user", "content": json.dumps(payload)},
+        ],
+        "temperature": 0,
+        "max_tokens": 180,
+    }
+    r = requests.post(
+        f"{OPENCLAW_BASE_URL}/v1/chat/completions",
+        headers=oc_headers(),
+        data=json.dumps(body),
+        timeout=16,
+    )
+    r.raise_for_status()
+    text = r.json()["choices"][0]["message"]["content"]
+    try:
+        return json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            raise
+        return json.loads(match.group(0))
 
 
 def call_summary_repair(
@@ -1201,6 +1591,20 @@ def classify_without_llm(window: list[dict], ctx_logs: list[dict], topic_cands: 
         chosen_topic_name = "General"
         create_topic = True
 
+    if create_topic and not _topic_creation_allowed(window, chosen_topic_name, topic_cands, text, topics):
+        create_topic = False
+
+    if not create_topic and not chosen_topic_id:
+        if topic_cands:
+            chosen_topic_id = topic_cands[0].get("id")
+            chosen_topic_name = topic_cands[0].get("name") or chosen_topic_name
+        elif topics:
+            chosen_topic_id = topics[0].get("id")
+            chosen_topic_name = topics[0].get("name") or chosen_topic_name
+
+    if not chosen_topic_id and not topics:
+        create_topic = True
+
     topic = upsert_topic(chosen_topic_id if not create_topic else None, chosen_topic_name)
     topic_id = topic["id"]
 
@@ -1214,9 +1618,13 @@ def classify_without_llm(window: list[dict], ctx_logs: list[dict], topic_cands: 
         match, score = _best_name_match(task_title, existing, "title")
         if match and score >= 0.78:
             task_id = match.get("id")
-        else:
+        elif _task_creation_allowed(window, task_title, task_cands):
             task = upsert_task(None, topic_id, task_title)
             task_id = task["id"]
+    if not task_id:
+        continuity_task = _latest_classified_task_for_topic(ctx_logs, topic_id)
+        if continuity_task:
+            task_id = continuity_task
 
     summaries = []
     for entry in window:
@@ -1264,6 +1672,16 @@ def classify_session(session_key: str):
             attempts = int(e.get("classificationAttempts") or 0)
             if attempts >= MAX_ATTEMPTS:
                 continue
+            if _is_command_conversation(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "classificationStatus": "classified",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_command",
+                    },
+                )
+                continue
             if _is_noise_conversation(e):
                 noise_text = _log_text(e)
                 patch_log(
@@ -1287,6 +1705,16 @@ def classify_session(session_key: str):
                 continue
             attempts = int(e.get("classificationAttempts") or 0)
             if attempts >= MAX_ATTEMPTS:
+                continue
+            if _is_command_conversation(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "classificationStatus": "classified",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_command",
+                    },
+                )
                 continue
             if _is_noise_conversation(e):
                 noise_text = _log_text(e)
@@ -1403,6 +1831,37 @@ def classify_session(session_key: str):
         chosen_topic_name = topic_name_match.get("name") or chosen_topic_name
         create_topic = False
 
+    if create_topic and not _topic_creation_allowed(window, chosen_topic_name, topic_cands, text, all_topics):
+        create_topic = False
+
+    if create_topic:
+        try:
+            gate = call_creation_gate(window, topic_cands, task_cands, chosen_topic_name, None)
+            allowed = bool(gate.get("createTopic"))
+            _record_creation_gate("topic", "allow" if allowed else "block", chosen_topic_name, gate.get("topicId"))
+            if not allowed:
+                create_topic = False
+                gate_topic_id = gate.get("topicId")
+                if isinstance(gate_topic_id, str) and gate_topic_id:
+                    chosen_topic_id = gate_topic_id
+                    match = next((t for t in topic_cands if t.get("id") == gate_topic_id), None)
+                    if match and match.get("name"):
+                        chosen_topic_name = match.get("name")
+        except Exception:
+            _record_creation_gate("topic", "block", chosen_topic_name, None)
+            create_topic = False
+
+    if not create_topic and not chosen_topic_id:
+        if topic_cands:
+            chosen_topic_id = topic_cands[0].get("id")
+            chosen_topic_name = topic_cands[0].get("name") or chosen_topic_name
+        elif all_topics:
+            chosen_topic_id = all_topics[0].get("id")
+            chosen_topic_name = all_topics[0].get("name") or chosen_topic_name
+
+    if not chosen_topic_id and not all_topics:
+        create_topic = True
+
     topic = upsert_topic(chosen_topic_id if not create_topic else None, chosen_topic_name)
     topic_id = topic["id"]
 
@@ -1419,6 +1878,21 @@ def classify_session(session_key: str):
         if task_cands2 and task_cands2[0]["score"] >= TASK_SIM_THRESHOLD:
             task_id = task_cands2[0]["id"]
         else:
+            if create_task and not _task_creation_allowed(window, task_title, task_cands2):
+                create_task = False
+            if create_task:
+                try:
+                    gate = call_creation_gate(window, topic_cands, task_cands2, None, task_title)
+                    allowed = bool(gate.get("createTask"))
+                    _record_creation_gate("task", "allow" if allowed else "block", task_title, gate.get("taskId"))
+                    if not allowed:
+                        create_task = False
+                        gate_task_id = gate.get("taskId")
+                        if isinstance(gate_task_id, str) and gate_task_id:
+                            task_id = gate_task_id
+                except Exception:
+                    _record_creation_gate("task", "block", task_title, None)
+                    create_task = False
             if proposed_task_id and not create_task:
                 task_id = proposed_task_id
             elif create_task and task_title:
@@ -1451,9 +1925,21 @@ def classify_session(session_key: str):
                 task_name_match, task_name_score = _best_name_match(task_title, existing_tasks, "title")
                 if task_name_match and task_name_score >= 0.74:
                     task_id = task_name_match["id"]
-                else:
-                    task = upsert_task(None, topic_id, task_title)
-                    task_id = task["id"]
+                elif _task_creation_allowed(window, task_title, task_cands2):
+                    try:
+                        gate = call_creation_gate(window, topic_cands, task_cands2, None, task_title)
+                        allowed = bool(gate.get("createTask"))
+                        _record_creation_gate("task", "allow" if allowed else "block", task_title, gate.get("taskId"))
+                        if not allowed:
+                            gate_task_id = gate.get("taskId")
+                            if isinstance(gate_task_id, str) and gate_task_id:
+                                task_id = gate_task_id
+                        else:
+                            task = upsert_task(None, topic_id, task_title)
+                            task_id = task["id"]
+                    except Exception:
+                        _record_creation_gate("task", "block", task_title, None)
+                        pass
 
     summary_updates: dict[str, str] = {}
     raw_summaries = result.get("summaries")
@@ -1498,6 +1984,16 @@ def classify_session(session_key: str):
         attempts = int(e.get("classificationAttempts") or 0)
         if attempts >= MAX_ATTEMPTS:
             continue
+        if _is_command_conversation(e):
+            patch_log(
+                e["id"],
+                {
+                    "classificationStatus": "classified",
+                    "classificationAttempts": attempts + 1,
+                    "classificationError": "filtered_command",
+                },
+            )
+            continue
         if _is_noise_conversation(e):
             noise_text = _log_text(e)
             patch_log(
@@ -1506,6 +2002,27 @@ def classify_session(session_key: str):
                     "classificationStatus": "failed",
                     "classificationAttempts": attempts + 1,
                     "classificationError": _noise_error_code(noise_text),
+                },
+            )
+            continue
+        log_type = str(e.get("type") or "")
+        if log_type in ("system", "import"):
+            patch_log(
+                e["id"],
+                {
+                    "classificationStatus": "classified",
+                    "classificationAttempts": attempts + 1,
+                    "classificationError": "filtered_non_semantic",
+                },
+            )
+            continue
+        if _is_memory_action(e):
+            patch_log(
+                e["id"],
+                {
+                    "classificationStatus": "classified",
+                    "classificationAttempts": attempts + 1,
+                    "classificationError": "filtered_memory_action",
                 },
             )
             continue

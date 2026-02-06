@@ -94,6 +94,20 @@ def create_id(prefix: str) -> str:
 
 
 REINDEX_QUEUE_PATH = os.getenv("CLAWBOARD_REINDEX_QUEUE_PATH", "./data/reindex-queue.jsonl")
+SLASH_COMMANDS = {
+    "/new",
+    "/topic",
+    "/topics",
+    "/task",
+    "/tasks",
+    "/log",
+    "/logs",
+    "/board",
+    "/graph",
+    "/help",
+    "/reset",
+    "/clear",
+}
 
 
 def enqueue_reindex_request(payload: dict) -> None:
@@ -136,6 +150,18 @@ def _sanitize_log_text(value: str | None) -> str:
     return text
 
 
+def _is_command_log(entry: LogEntry) -> bool:
+    if getattr(entry, "type", None) != "conversation":
+        return False
+    text = _sanitize_log_text(str(entry.content or entry.summary or entry.raw or ""))
+    if not text.startswith("/"):
+        return False
+    command = text.split(None, 1)[0].lower()
+    if command in SLASH_COMMANDS:
+        return True
+    return bool(re.fullmatch(r"/[a-z0-9_-]{2,}", command))
+
+
 def _clip(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
@@ -143,6 +169,11 @@ def _clip(value: str, limit: int) -> str:
 
 
 def _log_reindex_text(entry: LogEntry) -> str:
+    log_type = str(getattr(entry, "type", "") or "")
+    if log_type in ("system", "import"):
+        return ""
+    if _is_memory_action_log(entry) or _is_command_log(entry):
+        return ""
     parts = [
         _sanitize_log_text(entry.summary or ""),
         _sanitize_log_text(entry.content or ""),
@@ -152,11 +183,30 @@ def _log_reindex_text(entry: LogEntry) -> str:
     return _clip(text, 1200)
 
 
+def _is_memory_action_log(entry: LogEntry) -> bool:
+    if getattr(entry, "type", None) != "action":
+        return False
+    combined = " ".join(
+        part
+        for part in [
+            str(entry.summary or ""),
+            str(entry.content or ""),
+            str(entry.raw or ""),
+        ]
+        if part
+    ).lower()
+    if "tool call:" in combined or "tool result:" in combined or "tool error:" in combined:
+        if re.search(r"\bmemory[_-]?(search|get|query|fetch|retrieve|read|write|store|list|prune|delete)\b", combined):
+            return True
+    return False
+
+
 def _enqueue_log_reindex(entry: LogEntry) -> None:
     text = _log_reindex_text(entry)
     if not text:
+        enqueue_reindex_request({"op": "delete", "kind": "log", "id": entry.id})
         return
-    enqueue_reindex_request({"kind": "log", "id": entry.id, "text": text, "topicId": entry.topicId})
+    enqueue_reindex_request({"op": "upsert", "kind": "log", "id": entry.id, "text": text, "topicId": entry.topicId})
 
 
 def _log_matches_session(entry: LogEntry, session_key: str) -> bool:
@@ -569,7 +619,7 @@ def upsert_topic(
                 session.commit()
                 session.refresh(duplicate)
                 event_hub.publish({"type": "topic.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
-                enqueue_reindex_request({"kind": "topic", "id": duplicate.id, "text": duplicate.name})
+                enqueue_reindex_request({"op": "upsert", "kind": "topic", "id": duplicate.id, "text": duplicate.name})
                 return duplicate
             used_colors = {
                 _normalize_hex_color(getattr(item, "color", None))
@@ -596,7 +646,7 @@ def upsert_topic(
         session.commit()
         session.refresh(topic)
         event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
-        enqueue_reindex_request({"kind": "topic", "id": topic.id, "text": topic.name})
+        enqueue_reindex_request({"op": "upsert", "kind": "topic", "id": topic.id, "text": topic.name})
         return topic
 
 
@@ -624,6 +674,18 @@ def delete_topic(topic_id: str):
 
         session.delete(topic)
         session.commit()
+
+        enqueue_reindex_request({"op": "delete", "kind": "topic", "id": topic_id})
+        for task in tasks:
+            enqueue_reindex_request(
+                {
+                    "op": "upsert",
+                    "kind": "task",
+                    "id": task.id,
+                    "topicId": task.topicId,
+                    "text": task.title,
+                }
+            )
 
         for task in tasks:
             event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
@@ -727,7 +789,7 @@ def upsert_task(
                 session.refresh(duplicate)
                 event_hub.publish({"type": "task.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
                 enqueue_reindex_request(
-                    {"kind": "task", "id": duplicate.id, "topicId": duplicate.topicId, "text": duplicate.title}
+                    {"op": "upsert", "kind": "task", "id": duplicate.id, "topicId": duplicate.topicId, "text": duplicate.title}
                 )
                 return duplicate
             used_colors = {
@@ -754,7 +816,7 @@ def upsert_task(
         session.commit()
         session.refresh(task)
         event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
-        enqueue_reindex_request({"kind": "task", "id": task.id, "topicId": task.topicId, "text": task.title})
+        enqueue_reindex_request({"op": "upsert", "kind": "task", "id": task.id, "topicId": task.topicId, "text": task.title})
         return task
 
 
@@ -776,6 +838,8 @@ def delete_task(task_id: str):
 
         session.delete(task)
         session.commit()
+
+        enqueue_reindex_request({"op": "delete", "kind": "task", "id": task_id})
 
         for entry in logs:
             event_hub.publish({"type": "log.patched", "data": entry.model_dump(), "eventTs": entry.updatedAt})
@@ -941,6 +1005,8 @@ def delete_log(log_id: str):
         for row in to_delete:
             session.delete(row)
         session.commit()
+        for deleted_id in deleted_ids:
+            enqueue_reindex_request({"op": "delete", "kind": "log", "id": deleted_id})
         event_ts = now_iso()
         for deleted_id in deleted_ids:
             event_hub.publish({"type": "log.deleted", "data": {"id": deleted_id, "rootId": log_id}, "eventTs": event_ts})
@@ -1274,6 +1340,72 @@ def metrics():
         classified = total - len(pending) - len(failed)
         newest = max((l.createdAt for l in logs), default=None)
         oldest_pending = min((l.createdAt for l in pending), default=None)
+        topics = session.exec(select(Topic)).all()
+        tasks = session.exec(select(Task)).all()
+        now = datetime.now(timezone.utc)
+
+        def parse_iso(value: str | None) -> datetime | None:
+            if not value:
+                return None
+            raw = str(value).strip()
+            if not raw:
+                return None
+            try:
+                if raw.endswith("Z"):
+                    raw = raw[:-1] + "+00:00"
+                ts = datetime.fromisoformat(raw)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                return ts.astimezone(timezone.utc)
+            except Exception:
+                return None
+
+        cutoff = now.timestamp() - 24 * 60 * 60
+        topics_created_24h = sum(
+            1
+            for t in topics
+            if (parsed := parse_iso(getattr(t, "createdAt", None))) and parsed.timestamp() >= cutoff
+        )
+        tasks_created_24h = sum(
+            1
+            for t in tasks
+            if (parsed := parse_iso(getattr(t, "createdAt", None))) and parsed.timestamp() >= cutoff
+        )
+
+        gate = {
+            "topics": {"allowedTotal": 0, "blockedTotal": 0, "allowed24h": 0, "blocked24h": 0},
+            "tasks": {"allowedTotal": 0, "blockedTotal": 0, "allowed24h": 0, "blocked24h": 0},
+        }
+        audit_path = os.getenv("CLAWBOARD_CREATION_AUDIT_PATH") or os.getenv("CLASSIFIER_CREATION_AUDIT_PATH") or "/data/creation-gate.jsonl"
+        try:
+            if audit_path and os.path.exists(audit_path):
+                with open(audit_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            item = json.loads(line)
+                        except Exception:
+                            continue
+                        kind = str(item.get("kind") or "").lower()
+                        decision = str(item.get("decision") or "").lower()
+                        if kind not in ("topic", "task"):
+                            continue
+                        bucket = gate["topics" if kind == "topic" else "tasks"]
+                        is_allowed = decision == "allow"
+                        if is_allowed:
+                            bucket["allowedTotal"] += 1
+                        else:
+                            bucket["blockedTotal"] += 1
+                        ts = parse_iso(item.get("ts"))
+                        if ts and ts.timestamp() >= cutoff:
+                            if is_allowed:
+                                bucket["allowed24h"] += 1
+                            else:
+                                bucket["blocked24h"] += 1
+        except Exception:
+            pass
         return {
             "logs": {
                 "total": total,
@@ -1282,5 +1414,10 @@ def metrics():
                 "failed": len(failed),
                 "newestCreatedAt": newest,
                 "oldestPendingAt": oldest_pending,
-            }
+            },
+            "creation": {
+                "topics": {"total": len(topics), "created24h": topics_created_24h},
+                "tasks": {"total": len(tasks), "created24h": tasks_created_24h},
+                "gate": gate,
+            },
         }

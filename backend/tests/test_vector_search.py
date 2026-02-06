@@ -127,6 +127,44 @@ class VectorSearchHybridTests(unittest.TestCase):
         self.assertTrue(result["topics"])
         self.assertEqual(result["topics"][0]["id"], "topic-ops")
 
+    def test_semantic_search_excludes_slash_command_logs(self):
+        topics = [{"id": "topic-ops", "name": "Discord Ops", "description": "Reliability"}]
+        tasks = [{"id": "task-retry", "topicId": "topic-ops", "title": "Fix retry loop", "status": "doing"}]
+        logs = [
+            {
+                "id": "log-command",
+                "topicId": "topic-ops",
+                "taskId": None,
+                "type": "conversation",
+                "summary": "/new",
+                "content": "/new",
+                "raw": "",
+            },
+            {
+                "id": "log-real",
+                "topicId": "topic-ops",
+                "taskId": "task-retry",
+                "type": "conversation",
+                "summary": "Investigate discord retry loop",
+                "content": "Gateway retries after reconnect still spike.",
+                "raw": "",
+            },
+        ]
+
+        result = vs.semantic_search(
+            "discord retry loop",
+            topics,
+            tasks,
+            logs,
+            topic_limit=3,
+            task_limit=3,
+            log_limit=10,
+        )
+
+        log_ids = [row["id"] for row in result["logs"]]
+        self.assertIn("log-real", log_ids)
+        self.assertNotIn("log-command", log_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

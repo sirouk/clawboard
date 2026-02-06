@@ -690,9 +690,47 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
   };
 
+  const deleteUnassignedTasks = async () => {
+    if (readOnly) return;
+    const deleteKey = "topic:unassigned";
+    const unassignedTasks = tasks.filter((task) => !task.topicId);
+    if (unassignedTasks.length === 0) return;
+    setDeleteInFlightKey(deleteKey);
+    setRenameError(deleteKey);
+    try {
+      const removed = new Set<string>();
+      for (const task of unassignedTasks) {
+        const res = await apiFetch(`/api/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" }, token);
+        if (!res.ok) continue;
+        const payload = (await res.json().catch(() => null)) as { deleted?: boolean } | null;
+        if (payload?.deleted) removed.add(task.id);
+      }
+      if (removed.size === 0) {
+        setRenameError(deleteKey, "Failed to clear unassigned tasks.");
+        return;
+      }
+      const updatedAt = new Date().toISOString();
+      setTasks((prev) => prev.filter((item) => !removed.has(item.id)));
+      setLogs((prev) =>
+        prev.map((item) => (item.taskId && removed.has(item.taskId) ? { ...item, taskId: null, updatedAt } : item))
+      );
+      const nextTasks = Array.from(expandedTasksSafe).filter((id) => !removed.has(id));
+      setExpandedTasks(new Set(nextTasks));
+      pushUrl({ tasks: nextTasks }, "replace");
+      setDeleteArmedKey(null);
+      setRenameError(deleteKey);
+    } finally {
+      setDeleteInFlightKey(null);
+    }
+  };
+
   const deleteTopic = async (topic: Topic) => {
     const deleteKey = `topic:${topic.id}`;
-    if (readOnly || topic.id === "unassigned") return;
+    if (readOnly) return;
+    if (topic.id === "unassigned") {
+      await deleteUnassignedTasks();
+      return;
+    }
     setDeleteInFlightKey(deleteKey);
     setRenameError(deleteKey);
     try {
@@ -1183,6 +1221,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       <div className="space-y-4">
         {pagedTopics.map((topic, topicIndex) => {
           const topicId = topic.id;
+          const isUnassigned = topicId === "unassigned";
+          const deleteKey = `topic:${topic.id}`;
           const taskList = tasksByTopic.get(topicId) ?? [];
           const openCount = taskList.filter((task) => task.status !== "done").length;
           const doingCount = taskList.filter((task) => task.status === "doing").length;
@@ -1297,19 +1337,25 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         >
                           Cancel
                         </Button>
-                        {deleteArmedKey === `topic:${topic.id}` ? (
+                        {deleteArmedKey === deleteKey ? (
                           <>
                             <Button
                               size="sm"
                               variant="secondary"
                               className="border-[rgba(239,68,68,0.45)] text-[rgb(var(--claw-danger))]"
-                              disabled={readOnly || deleteInFlightKey === `topic:${topic.id}`}
+                              disabled={readOnly || deleteInFlightKey === deleteKey}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 void deleteTopic(topic);
                               }}
                             >
-                              {deleteInFlightKey === `topic:${topic.id}` ? "Deleting..." : "Confirm delete"}
+                              {deleteInFlightKey === deleteKey
+                                ? isUnassigned
+                                  ? "Clearing..."
+                                  : "Deleting..."
+                                : isUnassigned
+                                  ? "Confirm clear"
+                                  : "Confirm delete"}
                             </Button>
                             <Button
                               size="sm"
@@ -1327,14 +1373,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             size="sm"
                             variant="ghost"
                             className="text-[rgb(var(--claw-danger))]"
-                            disabled={readOnly || topic.id === "unassigned"}
+                            disabled={readOnly}
                             onClick={(event) => {
                               event.stopPropagation();
-                              setDeleteArmedKey(`topic:${topic.id}`);
-                              setRenameError(`topic:${topic.id}`);
+                              setDeleteArmedKey(deleteKey);
+                              setRenameError(deleteKey);
                             }}
                           >
-                            Delete
+                            {isUnassigned ? "Clear unassigned" : "Delete"}
                           </Button>
                         )}
                       </div>

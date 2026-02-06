@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional, List, Dict, Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic.config import ConfigDict
 
 
@@ -225,8 +225,18 @@ class ChangesResponse(BaseModel):
 class ReindexRequest(BaseModel):
     kind: Literal["topic", "task", "log"] = Field(description="Embedding namespace kind.")
     id: str = Field(description="Topic/task/log ID.")
-    text: str = Field(description="Canonical label text to embed.")
+    op: Literal["upsert", "delete"] = Field(default="upsert", description="Queue operation.")
+    text: Optional[str] = Field(default=None, description="Canonical label text to embed.")
     topicId: Optional[str] = Field(default=None, description="Task parent topic ID when kind=task.")
+
+    @model_validator(mode="after")
+    def validate_for_operation(self):
+        if self.op == "upsert":
+            text = (self.text or "").strip()
+            if not text:
+                raise ValueError("text is required when op=upsert")
+            self.text = text
+        return self
 
 
 class ClawgraphNode(BaseModel):

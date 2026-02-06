@@ -7,9 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test:backend": "python3 -m unittest discover -s backend/tests -p \"test_*.py\"",
     "test": "playwright test",
     "test:e2e": "playwright test",
-    "test:all": "npm run lint && npm run build && npm run test:e2e"
+    "test:all": "npm run lint && npm run test:backend && npm run build && npm run test:e2e"
   },
   "dependencies": {
     "next": "16.1.6",

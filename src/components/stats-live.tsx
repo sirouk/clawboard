@@ -1,14 +1,33 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Badge, Card, CardHeader, type BadgeTone } from "@/components/ui";
 import { formatRelativeTime } from "@/lib/format";
 import { buildTopicUrl } from "@/lib/url";
 import { useDataStore } from "@/components/data-provider";
+import { apiFetch } from "@/lib/api";
 import type { Task } from "@/lib/types";
 
 type StatusKey = Task["status"];
+
+type CreationGateBucket = {
+  allowedTotal: number;
+  blockedTotal: number;
+  allowed24h: number;
+  blocked24h: number;
+};
+
+type MetricsResponse = {
+  creation?: {
+    topics?: { total: number; created24h: number };
+    tasks?: { total: number; created24h: number };
+    gate?: {
+      topics?: CreationGateBucket;
+      tasks?: CreationGateBucket;
+    };
+  };
+};
 
 const STATUS_LABELS: Record<StatusKey, string> = {
   todo: "To Do",
@@ -60,6 +79,27 @@ function MetricCard({
 
 export function StatsLive() {
   const { tasks, logs, topics } = useDataStore();
+  const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    apiFetch("/api/metrics", { cache: "no-store" })
+      .then(async (res) => {
+        if (!res.ok) return null;
+        return await res.json().catch(() => null);
+      })
+      .then((payload) => {
+        if (!alive) return;
+        setMetrics(payload);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setMetrics(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const logsSorted = useMemo(() => [...logs].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)), [logs]);
 
@@ -114,6 +154,10 @@ export function StatsLive() {
       .slice(0, 6);
   }, [logs]);
 
+  const creation = metrics?.creation;
+  const gateTopics = creation?.gate?.topics;
+  const gateTasks = creation?.gate?.tasks;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -132,6 +176,51 @@ export function StatsLive() {
         <MetricCard title="Open" count={openCount} tone="warning" description="Needs attention." href="/u?status=blocked" cta="View blocked tasks" />
         <MetricCard title="Logs" count={logs.length} tone="accent" description="Conversation + action events." href="/log" cta="Open logs" />
       </div>
+
+      <Card>
+        <CardHeader>
+          <h2 className="text-lg font-semibold">Creation Intelligence</h2>
+          <Badge tone="muted">24h + total</Badge>
+        </CardHeader>
+        {!creation ? (
+          <p className="text-sm text-[rgb(var(--claw-muted))]">Loading creation telemetry…</p>
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4 text-sm">
+              <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Topics</div>
+              <div className="mt-2 text-[rgb(var(--claw-muted))]">
+                Created last 24h: <span className="text-[rgb(var(--claw-text))]">{creation.topics?.created24h ?? 0}</span>
+              </div>
+              <div className="mt-2 text-[rgb(var(--claw-muted))]">
+                Gate allowed:{" "}
+                <span className="text-[rgb(var(--claw-text))]">{gateTopics?.allowed24h ?? 0}</span> /{" "}
+                <span className="text-[rgb(var(--claw-muted))]">{gateTopics?.allowedTotal ?? 0}</span>
+              </div>
+              <div className="mt-1 text-[rgb(var(--claw-muted))]">
+                Gate blocked:{" "}
+                <span className="text-[rgb(var(--claw-warning))]">{gateTopics?.blocked24h ?? 0}</span> /{" "}
+                <span className="text-[rgb(var(--claw-muted))]">{gateTopics?.blockedTotal ?? 0}</span>
+              </div>
+            </div>
+            <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4 text-sm">
+              <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Tasks</div>
+              <div className="mt-2 text-[rgb(var(--claw-muted))]">
+                Created last 24h: <span className="text-[rgb(var(--claw-text))]">{creation.tasks?.created24h ?? 0}</span>
+              </div>
+              <div className="mt-2 text-[rgb(var(--claw-muted))]">
+                Gate allowed:{" "}
+                <span className="text-[rgb(var(--claw-text))]">{gateTasks?.allowed24h ?? 0}</span> /{" "}
+                <span className="text-[rgb(var(--claw-muted))]">{gateTasks?.allowedTotal ?? 0}</span>
+              </div>
+              <div className="mt-1 text-[rgb(var(--claw-muted))]">
+                Gate blocked:{" "}
+                <span className="text-[rgb(var(--claw-warning))]">{gateTasks?.blocked24h ?? 0}</span> /{" "}
+                <span className="text-[rgb(var(--claw-muted))]">{gateTasks?.blockedTotal ?? 0}</span>
+              </div>
+            </div>
+          </div>
+        )}
+      </Card>
 
       <Card>
         <CardHeader>
