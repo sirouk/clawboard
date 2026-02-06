@@ -3,6 +3,8 @@ import { test, expect } from "@playwright/test";
 test("home loads unified view", async ({ page }) => {
   await page.goto("/u");
   await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "View options" })).toBeVisible();
+  await page.getByRole("button", { name: "View options" }).click();
   await expect(page.getByRole("button", { name: "Show full messages" })).toBeVisible();
 });
 

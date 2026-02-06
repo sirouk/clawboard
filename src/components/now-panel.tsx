@@ -6,7 +6,7 @@ import type { Task, Topic, TaskStatus } from "@/lib/types";
 import { Button, StatusPill } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { formatRelativeTime } from "@/lib/format";
-import { buildTaskUrl } from "@/lib/url";
+import { buildTaskUrl, UNIFIED_BASE } from "@/lib/url";
 import { apiUrl } from "@/lib/api";
 
 const STATUS_TONE: Record<TaskStatus, "muted" | "accent" | "accent2" | "warning" | "success"> = {
@@ -61,7 +61,14 @@ export function NowPanel({
       {readOnly && (
         <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token to update tasks.</p>
       )}
-      {openTasks.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No open tasks yet.</p>}
+      {openTasks.length === 0 && (
+        <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-3 text-sm text-[rgb(var(--claw-muted))]">
+          <p>No open tasks yet.</p>
+          <Link href={UNIFIED_BASE} className="mt-2 inline-flex text-xs text-[rgb(var(--claw-accent))]">
+            Open Board to create or triage tasks
+          </Link>
+        </div>
+      )}
       {openTasks.map((task) => {
         const topicLabel = topics.find((topic) => topic.id === task.topicId)?.name ?? "Unassigned";
         const taskHref = buildTaskUrl(task, topics);

@@ -1,6 +1,24 @@
-import { Badge, Card, CardHeader } from "@/components/ui";
+"use client";
+
+import { useState } from "react";
+import { Badge, Button, Card, CardHeader } from "@/components/ui";
+
+const HUMAN_UNIX_COMMAND = "curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash";
+const HUMAN_WINDOWS_COMMAND = "iwr -useb https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash";
+const AGENT_PROMPT = "Follow the instructions at skills/chutes/SKILL.md to set up Chutes.";
 
 export default function ProvidersPage() {
+  const [message, setMessage] = useState<string | null>(null);
+
+  const copyToClipboard = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setMessage("Copied to clipboard.");
+    } catch {
+      setMessage("Clipboard unavailable. Copy manually.");
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -25,38 +43,66 @@ export default function ProvidersPage() {
             <Badge tone="success">Provider</Badge>
           </div>
         </CardHeader>
-        <div className="space-y-5 text-sm text-[rgb(var(--claw-muted))]">
+
+        <div className="grid gap-5 xl:grid-cols-2">
           <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
-            <p className="text-[rgb(var(--claw-text))] font-semibold">Fast path (human-first bootstrap)</p>
-            <p className="mt-2">
-              These scripts are self-contained. They install OpenClaw if needed, add Chutes auth, configure the provider,
-              and set the agent&apos;s primary model (no extra aliases).
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[rgb(var(--claw-text))] font-semibold">I&apos;m setting this up manually</p>
+              <Badge tone="accent2">Human</Badge>
+            </div>
+            <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">
+              Run one command and the bootstrap script configures provider auth and default model mapping.
             </p>
             <div className="mt-4 space-y-3">
               <div>
-                <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">macOS / Linux / WSL / Git Bash</div>
-                <pre className="mt-2 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
-{`curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash`}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">macOS / Linux / WSL / Git Bash</div>
+                  <Button size="sm" variant="secondary" onClick={() => void copyToClipboard(HUMAN_UNIX_COMMAND)}>
+                    Copy
+                  </Button>
+                </div>
+                <pre className="mt-2 overflow-x-auto whitespace-pre rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+{HUMAN_UNIX_COMMAND}
                 </pre>
               </div>
               <div>
-                <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Windows (PowerShell + Git Bash/WSL)</div>
-                <pre className="mt-2 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
-{`iwr -useb https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash`}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Windows (PowerShell + Git Bash/WSL)</div>
+                  <Button size="sm" variant="secondary" onClick={() => void copyToClipboard(HUMAN_WINDOWS_COMMAND)}>
+                    Copy
+                  </Button>
+                </div>
+                <pre className="mt-2 overflow-x-auto whitespace-pre rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+{HUMAN_WINDOWS_COMMAND}
                 </pre>
               </div>
             </div>
           </div>
 
           <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
-            <p className="text-[rgb(var(--claw-text))] font-semibold">Agent-first (autonomous)</p>
-            <p className="mt-2">Tell your OpenClaw instance:</p>
-            <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
-{`Follow the instructions at skills/chutes/SKILL.md to set up Chutes.`}
-            </pre>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[rgb(var(--claw-text))] font-semibold">I want OpenClaw to do it</p>
+              <Badge tone="accent">Agent</Badge>
+            </div>
+            <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">
+              Give your main agent this instruction and let it perform the provider install autonomously.
+            </p>
+            <div className="mt-4">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Prompt</div>
+                <Button size="sm" variant="secondary" onClick={() => void copyToClipboard(AGENT_PROMPT)}>
+                  Copy
+                </Button>
+              </div>
+              <pre className="mt-2 overflow-x-auto whitespace-pre rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+{AGENT_PROMPT}
+              </pre>
+            </div>
           </div>
         </div>
       </Card>
+
+      {message && <p className="text-sm text-[rgb(var(--claw-muted))]">{message}</p>}
     </div>
   );
 }

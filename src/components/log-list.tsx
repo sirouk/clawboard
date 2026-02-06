@@ -78,6 +78,7 @@ export function LogList({
   const [agentFilter, setAgentFilter] = useState("all");
   const [laneFilter, setLaneFilter] = useState<LaneFilter>("all");
   const [search, setSearch] = useState("");
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [localShowRawAll, setLocalShowRawAll] = useState(false);
   const [groupByDay, setGroupByDay] = useState(true);
   const loadMoreEnabled = Boolean(initialVisibleCount && initialVisibleCount > 0 && loadMoreStep && loadMoreStep > 0);
@@ -236,15 +237,7 @@ export function LogList({
       {showFilters && (
         <div className="space-y-3">
           <div className="flex flex-wrap gap-3">
-            <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search log" className="max-w-sm" />
-            <Select value={topicFilter} onChange={(event) => setTopicFilter(event.target.value)} className="max-w-[200px]">
-              <option value="all">All topics</option>
-              {topics.map((topic) => (
-                <option key={topic.id} value={topic.id}>
-                  {topic.name}
-                </option>
-              ))}
-            </Select>
+            <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search messages" className="min-w-[220px] flex-1" />
             <Select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} className="max-w-[180px]">
               <option value="all">All types</option>
               {Object.entries(TYPE_LABELS).map(([value, label]) => (
@@ -261,31 +254,48 @@ export function LogList({
                 </option>
               ))}
             </Select>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Agent lanes</span>
-            <Button variant={laneFilter === "all" ? "secondary" : "ghost"} size="sm" onClick={() => setLaneFilter("all")}>
-              All
-            </Button>
-            {agentLabels.map((lane) => (
-              <Button
-                key={lane}
-                variant={laneFilter === lane ? "secondary" : "ghost"}
-                size="sm"
-                onClick={() => setLaneFilter(lane)}
-              >
-                {lane}
-              </Button>
-            ))}
-            {showRawToggle && (
-              <Button variant="secondary" size="sm" onClick={() => setShowRawAll(!showRawAll)}>
-                {showRawAll ? "Hide full messages" : "Show full messages"}
-              </Button>
-            )}
-            <Button variant="secondary" size="sm" onClick={() => setGroupByDay((prev) => !prev)}>
-              {groupByDay ? "Ungrouped" : "Group by day"}
+            <Button variant="secondary" size="sm" onClick={() => setShowAdvancedFilters((prev) => !prev)}>
+              {showAdvancedFilters ? "Hide filters" : "More filters"}
             </Button>
           </div>
+          {showAdvancedFilters && (
+            <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.9)] p-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <Select value={topicFilter} onChange={(event) => setTopicFilter(event.target.value)} className="max-w-[220px]">
+                  <option value="all">All topics</option>
+                  {topics.map((topic) => (
+                    <option key={topic.id} value={topic.id}>
+                      {topic.name}
+                    </option>
+                  ))}
+                </Select>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Agent lanes</span>
+                  <Button variant={laneFilter === "all" ? "secondary" : "ghost"} size="sm" onClick={() => setLaneFilter("all")}>
+                    All
+                  </Button>
+                  {agentLabels.map((lane) => (
+                    <Button
+                      key={lane}
+                      variant={laneFilter === lane ? "secondary" : "ghost"}
+                      size="sm"
+                      onClick={() => setLaneFilter(lane)}
+                    >
+                      {lane}
+                    </Button>
+                  ))}
+                </div>
+                {showRawToggle && (
+                  <Button variant="secondary" size="sm" onClick={() => setShowRawAll(!showRawAll)}>
+                    {showRawAll ? "Hide full messages" : "Show full messages"}
+                  </Button>
+                )}
+                <Button variant="secondary" size="sm" onClick={() => setGroupByDay((prev) => !prev)}>
+                  {groupByDay ? "Ungrouped" : "Group by day"}
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -458,7 +468,7 @@ function LogRow({
 
       {isConversation ? (
         <div className="mt-3 space-y-2">
-          <p className="text-xs uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">{summaryText}</p>
+          <p className="text-sm font-medium text-[rgb(var(--claw-text))]">{summaryText}</p>
           <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
             <div className={`w-full max-w-[78%] ${isUser ? "text-right" : "text-left"}`}>
               <p className="mb-1 text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
@@ -516,11 +526,11 @@ function LogRow({
       {allowNotes && entry.type !== "note" && (
         <div className="mt-3">
           {!noteOpen ? (
-            <Button variant="ghost" size="sm" onClick={() => setNoteOpen(true)}>
+            <Button variant="secondary" size="sm" onClick={() => setNoteOpen(true)}>
               Add note
             </Button>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
               <textarea
                 value={noteText}
                 onChange={(event) => setNoteText(event.target.value)}

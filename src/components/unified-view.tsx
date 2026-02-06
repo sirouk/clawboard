@@ -161,6 +161,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [showRaw, setShowRaw] = useState(initialUrlState.raw);
   const [search, setSearch] = useState(initialUrlState.search);
   const [showDone, setShowDone] = useState(initialUrlState.done);
+  const [showViewOptions, setShowViewOptions] = useState(false);
   const [timelineLimits, setTimelineLimits] = useState<Record<string, number>>({});
   const [moveTaskId, setMoveTaskId] = useState<string | null>(null);
   const [editingTopicId, setEditingTopicId] = useState<string | null>(null);
@@ -561,6 +562,58 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setExpandedTasks(new Set());
   };
 
+  const toggleTopicExpanded = (topicId: string) => {
+    const next = new Set(expandedTopicsSafe);
+    if (next.has(topicId)) {
+      next.delete(topicId);
+    } else {
+      next.add(topicId);
+    }
+    setExpandedTopics(next);
+    pushUrl({ topics: Array.from(next) });
+  };
+
+  const toggleTaskExpanded = (taskId: string) => {
+    const next = new Set(expandedTasksSafe);
+    if (next.has(taskId)) {
+      next.delete(taskId);
+    } else {
+      next.add(taskId);
+    }
+    setExpandedTasks(next);
+    pushUrl({ tasks: Array.from(next) });
+  };
+
+  const toggleDoneVisibility = () => {
+    const next = !showDone;
+    setShowDone(next);
+    setPage(1);
+    pushUrl({ done: next ? "1" : "0", page: "1" });
+  };
+
+  const toggleRawVisibility = () => {
+    const next = !showRaw;
+    setShowRaw(next);
+    pushUrl({ raw: next ? "1" : "0" });
+  };
+
+  const toggleExpandAll = () => {
+    const allTopics = orderedTopics.map((topic) => topic.id);
+    const allTasks = tasks.map((task) => task.id);
+    const hasAnyExpandable = allTopics.length > 0 || allTasks.length > 0;
+    const allExpanded =
+      hasAnyExpandable &&
+      expandedTopicsSafe.size === allTopics.length &&
+      expandedTasksSafe.size === allTasks.length;
+    if (allExpanded) {
+      collapseAll();
+      pushUrl({ topics: [], tasks: [] });
+      return;
+    }
+    expandAll();
+    pushUrl({ topics: allTopics, tasks: allTasks });
+  };
+
   const allowToggle = (target: HTMLElement | null) => {
     if (!target) return true;
     return !target.closest("a, button, input, select, textarea, option");
@@ -782,58 +835,55 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             placeholder="Search topics, tasks, or messages"
             className="min-w-[240px] flex-1"
           />
-          <div className="flex flex-wrap items-center gap-3">
-            <Button
-              variant={showDone ? "secondary" : "ghost"}
-              size="sm"
-              onClick={() => {
-                const next = !showDone;
-                setShowDone(next);
-                setPage(1);
-                pushUrl({ done: next ? "1" : "0", page: "1" });
-              }}
-            >
-              {showDone ? "Hide done" : "Show done"}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                const next = !showRaw;
-                setShowRaw(next);
-                pushUrl({ raw: next ? "1" : "0" });
-              }}
-            >
-              {showRaw ? "Hide full messages" : "Show full messages"}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                const allTopics = orderedTopics.map((topic) => topic.id);
-                const allTasks = tasks.map((task) => task.id);
-                const hasAnyExpandable = allTopics.length > 0 || allTasks.length > 0;
-                const allExpanded =
-                  hasAnyExpandable &&
-                  expandedTopicsSafe.size === allTopics.length &&
-                  expandedTasksSafe.size === allTasks.length;
-                if (allExpanded) {
-                  collapseAll();
-                  pushUrl({ topics: [], tasks: [] });
-                  return;
-                }
-                expandAll();
-                pushUrl({ topics: allTopics, tasks: allTasks });
-              }}
-            >
-              {(orderedTopics.length > 0 || tasks.length > 0) &&
-              expandedTopicsSafe.size === orderedTopics.length &&
-              expandedTasksSafe.size === tasks.length
-                ? "Collapse all"
-                : "Expand all"}
-            </Button>
-          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setShowViewOptions((prev) => !prev)}
+            aria-expanded={showViewOptions}
+          >
+            {showViewOptions ? "Hide options" : "View options"}
+          </Button>
         </div>
+        {showViewOptions && (
+          <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.92)] p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                className={cn(showDone ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+                onClick={toggleDoneVisibility}
+              >
+                {showDone ? "Hide done" : "Show done"}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                className={cn(showRaw ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+                onClick={toggleRawVisibility}
+              >
+                {showRaw ? "Hide full messages" : "Show full messages"}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                className={cn(
+                  (orderedTopics.length > 0 || tasks.length > 0) &&
+                    expandedTopicsSafe.size === orderedTopics.length &&
+                    expandedTasksSafe.size === tasks.length
+                    ? "border-[rgba(255,90,45,0.5)]"
+                    : "opacity-85"
+                )}
+                onClick={toggleExpandAll}
+              >
+                {(orderedTopics.length > 0 || tasks.length > 0) &&
+                expandedTopicsSafe.size === orderedTopics.length &&
+                expandedTasksSafe.size === tasks.length
+                  ? "Collapse all"
+                  : "Expand all"}
+              </Button>
+            </div>
+          </div>
+        )}
         {readOnly && (
           <span className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add token to move tasks.</span>
         )}
@@ -868,26 +918,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 className="flex flex-wrap items-start justify-between gap-4 text-left"
                 onClick={(event) => {
                   if (!allowToggle(event.target as HTMLElement)) return;
-                  const next = new Set(expandedTopicsSafe);
-                  if (next.has(topicId)) {
-                    next.delete(topicId);
-                  } else {
-                    next.add(topicId);
-                  }
-                  setExpandedTopics(next);
-                  pushUrl({ topics: Array.from(next) });
+                  toggleTopicExpanded(topicId);
                 }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    const next = new Set(expandedTopicsSafe);
-                    if (next.has(topicId)) {
-                      next.delete(topicId);
-                    } else {
-                      next.add(topicId);
-                    }
-                    setExpandedTopics(next);
-                    pushUrl({ topics: Array.from(next) });
+                    toggleTopicExpanded(topicId);
                   }
                 }}
                 aria-expanded={isExpanded}
@@ -1020,16 +1056,26 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   {renameErrors[`topic:${topic.id}`] && (
                     <p className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`topic:${topic.id}`]}</p>
                   )}
-                  <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topic.description}</p>
+                  {isExpanded && <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topic.description}</p>}
                   <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-[rgb(var(--claw-muted))]">
                     <span>{taskList.length} tasks</span>
                     <span>{openCount} open</span>
-                    <span>{doingCount} doing</span>
-                    <span>{blockedCount} blocked</span>
+                    {isExpanded && <span>{doingCount} doing</span>}
+                    {isExpanded && <span>{blockedCount} blocked</span>}
                     <span>Last activity {formatRelativeTime(lastActivity)}</span>
                   </div>
                 </div>
-                <span className="text-[rgb(var(--claw-accent))]">{isExpanded ? "▾" : "▸"}</span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="min-w-[112px]"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleTopicExpanded(topicId);
+                  }}
+                >
+                  {isExpanded ? "Collapse" : "Expand"}
+                </Button>
               </div>
 
               {isExpanded && showTasks && (
@@ -1063,33 +1109,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                           <div
                             role="button"
                             tabIndex={0}
-                          className="flex flex-wrap items-center justify-between gap-3 text-left"
-                          onClick={(event) => {
-                            if (!allowToggle(event.target as HTMLElement)) return;
-                            const next = new Set(expandedTasksSafe);
-                            if (next.has(task.id)) {
-                              next.delete(task.id);
-                            } else {
-                              next.add(task.id);
-                            }
-                            setExpandedTasks(next);
-                            pushUrl({ tasks: Array.from(next) });
-                          }}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter" || event.key === " ") {
-                              event.preventDefault();
-                              const next = new Set(expandedTasksSafe);
-                              if (next.has(task.id)) {
-                                next.delete(task.id);
-                              } else {
-                                next.add(task.id);
+                            className="flex flex-wrap items-center justify-between gap-3 text-left"
+                            onClick={(event) => {
+                              if (!allowToggle(event.target as HTMLElement)) return;
+                              toggleTaskExpanded(task.id);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                toggleTaskExpanded(task.id);
                               }
-                              setExpandedTasks(next);
-                              pushUrl({ tasks: Array.from(next) });
-                            }
-                          }}
-                          aria-expanded={taskExpanded}
-                        >
+                            }}
+                            aria-expanded={taskExpanded}
+                          >
                           <div>
                             <div className="flex items-center gap-2 text-sm font-semibold">
                               {editingTaskId === task.id ? (
@@ -1212,11 +1244,23 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             {renameErrors[`task:${task.id}`] && (
                               <div className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`task:${task.id}`]}</div>
                             )}
-                            <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">Updated {formatRelativeTime(task.updatedAt)}</div>
+                            <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
+                              {taskExpanded ? "Updated" : "Last touch"} {formatRelativeTime(task.updatedAt)}
+                            </div>
                           </div>
                           <div className="flex items-center gap-2">
                             <StatusPill tone={STATUS_TONE[task.status]} label={STATUS_LABELS[task.status] ?? task.status} />
-                            <span className="text-[rgb(var(--claw-accent))]">{taskExpanded ? "▾" : "▸"}</span>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              className="min-w-[104px]"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                toggleTaskExpanded(task.id);
+                              }}
+                            >
+                              {taskExpanded ? "Collapse" : "Expand"}
+                            </Button>
                           </div>
                         </div>
                         {taskExpanded && (

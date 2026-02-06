@@ -87,6 +87,7 @@ test("unified chat renders natural bubbles and topic-only chat entries", async (
   await expect(page.getByText(`assistant-tail-${suffix}`)).toBeVisible();
   await expect(page.getByText(`user-tail-${suffix}`)).toHaveCount(0);
 
+  await page.getByRole("button", { name: "View options" }).click();
   await page.getByRole("button", { name: "Show full messages" }).click();
   await expect(page.getByText(`user-tail-${suffix}`)).toBeVisible();
   await expect(page.getByText("TASK CHAT")).toBeVisible();

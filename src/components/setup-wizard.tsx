@@ -5,6 +5,7 @@ import { Button, Input, Select, Badge, Card } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import type { IntegrationLevel } from "@/lib/types";
 import { apiUrl, getApiBase, setApiBase } from "@/lib/api";
+import { cn } from "@/lib/cn";
 
 const STEPS = [
   { id: 1, title: "OpenClaw Skill", description: "Install the skill and connect your agent." },
@@ -15,9 +16,11 @@ const STEPS = [
 export function SetupWizard() {
   const { instanceTitle, setInstanceTitle, token, setToken, tokenRequired, integrationLevel, setIntegrationLevel } = useAppConfig();
   const [step, setStep] = useState(1);
+  const [skillTab, setSkillTab] = useState<"install" | "plugin" | "connect">("install");
   const [localTitle, setLocalTitle] = useState(instanceTitle);
   const [localIntegration, setLocalIntegration] = useState<IntegrationLevel>(integrationLevel);
   const [message, setMessage] = useState<string | null>(null);
+  const [instanceSaved, setInstanceSaved] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const origin = useMemo(() => {
@@ -66,6 +69,7 @@ Once I have those, I’ll validate /api/health and /api/config and start logging
 
       setInstanceTitle(localTitle);
       setIntegrationLevel(localIntegration);
+      setInstanceSaved(true);
       setMessage("Saved. Instance updated.");
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Something went wrong.");
@@ -77,6 +81,12 @@ Once I have those, I’ll validate /api/health and /api/config and start logging
   const handleTokenSave = () => {
     setToken(token.trim());
     setMessage("Token stored locally.");
+  };
+
+  const completedSteps: Record<number, boolean> = {
+    1: step > 1,
+    2: token.trim().length > 0 || step > 2,
+    3: instanceSaved,
   };
 
   const copyToClipboard = async (value: string) => {
@@ -117,19 +127,23 @@ openclaw plugins enable clawboard-logger`;
         <div className="space-y-4">
           {STEPS.map((item) => {
             const active = step === item.id;
+            const complete = completedSteps[item.id];
             return (
               <button
                 key={item.id}
-                className={`w-full rounded-[var(--radius-md)] border px-4 py-3 text-left transition ${
+                className={cn(
+                  "w-full rounded-[var(--radius-md)] border px-4 py-3 text-left transition",
                   active
                     ? "border-[rgba(226,86,64,0.5)] bg-[rgba(226,86,64,0.1)]"
-                    : "border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))]"
-                }`}
+                    : complete
+                      ? "border-[rgba(80,200,120,0.45)] bg-[rgba(80,200,120,0.08)]"
+                      : "border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))]"
+                )}
                 onClick={() => setStep(item.id)}
               >
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-semibold">Step {item.id}</span>
-                  {active && <Badge tone="accent">Active</Badge>}
+                  {active ? <Badge tone="accent">Active</Badge> : complete ? <Badge tone="success">Done</Badge> : null}
                 </div>
                 <div className="mt-2 text-sm">{item.title}</div>
                 <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{item.description}</p>
@@ -171,10 +185,10 @@ openclaw plugins enable clawboard-logger`;
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <Button onClick={saveInstance} disabled={saving}>
-                {saving ? "Saving..." : "Save & continue"}
+                {saving ? "Saving..." : "Save setup"}
               </Button>
               <Button variant="secondary" onClick={() => setStep(2)}>
-                Next
+                Back to token
               </Button>
             </div>
           </div>
@@ -200,8 +214,8 @@ openclaw plugins enable clawboard-logger`;
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <Button onClick={handleTokenSave}>Save token locally</Button>
-              <Button variant="secondary" onClick={() => setStep(3)}>
-                Next
+              <Button variant="secondary" onClick={() => setStep(3)} disabled={tokenRequired && token.trim().length === 0}>
+                Continue to instance
               </Button>
             </div>
           </div>
@@ -214,6 +228,33 @@ openclaw plugins enable clawboard-logger`;
               <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">
                 Install the Clawboard skill in your OpenClaw instance and point it to this server.
               </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                className={cn(skillTab === "install" ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+                onClick={() => setSkillTab("install")}
+              >
+                Install
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                className={cn(skillTab === "plugin" ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+                onClick={() => setSkillTab("plugin")}
+              >
+                Plugin config
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                className={cn(skillTab === "connect" ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+                onClick={() => setSkillTab("connect")}
+              >
+                Connect prompt
+              </Button>
             </div>
 
             <div className="space-y-3">
@@ -232,66 +273,75 @@ openclaw plugins enable clawboard-logger`;
                 </div>
               </div>
 
-              <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-semibold">Skill install</div>
-                  <Button size="sm" variant="secondary" onClick={() => copyToClipboard(skillInstallSnippet)} aria-label="Copy skill install commands">
-                    <span className="h-4 w-4">{clipboardIcon}</span>
-                  </Button>
-                </div>
-                <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                  Clawhub is coming soon. For now, install manually.
-                </p>
-                <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+              {skillTab === "install" && (
+                <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold">Skill install</div>
+                    <Button size="sm" variant="secondary" onClick={() => copyToClipboard(skillInstallSnippet)} aria-label="Copy skill install commands">
+                      <span className="h-4 w-4">{clipboardIcon}</span>
+                    </Button>
+                  </div>
+                  <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
+                    Clawhub is coming soon. For now, install manually.
+                  </p>
+                  <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
 {skillInstallSnippet}
-                </pre>
-                <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                  OpenClaw picks up new skills on the next turn.
-                </p>
-              </div>
-
-              <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-semibold">Always‑on logger plugin (required)</div>
-                  <Button size="sm" variant="secondary" onClick={() => copyToClipboard(pluginInstallSnippet)} aria-label="Copy logger plugin commands">
-                    <span className="h-4 w-4">{clipboardIcon}</span>
-                  </Button>
+                  </pre>
+                  <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
+                    OpenClaw picks up new skills on the next turn.
+                  </p>
                 </div>
-                <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                  The plugin ensures every turn is logged even if the agent misses a tool call.
-                </p>
-                <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+              )}
+
+              {skillTab === "plugin" && (
+                <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold">Always‑on logger plugin (required)</div>
+                    <Button size="sm" variant="secondary" onClick={() => copyToClipboard(pluginInstallSnippet)} aria-label="Copy logger plugin commands">
+                      <span className="h-4 w-4">{clipboardIcon}</span>
+                    </Button>
+                  </div>
+                  <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
+                    The plugin ensures every turn is logged even if the agent misses a tool call.
+                  </p>
+                  <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
 {pluginInstallSnippet}
-                </pre>
-                <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                  If you see <code>extracted package missing package.json</code>, update your repo: <code>cd ~/clawboard && git pull</code>.
-                </p>
-                <div className="mt-3 flex items-center justify-between">
-                  <div className="text-xs font-semibold uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Plugin config</div>
-                  <Button size="sm" variant="secondary" onClick={() => copyToClipboard(pluginConfigSnippet)} aria-label="Copy logger plugin config">
-                    <span className="h-4 w-4">{clipboardIcon}</span>
-                  </Button>
-                </div>
-                <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+                  </pre>
+                  <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
+                    If you see <code>extracted package missing package.json</code>, update your repo: <code>cd ~/clawboard && git pull</code>.
+                  </p>
+                  <div className="mt-3 flex items-center justify-between">
+                    <div className="text-xs font-semibold uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Plugin config</div>
+                    <Button size="sm" variant="secondary" onClick={() => copyToClipboard(pluginConfigSnippet)} aria-label="Copy logger plugin config">
+                      <span className="h-4 w-4">{clipboardIcon}</span>
+                    </Button>
+                  </div>
+                  <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
 {pluginConfigSnippet}
-                </pre>
-                <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                  Use the same token as your API server&apos;s <code>CLAWBOARD_TOKEN</code>. If the server does not require a token,
-                  remove the <code>token</code> field or leave it empty.
-                </p>
-              </div>
-
-              <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-semibold">Connect prompt</div>
-                  <Button size="sm" variant="secondary" onClick={() => copyToClipboard(connectionSnippet)}>
-                    Copy
-                  </Button>
+                  </pre>
+                  <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
+                    Use the same token as your API server&apos;s <code>CLAWBOARD_TOKEN</code>. If the server does not require a token,
+                    remove the <code>token</code> field or leave it empty.
+                  </p>
                 </div>
-                <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+              )}
+
+              {skillTab === "connect" && (
+                <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold">Connect prompt</div>
+                    <Button size="sm" variant="secondary" onClick={() => copyToClipboard(connectionSnippet)}>
+                      Copy
+                    </Button>
+                  </div>
+                  <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
 {connectionSnippet}
-                </pre>
-              </div>
+                  </pre>
+                </div>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button onClick={() => setStep(2)}>I installed this - continue</Button>
             </div>
           </div>
         )}
