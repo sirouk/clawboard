@@ -219,8 +219,8 @@ class ChangesResponse(BaseModel):
 
 
 class ReindexRequest(BaseModel):
-    kind: Literal["topic", "task"] = Field(description="Embedding namespace kind.")
-    id: str = Field(description="Topic or task ID.")
+    kind: Literal["topic", "task", "log"] = Field(description="Embedding namespace kind.")
+    id: str = Field(description="Topic/task/log ID.")
     text: str = Field(description="Canonical label text to embed.")
     topicId: Optional[str] = Field(default=None, description="Task parent topic ID when kind=task.")
 

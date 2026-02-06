@@ -15,6 +15,11 @@ declare module "openclaw/plugin-sdk" {
     sessionKey?: string;
   };
 
+  export type PluginHookBeforeAgentStartEvent = {
+    prompt?: string;
+    messages?: unknown[];
+  };
+
   export type PluginHookMessageReceivedEvent = {
     content?: string;
     metadata?: Record<string, unknown>;
@@ -78,6 +83,13 @@ declare module "openclaw/plugin-sdk" {
     on(
       event: "agent_end",
       handler: (event: PluginHookAgentEndEvent, ctx: PluginHookAgentContext) => void | Promise<void>
+    ): void;
+    on(
+      event: "before_agent_start",
+      handler: (
+        event: PluginHookBeforeAgentStartEvent,
+        ctx: PluginHookAgentContext
+      ) => void | Promise<void | { prependContext?: string }>
     ): void;
   };
 }

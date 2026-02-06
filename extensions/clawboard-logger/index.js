@@ -9,6 +9,8 @@ const DEFAULT_CONTEXT_MAX_CHARS = 2200;
 const DEFAULT_CONTEXT_TOPIC_LIMIT = 3;
 const DEFAULT_CONTEXT_TASK_LIMIT = 3;
 const DEFAULT_CONTEXT_LOG_LIMIT = 6;
+const CLAWBOARD_CONTEXT_BEGIN = "[CLAWBOARD_CONTEXT_BEGIN]";
+const CLAWBOARD_CONTEXT_END = "[CLAWBOARD_CONTEXT_END]";
 
 function normalizeBaseUrl(url) {
   return url.replace(/\/$/, "");
@@ -16,6 +18,11 @@ function normalizeBaseUrl(url) {
 
 function sanitizeMessageContent(content) {
   let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
+  text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\][\s\S]*?\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
+  text = text.replace(
+    /Clawboard continuity hook is active for this turn\.[\s\S]*?Prioritize curated user notes when present\.\s*/gi,
+    ""
+  );
   text = text.replace(/^\s*summary\s*[:\-]\s*/gim, "");
   text = text.replace(/^\[Discord [^\]]+\]\s*/gim, "");
   text = text.replace(/\[message[_\s-]?id:[^\]]+\]/gi, "");
@@ -379,16 +386,83 @@ export default function register(api) {
     return coerceArray(await getJson("/api/tasks", { topicId }));
   }
 
+  async function semanticLookup(query, sessionKey) {
+    const data = await getJson("/api/search", {
+      q: query,
+      sessionKey,
+      includePending: 1,
+      limitTopics: Math.max(12, contextTopicLimit * 4),
+      limitTasks: Math.max(24, contextTaskLimit * 5),
+      limitLogs: Math.max(120, contextLogLimit * 30)
+    });
+    if (!data || typeof data !== "object")
+      return null;
+    return data;
+  }
+
+  function extractUpstreamMemorySignals(prompt, messages) {
+    const memoryLines = [];
+    const turnLines = [];
+    const seen = /* @__PURE__ */ new Set();
+    const remember = (line, bucket) => {
+      const text = clip(normalizeWhitespace(sanitizeMessageContent(line)), 180);
+      if (!text)
+        return;
+      const key = text.toLowerCase();
+      if (seen.has(key))
+        return;
+      seen.add(key);
+      bucket.push(text);
+    };
+    const promptText = sanitizeMessageContent(prompt ?? "");
+    if (promptText) {
+      const lines = promptText.split("\n").map((line) => line.trim()).filter(Boolean);
+      const memoryHints = lines.filter((line) => /(memory|markdown|\.md\b|session|history|continuity|topic|task|retriev|vector|embed|note|curat)/i.test(line));
+      for (const line of memoryHints.slice(0, 8))
+        remember(line, memoryLines);
+    }
+    if (Array.isArray(messages)) {
+      const recent = messages.slice(-8);
+      for (const raw of recent) {
+        const item = raw ?? {};
+        const role = typeof item.role === "string" ? item.role : "turn";
+        const text = extractTextLoose(item.content);
+        if (!text)
+          continue;
+        const clean = clip(normalizeWhitespace(sanitizeMessageContent(text)), 140);
+        if (!clean)
+          continue;
+        remember(`${role}: ${clean}`, turnLines);
+      }
+    }
+    return {
+      memoryLines: memoryLines.slice(0, 6),
+      turnLines: turnLines.slice(0, 6)
+    };
+  }
+
   function formatLogLine(entry) {
     const who = (entry.agentId || "").toLowerCase() === "user" ? "User" : entry.agentLabel || entry.agentId || "Agent";
     const text = sanitizeMessageContent(entry.summary || entry.content || "");
     return `${who}: ${clip(normalizeWhitespace(text), 120)}`;
   }
 
-  function buildContextBlock({ query, sessionLogs, topics, tasks, topicRecent, notes }) {
+  function buildContextBlock({ query, searchMode, sessionLogs, semanticLogs, topics, tasks, topicRecent, notes, upstream }) {
     const lines = [];
     lines.push("Clawboard continuity context:");
     lines.push(`Current user intent: ${clip(normalizeWhitespace(query), 180)}`);
+    if (searchMode)
+      lines.push(`Retrieval mode: ${searchMode}`);
+    if (upstream.memoryLines.length > 0) {
+      lines.push("OpenClaw memory signals (sessions/markdown/recent retrieval):");
+      for (const line of upstream.memoryLines.slice(0, 5))
+        lines.push(`- ${line}`);
+    }
+    if (upstream.turnLines.length > 0) {
+      lines.push("Recent turns:");
+      for (const line of upstream.turnLines.slice(0, 4))
+        lines.push(`- ${line}`);
+    }
     if (topics.length > 0) {
       lines.push("Likely topics:");
       for (const topic of topics) {
@@ -403,16 +477,44 @@ export default function register(api) {
         lines.push(`- ${task.title}${status}`);
       }
     }
-    const timeline = sessionLogs.filter((entry) => entry.type === "conversation").slice(0, contextLogLimit);
+    const timeline = [];
+    const pushed = /* @__PURE__ */ new Set();
+    for (const item of sessionLogs.filter((entry) => entry.type === "conversation").slice(0, contextLogLimit + 2)) {
+      const key = item.id || `${item.createdAt}:${item.summary || item.content || ""}`;
+      if (pushed.has(key))
+        continue;
+      pushed.add(key);
+      timeline.push(item);
+      if (timeline.length >= contextLogLimit)
+        break;
+    }
+    for (const item of semanticLogs.slice(0, contextLogLimit + 3)) {
+      if (item.type && item.type !== "conversation")
+        continue;
+      const key = item.id || `${item.createdAt}:${item.summary || item.content || ""}`;
+      if (pushed.has(key))
+        continue;
+      pushed.add(key);
+      timeline.push({
+        id: item.id,
+        topicId: item.topicId,
+        taskId: item.taskId,
+        type: item.type ?? "conversation",
+        summary: item.summary ?? void 0,
+        content: item.content ?? void 0,
+        createdAt: item.createdAt
+      });
+      if (timeline.length >= contextLogLimit)
+        break;
+    }
     if (timeline.length > 0) {
       lines.push("Recent thread timeline:");
-      for (const entry of timeline) {
+      for (const entry of timeline)
         lines.push(`- ${formatLogLine(entry)}`);
-      }
     }
     const notesByLog = /* @__PURE__ */ new Map();
     for (const note of notes) {
-      if (note.type !== "note")
+      if ("type" in note && note.type && note.type !== "note")
         continue;
       const key = String(note.relatedLogId ?? "");
       if (!key)
@@ -430,14 +532,13 @@ export default function register(api) {
       if (!entry.id)
         continue;
       const attached = notesByLog.get(entry.id) ?? [];
-      for (const noteText of attached) {
+      for (const noteText of attached)
         noteLines.push(`- ${formatLogLine(entry)} | note: ${noteText}`);
-      }
       if (noteLines.length >= 4)
         break;
     }
     if (noteLines.length > 0) {
-      lines.push("Curated user notes:");
+      lines.push("Curated user notes (high weight):");
       lines.push(...noteLines.slice(0, 4));
     }
     const topicCtxLines = [];
@@ -446,9 +547,8 @@ export default function register(api) {
       if (recent.length === 0)
         continue;
       topicCtxLines.push(`Topic ${topic.name}:`);
-      for (const item of recent.slice(0, 2)) {
+      for (const item of recent.slice(0, 2))
         topicCtxLines.push(`- ${formatLogLine(item)}`);
-      }
       if (topicCtxLines.length >= 10)
         break;
     }
@@ -459,21 +559,22 @@ export default function register(api) {
     return clip(lines.join("\n"), contextMaxChars);
   }
 
-  async function retrieveContext(query, sessionKey) {
+  async function retrieveContext(query, sessionKey, upstream) {
     const normalizedQuery = clip(normalizeWhitespace(sanitizeMessageContent(query)), 500);
     if (!normalizedQuery || normalizedQuery.length < 6)
       return void 0;
-    const [topicsAll, sessionLogsRaw] = await Promise.all([
+    const [topicsAll, sessionLogsRaw, semantic] = await Promise.all([
       listTopics(),
       sessionKey ? listLogs({
         sessionKey,
         type: "conversation",
-        classificationStatus: "classified",
         limit: 80,
         offset: 0
-      }) : Promise.resolve([])
+      }) : Promise.resolve([]),
+      semanticLookup(normalizedQuery, sessionKey)
     ]);
     const sessionLogs = sessionLogsRaw.filter((entry) => entry.type === "conversation").sort((a, b) => String(a.createdAt || "") < String(b.createdAt || "") ? 1 : -1);
+    const topicsById = new Map(topicsAll.map((topic) => [topic.id, topic]));
     const recentTopicOrder = [];
     const recentTopicSet = /* @__PURE__ */ new Set();
     const recentTaskSet = /* @__PURE__ */ new Set();
@@ -486,6 +587,16 @@ export default function register(api) {
         recentTaskSet.add(entry.taskId);
     }
     const topicScore = /* @__PURE__ */ new Map();
+    if (semantic?.topics?.length) {
+      for (const item of semantic.topics) {
+        if (!item?.id)
+          continue;
+        const base = Number(item.score || 0);
+        const noteWeight = Number(item.noteWeight || 0);
+        const boosted = base + Math.min(0.24, noteWeight);
+        topicScore.set(item.id, Math.max(topicScore.get(item.id) ?? 0, boosted));
+      }
+    }
     for (let i = 0; i < recentTopicOrder.length; i += 1) {
       const id = recentTopicOrder[i];
       const continuityBoost = Math.max(0.5, 0.9 - i * 0.08);
@@ -499,6 +610,9 @@ export default function register(api) {
       }
     }
     const topics = topicsAll.map((topic) => ({ topic, score: topicScore.get(topic.id) ?? 0 })).filter((item) => item.score > 0.12 || recentTopicSet.has(item.topic.id)).sort((a, b) => b.score - a.score).slice(0, contextTopicLimit).map((item) => item.topic);
+    const semanticTaskById = new Map((semantic?.tasks ?? []).map((item) => [item.id, item]));
+    const semanticLogs = (semantic?.logs ?? []).slice(0, contextLogLimit + 4);
+    const semanticNotes = (semantic?.notes ?? []).slice(0, 120);
     const taskBuckets = await Promise.all(
       topics.map(async (topic) => {
         const [tasks, logs] = await Promise.all([
@@ -506,7 +620,6 @@ export default function register(api) {
           listLogs({
             topicId: topic.id,
             type: "conversation",
-            classificationStatus: "classified",
             limit: contextLogLimit,
             offset: 0
           })
@@ -526,28 +639,43 @@ export default function register(api) {
       for (const task of bucket.tasks) {
         const lexical = lexicalSimilarity(normalizedQuery, task.title || "");
         const continuityBoost = recentTaskSet.has(task.id) ? 0.25 : 0;
-        taskScored.push({ task, score: lexical + continuityBoost });
+        const semanticScore = Number(semanticTaskById.get(task.id)?.score || 0);
+        const noteWeight = Number(semanticTaskById.get(task.id)?.noteWeight || 0);
+        taskScored.push({ task, score: lexical + continuityBoost + semanticScore + Math.min(0.24, noteWeight) });
       }
     }
     for (const entry of sessionLogs.slice(0, contextLogLimit + 4)) {
       if (entry.id)
         relatedIds.add(entry.id);
     }
+    for (const entry of semanticLogs) {
+      if (entry.id)
+        relatedIds.add(entry.id);
+      if (entry.topicId && topics.length < contextTopicLimit) {
+        const candidate = topicsById.get(entry.topicId);
+        if (candidate && !topics.some((item) => item.id === candidate.id))
+          topics.push(candidate);
+      }
+    }
     const tasks = taskScored.sort((a, b) => b.score - a.score).filter((item, idx) => item.score > 0.08 || idx < contextTaskLimit).slice(0, contextTaskLimit).map((item) => item.task);
     const relatedLogId = Array.from(relatedIds).slice(0, 50).join(",");
-    const notes = relatedLogId.length > 0 ? await listLogs({
+    const fallbackNotes = relatedLogId.length > 0 ? await listLogs({
       type: "note",
       relatedLogId,
       limit: 120,
       offset: 0
     }) : [];
+    const notes = [...semanticNotes, ...fallbackNotes];
     const context = buildContextBlock({
       query: normalizedQuery,
+      searchMode: semantic?.mode,
       sessionLogs,
+      semanticLogs,
       topics,
       tasks,
       topicRecent,
-      notes
+      notes,
+      upstream
     });
     return context || void 0;
   }
@@ -555,16 +683,21 @@ export default function register(api) {
   api.on("before_agent_start", async (event, ctx) => {
     if (!contextAugment)
       return;
-    if (ctx?.agentId && ctx.agentId !== "main")
-      return;
     const input = latestUserInput(event.prompt, event.messages);
-    if (!input)
-      return;
-    const context = await retrieveContext(input, ctx?.sessionKey);
+    const retrievalQuery = input && input.trim().length > 0 ? input : "current conversation continuity, active topics, active tasks, and curated notes";
+    const upstream = extractUpstreamMemorySignals(event.prompt, event.messages);
+    const context = await retrieveContext(retrievalQuery, ctx?.sessionKey, upstream);
     if (!context)
       return;
+    const prependContext = [
+      CLAWBOARD_CONTEXT_BEGIN,
+      "Clawboard continuity hook is active for this turn. The block below already comes from Clawboard retrieval. Do not claim Clawboard is unavailable unless this block explicitly says retrieval failed.",
+      "Use this Clawboard retrieval context merged with existing OpenClaw memory/turn context. Prioritize curated user notes when present.",
+      context,
+      CLAWBOARD_CONTEXT_END
+    ].join("\n");
     return {
-      prependContext: "Use this Clawboard retrieval context for continuity with user intent, topics, tasks, and curated notes.\n" + context
+      prependContext
     };
   });
 
@@ -579,7 +712,10 @@ export default function register(api) {
       return metaSession;
     if (ctx2?.channelId)
       return `channel:${ctx2.channelId}`;
-    return metaSession ?? ctx2?.sessionKey;
+    const ctxSession = ctx2?.sessionKey;
+    if (ctxSession)
+      return ctxSession;
+    return metaSession;
   };
 
   api.on("message_received", async (event, ctx) => {

@@ -29,7 +29,7 @@ TASK_SIM_THRESHOLD = float(os.environ.get("CLASSIFIER_TASK_SIM_THRESHOLD", "0.80
 EMBED_MODEL = os.environ.get("CLASSIFIER_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 TOPIC_NAME_SIM_THRESHOLD = float(os.environ.get("CLASSIFIER_TOPIC_NAME_SIM_THRESHOLD", "0.86"))
 TASK_NAME_SIM_THRESHOLD = float(os.environ.get("CLASSIFIER_TASK_NAME_SIM_THRESHOLD", "0.88"))
-SUMMARY_MAX = int(os.environ.get("CLASSIFIER_SUMMARY_MAX", "72"))
+SUMMARY_MAX = int(os.environ.get("CLASSIFIER_SUMMARY_MAX", "56"))
 
 LOCK_PATH = os.environ.get("CLASSIFIER_LOCK_PATH", "/data/classifier.lock")
 REINDEX_QUEUE_PATH = os.environ.get("CLASSIFIER_REINDEX_QUEUE_PATH", "/data/reindex-queue.jsonl")
@@ -40,6 +40,51 @@ OPENCLAW_MEMORY_MAX_HITS = int(os.environ.get("OPENCLAW_MEMORY_MAX_HITS", "6"))
 
 _embedder = None
 _embed_failed = False
+SUMMARY_DROP_WORDS = {
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "but",
+    "to",
+    "of",
+    "for",
+    "in",
+    "on",
+    "at",
+    "from",
+    "with",
+    "about",
+    "into",
+    "by",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "it",
+    "this",
+    "that",
+    "these",
+    "those",
+    "i",
+    "you",
+    "we",
+    "they",
+    "he",
+    "she",
+    "can",
+    "could",
+    "would",
+    "should",
+    "will",
+    "please",
+    "just",
+    "very",
+}
 
 
 def headers_clawboard():
@@ -160,10 +205,37 @@ def _is_classifier_payload(text: str) -> bool:
     return any(m in t for m in markers)
 
 
+def _is_injected_context_artifact(text: str) -> bool:
+    if not text:
+        return False
+    lower = text.lower()
+    if "[clawboard_context_begin]" in lower and "[clawboard_context_end]" in lower:
+        return True
+    return (
+        "clawboard continuity hook is active for this turn" in lower
+        and "use this clawboard retrieval context merged with existing openclaw memory/turn context" in lower
+    )
+
+
+def _noise_error_code(text: str) -> str:
+    if _is_classifier_payload(text):
+        return "classifier_payload_noise"
+    if _is_injected_context_artifact(text):
+        return "context_injection_noise"
+    return "conversation_noise"
+
+
+def _is_noise_conversation(entry: dict) -> bool:
+    if entry.get("type") != "conversation":
+        return False
+    text = _log_text(entry)
+    return _is_classifier_payload(text) or _is_injected_context_artifact(text)
+
+
 def _is_context_log(entry: dict) -> bool:
     if entry.get("type") not in ("conversation", "note"):
         return False
-    if _is_classifier_payload(_log_text(entry)):
+    if _is_noise_conversation(entry):
         return False
     return True
 
@@ -247,16 +319,52 @@ def _strip_transport_noise(text: str) -> str:
     return clean.strip()
 
 
+def _dense_clause(text: str) -> str:
+    clauses = [c.strip() for c in re.split(r"[.!?;\n]+", text) if c.strip()]
+    if not clauses:
+        return text
+
+    def score(clause: str) -> tuple[int, int]:
+        tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/_-]*", clause)
+        dense = [t for t in tokens if t.lower() not in SUMMARY_DROP_WORDS]
+        # Prefer information-dense clauses, then shorter for concision.
+        return (len(set(dense)) * 2 + len(dense), -len(tokens))
+
+    return max(clauses, key=score)
+
+
+def _telegraphic_phrase(text: str, max_words: int = 14) -> str:
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/_-]*", text)
+    if not tokens:
+        return ""
+    compact: list[str] = []
+    drop_enabled = len(tokens) >= 8
+    for token in tokens:
+        if drop_enabled and token.lower() in SUMMARY_DROP_WORDS:
+            continue
+        compact.append(token)
+        if len(compact) >= max_words:
+            break
+    if not compact:
+        compact = tokens[:max_words]
+    return " ".join(compact).strip()
+
+
 def _concise_summary(text: str) -> str:
     clean = _strip_transport_noise(text)
     clean = re.sub(r"\s+", " ", clean)
     clean = clean.strip("`* ")
-    if len(clean) <= SUMMARY_MAX:
-        return clean
-    sentence = re.split(r"(?<=[.!?])\s+", clean)[0].strip()
-    if sentence and len(sentence) <= SUMMARY_MAX:
-        return sentence
-    return f"{clean[: SUMMARY_MAX - 1].rstrip()}…"
+    clean = re.sub(r"(?i)\b(summary|message|content)\s*[:\-]\s*", "", clean).strip()
+    if not clean:
+        return ""
+
+    dense = _dense_clause(clean)
+    telegraphic = _telegraphic_phrase(dense)
+    candidate = telegraphic if len(telegraphic) >= 8 else dense
+    candidate = re.sub(r"\s+", " ", candidate).strip("`* ")
+    if len(candidate) <= SUMMARY_MAX:
+        return candidate
+    return f"{candidate[: SUMMARY_MAX - 1].rstrip()}…"
 
 
 def _looks_actionable(text: str) -> bool:
@@ -432,6 +540,8 @@ def process_reindex_queue():
             elif kind == "task":
                 namespace = f"task:{topic_id or 'unassigned'}"
                 embed_upsert(namespace, item_id, vec)
+            elif kind == "log":
+                embed_upsert("log", item_id, vec)
         except Exception as exc:
             print(f"classifier: reindex update failed for {kind}:{item_id}: {exc}")
 
@@ -686,6 +796,7 @@ def window_text(window: list[dict], notes_index: dict[str, list[str]] | None = N
 
 def call_classifier(
     window: list[dict],
+    pending_ids: list[str],
     candidate_topics: list[dict],
     candidate_tasks: list[dict],
     notes_index: dict[str, list[str]],
@@ -724,6 +835,7 @@ def call_classifier(
                 for t in candidate_tasks
             ],
             "memory": memory_hits[:memory_limit],
+            "pendingIds": pending_ids,
             "instructions": (
                 "Return STRICT JSON only with shape: "
                 "{\"topic\": {\"id\": string|null, \"name\": string, \"create\": boolean}, "
@@ -734,8 +846,11 @@ def call_classifier(
                 "(3) Only create when needed; (4) Topic/task names must be short and human; "
                 "(5) If an action item exists, pick or create a task; "
                 "(6) If in doubt, return task=null; "
-                "(7) For summaries, return very short one-liners <=72 chars; "
-                "telegraphic style is acceptable; never prefix with 'SUMMARY:' or transport metadata."
+                "(7) Summaries are REQUIRED for every id in pendingIds (no omissions, one per id); "
+                "(8) Each summary must be ultra concise <=56 chars, 4-10 words, telegraphic style; "
+                "sacrifice grammar for brevity; "
+                "(9) Do not copy first sentence verbatim, rewrite semantically; "
+                "(10) Never prefix with 'SUMMARY:' and never include transport metadata."
             ),
         }
 
@@ -770,6 +885,102 @@ def call_classifier(
             if compact:
                 raise
             continue
+
+
+def call_summary_repair(
+    window: list[dict],
+    pending_ids: list[str],
+    notes_index: dict[str, list[str]],
+):
+    if not pending_ids:
+        return {}
+
+    pending_set = {sid for sid in pending_ids if isinstance(sid, str) and sid}
+    if not pending_set:
+        return {}
+
+    best: dict[str, str] = {}
+    for compact in (False, True):
+        content_limit = 320 if compact else 520
+        body = {
+            "model": OPENCLAW_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a terse summarizer for dashboard message chips. STRICT JSON only.",
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "window": [
+                                {
+                                    "id": e.get("id"),
+                                    "agentLabel": e.get("agentLabel") or e.get("agentId"),
+                                    "content": _strip_transport_noise(e.get("content") or e.get("summary") or "")[
+                                        :content_limit
+                                    ],
+                                    "notes": notes_index.get(e.get("id") or "", [])[:2],
+                                }
+                                for e in window
+                                if e.get("id") in pending_set
+                            ],
+                            "pendingIds": list(pending_set),
+                            "instructions": (
+                                "Return STRICT JSON only with shape "
+                                "{\"summaries\":[{\"id\":string,\"summary\":string}]}. "
+                                "Rules: include every id in pendingIds exactly once; "
+                                "summary <=56 chars; 4-10 words; telegraphic style; "
+                                "sacrifice grammar for concision; semantic rewrite, not first sentence copy; "
+                                "no 'SUMMARY:' prefix; no transport metadata."
+                            ),
+                        }
+                    ),
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 260 if compact else 360,
+        }
+        try:
+            response = requests.post(
+                f"{OPENCLAW_BASE_URL}/v1/chat/completions",
+                headers=oc_headers(),
+                data=json.dumps(body),
+                timeout=15 if compact else 22,
+            )
+            response.raise_for_status()
+            raw = response.json()["choices"][0]["message"]["content"]
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+                if not match:
+                    continue
+                parsed = json.loads(match.group(0))
+            rows = parsed.get("summaries") if isinstance(parsed, dict) else None
+            if not isinstance(rows, list):
+                continue
+            out: dict[str, str] = {}
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                sid = item.get("id")
+                stext = item.get("summary")
+                if not isinstance(sid, str) or sid not in pending_set:
+                    continue
+                if not isinstance(stext, str):
+                    continue
+                concise = _concise_summary(stext)
+                if concise:
+                    out[sid] = concise
+            if len(out) > len(best):
+                best = out
+            if len(best) == len(pending_set):
+                return best
+        except Exception:
+            continue
+
+    return best
 
 
 def classify_without_llm(window: list[dict], ctx_logs: list[dict], topic_cands: list[dict], text: str):
@@ -875,13 +1086,14 @@ def classify_session(session_key: str):
             attempts = int(e.get("classificationAttempts") or 0)
             if attempts >= MAX_ATTEMPTS:
                 continue
-            if e.get("type") == "conversation" and _is_classifier_payload(_log_text(e)):
+            if _is_noise_conversation(e):
+                noise_text = _log_text(e)
                 patch_log(
                     e["id"],
                     {
                         "classificationStatus": "failed",
                         "classificationAttempts": attempts + 1,
-                        "classificationError": "classifier_payload_noise",
+                        "classificationError": _noise_error_code(noise_text),
                     },
                 )
         return
@@ -898,13 +1110,14 @@ def classify_session(session_key: str):
             attempts = int(e.get("classificationAttempts") or 0)
             if attempts >= MAX_ATTEMPTS:
                 continue
-            if e.get("type") == "conversation" and _is_classifier_payload(_log_text(e)):
+            if _is_noise_conversation(e):
+                noise_text = _log_text(e)
                 patch_log(
                     e["id"],
                     {
                         "classificationStatus": "failed",
                         "classificationAttempts": attempts + 1,
-                        "classificationError": "classifier_payload_noise",
+                        "classificationError": _noise_error_code(noise_text),
                     },
                 )
         return
@@ -969,7 +1182,16 @@ def classify_session(session_key: str):
 
     fallback_error: str | None = None
     try:
-        result = call_classifier(window, topic_cands, task_cands, notes_index, topic_contexts, task_contexts, memory_hits)
+        result = call_classifier(
+            window,
+            pending_ids,
+            topic_cands,
+            task_cands,
+            notes_index,
+            topic_contexts,
+            task_contexts,
+            memory_hits,
+        )
     except requests.exceptions.ReadTimeout:
         fallback_error = "llm_timeout"
     except Exception as exc:
@@ -1071,6 +1293,13 @@ def classify_session(session_key: str):
             if concise:
                 summary_updates[sid] = concise
 
+    missing_pending = [sid for sid in pending_ids if sid not in summary_updates]
+    if missing_pending:
+        repaired = call_summary_repair(window, missing_pending, notes_index)
+        for sid, summary in repaired.items():
+            if sid in missing_pending and summary:
+                summary_updates[sid] = summary
+
     for e in window:
         if (e.get("classificationStatus") or "pending") != "pending":
             continue
@@ -1091,13 +1320,14 @@ def classify_session(session_key: str):
         attempts = int(e.get("classificationAttempts") or 0)
         if attempts >= MAX_ATTEMPTS:
             continue
-        if e.get("type") == "conversation" and _is_classifier_payload(_log_text(e)):
+        if _is_noise_conversation(e):
+            noise_text = _log_text(e)
             patch_log(
                 e["id"],
                 {
                     "classificationStatus": "failed",
                     "classificationAttempts": attempts + 1,
-                    "classificationError": "classifier_payload_noise",
+                    "classificationError": _noise_error_code(noise_text),
                 },
             )
             continue
@@ -1145,6 +1375,27 @@ def main():
                 print(f"classifier: clawboard api unavailable: {e}")
                 pending = []
 
+            filtered_pending: list[dict] = []
+            for e in pending:
+                if not _is_noise_conversation(e):
+                    filtered_pending.append(e)
+                    continue
+                attempts = int(e.get("classificationAttempts") or 0) + 1
+                next_status = "failed" if attempts >= MAX_ATTEMPTS else "pending"
+                noise_text = _log_text(e)
+                try:
+                    patch_log(
+                        e["id"],
+                        {
+                            "classificationStatus": next_status,
+                            "classificationAttempts": attempts,
+                            "classificationError": _noise_error_code(noise_text),
+                        },
+                    )
+                except Exception:
+                    pass
+            pending = filtered_pending
+
             session_stats: dict[str, dict] = {}
             for e in pending:
                 sk = ((e.get("source") or {}) or {}).get("sessionKey")
@@ -1171,8 +1422,9 @@ def main():
                     session_keys.append(sk)
                     continue
                 # Fallback for environments where channel session keys are unavailable:
-                # only classify non-channel sessions that still carry real message ids.
-                if stats["messageId"] > 0 and stats["count"] >= 2 and stats["user"] > 0 and stats["assistant"] > 0:
+                # classify any real user<->assistant thread even without message ids
+                # (e.g. agent:main:main sessions from gateway/openclaw CLI).
+                if stats["count"] >= 2 and stats["user"] > 0 and stats["assistant"] > 0:
                     session_keys.append(sk)
 
             session_keys.sort(

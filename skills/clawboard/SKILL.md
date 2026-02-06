@@ -90,11 +90,11 @@ Set plugin config with the Clawboard base URL and token (if required):
   "entries": {
     "clawboard-logger": {
       "enabled": true,
-      "config": {
-        "baseUrl": "http://clawboard:8010",
-        "token": "YOUR_TOKEN",
-        "contextAugment": true,
-        "contextMaxChars": 2200
+        "config": {
+          "baseUrl": "http://clawboard:8010",
+          "token": "YOUR_TOKEN",
+          "contextAugment": true,
+          "contextMaxChars": 2200
       }
     }
   }
@@ -138,6 +138,9 @@ If the host is on Tailscale, use the tailnet hostname or IP (example: `http://cl
 - Clawboard UI shows summaries by default; users can click “...” or “Show full prompts.”
 - Tasks support **pinning**. Use `pinned: true` to keep priority tasks at the top; users and OpenClaw can toggle it via `POST /api/tasks`.
 - The plugin also injects Clawboard continuity context at `before_agent_start` (topics, tasks, recent timeline, curated notes) unless `contextAugment` is disabled.
+- Retrieval path is hybrid by default: vector+lexical `/api/search` first, lexical fallback if unavailable.
+- Context is merged with OpenClaw's existing prompt context (session memory, markdown memory, recent turns) so Clawboard augments rather than replaces native memory.
+- Curated notes (`type: "note"` + `relatedLogId`) are weighted above neutral timeline lines during retrieval and prompt injection.
 
 ### 4a) API awareness (mandatory)
 

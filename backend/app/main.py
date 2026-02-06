@@ -14,7 +14,7 @@ from fastapi import Request
 from uuid import uuid4
 from fastapi import FastAPI, Depends, Query, Body, HTTPException, Header
 from fastapi.responses import StreamingResponse
-from typing import List
+from typing import List, Any
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import select
 
@@ -38,6 +38,7 @@ from .schemas import (
 )
 from .events import event_hub
 from .clawgraph import build_clawgraph
+from .vector_search import semantic_search
 
 app = FastAPI(
     title="Clawboard API",
@@ -99,6 +100,47 @@ def _normalize_label(value: str | None) -> str:
     text = re.sub(r"[^a-z0-9\s]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _sanitize_log_text(value: str | None) -> str:
+    if not value:
+        return ""
+    text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = re.sub(r"^\s*summary\s*[:\-]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r"^\[Discord [^\]]+\]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r"\[message[_\s-]?id:[^\]]+\]", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _clip(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
+def _log_reindex_text(entry: LogEntry) -> str:
+    parts = [
+        _sanitize_log_text(entry.summary or ""),
+        _sanitize_log_text(entry.content or ""),
+        _sanitize_log_text(entry.raw or ""),
+    ]
+    text = " ".join(part for part in parts if part)
+    return _clip(text, 1200)
+
+
+def _enqueue_log_reindex(entry: LogEntry) -> None:
+    text = _log_reindex_text(entry)
+    if not text:
+        return
+    enqueue_reindex_request({"kind": "log", "id": entry.id, "text": text, "topicId": entry.topicId})
+
+
+def _log_matches_session(entry: LogEntry, session_key: str) -> bool:
+    source = getattr(entry, "source", None)
+    if not isinstance(source, dict):
+        return False
+    return str(source.get("sessionKey") or "") == session_key
 
 
 def _normalize_hex_color(value: str | None) -> str | None:
@@ -289,6 +331,7 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     session.commit()
     session.refresh(entry)
     event_hub.publish({"type": "log.appended", "data": entry.model_dump(), "eventTs": entry.updatedAt})
+    _enqueue_log_reindex(entry)
     return entry
 
 
@@ -764,6 +807,7 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
         session.commit()
         session.refresh(entry)
         event_hub.publish({"type": "log.patched", "data": entry.model_dump(), "eventTs": entry.updatedAt})
+        _enqueue_log_reindex(entry)
         return entry
 
 
@@ -833,6 +877,233 @@ def clawgraph(
         )
         graph["generatedAt"] = now_iso()
         return graph
+
+
+@app.get("/api/search", tags=["search"])
+def search(
+    q: str = Query(..., min_length=1, description="Natural language query."),
+    topicId: str | None = Query(default=None, description="Restrict search to one topic ID."),
+    sessionKey: str | None = Query(default=None, description="Session key continuity boost (source.sessionKey)."),
+    includePending: bool = Query(default=True, description="Include pending logs in matching."),
+    limitTopics: int = Query(default=24, ge=1, le=120, description="Max topic matches."),
+    limitTasks: int = Query(default=48, ge=1, le=240, description="Max task matches."),
+    limitLogs: int = Query(default=360, ge=10, le=2000, description="Max log matches."),
+):
+    """Hybrid semantic + lexical search across topics, tasks, and logs."""
+    query = (q or "").strip()
+    if len(query) < 1:
+        return {
+            "query": "",
+            "mode": "empty",
+            "topics": [],
+            "tasks": [],
+            "logs": [],
+            "notes": [],
+            "matchedTopicIds": [],
+            "matchedTaskIds": [],
+            "matchedLogIds": [],
+        }
+
+    with get_session() as session:
+        topics = session.exec(select(Topic)).all()
+        tasks = session.exec(select(Task)).all()
+        logs = session.exec(select(LogEntry)).all()
+
+        if topicId:
+            tasks = [task for task in tasks if task.topicId == topicId]
+            logs = [entry for entry in logs if entry.topicId == topicId]
+
+        if not includePending:
+            logs = [entry for entry in logs if (entry.classificationStatus or "pending") == "classified"]
+
+        logs.sort(key=lambda entry: entry.createdAt, reverse=True)
+
+        topic_map: dict[str, Topic] = {item.id: item for item in topics}
+        task_map: dict[str, Task] = {item.id: item for item in tasks}
+        log_map: dict[str, LogEntry] = {item.id: item for item in logs}
+
+        notes = [entry for entry in logs if entry.type == "note" and entry.relatedLogId]
+        note_count_by_log: dict[str, int] = {}
+        note_items_by_log: dict[str, list[LogEntry]] = {}
+        for note in notes:
+            related_id = str(note.relatedLogId or "")
+            if not related_id:
+                continue
+            note_count_by_log[related_id] = (note_count_by_log.get(related_id) or 0) + 1
+            note_items_by_log.setdefault(related_id, []).append(note)
+
+        note_weight_by_topic: dict[str, float] = {}
+        note_weight_by_task: dict[str, float] = {}
+        for related_id, count in note_count_by_log.items():
+            related = log_map.get(related_id)
+            if not related:
+                continue
+            weight = min(0.24, 0.07 * count)
+            if related.topicId:
+                note_weight_by_topic[related.topicId] = (note_weight_by_topic.get(related.topicId) or 0.0) + weight
+            if related.taskId:
+                note_weight_by_task[related.taskId] = (note_weight_by_task.get(related.taskId) or 0.0) + weight
+
+        session_topic_ids: set[str] = set()
+        session_task_ids: set[str] = set()
+        session_log_ids: set[str] = set()
+        if sessionKey:
+            for entry in logs:
+                if not _log_matches_session(entry, sessionKey):
+                    continue
+                session_log_ids.add(entry.id)
+                if entry.topicId:
+                    session_topic_ids.add(entry.topicId)
+                if entry.taskId:
+                    session_task_ids.add(entry.taskId)
+
+        search_result = semantic_search(
+            query,
+            [item.model_dump() for item in topics],
+            [item.model_dump() for item in tasks],
+            [item.model_dump() for item in logs],
+            topic_limit=limitTopics,
+            task_limit=limitTasks,
+            log_limit=limitLogs,
+        )
+
+        topic_base_score: dict[str, float] = {
+            str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("topics", [])
+        }
+        task_base_score: dict[str, float] = {
+            str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("tasks", [])
+        }
+        log_base_score: dict[str, float] = {
+            str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("logs", [])
+        }
+
+        # Parent propagation from matched logs.
+        for log_id, score in log_base_score.items():
+            entry = log_map.get(log_id)
+            if not entry:
+                continue
+            if entry.topicId:
+                boosted = topic_base_score.get(entry.topicId, 0.0) + min(0.18, score * 0.22)
+                topic_base_score[entry.topicId] = boosted
+            if entry.taskId:
+                boosted = task_base_score.get(entry.taskId, 0.0) + min(0.2, score * 0.25)
+                task_base_score[entry.taskId] = boosted
+
+        topic_rows: list[dict[str, Any]] = []
+        for topic_id, base_score in topic_base_score.items():
+            topic = topic_map.get(topic_id)
+            if not topic:
+                continue
+            score = base_score
+            score += min(0.26, note_weight_by_topic.get(topic_id, 0.0))
+            if topic_id in session_topic_ids:
+                score += 0.12
+            topic_rows.append(
+                {
+                    "id": topic.id,
+                    "name": topic.name,
+                    "description": topic.description,
+                    "score": round(score, 6),
+                    "noteWeight": round(min(0.26, note_weight_by_topic.get(topic_id, 0.0)), 6),
+                    "sessionBoosted": topic_id in session_topic_ids,
+                }
+            )
+        topic_rows.sort(key=lambda item: float(item["score"]), reverse=True)
+        topic_rows = topic_rows[:limitTopics]
+
+        task_rows: list[dict[str, Any]] = []
+        for task_id, base_score in task_base_score.items():
+            task = task_map.get(task_id)
+            if not task:
+                continue
+            score = base_score
+            score += min(0.26, note_weight_by_task.get(task_id, 0.0))
+            if task_id in session_task_ids:
+                score += 0.1
+            task_rows.append(
+                {
+                    "id": task.id,
+                    "topicId": task.topicId,
+                    "title": task.title,
+                    "status": task.status,
+                    "score": round(score, 6),
+                    "noteWeight": round(min(0.26, note_weight_by_task.get(task_id, 0.0)), 6),
+                    "sessionBoosted": task_id in session_task_ids,
+                }
+            )
+        task_rows.sort(key=lambda item: float(item["score"]), reverse=True)
+        task_rows = task_rows[:limitTasks]
+
+        log_rows: list[dict[str, Any]] = []
+        for log_id, base_score in log_base_score.items():
+            entry = log_map.get(log_id)
+            if not entry:
+                continue
+            score = base_score
+            note_count = int(note_count_by_log.get(log_id) or 0)
+            note_weight = min(0.24, 0.06 * note_count)
+            score += note_weight
+            if log_id in session_log_ids:
+                score += 0.08
+            log_rows.append(
+                {
+                    "id": entry.id,
+                    "topicId": entry.topicId,
+                    "taskId": entry.taskId,
+                    "type": entry.type,
+                    "agentId": entry.agentId,
+                    "agentLabel": entry.agentLabel,
+                    "summary": _clip(_sanitize_log_text(entry.summary or entry.content or ""), 140),
+                    "content": _clip(_sanitize_log_text(entry.content or ""), 320),
+                    "createdAt": entry.createdAt,
+                    "score": round(score, 6),
+                    "noteCount": note_count,
+                    "noteWeight": round(note_weight, 6),
+                    "sessionBoosted": log_id in session_log_ids,
+                }
+            )
+        log_rows.sort(
+            key=lambda item: (
+                float(item["score"]),
+                item.get("createdAt") or "",
+            ),
+            reverse=True,
+        )
+        log_rows = log_rows[:limitLogs]
+
+        note_rows: list[dict[str, Any]] = []
+        emitted_note_ids: set[str] = set()
+        for item in log_rows:
+            log_id = str(item.get("id") or "")
+            for note in note_items_by_log.get(log_id, [])[:3]:
+                if note.id in emitted_note_ids:
+                    continue
+                emitted_note_ids.add(note.id)
+                note_rows.append(
+                    {
+                        "id": note.id,
+                        "relatedLogId": note.relatedLogId,
+                        "topicId": note.topicId,
+                        "taskId": note.taskId,
+                        "summary": _clip(_sanitize_log_text(note.summary or note.content or ""), 140),
+                        "content": _clip(_sanitize_log_text(note.content or ""), 280),
+                        "createdAt": note.createdAt,
+                    }
+                )
+            if len(note_rows) >= 160:
+                break
+
+        return {
+            "query": query,
+            "mode": search_result.get("mode") or "lexical",
+            "topics": topic_rows,
+            "tasks": task_rows,
+            "logs": log_rows,
+            "notes": note_rows,
+            "matchedTopicIds": [item["id"] for item in topic_rows],
+            "matchedTaskIds": [item["id"] for item in task_rows],
+            "matchedLogIds": [item["id"] for item in log_rows],
+        }
 
 
 @app.post("/api/reindex", dependencies=[Depends(require_token)], tags=["classifier"])

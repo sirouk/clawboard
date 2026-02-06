@@ -97,6 +97,8 @@ const DEFAULT_CONTEXT_MAX_CHARS = 2200;
 const DEFAULT_CONTEXT_TOPIC_LIMIT = 3;
 const DEFAULT_CONTEXT_TASK_LIMIT = 3;
 const DEFAULT_CONTEXT_LOG_LIMIT = 6;
+const CLAWBOARD_CONTEXT_BEGIN = "[CLAWBOARD_CONTEXT_BEGIN]";
+const CLAWBOARD_CONTEXT_END = "[CLAWBOARD_CONTEXT_END]";
 
 function normalizeBaseUrl(url: string) {
   return url.replace(/\/$/, "");
@@ -104,6 +106,11 @@ function normalizeBaseUrl(url: string) {
 
 function sanitizeMessageContent(content: string) {
   let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
+  text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\][\s\S]*?\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
+  text = text.replace(
+    /Clawboard continuity hook is active for this turn\.[\s\S]*?Prioritize curated user notes when present\.\s*/gi,
+    "",
+  );
   text = text.replace(/^\s*summary\s*[:\-]\s*/gim, "");
   text = text.replace(/^\[Discord [^\]]+\]\s*/gim, "");
   text = text.replace(/\[message[_\s-]?id:[^\]]+\]/gi, "");
@@ -449,6 +456,56 @@ export default function register(api: OpenClawPluginApi) {
     title: string;
     status?: string;
   };
+  type ApiSearchTopic = {
+    id: string;
+    name: string;
+    description?: string | null;
+    score?: number;
+    noteWeight?: number;
+    sessionBoosted?: boolean;
+  };
+  type ApiSearchTask = {
+    id: string;
+    topicId?: string | null;
+    title: string;
+    status?: string;
+    score?: number;
+    noteWeight?: number;
+    sessionBoosted?: boolean;
+  };
+  type ApiSearchLog = {
+    id: string;
+    topicId?: string | null;
+    taskId?: string | null;
+    type?: string;
+    summary?: string | null;
+    content?: string | null;
+    createdAt?: string;
+    score?: number;
+    noteCount?: number;
+    noteWeight?: number;
+    sessionBoosted?: boolean;
+  };
+  type ApiSearchNote = {
+    id: string;
+    relatedLogId?: string | null;
+    topicId?: string | null;
+    taskId?: string | null;
+    summary?: string | null;
+    content?: string | null;
+    createdAt?: string;
+  };
+  type ApiSearchResponse = {
+    query?: string;
+    mode?: string;
+    topics?: ApiSearchTopic[];
+    tasks?: ApiSearchTask[];
+    logs?: ApiSearchLog[];
+    notes?: ApiSearchNote[];
+    matchedTopicIds?: string[];
+    matchedTaskIds?: string[];
+    matchedLogIds?: string[];
+  };
 
   const apiHeaders = {
     "Content-Type": "application/json",
@@ -499,6 +556,66 @@ export default function register(api: OpenClawPluginApi) {
     return coerceTasks(data);
   }
 
+  async function semanticLookup(query: string, sessionKey?: string) {
+    const data = await getJson("/api/search", {
+      q: query,
+      sessionKey,
+      includePending: 1,
+      limitTopics: Math.max(12, contextTopicLimit * 4),
+      limitTasks: Math.max(24, contextTaskLimit * 5),
+      limitLogs: Math.max(120, contextLogLimit * 30),
+    });
+    if (!data || typeof data !== "object") return null;
+    return data as ApiSearchResponse;
+  }
+
+  function extractUpstreamMemorySignals(prompt: string | undefined, messages: unknown[] | undefined) {
+    const memoryLines: string[] = [];
+    const turnLines: string[] = [];
+    const seen = new Set<string>();
+
+    const remember = (line: string, bucket: string[]) => {
+      const text = clip(normalizeWhitespace(sanitizeMessageContent(line)), 180);
+      if (!text) return;
+      const key = text.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      bucket.push(text);
+    };
+
+    const promptText = sanitizeMessageContent(prompt ?? "");
+    if (promptText) {
+      const lines = promptText
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const memoryHints = lines.filter((line) =>
+        /(memory|markdown|\.md\b|session|history|continuity|topic|task|retriev|vector|embed|note|curat)/i.test(line)
+      );
+      for (const line of memoryHints.slice(0, 8)) {
+        remember(line, memoryLines);
+      }
+    }
+
+    if (Array.isArray(messages)) {
+      const recent = messages.slice(-8);
+      for (const raw of recent) {
+        const item = (raw ?? {}) as { role?: unknown; content?: unknown };
+        const role = typeof item.role === "string" ? item.role : "turn";
+        const text = extractTextLoose(item.content);
+        if (!text) continue;
+        const clean = clip(normalizeWhitespace(sanitizeMessageContent(text)), 140);
+        if (!clean) continue;
+        remember(`${role}: ${clean}`, turnLines);
+      }
+    }
+
+    return {
+      memoryLines: memoryLines.slice(0, 6),
+      turnLines: turnLines.slice(0, 6),
+    };
+  }
+
   function formatLogLine(entry: ApiLogEntry) {
     const who = (entry.agentId || "").toLowerCase() === "user" ? "User" : entry.agentLabel || entry.agentId || "Agent";
     const text = sanitizeMessageContent(entry.summary || entry.content || "");
@@ -507,16 +624,36 @@ export default function register(api: OpenClawPluginApi) {
 
   function buildContextBlock(params: {
     query: string;
+    searchMode?: string;
     sessionLogs: ApiLogEntry[];
+    semanticLogs: ApiSearchLog[];
     topics: ApiTopic[];
     tasks: ApiTask[];
     topicRecent: Record<string, ApiLogEntry[]>;
-    notes: ApiLogEntry[];
+    notes: Array<ApiLogEntry | ApiSearchNote>;
+    upstream: ReturnType<typeof extractUpstreamMemorySignals>;
   }) {
-    const { query, sessionLogs, topics, tasks, topicRecent, notes } = params;
+    const { query, searchMode, sessionLogs, semanticLogs, topics, tasks, topicRecent, notes, upstream } = params;
     const lines: string[] = [];
     lines.push("Clawboard continuity context:");
     lines.push(`Current user intent: ${clip(normalizeWhitespace(query), 180)}`);
+    if (searchMode) {
+      lines.push(`Retrieval mode: ${searchMode}`);
+    }
+
+    if (upstream.memoryLines.length > 0) {
+      lines.push("OpenClaw memory signals (sessions/markdown/recent retrieval):");
+      for (const line of upstream.memoryLines.slice(0, 5)) {
+        lines.push(`- ${line}`);
+      }
+    }
+
+    if (upstream.turnLines.length > 0) {
+      lines.push("Recent turns:");
+      for (const line of upstream.turnLines.slice(0, 4)) {
+        lines.push(`- ${line}`);
+      }
+    }
 
     if (topics.length > 0) {
       lines.push("Likely topics:");
@@ -534,7 +671,31 @@ export default function register(api: OpenClawPluginApi) {
       }
     }
 
-    const timeline = sessionLogs.filter((entry) => entry.type === "conversation").slice(0, contextLogLimit);
+    const timeline: ApiLogEntry[] = [];
+    const pushed = new Set<string>();
+    for (const item of sessionLogs.filter((entry) => entry.type === "conversation").slice(0, contextLogLimit + 2)) {
+      const key = item.id || `${item.createdAt}:${item.summary || item.content || ""}`;
+      if (pushed.has(key)) continue;
+      pushed.add(key);
+      timeline.push(item);
+      if (timeline.length >= contextLogLimit) break;
+    }
+    for (const item of semanticLogs.slice(0, contextLogLimit + 3)) {
+      if (item.type && item.type !== "conversation") continue;
+      const key = item.id || `${item.createdAt}:${item.summary || item.content || ""}`;
+      if (pushed.has(key)) continue;
+      pushed.add(key);
+      timeline.push({
+        id: item.id,
+        topicId: item.topicId,
+        taskId: item.taskId,
+        type: item.type ?? "conversation",
+        summary: item.summary ?? undefined,
+        content: item.content ?? undefined,
+        createdAt: item.createdAt,
+      });
+      if (timeline.length >= contextLogLimit) break;
+    }
     if (timeline.length > 0) {
       lines.push("Recent thread timeline:");
       for (const entry of timeline) {
@@ -544,7 +705,7 @@ export default function register(api: OpenClawPluginApi) {
 
     const notesByLog = new Map<string, string[]>();
     for (const note of notes) {
-      if (note.type !== "note") continue;
+      if ("type" in note && note.type && note.type !== "note") continue;
       const key = String(note.relatedLogId ?? "");
       if (!key) continue;
       const text = sanitizeMessageContent(note.content || note.summary || "");
@@ -563,7 +724,7 @@ export default function register(api: OpenClawPluginApi) {
       if (noteLines.length >= 4) break;
     }
     if (noteLines.length > 0) {
-      lines.push("Curated user notes:");
+      lines.push("Curated user notes (high weight):");
       lines.push(...noteLines.slice(0, 4));
     }
 
@@ -586,26 +747,32 @@ export default function register(api: OpenClawPluginApi) {
     return clip(block, contextMaxChars);
   }
 
-  async function retrieveContext(query: string, sessionKey?: string) {
+  async function retrieveContext(
+    query: string,
+    sessionKey: string | undefined,
+    upstream: ReturnType<typeof extractUpstreamMemorySignals>
+  ) {
     const normalizedQuery = clip(normalizeWhitespace(sanitizeMessageContent(query)), 500);
     if (!normalizedQuery || normalizedQuery.length < 6) return undefined;
 
-    const [topicsAll, sessionLogsRaw] = await Promise.all([
+    const [topicsAll, sessionLogsRaw, semantic] = await Promise.all([
       listTopics(),
       sessionKey
         ? listLogs({
             sessionKey,
             type: "conversation",
-            classificationStatus: "classified",
             limit: 80,
             offset: 0,
           })
         : Promise.resolve([] as ApiLogEntry[]),
+      semanticLookup(normalizedQuery, sessionKey),
     ]);
 
     const sessionLogs = sessionLogsRaw
       .filter((entry) => entry.type === "conversation")
       .sort((a, b) => (String(a.createdAt || "") < String(b.createdAt || "") ? 1 : -1));
+
+    const topicsById = new Map(topicsAll.map((topic) => [topic.id, topic]));
 
     const recentTopicOrder: string[] = [];
     const recentTopicSet = new Set<string>();
@@ -619,6 +786,15 @@ export default function register(api: OpenClawPluginApi) {
     }
 
     const topicScore = new Map<string, number>();
+    if (semantic?.topics?.length) {
+      for (const item of semantic.topics) {
+        if (!item?.id) continue;
+        const base = Number(item.score || 0);
+        const noteWeight = Number(item.noteWeight || 0);
+        const boosted = base + Math.min(0.24, noteWeight);
+        topicScore.set(item.id, Math.max(topicScore.get(item.id) ?? 0, boosted));
+      }
+    }
     for (let i = 0; i < recentTopicOrder.length; i += 1) {
       const id = recentTopicOrder[i];
       const continuityBoost = Math.max(0.5, 0.9 - i * 0.08);
@@ -639,6 +815,10 @@ export default function register(api: OpenClawPluginApi) {
       .slice(0, contextTopicLimit)
       .map((item) => item.topic);
 
+    const semanticTaskById = new Map((semantic?.tasks ?? []).map((item) => [item.id, item]));
+    const semanticLogs = (semantic?.logs ?? []).slice(0, contextLogLimit + 4);
+    const semanticNotes = (semantic?.notes ?? []).slice(0, 120);
+
     const taskBuckets = await Promise.all(
       topics.map(async (topic) => {
         const [tasks, logs] = await Promise.all([
@@ -646,7 +826,6 @@ export default function register(api: OpenClawPluginApi) {
           listLogs({
             topicId: topic.id,
             type: "conversation",
-            classificationStatus: "classified",
             limit: contextLogLimit,
             offset: 0,
           }),
@@ -666,11 +845,20 @@ export default function register(api: OpenClawPluginApi) {
       for (const task of bucket.tasks) {
         const lexical = lexicalSimilarity(normalizedQuery, task.title || "");
         const continuityBoost = recentTaskSet.has(task.id) ? 0.25 : 0;
-        taskScored.push({ task, score: lexical + continuityBoost });
+        const semanticScore = Number(semanticTaskById.get(task.id)?.score || 0);
+        const noteWeight = Number(semanticTaskById.get(task.id)?.noteWeight || 0);
+        taskScored.push({ task, score: lexical + continuityBoost + semanticScore + Math.min(0.24, noteWeight) });
       }
     }
     for (const entry of sessionLogs.slice(0, contextLogLimit + 4)) {
       if (entry.id) relatedIds.add(entry.id);
+    }
+    for (const entry of semanticLogs) {
+      if (entry.id) relatedIds.add(entry.id);
+      if (entry.topicId && topics.length < contextTopicLimit) {
+        const candidate = topicsById.get(entry.topicId);
+        if (candidate && !topics.some((item) => item.id === candidate.id)) topics.push(candidate);
+      }
     }
 
     const tasks = taskScored
@@ -680,7 +868,7 @@ export default function register(api: OpenClawPluginApi) {
       .map((item) => item.task);
 
     const relatedLogId = Array.from(relatedIds).slice(0, 50).join(",");
-    const notes =
+    const fallbackNotes =
       relatedLogId.length > 0
         ? await listLogs({
             type: "note",
@@ -689,14 +877,18 @@ export default function register(api: OpenClawPluginApi) {
             offset: 0,
           })
         : [];
+    const notes = [...semanticNotes, ...fallbackNotes];
 
     const context = buildContextBlock({
       query: normalizedQuery,
+      searchMode: semantic?.mode,
       sessionLogs,
+      semanticLogs,
       topics,
       tasks,
       topicRecent,
       notes,
+      upstream,
     });
     return context || undefined;
   }
@@ -707,15 +899,23 @@ export default function register(api: OpenClawPluginApi) {
 
   beforeAgentStartApi.on("before_agent_start", async (event: PluginHookBeforeAgentStartEvent, ctx: PluginHookAgentContext) => {
     if (!contextAugment) return;
-    if (ctx?.agentId && ctx.agentId !== "main") return;
     const input = latestUserInput(event.prompt, event.messages);
-    if (!input) return;
-    const context = await retrieveContext(input, ctx?.sessionKey);
+    const retrievalQuery =
+      input && input.trim().length > 0
+        ? input
+        : "current conversation continuity, active topics, active tasks, and curated notes";
+    const upstream = extractUpstreamMemorySignals(event.prompt, event.messages);
+    const context = await retrieveContext(retrievalQuery, ctx?.sessionKey, upstream);
     if (!context) return;
+    const prependContext = [
+      CLAWBOARD_CONTEXT_BEGIN,
+      "Clawboard continuity hook is active for this turn. The block below already comes from Clawboard retrieval. Do not claim Clawboard is unavailable unless this block explicitly says retrieval failed.",
+      "Use this Clawboard retrieval context merged with existing OpenClaw memory/turn context. Prioritize curated user notes when present.",
+      context,
+      CLAWBOARD_CONTEXT_END,
+    ].join("\n");
     return {
-      prependContext:
-        "Use this Clawboard retrieval context for continuity with user intent, topics, tasks, and curated notes.\n" +
-        `${context}`,
+      prependContext,
     };
   });
 
@@ -730,7 +930,9 @@ export default function register(api: OpenClawPluginApi) {
     const metaSession = meta?.sessionKey;
     if (typeof metaSession === "string" && metaSession.startsWith("channel:")) return metaSession;
     if (ctx2?.channelId) return `channel:${ctx2.channelId}`;
-    return metaSession ?? (ctx2 as unknown as { sessionKey?: string })?.sessionKey;
+    const ctxSession = (ctx2 as unknown as { sessionKey?: string })?.sessionKey;
+    if (ctxSession) return ctxSession;
+    return metaSession;
   };
 
   api.on("message_received", async (event: PluginHookMessageReceivedEvent, ctx: PluginHookMessageContext) => {

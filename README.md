@@ -145,6 +145,12 @@ Set plugin config in your OpenClaw config:
 }
 ```
 
+Continuity read-path:
+- The plugin logs every turn and also performs `before_agent_start` context augmentation.
+- It retrieves Clawboard context via hybrid semantic search (`/api/search`) with lexical fallback.
+- Curated notes (`type=note` linked by `relatedLogId`) are weighted and injected with recent topic/task context.
+- Existing OpenClaw memory context (session DB/markdown/turn history already present in the prompt) is preserved and merged, not replaced.
+
 ## API quick test
 
 ```bash
