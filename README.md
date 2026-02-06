@@ -1,133 +1,226 @@
 # Clawboard
 
-Clawboard is a local-first companion for OpenClaw. It keeps topics, tasks, and an append-only activity log in one place so you can always resume where you left off.
+Clawboard is a companion memory system for [OpenClaw](https://openclaw.ai):
 
-## Run locally
+- Stage 1: firehose logging (user/assistant/subagent/tool events).
+- Stage 2: async classification into Topics and Tasks.
+- Stage 3: Clawgraph memory map (entity + relationship synthesis).
+- UI: Unified Board, Logs, Stats, Setup, Providers, and Clawgraph.
 
-```bash
-npm install
-npm run dev
-```
+Clawboard runs alongside OpenClaw. OpenClaw remains the agent runtime; Clawboard provides durable memory capture, classification, curation, and retrieval context.
 
-Then open `http://localhost:3000` (or `http://localhost:3010` if running via Docker Compose).
+## If OpenClaw Is Not Installed Yet
 
-## Configuration
+If you want to use Chutes as your provider, create an account at `https://chutes.ai` first, then run [`add_chutes.sh`](inference-providers/add_chutes.sh) before skill installation.
 
-- `CLAWBOARD_TOKEN`: if set, write actions require the matching `X-Clawboard-Token` header.
-- `NEXT_PUBLIC_CLAWBOARD_API_BASE`: base URL for the FastAPI backend (e.g. `http://localhost:8010`).
-- `CLAWBOARD_DB_URL`: database URL for FastAPI (defaults to `sqlite:///./data/clawboard.db`).
-- `CLAWBOARD_INTEGRATION_LEVEL`: default integration level for /api/config (`manual` | `write` | `full`).
-
-Clawboard does not read local JSON for runtime data. All UI data is fetched from the FastAPI-backed SQLite database.
-Live updates use an SSE stream (`/api/stream`) so OpenClaw writes are reflected instantly without manual refresh.
-The UI will reconcile on reconnect using `/api/changes?since=...` to avoid missing events if the stream blips.
-
-## FastAPI backend (recommended)
-
-The backend API now lives in FastAPI (Swagger docs at `http://localhost:8010/docs`).
-By default it uses SQLite at `./data/clawboard.db` and supports the same schema as the UI.
-The Next.js API routes have been removed; set `NEXT_PUBLIC_CLAWBOARD_API_BASE` for the UI to function.
-You can also set the API base at runtime via the Setup panel in the UI (stored in localStorage).
-
-## Tests (Playwright)
-
-Install browsers once:
+Local script:
 
 ```bash
-npx playwright install
+bash inference-providers/add_chutes.sh
 ```
 
-Run the full suite (auto-starts the dev server on port 3050):
+Remote fast path:
 
 ```bash
-npm run test
+curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash
 ```
 
-Playwright uses `tests/fixtures/portal.json` as its data source for deterministic UI assertions.
-To load demo data into the SQLite database:
+`scripts/bootstrap_openclaw.sh` will now prompt to launch this fast path when `openclaw` is missing.
+It also sets token + browser access URL values during bootstrap.
+
+## Quick Start (Recommended)
+
+1. Create `.env` from the template:
 
 ```bash
-bash deploy.sh demo-load
+cp .env.example .env
 ```
 
-To clear demo data:
+2. Set an API token (required for writes and non-localhost reads):
 
 ```bash
-bash deploy.sh demo-clear
+openssl rand -hex 32
 ```
 
-## OpenClaw skill
+Paste it into `.env` as:
 
-This repo ships a `skills/clawboard` folder for OpenClaw.
+```bash
+CLAWBOARD_TOKEN=<your-token>
+```
+
+3. Start the stack:
+
+```bash
+docker compose up -d --build
+```
+
+4. Open:
+
+- UI: `http://localhost:3010`
+- API: `http://localhost:8010`
+- API docs: `http://localhost:8010/docs`
+
+If you need Tailscale/custom-domain access, set:
+
+- `CLAWBOARD_PUBLIC_API_BASE=<browser-reachable-api-url>`
+- `CLAWBOARD_PUBLIC_WEB_URL=<browser-reachable-ui-url>` (optional)
+
+Example:
+
+- Tailscale: `http://100.x.y.z:8010`
+- Custom domain: `https://api.example.com`
+
+## What Runs
+
+- `web`: Next.js app (`:3010`)
+- `api`: FastAPI + SQLite (`:8010`)
+- `classifier`: async classifier worker (default 10s cadence)
+- `db` / `qdrant` / `redis` (only when using `--profile scale`) run on an internal Docker network without host port publishing.
+
+Data is persisted in `./data` (`clawboard.db`, embeddings store, queue files).
+For install defaults, users interact through `web` and `api`; database services are not exposed externally.
+
+## Technology Stack
+
+- OpenClaw gateway + plugins/hooks (source agent runtime)
+- Clawboard logger plugin (`extensions/clawboard-logger`) for stage-1 firehose capture
+- FastAPI + SQLModel backend (`backend/`)
+- Next.js App Router frontend (`src/`)
+- Classifier worker (`classifier/classifier.py`) with local embeddings + optional Qdrant path
+- Docker Compose orchestration for `web` + `api` + `classifier` (+ optional scale profile services)
+
+## How It Works
+
+### Stage 1: Firehose Hook Logging (OpenClaw plugin)
+
+- Plugin path: `extensions/clawboard-logger`.
+- Captures inbound/outbound conversation and agent activity with OpenClaw hooks:
+  - `message_received` (user inbound)
+  - `message_sending` + `agent_end` fallback (assistant/main/subagent outbound)
+  - `before_tool_call` / `after_tool_call` (tool actions)
+- Writes logs to Clawboard as `pending` first so stage 1 never blocks on classification.
+- Uses idempotency keys + source `messageId` guards to prevent duplicate conversation rows.
+
+### Stage 2: Async Topic/Task Classifier
+
+- Worker path: `classifier/classifier.py` (runs in `classifier` container).
+- Runs every `CLASSIFIER_INTERVAL_SECONDS` (default `10`) with single-flight lock protection.
+- Pulls pending conversation windows by `sessionKey`, then classifies with:
+  - local embeddings (`fastembed`)
+  - lexical matching
+  - candidate topic/task retrieval
+  - curated user notes (`type=note`) as weighted signals
+  - optional OpenClaw memory snippets from sqlite (`OPENCLAW_MEMORY_DB_PATH` fallback support)
+- Patches logs to `classified` with resolved `topicId` / `taskId`.
+- Generates very short message summaries for chips (telegraphic style, no `SUMMARY:` prefix, transport metadata stripped).
+
+### Stage 3: Clawgraph Memory Synthesis
+
+- API path: `GET /api/clawgraph`.
+- Builds a graph from topics, tasks, logs, and note-weighted entity extraction:
+  - nodes: `topic`, `task`, `entity`, `agent`
+  - edges: `has_task`, `mentions`, `co_occurs`, `related_topic`, `related_task`, `agent_focus`
+- Powers the Clawgraph page for interactive memory navigation.
+
+### Main Agent Context Extension
+
+- The same logger plugin also augments response-time context using `before_agent_start`.
+- It retrieves continuity context via `/api/search` + recent session logs + related topic/task logs + curated notes, then prepends a compact `CLAWBOARD_CONTEXT` block.
+- This retrieval is additive to OpenClaw native memory (turn history, markdown/context, memory search), not a replacement.
+
+## Local Dev (Without Docker)
+
+Backend:
+
+```bash
+cd backend
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8010
+```
+
+Frontend (from repo root, separate terminal):
+
+```bash
+NEXT_PUBLIC_CLAWBOARD_API_BASE=http://localhost:8010 npm run dev
+```
+
+Open `http://localhost:3000`.
+
+## Key Config
+
+Set these in `.env`:
+
+- `CLAWBOARD_TOKEN`: required for all write endpoints and non-localhost reads. Localhost reads can be tokenless.
+- `CLAWBOARD_PUBLIC_API_BASE`: API URL reachable from the browser (important for Tailscale usage).
+- `CLAWBOARD_PUBLIC_WEB_URL`: optional browser-facing UI URL for bootstrap summaries.
+- `OPENCLAW_BASE_URL`: OpenClaw gateway URL for classifier calls from Docker.
+- `OPENCLAW_GATEWAY_TOKEN`: OpenClaw gateway auth token (if your gateway requires it).
+- `CLASSIFIER_INTERVAL_SECONDS`: classifier loop interval (default `10`).
+- `CLASSIFIER_MAX_ATTEMPTS`: max classify retries before failed state (default `3`).
+- `CLAWBOARD_TRUST_PROXY`: set `1` only when behind a trusted reverse proxy and you want `X-Forwarded-For` / `X-Real-IP` honored.
+
+Note: `CLAWBOARD_INTEGRATION_LEVEL` is used by `scripts/bootstrap_openclaw.sh` (installer), not as a standalone API server env default.
+Security: remote/tailnet/domain API reads require token. Setup stores token in browser local storage (masked input) and sends it on all API reads/writes.
+Docker security: compose does not publish DB/vector/cache ports; use API endpoints as the supported read/write/delete path.
+
+## OpenClaw Integration
+
+### One-command bootstrap (recommended)
+
+```bash
+bash scripts/bootstrap_openclaw.sh
+```
+
+This deploys Clawboard, installs the skill, installs/enables `clawboard-logger`, and configures `/api/config`.
+It also establishes token + browser-access URL defaults.
+
+Useful flags:
+
+- `--integration-level full|write|manual` (default `write`)
+- `--no-backfill` (shortcut for `manual`)
+- `--api-url http://localhost:8010`
+- `--web-url http://localhost:3010`
+- `--public-api-base https://api.example.com`
+- `--public-web-url https://clawboard.example.com`
+- `--title "My Clawboard"`
+- `--token <token>`
+- `--no-access-url-prompt`
+
+### Manual setup
+
+Token + access URL setup:
+
+```bash
+cp .env.example .env
+openssl rand -hex 32
+```
+
+Then set:
+
+- `CLAWBOARD_TOKEN=<your-token>`
+- `CLAWBOARD_PUBLIC_API_BASE=<api-url-reachable-from-browser>`
+
+Use:
+
+- local: `http://localhost:8010`
+- tailscale: `http://100.x.y.z:8010`
+- custom domain: `https://api.example.com`
+
+Install skill:
 
 ```bash
 mkdir -p ~/.openclaw/skills
 cp -R skills/clawboard ~/.openclaw/skills/clawboard
 ```
 
-Then point your OpenClaw instance at the Clawboard API base URL (`http://localhost:8010`) and token (if required).
-
-## Docker compose (web + api)
-
-```bash
-docker compose up -d --build
-```
-
-Compose maps the web UI to `http://localhost:3010` and the API to `http://localhost:8010`.
-
-Or use the helper:
-
-```bash
-bash deploy.sh
-```
-
-## Bootstrap installer (recommended)
-
-One command to deploy Clawboard + install the OpenClaw skill + logger plugin:
-
-```bash
-bash scripts/bootstrap_openclaw.sh
-```
-
-By default the installer sets `integrationLevel` to `full` (full backfill). Use the flags below to change it.
-
-Useful flags:
-
-- `--integration-level full|write|manual` (default: `full`)
-- `--no-backfill` (shortcut for `manual`)
-- `--title "My Clawboard"`
-- `--api-url http://localhost:8010`
-- `--web-url http://localhost:3010`
-
-## Chutes provider bootstrap (optional)
-
-Self-contained installer (no repo cloning):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash
-```
-
-PowerShell (requires Git Bash or WSL):
-
-```powershell
-iwr -useb https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash
-```
-
-Model list refresh:
-- The installer creates `~/.openclaw/update_chutes_models.sh`.
-- A cron job runs it every 4 hours (if `crontab` is available).
-- You can run it manually at any time to refresh Chutes models.
-
-## OpenClaw logger plugin (always-on)
-
-Install the plugin to capture every turn (user input, assistant reply, tool calls):
+Install plugin:
 
 ```bash
 openclaw plugins install -l /path/to/clawboard/extensions/clawboard-logger
 openclaw plugins enable clawboard-logger
 ```
 
-Set plugin config in your OpenClaw config:
+Plugin config example:
 
 ```json
 {
@@ -136,7 +229,7 @@ Set plugin config in your OpenClaw config:
       "clawboard-logger": {
         "enabled": true,
         "config": {
-          "baseUrl": "http://clawboard:8010",
+          "baseUrl": "http://localhost:8010",
           "token": "YOUR_TOKEN"
         }
       }
@@ -145,17 +238,79 @@ Set plugin config in your OpenClaw config:
 }
 ```
 
-Continuity read-path:
-- The plugin logs every turn and also performs `before_agent_start` context augmentation.
-- It retrieves Clawboard context via hybrid semantic search (`/api/search`) with lexical fallback.
-- Curated notes (`type=note` linked by `relatedLogId`) are weighted and injected with recent topic/task context.
-- Existing OpenClaw memory context (session DB/markdown/turn history already present in the prompt) is preserved and merged, not replaced.
+The logger plugin writes events and augments `before_agent_start` with Clawboard retrieval context (`/api/search`) including weighted curated notes.
 
-## API quick test
+### Agentic install prompt
+
+Use this in OpenClaw:
+
+```md
+Install Clawboard end-to-end.
+Include token setup and access URL setup (local/Tailscale/custom domain), then docker startup, skill install, plugin enable, gateway restart, and validation.
+If OpenClaw is missing and I want Chutes, run add_chutes.sh first.
+```
+
+## API Notes
+
+- Localhost reads can run without token.
+- Non-localhost reads require `X-Clawboard-Token`.
+- All write endpoints require `X-Clawboard-Token`.
+- Live updates stream from `/api/stream` with replay-safe reconciliation via `/api/changes`.
+
+Quick checks:
+
+```bash
+curl -s http://localhost:8010/api/health
+curl -s http://localhost:8010/api/config
+```
+
+Write check:
 
 ```bash
 curl -X POST http://localhost:8010/api/topics \
   -H 'Content-Type: application/json' \
   -H 'X-Clawboard-Token: YOUR_TOKEN' \
   -d '{"name":"Clawboard"}'
+```
+
+## Reset Data (Fresh Start)
+
+```bash
+docker compose down
+rm -f data/clawboard.db data/clawboard.db-shm data/clawboard.db-wal
+rm -f data/classifier_embeddings.db data/classifier.lock data/reindex-queue.jsonl
+docker compose up -d --build
+```
+
+## Tests
+
+Install Playwright browsers once:
+
+```bash
+npx playwright install
+```
+
+Run E2E:
+
+```bash
+npm run test
+```
+
+Load or clear demo fixtures:
+
+```bash
+bash deploy.sh demo-load
+bash deploy.sh demo-clear
+```
+
+## Optional: Chutes Provider Bootstrap
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash
+```
+
+PowerShell:
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash
 ```
