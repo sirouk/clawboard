@@ -1,8 +1,9 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Space_Grotesk, Sora, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { AppShell } from "@/components/app-shell";
 import { AppConfigProvider } from "@/components/providers";
+import { PwaRegister } from "@/components/pwa-register";
 
 const sora = Sora({
   variable: "--font-sora",
@@ -26,6 +27,14 @@ export const metadata: Metadata = {
   title: "Clawboard",
   description: "OpenClaw companion for topics, tasks, and logs.",
   manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    title: "Clawboard",
+    statusBarStyle: "black-translucent",
+  },
+  other: {
+    "mobile-web-app-capable": "yes",
+  },
   icons: {
     icon: [
       { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
@@ -35,8 +44,11 @@ export const metadata: Metadata = {
   },
 };
 
-export const viewport = {
+export const viewport: Viewport = {
   themeColor: "#0b0d12",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({
@@ -47,6 +59,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${sora.variable} ${spaceGrotesk.variable} ${jetBrainsMono.variable} antialiased`}>
+        <PwaRegister />
         <AppConfigProvider>
           <AppShell>{children}</AppShell>
         </AppConfigProvider>
