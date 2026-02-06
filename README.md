@@ -169,6 +169,7 @@ Open `http://localhost:3000`.
 Set these in `.env`:
 
 - `CLAWBOARD_TOKEN`: required for all write endpoints and non-localhost reads. Localhost reads can be tokenless.
+- `NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN`: optional frontend bootstrap token. This is embedded in the browser bundle, so use only on trusted/private networks.
 - `CLAWBOARD_PUBLIC_API_BASE`: API URL reachable from the browser (important for Tailscale usage).
 - `CLAWBOARD_PUBLIC_WEB_URL`: optional browser-facing UI URL for bootstrap summaries.
 - `OPENCLAW_BASE_URL`: OpenClaw gateway URL for classifier calls from Docker.
@@ -300,12 +301,25 @@ rm -f data/classifier_embeddings.db data/classifier.lock data/reindex-queue.json
 docker compose up -d --build
 ```
 
+Or use:
+
+```bash
+bash deploy.sh reset-data --yes
+bash deploy.sh fresh
+```
+
 ## Tests
 
 Full stack checks:
 
 ```bash
 ./tests.sh --skip-e2e
+```
+
+Backend unit tests only:
+
+```bash
+npm run test:backend
 ```
 
 Playwright browsers (first run only):
@@ -320,11 +334,41 @@ Run E2E:
 npm run test:e2e
 ```
 
+Full npm suite (lint + backend unit + build + e2e):
+
+```bash
+npm run test:all
+```
+
+## One-Time Vector Cleanup
+
+Run this once after upgrading classifier/search filtering rules to remove stale/non-semantic vectors and enqueue targeted reindex for missing canonical vectors:
+
+```bash
+python3 scripts/one_time_vector_cleanup.py
+```
+
+Preview only:
+
+```bash
+python3 scripts/one_time_vector_cleanup.py --dry-run
+```
+
 Load or clear demo fixtures:
 
 ```bash
 bash deploy.sh demo-load
 bash deploy.sh demo-clear
+```
+
+Common deploy workflow commands:
+
+```bash
+bash deploy.sh test
+bash deploy.sh fresh
+bash deploy.sh token-both --generate
+bash deploy.sh ensure-skill
+bash deploy.sh ensure-plugin
 ```
 
 ## Optional: Chutes Provider Bootstrap

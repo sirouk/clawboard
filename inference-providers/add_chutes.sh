@@ -46,21 +46,23 @@ check_node_version() {
   echo ""
 
   log_info "Checking Node.js and npm..."
-  
-  # Check if npm is missing but node is present
-  if command -v node >/dev/null 2>&1 && ! command -v npm >/dev/null 2>&1; then
-    log_warn "npm not found. Attempting to install npm..."
-    if command -v apt-get >/dev/null 2>&1; then
-      sudo apt-get update && sudo apt-get install -y npm || log_error "Failed to install npm via apt-get."
-    elif command -v apk >/dev/null 2>&1; then
-      sudo apk add npm || log_error "Failed to install npm via apk."
-    elif command -v yum >/dev/null 2>&1; then
-      sudo yum install -y npm || log_error "Failed to install npm via yum."
-    elif command -v brew >/dev/null 2>&1; then
-      brew install node || log_error "Failed to install node/npm via brew."
-    else
-      log_error "npm is missing and could not be automatically installed. Please install Node.js (includes npm)."
-    fi
+
+  install_node_with_nvm() {
+    curl -s -o- https://raw.githubusercontent.com/nvm-sh/nvm/$(curl -s https://api.github.com/repos/nvm-sh/nvm/releases/latest | grep tag_name | cut -d : -f 2 | tr -d ' ", ')/install.sh | bash \
+    && source "$HOME/.nvm/nvm.sh" \
+    && nvm install node \
+    && nvm use node \
+    && npm install -g npm@latest
+  }
+
+  if [ -s "$HOME/.nvm/nvm.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$HOME/.nvm/nvm.sh"
+  fi
+
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    log_warn "Node.js or npm not found. Installing via nvm..."
+    install_node_with_nvm || log_error "Failed to install Node.js via nvm."
   fi
 
   command -v node >/dev/null 2>&1 || log_error "Node.js is not installed. OpenClaw requires Node.js 22+."
@@ -69,6 +71,12 @@ check_node_version() {
   local node_version major
   node_version="$(node -v | sed 's/^v//')"
   major="$(echo "$node_version" | cut -d'.' -f1)"
+  if [ "${major:-0}" -lt 22 ]; then
+    log_warn "Node.js ${node_version} is too old. Updating via nvm..."
+    install_node_with_nvm || log_error "Failed to update Node.js via nvm."
+    node_version="$(node -v | sed 's/^v//')"
+    major="$(echo "$node_version" | cut -d'.' -f1)"
+  fi
   if [ "${major:-0}" -lt 22 ]; then
     log_error "Node.js ${node_version} is too old. Need Node.js 22+."
   fi
@@ -280,9 +288,23 @@ run();' 2>/dev/null || echo "")
   chmod +x "$UPDATE_SCRIPT"
 
   if command -v crontab >/dev/null 2>&1; then
-    crontab -l 2>/dev/null | grep -v "update_chutes_models.sh" | crontab - 2>/dev/null || true
-    (crontab -l 2>/dev/null; echo "0 */4 * * * $UPDATE_SCRIPT >/dev/null 2>&1") | crontab -
-    log_success "Update job scheduled (every 4 hours)."
+    if [ -r /dev/tty ]; then
+      echo ""
+      echo "There's a helper script to refresh Chutes models update_chutes_models.sh added to your openclaw workspace."
+      printf "Would you like to schedule it to run every 4 hours? [N/y] : " > /dev/tty
+      SCHEDULE_CHUTES=""
+      IFS= read -r SCHEDULE_CHUTES < /dev/tty
+      SCHEDULE_CHUTES="${SCHEDULE_CHUTES//$'\r'/}"
+      if [[ "$SCHEDULE_CHUTES" =~ ^[yY]$ ]]; then
+        crontab -l 2>/dev/null | grep -v "update_chutes_models.sh" | crontab - 2>/dev/null || true
+        (crontab -l 2>/dev/null; echo "0 */4 * * * $UPDATE_SCRIPT >/dev/null 2>&1") | crontab -
+        log_success "Update job scheduled (every 4 hours)."
+      else
+        log_info "Skipping scheduled updates."
+      fi
+    else
+      log_info "No TTY available; skipping scheduled updates."
+    fi
   else
     log_warn "crontab not found. Auto-updates not scheduled."
   fi

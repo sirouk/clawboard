@@ -64,9 +64,12 @@ services:
         # IMPORTANT: this value is baked into the browser bundle.
         # For remote (Tailscale) access, set CLAWBOARD_PUBLIC_API_BASE in .env
         NEXT_PUBLIC_CLAWBOARD_API_BASE: ${CLAWBOARD_PUBLIC_API_BASE:-http://localhost:8010}
+        # Optional default UI token, also baked into browser bundle.
+        NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN: ${NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN:-}
     environment:
       # IMPORTANT: this is used client-side; must be reachable from the browser.
       NEXT_PUBLIC_CLAWBOARD_API_BASE: ${CLAWBOARD_PUBLIC_API_BASE:-http://localhost:8010}
+      NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN: ${NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN:-}
     depends_on:
       - api
     ports:

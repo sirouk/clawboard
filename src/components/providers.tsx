@@ -28,8 +28,13 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
     return window.localStorage.getItem("clawboard.instanceTitle") ?? "Clawboard";
   });
   const [token, setTokenState] = useState(() => {
-    if (typeof window === "undefined") return "";
-    return normalizeTokenInput(window.localStorage.getItem("clawboard.token") ?? "");
+    const defaultToken = normalizeTokenInput(process.env.NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN ?? "");
+    if (typeof window === "undefined") return defaultToken;
+    const storedToken = window.localStorage.getItem("clawboard.token");
+    if (storedToken !== null) {
+      return normalizeTokenInput(storedToken);
+    }
+    return defaultToken;
   });
   const [tokenRequired, setTokenRequired] = useState(true);
   const [tokenConfigured, setTokenConfigured] = useState(false);
