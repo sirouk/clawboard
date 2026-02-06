@@ -20,6 +20,18 @@ const ICONS: Record<string, React.ReactElement> = {
       <circle cx="22" cy="18" r="2" />
     </svg>
   ),
+  graph: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="6" cy="6" r="2" />
+      <circle cx="18" cy="8" r="2" />
+      <circle cx="8" cy="17" r="2" />
+      <circle cx="18" cy="18" r="2" />
+      <path d="M7.8 7.2l8.4 1.6" />
+      <path d="M7.3 7.8l-1.4 7.4" />
+      <path d="M9.8 17.1l6.4.7" />
+      <path d="M16.8 10l1 6" />
+    </svg>
+  ),
   stats: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 19h16" />
@@ -55,6 +67,7 @@ const ICONS: Record<string, React.ReactElement> = {
 
 const NAV_ITEMS = [
   { href: "/u", label: "Board", id: "home" },
+  { href: "/graph", label: "Clawgraph", id: "graph" },
   { href: "/stats", label: "Stats", id: "stats" },
   { href: "/log", label: "Logs", id: "log" },
   { href: "/providers", label: "Providers", id: "providers" },
@@ -91,7 +104,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <DataProvider>
-      <div className="min-h-screen bg-[rgb(var(--claw-bg))]">
+      <div className="claw-ambient min-h-screen">
         <div className="flex min-h-screen flex-col lg:flex-row">
           <aside
             className={cn(

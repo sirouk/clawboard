@@ -59,7 +59,7 @@ export function TaskDetailClient({
             <span>Updated {formatRelativeTime(task.updatedAt)}</span>
           </div>
         </div>
-        <Badge tone="accent">Task timeline</Badge>
+        <Badge tone="accent">Task messages</Badge>
       </div>
 
       <div id="conversation">

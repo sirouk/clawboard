@@ -29,6 +29,12 @@ test("logs route loads raw log hopper", async ({ page }) => {
   await expect(page.getByText("pending logs before classification")).toBeVisible();
 });
 
+test("graph route loads clawgraph view", async ({ page }) => {
+  await page.goto("/graph");
+  await expect(page.getByRole("heading", { name: "Clawgraph" })).toBeVisible();
+  await expect(page.getByTestId("clawgraph-canvas")).toBeVisible();
+});
+
 test("unified view expands topics and tasks", async ({ page }) => {
   await page.goto("/u");
   await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();

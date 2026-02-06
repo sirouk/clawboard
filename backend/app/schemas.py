@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field
 from pydantic.config import ConfigDict
 
@@ -48,6 +48,7 @@ class InstanceOut(ModelBase):
 class TopicOut(ModelBase):
     id: str = Field(description="Topic ID.", examples=["topic-1"])
     name: str = Field(description="Topic name.", examples=["Clawboard"])
+    color: Optional[str] = Field(description="Topic color #RRGGBB.", examples=["#FF8A4A"])
     description: Optional[str] = Field(description="Topic description.", examples=["Product and platform work."])
     priority: Optional[str] = Field(description="Priority (low | medium | high).", examples=["high"])
     status: Optional[str] = Field(description="Status (active | archived).", examples=["active"])
@@ -62,6 +63,7 @@ class TaskOut(ModelBase):
     id: str = Field(description="Task ID.", examples=["task-1"])
     topicId: Optional[str] = Field(description="Parent topic ID (nullable).", examples=["topic-1"])
     title: str = Field(description="Task title.", examples=["Ship onboarding wizard"])
+    color: Optional[str] = Field(description="Task color #RRGGBB.", examples=["#4EA1FF"])
     status: str = Field(description="Task status (todo | doing | blocked | done).", examples=["doing"])
     pinned: Optional[bool] = Field(description="Pinned tasks sort to the top.", examples=[True])
     priority: Optional[str] = Field(description="Priority (low | medium | high).", examples=["high"])
@@ -112,6 +114,7 @@ class TopicUpsert(BaseModel):
     )
     id: Optional[str] = Field(default=None, description="Topic ID (omit to create).", examples=["topic-1"])
     name: str = Field(description="Topic name.", examples=["Clawboard"])
+    color: Optional[str] = Field(default=None, description="Optional topic color #RRGGBB.", examples=["#FF8A4A"])
     description: Optional[str] = Field(default=None, description="Topic description.", examples=["Product work."])
     priority: Optional[str] = Field(default=None, description="Priority (low | medium | high).", examples=["high"])
     status: Optional[str] = Field(default=None, description="Status (active | archived).", examples=["active"])
@@ -137,6 +140,7 @@ class TaskUpsert(BaseModel):
     id: Optional[str] = Field(default=None, description="Task ID (omit to create).", examples=["task-1"])
     topicId: Optional[str] = Field(default=None, description="Parent topic ID.", examples=["topic-1"])
     title: str = Field(description="Task title.", examples=["Ship onboarding wizard"])
+    color: Optional[str] = Field(default=None, description="Optional task color #RRGGBB.", examples=["#4EA1FF"])
     status: Optional[str] = Field(
         default=None, description="Task status (todo | doing | blocked | done).", examples=["doing"]
     )
@@ -212,6 +216,13 @@ class ChangesResponse(BaseModel):
     topics: List[TopicOut] = Field(description="Topics updated since timestamp.")
     tasks: List[TaskOut] = Field(description="Tasks updated since timestamp.")
     logs: List[LogOut] = Field(description="Logs created since timestamp.")
+
+
+class ReindexRequest(BaseModel):
+    kind: Literal["topic", "task"] = Field(description="Embedding namespace kind.")
+    id: str = Field(description="Topic or task ID.")
+    text: str = Field(description="Canonical label text to embed.")
+    topicId: Optional[str] = Field(default=None, description="Task parent topic ID when kind=task.")
 
 
 class ClawgraphNode(BaseModel):

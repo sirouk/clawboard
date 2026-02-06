@@ -1,19 +1,66 @@
 import type {
   OpenClawPluginApi,
-  PluginHookBeforeAgentStartEvent,
-  PluginHookMessageReceivedEvent,
-  PluginHookMessageSentEvent,
-  PluginHookBeforeToolCallEvent,
-  PluginHookAfterToolCallEvent,
-  PluginHookAgentEndEvent,
-  PluginHookMessageContext,
-  PluginHookToolContext,
-  PluginHookAgentContext,
 } from "openclaw/plugin-sdk";
 
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+
+type HookEvent = {
+  [key: string]: unknown;
+};
+
+type PluginHookBeforeAgentStartEvent = HookEvent & {
+  prompt?: string;
+  messages?: unknown[];
+};
+
+type PluginHookMessageReceivedEvent = HookEvent & {
+  content?: string;
+  metadata?: {
+    sessionKey?: string;
+    [key: string]: unknown;
+  };
+};
+
+type PluginHookMessageSentEvent = HookEvent & {
+  content?: string;
+  metadata?: {
+    sessionKey?: string;
+    [key: string]: unknown;
+  };
+};
+
+type PluginHookBeforeToolCallEvent = HookEvent & {
+  toolName?: string;
+  input?: unknown;
+};
+
+type PluginHookAfterToolCallEvent = HookEvent & {
+  toolName?: string;
+  input?: unknown;
+  output?: unknown;
+  error?: unknown;
+};
+
+type PluginHookAgentEndEvent = HookEvent & {
+  output?: unknown;
+  message?: string;
+  messages?: unknown[];
+};
+
+type PluginHookContextBase = {
+  agentId?: string;
+  sessionKey?: string;
+  channelId?: string;
+  messageProvider?: string;
+  provider?: string;
+  [key: string]: unknown;
+};
+
+type PluginHookMessageContext = PluginHookContextBase;
+type PluginHookToolContext = PluginHookContextBase;
+type PluginHookAgentContext = PluginHookContextBase;
 
 type ClawboardLoggerConfig = {
   baseUrl: string;
@@ -654,7 +701,11 @@ export default function register(api: OpenClawPluginApi) {
     return context || undefined;
   }
 
-  api.on("before_agent_start", async (event: PluginHookBeforeAgentStartEvent, ctx) => {
+  const beforeAgentStartApi = api as unknown as {
+    on: (event: "before_agent_start", handler: (event: PluginHookBeforeAgentStartEvent, ctx: PluginHookAgentContext) => unknown) => void;
+  };
+
+  beforeAgentStartApi.on("before_agent_start", async (event: PluginHookBeforeAgentStartEvent, ctx: PluginHookAgentContext) => {
     if (!contextAugment) return;
     if (ctx?.agentId && ctx.agentId !== "main") return;
     const input = latestUserInput(event.prompt, event.messages);

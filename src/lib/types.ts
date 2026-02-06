@@ -3,6 +3,7 @@ export type IntegrationLevel = "manual" | "write" | "full";
 export type Topic = {
   id: string;
   name: string;
+  color?: string;
   description?: string;
   priority?: "low" | "medium" | "high";
   status?: "active" | "paused" | "archived";
@@ -19,6 +20,7 @@ export type Task = {
   id: string;
   topicId: string | null;
   title: string;
+  color?: string;
   status: TaskStatus;
   pinned?: boolean;
   priority?: "low" | "medium" | "high";

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import json
+import hashlib
+import colorsys
 import asyncio
 import threading
 import time
@@ -31,6 +34,7 @@ from .schemas import (
     LogPatch,
     ChangesResponse,
     ClawgraphResponse,
+    ReindexRequest,
 )
 from .events import event_hub
 from .clawgraph import build_clawgraph
@@ -65,6 +69,22 @@ def create_id(prefix: str) -> str:
     return f"{prefix}-{uuid4()}"
 
 
+REINDEX_QUEUE_PATH = os.getenv("CLAWBOARD_REINDEX_QUEUE_PATH", "./data/reindex-queue.jsonl")
+
+
+def enqueue_reindex_request(payload: dict) -> None:
+    try:
+        queue_path = os.path.abspath(REINDEX_QUEUE_PATH)
+        queue_dir = os.path.dirname(queue_path)
+        if queue_dir:
+            os.makedirs(queue_dir, exist_ok=True)
+        with open(queue_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({**payload, "requestedAt": now_iso()}) + "\n")
+    except Exception:
+        # Non-fatal: classifier can still reseed embeddings during normal runs.
+        pass
+
+
 def _normalize_label(value: str | None) -> str:
     if not value:
         return ""
@@ -79,6 +99,29 @@ def _normalize_label(value: str | None) -> str:
     text = re.sub(r"[^a-z0-9\s]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _normalize_hex_color(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", text):
+        return text.upper()
+    return None
+
+
+def _auto_pick_color(seed: str, used: set[str], offset: float = 0.0) -> str:
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+    base_hue = ((int(digest[:8], 16) % 360) + offset) % 360
+    sat = 0.62 + (int(digest[8:12], 16) % 13) / 100.0
+    lig = 0.50 + (int(digest[12:16], 16) % 11) / 100.0
+    for step in range(24):
+        hue = (base_hue + (step * 29.0)) % 360
+        r, g, b = colorsys.hls_to_rgb(hue / 360.0, min(0.66, lig), min(0.80, sat))
+        color = f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
+        if color not in used:
+            return color
+    return color
 
 
 def _label_similarity(a: str | None, b: str | None) -> float:
@@ -389,6 +432,10 @@ def upsert_topic(
         timestamp = now_iso()
         if topic:
             topic.name = payload.name or topic.name
+            if payload.color is not None:
+                normalized_color = _normalize_hex_color(payload.color)
+                if normalized_color:
+                    topic.color = normalized_color
             if payload.description is not None:
                 topic.description = payload.description
             if payload.priority is not None:
@@ -405,6 +452,17 @@ def upsert_topic(
         else:
             duplicate = _find_similar_topic(session, payload.name)
             if duplicate:
+                if payload.color is not None:
+                    normalized_color = _normalize_hex_color(payload.color)
+                    if normalized_color:
+                        duplicate.color = normalized_color
+                elif not _normalize_hex_color(getattr(duplicate, "color", None)):
+                    used_colors = {
+                        _normalize_hex_color(getattr(item, "color", None))
+                        for item in session.exec(select(Topic)).all()
+                        if _normalize_hex_color(getattr(item, "color", None))
+                    }
+                    duplicate.color = _auto_pick_color(f"topic:{duplicate.id}:{duplicate.name}", used_colors, 0.0)
                 if payload.description is not None and not duplicate.description:
                     duplicate.description = payload.description
                 if payload.tags:
@@ -421,10 +479,20 @@ def upsert_topic(
                 session.commit()
                 session.refresh(duplicate)
                 event_hub.publish({"type": "topic.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
+                enqueue_reindex_request({"kind": "topic", "id": duplicate.id, "text": duplicate.name})
                 return duplicate
+            used_colors = {
+                _normalize_hex_color(getattr(item, "color", None))
+                for item in session.exec(select(Topic)).all()
+                if _normalize_hex_color(getattr(item, "color", None))
+            }
+            resolved_color = _normalize_hex_color(payload.color)
+            if not resolved_color:
+                resolved_color = _auto_pick_color(f"topic:{payload.id or ''}:{payload.name}", used_colors, 0.0)
             topic = Topic(
                 id=payload.id or create_id("topic"),
                 name=payload.name,
+                color=resolved_color,
                 description=payload.description,
                 priority=payload.priority or "medium",
                 status=payload.status or "active",
@@ -438,6 +506,7 @@ def upsert_topic(
         session.commit()
         session.refresh(topic)
         event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
+        enqueue_reindex_request({"kind": "topic", "id": topic.id, "text": topic.name})
         return topic
 
 
@@ -485,6 +554,10 @@ def upsert_task(
         timestamp = now_iso()
         if task:
             task.title = payload.title or task.title
+            if payload.color is not None:
+                normalized_color = _normalize_hex_color(payload.color)
+                if normalized_color:
+                    task.color = normalized_color
             if payload.topicId is not None:
                 task.topicId = payload.topicId
             if payload.status is not None:
@@ -499,6 +572,17 @@ def upsert_task(
         else:
             duplicate = _find_similar_task(session, payload.topicId, payload.title)
             if duplicate:
+                if payload.color is not None:
+                    normalized_color = _normalize_hex_color(payload.color)
+                    if normalized_color:
+                        duplicate.color = normalized_color
+                elif not _normalize_hex_color(getattr(duplicate, "color", None)):
+                    used_colors = {
+                        _normalize_hex_color(getattr(item, "color", None))
+                        for item in session.exec(select(Task)).all()
+                        if _normalize_hex_color(getattr(item, "color", None))
+                    }
+                    duplicate.color = _auto_pick_color(f"task:{duplicate.id}:{duplicate.title}", used_colors, 21.0)
                 if payload.status is not None:
                     duplicate.status = payload.status
                 if payload.priority is not None:
@@ -512,11 +596,23 @@ def upsert_task(
                 session.commit()
                 session.refresh(duplicate)
                 event_hub.publish({"type": "task.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
+                enqueue_reindex_request(
+                    {"kind": "task", "id": duplicate.id, "topicId": duplicate.topicId, "text": duplicate.title}
+                )
                 return duplicate
+            used_colors = {
+                _normalize_hex_color(getattr(item, "color", None))
+                for item in session.exec(select(Task)).all()
+                if _normalize_hex_color(getattr(item, "color", None))
+            }
+            resolved_color = _normalize_hex_color(payload.color)
+            if not resolved_color:
+                resolved_color = _auto_pick_color(f"task:{payload.id or ''}:{payload.title}", used_colors, 21.0)
             task = Task(
                 id=payload.id or create_id("task"),
                 topicId=payload.topicId,
                 title=payload.title,
+                color=resolved_color,
                 status=payload.status or "todo",
                 pinned=payload.pinned or False,
                 priority=payload.priority or "medium",
@@ -528,6 +624,7 @@ def upsert_task(
         session.commit()
         session.refresh(task)
         event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
+        enqueue_reindex_request({"kind": "task", "id": task.id, "topicId": task.topicId, "text": task.title})
         return task
 
 
@@ -736,6 +833,13 @@ def clawgraph(
         )
         graph["generatedAt"] = now_iso()
         return graph
+
+
+@app.post("/api/reindex", dependencies=[Depends(require_token)], tags=["classifier"])
+def request_reindex(payload: ReindexRequest = Body(...)):
+    """Queue a targeted embedding refresh request for classifier vector stores."""
+    enqueue_reindex_request(payload.model_dump())
+    return {"ok": True, "queued": True}
 
 
 @app.get("/api/metrics", tags=["metrics"])

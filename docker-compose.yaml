@@ -8,6 +8,7 @@ services:
     environment:
       CLAWBOARD_DB_URL: sqlite:///./data/clawboard.db
       CLAWBOARD_CORS_ORIGINS: "*"
+      CLAWBOARD_REINDEX_QUEUE_PATH: /app/data/reindex-queue.jsonl
       # CLAWBOARD_TOKEN is read from .env via env_file
     volumes:
       - ./data:/app/data
@@ -31,6 +32,7 @@ services:
       CLASSIFIER_TOPIC_SIM_THRESHOLD: ${CLASSIFIER_TOPIC_SIM_THRESHOLD:-0.78}
       CLASSIFIER_TASK_SIM_THRESHOLD: ${CLASSIFIER_TASK_SIM_THRESHOLD:-0.80}
       CLASSIFIER_EMBED_MODEL: ${CLASSIFIER_EMBED_MODEL:-BAAI/bge-small-en-v1.5}
+      CLASSIFIER_REINDEX_QUEUE_PATH: /data/reindex-queue.jsonl
       QDRANT_URL: ${QDRANT_URL:-}
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-clawboard_embeddings}
       QDRANT_DIM: ${QDRANT_DIM:-384}

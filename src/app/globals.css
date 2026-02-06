@@ -43,7 +43,8 @@
 
 body {
   position: relative;
-  background: radial-gradient(1100px circle at 12% 8%, rgba(255, 90, 45, 0.14), transparent 46%),
+  background: linear-gradient(158deg, rgba(255, 90, 45, 0.08), rgba(255, 90, 45, 0.02) 34%, transparent 68%),
+    radial-gradient(1100px circle at 12% 8%, rgba(255, 90, 45, 0.14), transparent 46%),
     radial-gradient(880px circle at 88% 92%, rgba(77, 171, 158, 0.08), transparent 44%),
     rgb(var(--claw-bg));
   color: rgb(var(--claw-text));
@@ -51,6 +52,13 @@ body {
   min-height: 100vh;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+}
+
+.claw-ambient {
+  background:
+    linear-gradient(160deg, rgba(255, 90, 45, 0.06), rgba(255, 90, 45, 0.018) 30%, transparent 66%),
+    radial-gradient(1100px circle at 82% 18%, rgba(255, 90, 45, 0.052), transparent 58%),
+    rgb(var(--claw-bg));
 }
 
 body::before {

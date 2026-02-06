@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { LogEntry, Task } from "@/lib/types";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import type { LogEntry, Task, Topic } from "@/lib/types";
 import { Badge, Button, Input, Select, StatusPill } from "@/components/ui";
 import { LogList } from "@/components/log-list";
 import { formatRelativeTime } from "@/lib/format";
@@ -29,6 +29,68 @@ const STATUS_LABELS: Record<string, string> = {
 
 const TASK_TIMELINE_LIMIT = 2;
 const TOPIC_TIMELINE_LIMIT = 4;
+const TOPIC_FALLBACK_COLORS = ["#FF8A4A", "#4DA39E", "#6FA8FF", "#E0B35A", "#8BC17E", "#F17C8E"];
+const TASK_FALLBACK_COLORS = ["#4EA1FF", "#59C3A6", "#F4B55F", "#9A8BFF", "#F0897C", "#6FB8D8"];
+
+function normalizeHexColor(value: string | undefined | null) {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) return trimmed.toUpperCase();
+  return null;
+}
+
+function hexToRgb(hex: string) {
+  const normalized = normalizeHexColor(hex) ?? "#4EA1FF";
+  const raw = normalized.slice(1);
+  return {
+    r: Number.parseInt(raw.slice(0, 2), 16),
+    g: Number.parseInt(raw.slice(2, 4), 16),
+    b: Number.parseInt(raw.slice(4, 6), 16),
+  };
+}
+
+function rgba(hex: string, alpha: number) {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function colorFromSeed(seed: string, palette: string[]) {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash = (hash << 5) - hash + seed.charCodeAt(i);
+    hash |= 0;
+  }
+  const index = Math.abs(hash) % palette.length;
+  return palette[index];
+}
+
+function pickAlternatingColor(base: string, previous: string | null, index: number, palette: string[]) {
+  const normalized = normalizeHexColor(base) ?? palette[index % palette.length];
+  if (!previous || normalized !== previous) return normalized;
+  const start = palette.indexOf(normalized);
+  const nextIndex = start >= 0 ? (start + 1) % palette.length : (index + 1) % palette.length;
+  return palette[nextIndex];
+}
+
+function topicGlowStyle(color: string, index: number, expanded: boolean): CSSProperties {
+  const band = index % 2 === 0;
+  const topAlpha = expanded ? (band ? 0.25 : 0.19) : band ? 0.18 : 0.14;
+  const lowAlpha = expanded ? (band ? 0.13 : 0.09) : band ? 0.09 : 0.07;
+  return {
+    background: `linear-gradient(155deg, ${rgba(color, topAlpha)}, rgba(16,19,24,0.90) 48%, ${rgba(color, lowAlpha)})`,
+    boxShadow: `0 0 0 1px ${rgba(color, expanded ? 0.28 : 0.2)}, 0 14px 34px ${rgba(color, expanded ? 0.15 : 0.1)}`,
+  };
+}
+
+function taskGlowStyle(color: string, index: number, expanded: boolean): CSSProperties {
+  const band = index % 2 === 0;
+  const topAlpha = expanded ? (band ? 0.27 : 0.2) : band ? 0.19 : 0.15;
+  const lowAlpha = expanded ? (band ? 0.14 : 0.1) : band ? 0.1 : 0.08;
+  return {
+    background: `linear-gradient(145deg, ${rgba(color, topAlpha)}, rgba(20,24,31,0.86) 52%, ${rgba(color, lowAlpha)})`,
+    boxShadow: `0 0 0 1px ${rgba(color, expanded ? 0.3 : 0.2)}, 0 10px 26px ${rgba(color, expanded ? 0.17 : 0.1)}`,
+  };
+}
 
 type UrlState = {
   search: string;
@@ -101,6 +163,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [showDone, setShowDone] = useState(initialUrlState.done);
   const [timelineLimits, setTimelineLimits] = useState<Record<string, number>>({});
   const [moveTaskId, setMoveTaskId] = useState<string | null>(null);
+  const [editingTopicId, setEditingTopicId] = useState<string | null>(null);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [topicNameDraft, setTopicNameDraft] = useState("");
+  const [topicColorDraft, setTopicColorDraft] = useState("#FF8A4A");
+  const [taskNameDraft, setTaskNameDraft] = useState("");
+  const [taskColorDraft, setTaskColorDraft] = useState("#4EA1FF");
+  const [renameSavingKey, setRenameSavingKey] = useState<string | null>(null);
+  const [renameErrors, setRenameErrors] = useState<Record<string, string>>({});
   const [page, setPage] = useState(initialUrlState.page);
   const [isSticky, setIsSticky] = useState(false);
   const committedSearch = useRef(initialUrlState.search);
@@ -253,6 +323,62 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const safePage = pageCount <= 1 ? 1 : Math.min(page, pageCount);
   const pagedTopics = pageCount > 1 ? orderedTopics.slice((safePage - 1) * pageSize, safePage * pageSize) : orderedTopics;
 
+  const topicDisplayColors = useMemo(() => {
+    const map = new Map<string, string>();
+    let previous: string | null = null;
+    pagedTopics.forEach((topic, index) => {
+      const seedColor = normalizeHexColor(topic.color) ?? colorFromSeed(`topic:${topic.id}:${topic.name}`, TOPIC_FALLBACK_COLORS);
+      const color = pickAlternatingColor(seedColor, previous, index, TOPIC_FALLBACK_COLORS);
+      map.set(topic.id, color);
+      previous = color;
+    });
+    return map;
+  }, [pagedTopics]);
+
+  const taskDisplayColors = useMemo(() => {
+    const map = new Map<string, string>();
+    pagedTopics.forEach((topic) => {
+      const taskList = tasksByTopic.get(topic.id) ?? [];
+      let previous: string | null = null;
+      taskList.forEach((task, index) => {
+        const seedColor = normalizeHexColor(task.color) ?? colorFromSeed(`task:${task.id}:${task.title}`, TASK_FALLBACK_COLORS);
+        const color = pickAlternatingColor(seedColor, previous, index, TASK_FALLBACK_COLORS);
+        map.set(task.id, color);
+        previous = color;
+      });
+    });
+    return map;
+  }, [pagedTopics, tasksByTopic]);
+
+  const writeHeaders = {
+    "Content-Type": "application/json",
+    ...(token ? { "X-Clawboard-Token": token } : {}),
+  };
+
+  const setRenameError = (key: string, message?: string) => {
+    setRenameErrors((prev) => {
+      const next = { ...prev };
+      if (message) {
+        next[key] = message;
+      } else {
+        delete next[key];
+      }
+      return next;
+    });
+  };
+
+  const requestEmbeddingRefresh = async (payload: { kind: "topic" | "task"; id: string; text: string; topicId?: string | null }) => {
+    try {
+      await fetch(apiUrl("/api/reindex"), {
+        method: "POST",
+        headers: writeHeaders,
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      // Best-effort only; DB update remains source of truth.
+    }
+  };
+
   const updateTask = async (taskId: string, updates: Partial<Task>) => {
     if (readOnly) return;
     const current = tasks.find((task) => task.id === taskId);
@@ -273,6 +399,156 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setTasks((prev) =>
       prev.map((task) => (task.id === taskId ? { ...task, ...updates, updatedAt: new Date().toISOString() } : task))
     );
+  };
+
+  const saveTopicRename = async (topic: Topic) => {
+    const renameKey = `topic:${topic.id}`;
+    const nextName = topicNameDraft.trim();
+    const currentColor =
+      normalizeHexColor(topic.color) ??
+      topicDisplayColors.get(topic.id) ??
+      colorFromSeed(`topic:${topic.id}:${topic.name}`, TOPIC_FALLBACK_COLORS);
+    const nextColor = normalizeHexColor(topicColorDraft) ?? currentColor;
+    const nameChanged = nextName !== topic.name;
+    const colorChanged = nextColor !== normalizeHexColor(topic.color);
+    if (readOnly) return;
+    if (!nextName) {
+      setRenameError(renameKey, "Topic name cannot be empty.");
+      return;
+    }
+    if (!nameChanged && !colorChanged) {
+      setEditingTopicId(null);
+      setTopicNameDraft("");
+      setTopicColorDraft(currentColor);
+      setRenameError(renameKey);
+      return;
+    }
+    setRenameSavingKey(renameKey);
+    setRenameError(renameKey);
+    try {
+      const res = await fetch(apiUrl("/api/topics"), {
+        method: "POST",
+        headers: writeHeaders,
+        body: JSON.stringify({
+          id: topic.id,
+          name: nameChanged ? nextName : topic.name,
+          color: nextColor,
+        }),
+      });
+      if (!res.ok) {
+        setRenameError(renameKey, "Failed to rename topic.");
+        return;
+      }
+      const updated = (await res.json().catch(() => null)) as Topic | null;
+      if (updated?.id) {
+        setTopics((prev) => prev.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)));
+        if (nameChanged) {
+          await requestEmbeddingRefresh({
+            kind: "topic",
+            id: updated.id,
+            text: updated.name || nextName,
+          });
+        }
+      } else {
+        setTopics((prev) =>
+          prev.map((item) =>
+            item.id === topic.id
+              ? { ...item, name: nameChanged ? nextName : topic.name, color: nextColor, updatedAt: new Date().toISOString() }
+              : item
+          )
+        );
+        if (nameChanged) {
+          await requestEmbeddingRefresh({ kind: "topic", id: topic.id, text: nextName });
+        }
+      }
+      setEditingTopicId(null);
+      setTopicNameDraft("");
+      setTopicColorDraft(currentColor);
+      setRenameError(renameKey);
+    } finally {
+      setRenameSavingKey(null);
+    }
+  };
+
+  const saveTaskRename = async (task: Task) => {
+    const renameKey = `task:${task.id}`;
+    const nextTitle = taskNameDraft.trim();
+    const currentColor =
+      normalizeHexColor(task.color) ??
+      taskDisplayColors.get(task.id) ??
+      colorFromSeed(`task:${task.id}:${task.title}`, TASK_FALLBACK_COLORS);
+    const nextColor = normalizeHexColor(taskColorDraft) ?? currentColor;
+    const titleChanged = nextTitle !== task.title;
+    const colorChanged = nextColor !== normalizeHexColor(task.color);
+    if (readOnly) return;
+    if (!nextTitle) {
+      setRenameError(renameKey, "Task name cannot be empty.");
+      return;
+    }
+    if (!titleChanged && !colorChanged) {
+      setEditingTaskId(null);
+      setTaskNameDraft("");
+      setTaskColorDraft(currentColor);
+      setRenameError(renameKey);
+      return;
+    }
+    setRenameSavingKey(renameKey);
+    setRenameError(renameKey);
+    try {
+      const res = await fetch(apiUrl("/api/tasks"), {
+        method: "POST",
+        headers: writeHeaders,
+        body: JSON.stringify({
+          id: task.id,
+          title: titleChanged ? nextTitle : task.title,
+          color: nextColor,
+          topicId: task.topicId,
+        }),
+      });
+      if (!res.ok) {
+        setRenameError(renameKey, "Failed to rename task.");
+        return;
+      }
+      const updated = (await res.json().catch(() => null)) as Task | null;
+      if (updated?.id) {
+        setTasks((prev) => prev.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)));
+        if (titleChanged) {
+          await requestEmbeddingRefresh({
+            kind: "task",
+            id: updated.id,
+            topicId: updated.topicId,
+            text: updated.title || nextTitle,
+          });
+        }
+      } else {
+        setTasks((prev) =>
+          prev.map((item) =>
+            item.id === task.id
+              ? {
+                  ...item,
+                  title: titleChanged ? nextTitle : task.title,
+                  color: nextColor,
+                  updatedAt: new Date().toISOString(),
+                }
+              : item
+          )
+        );
+        if (titleChanged) {
+          await requestEmbeddingRefresh({
+            kind: "task",
+            id: task.id,
+            topicId: task.topicId,
+            text: nextTitle,
+          });
+        }
+      }
+      setEditingTaskId(null);
+      setTaskNameDraft("");
+      setTaskColorDraft(currentColor);
+      setRenameError(renameKey);
+    } finally {
+      setRenameSavingKey(null);
+    }
   };
 
   const expandAll = () => {
@@ -468,7 +744,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         <div>
           <h1 className="text-3xl font-semibold tracking-tight">Unified View</h1>
           <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">
-            Topics → tasks → timelines in a single, expandable view.
+            Topics → tasks → messages in a single, expandable view.
           </p>
         </div>
         <Badge tone="accent2">Unified</Badge>
@@ -503,7 +779,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 pushUrl({ q: search });
               }
             }}
-            placeholder="Search topics, tasks, or timeline entries"
+            placeholder="Search topics, tasks, or messages"
             className="min-w-[240px] flex-1"
           />
           <div className="flex flex-wrap items-center gap-3">
@@ -564,7 +840,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       </div>
 
       <div className="space-y-4">
-        {pagedTopics.map((topic) => {
+        {pagedTopics.map((topic, topicIndex) => {
           const topicId = topic.id;
           const taskList = tasksByTopic.get(topicId) ?? [];
           const openCount = taskList.filter((task) => task.status !== "done").length;
@@ -575,9 +851,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const topicOnlyLogs = topicLogs.filter((entry) => !entry.taskId && matchesLogSearch(entry));
           const showTasks = !normalizedSearch || taskList.length > 0 || topicOnlyLogs.length > 0;
           const isExpanded = expandedTopicsSafe.has(topicId);
+          const topicColor =
+            topicDisplayColors.get(topicId) ??
+            normalizeHexColor(topic.color) ??
+            colorFromSeed(`topic:${topic.id}:${topic.name}`, TOPIC_FALLBACK_COLORS);
 
           return (
-            <div key={topicId} className="rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] bg-[rgba(16,19,24,0.88)] p-5">
+            <div
+              key={topicId}
+              className="rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] p-5 transition-colors duration-300"
+              style={topicGlowStyle(topicColor, topicIndex, isExpanded)}
+            >
               <div
                 role="button"
                 tabIndex={0}
@@ -610,7 +894,117 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               >
                 <div>
                   <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-semibold">{topic.name}</h2>
+                    {editingTopicId === topic.id ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Input
+                          data-testid={`rename-topic-input-${topic.id}`}
+                          value={topicNameDraft}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) => setTopicNameDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void saveTopicRename(topic);
+                            }
+                            if (event.key === "Escape") {
+                              event.preventDefault();
+                              setEditingTopicId(null);
+                              setTopicNameDraft("");
+                              setRenameError(`topic:${topic.id}`);
+                            }
+                          }}
+                          placeholder="Rename topic"
+                          className="h-9 w-[260px] max-w-[70vw]"
+                        />
+                        <label
+                          className="flex h-9 items-center gap-2 rounded-full border border-[rgb(var(--claw-border))] px-2 text-[10px] uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          Color
+                          <input
+                            data-testid={`rename-topic-color-${topic.id}`}
+                            type="color"
+                            value={topicColorDraft}
+                            disabled={readOnly}
+                            onClick={(event) => event.stopPropagation()}
+                            onChange={(event) => {
+                              const next = normalizeHexColor(event.target.value);
+                              if (next) setTopicColorDraft(next);
+                            }}
+                            className="h-6 w-7 cursor-pointer rounded border border-[rgb(var(--claw-border))] bg-transparent p-0 disabled:cursor-not-allowed"
+                          />
+                        </label>
+                        <Button
+                          data-testid={`save-topic-rename-${topic.id}`}
+                          size="sm"
+                          variant="secondary"
+                          disabled={
+                            readOnly ||
+                            renameSavingKey === `topic:${topic.id}` ||
+                            !topicNameDraft.trim() ||
+                            !normalizeHexColor(topicColorDraft)
+                          }
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void saveTopicRename(topic);
+                          }}
+                        >
+                          Save
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setEditingTopicId(null);
+                            setTopicNameDraft("");
+                            setTopicColorDraft(topicColor);
+                            setRenameError(`topic:${topic.id}`);
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    ) : (
+                      <>
+                        <h2 className="text-lg font-semibold">{topic.name}</h2>
+                        <button
+                          type="button"
+                          data-testid={`rename-topic-${topic.id}`}
+                          aria-label={`Rename topic ${topic.name}`}
+                          title={
+                            topic.id === "unassigned"
+                              ? "Unassigned is a virtual bucket."
+                              : readOnly
+                                ? "Read-only mode. Add token in Setup to rename."
+                                : "Rename topic"
+                          }
+                          disabled={readOnly || topic.id === "unassigned"}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (readOnly || topic.id === "unassigned") return;
+                            setEditingTaskId(null);
+                            setTaskNameDraft("");
+                            setTaskColorDraft(TASK_FALLBACK_COLORS[0]);
+                            setEditingTopicId(topic.id);
+                            setTopicNameDraft(topic.name);
+                            setTopicColorDraft(topicColor);
+                            setRenameError(`topic:${topic.id}`);
+                          }}
+                          className={cn(
+                            "flex h-7 w-7 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] transition",
+                            readOnly || topic.id === "unassigned"
+                              ? "cursor-not-allowed opacity-60"
+                              : "cursor-pointer hover:border-[rgba(255,90,45,0.3)] hover:text-[rgb(var(--claw-text))]"
+                          )}
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                            <path d="M12 20h9" />
+                            <path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                          </svg>
+                        </button>
+                      </>
+                    )}
                     <PinToggle
                       topic={topic}
                       size="sm"
@@ -623,6 +1017,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       }
                     />
                   </div>
+                  {renameErrors[`topic:${topic.id}`] && (
+                    <p className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`topic:${topic.id}`]}</p>
+                  )}
                   <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topic.description}</p>
                   <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-[rgb(var(--claw-muted))]">
                     <span>{taskList.length} tasks</span>
@@ -643,18 +1040,26 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       if (!showDone && task.status === "done") return false;
                       return matchesTaskSearch(task);
                     })
-                    .map((task) => {
+                    .map((task, taskIndex) => {
                       if (normalizedSearch && !matchesTaskSearch(task) && !`${topic.name} ${topic.description ?? ""}`.toLowerCase().includes(normalizedSearch)) {
                         return null;
                       }
                       const taskLogs = logsByTask.get(task.id) ?? [];
                       const taskExpanded = expandedTasksSafe.has(task.id);
+                      const taskColor =
+                        taskDisplayColors.get(task.id) ??
+                        normalizeHexColor(task.color) ??
+                        colorFromSeed(`task:${task.id}:${task.title}`, TASK_FALLBACK_COLORS);
                       const visibleLogs = taskLogs.filter(matchesLogSearch);
                       const limit = timelineLimits[task.id] ?? TASK_TIMELINE_LIMIT;
                       const limitedLogs = visibleLogs.slice(0, limit);
                       const truncated = visibleLogs.length > limit;
                       return (
-                        <div key={task.id} className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
+                        <div
+                          key={task.id}
+                          className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300"
+                          style={taskGlowStyle(taskColor, taskIndex, taskExpanded)}
+                        >
                           <div
                             role="button"
                             tabIndex={0}
@@ -687,7 +1092,111 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         >
                           <div>
                             <div className="flex items-center gap-2 text-sm font-semibold">
-                              <span>{task.title}</span>
+                              {editingTaskId === task.id ? (
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <Input
+                                    data-testid={`rename-task-input-${task.id}`}
+                                    value={taskNameDraft}
+                                    onClick={(event) => event.stopPropagation()}
+                                    onChange={(event) => setTaskNameDraft(event.target.value)}
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter") {
+                                        event.preventDefault();
+                                        void saveTaskRename(task);
+                                      }
+                                      if (event.key === "Escape") {
+                                        event.preventDefault();
+                                        setEditingTaskId(null);
+                                        setTaskNameDraft("");
+                                        setRenameError(`task:${task.id}`);
+                                      }
+                                    }}
+                                    placeholder="Rename task"
+                                    className="h-9 w-[280px] max-w-[68vw]"
+                                  />
+                                  <label
+                                    className="flex h-9 items-center gap-2 rounded-full border border-[rgb(var(--claw-border))] px-2 text-[10px] uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]"
+                                    onClick={(event) => event.stopPropagation()}
+                                  >
+                                    Color
+                                    <input
+                                      data-testid={`rename-task-color-${task.id}`}
+                                      type="color"
+                                      value={taskColorDraft}
+                                      disabled={readOnly}
+                                      onClick={(event) => event.stopPropagation()}
+                                      onChange={(event) => {
+                                        const next = normalizeHexColor(event.target.value);
+                                        if (next) setTaskColorDraft(next);
+                                      }}
+                                      className="h-6 w-7 cursor-pointer rounded border border-[rgb(var(--claw-border))] bg-transparent p-0 disabled:cursor-not-allowed"
+                                    />
+                                  </label>
+                                  <Button
+                                    data-testid={`save-task-rename-${task.id}`}
+                                    size="sm"
+                                    variant="secondary"
+                                    disabled={
+                                      readOnly ||
+                                      renameSavingKey === `task:${task.id}` ||
+                                      !taskNameDraft.trim() ||
+                                      !normalizeHexColor(taskColorDraft)
+                                    }
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      void saveTaskRename(task);
+                                    }}
+                                  >
+                                    Save
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setEditingTaskId(null);
+                                      setTaskNameDraft("");
+                                      setTaskColorDraft(taskColor);
+                                      setRenameError(`task:${task.id}`);
+                                    }}
+                                  >
+                                    Cancel
+                                  </Button>
+                                </div>
+                              ) : (
+                                <>
+                                  <span>{task.title}</span>
+                                  <button
+                                    type="button"
+                                    data-testid={`rename-task-${task.id}`}
+                                    aria-label={`Rename task ${task.title}`}
+                                    title={readOnly ? "Read-only mode. Add token in Setup to rename." : "Rename task"}
+                                    disabled={readOnly}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      if (readOnly) return;
+                                      setEditingTopicId(null);
+                                      setTopicNameDraft("");
+                                      setTopicColorDraft(TOPIC_FALLBACK_COLORS[0]);
+                                      setEditingTaskId(task.id);
+                                      setTaskNameDraft(task.title);
+                                      setTaskColorDraft(taskColor);
+                                      setRenameError(`task:${task.id}`);
+                                    }}
+                                    className={cn(
+                                      "flex h-7 w-7 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] transition",
+                                      readOnly
+                                        ? "cursor-not-allowed opacity-60"
+                                        : "cursor-pointer hover:border-[rgba(255,90,45,0.3)] hover:text-[rgb(var(--claw-text))]"
+                                    )}
+                                  >
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                                      <path d="M12 20h9" />
+                                      <path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                                    </svg>
+                                  </button>
+                                </>
+                              )}
                               <TaskPinToggle
                                 task={task}
                                 size="sm"
@@ -700,6 +1209,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                 }
                               />
                             </div>
+                            {renameErrors[`task:${task.id}`] && (
+                              <div className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`task:${task.id}`]}</div>
+                            )}
                             <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">Updated {formatRelativeTime(task.updatedAt)}</div>
                           </div>
                           <div className="flex items-center gap-2">
@@ -756,9 +1268,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                               )}
                             </div>
                             {visibleLogs.length === 0 ? (
-                              <p className="text-sm text-[rgb(var(--claw-muted))]">No timeline entries yet.</p>
+                              <p className="text-sm text-[rgb(var(--claw-muted))]">No messages yet.</p>
                             ) : (
-                              <>
+                              <div
+                                className="rounded-[var(--radius-md)] border p-4"
+                                style={{
+                                  borderColor: rgba(taskColor, 0.34),
+                                  background: `linear-gradient(150deg, ${rgba(taskColor, 0.15)}, ${rgba(taskColor, 0.08)} 44%, rgba(17,20,26,0.86))`,
+                                }}
+                              >
+                                <div className="mb-3 flex items-center justify-between">
+                                  <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">TASK CHAT</div>
+                                  <span className="text-xs text-[rgb(var(--claw-muted))]">{visibleLogs.length} entries</span>
+                                </div>
                                 <LogList
                                   logs={limitedLogs}
                                   topics={topics}
@@ -787,7 +1309,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                     </Button>
                                   </div>
                                 )}
-                              </>
+                              </div>
                             )}
                           </div>
                         )}
@@ -804,7 +1326,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   {topicOnlyLogs.length > 0 && (
                     <div className="rounded-[var(--radius-md)] border border-[rgba(255,90,45,0.25)] bg-[rgba(255,90,45,0.06)] p-4">
                       <div className="mb-3 flex items-center justify-between">
-                        <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Topic Chat</div>
+                        <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">TOPIC CHAT</div>
                         <span className="text-xs text-[rgb(var(--claw-muted))]">{topicOnlyLogs.length} entries</span>
                       </div>
                       <LogList

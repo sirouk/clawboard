@@ -524,8 +524,16 @@ function LogRow({
               <textarea
                 value={noteText}
                 onChange={(event) => setNoteText(event.target.value)}
-                placeholder="Add a curated note to this conversation..."
-                className="min-h-[90px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)]"
+                placeholder={
+                  readOnly
+                    ? "Add token in Setup to enable curated notes that steer classification."
+                    : "Add a curated note to this conversation..."
+                }
+                disabled={readOnly}
+                readOnly={readOnly}
+                className={`min-h-[90px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
+                  readOnly ? "cursor-not-allowed opacity-70" : ""
+                }`}
               />
               {noteStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{noteStatus}</p>}
               <div className="flex flex-wrap items-center gap-2">

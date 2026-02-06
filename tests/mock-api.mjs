@@ -79,6 +79,129 @@ function normalizeLog(entry) {
   };
 }
 
+function slug(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "node";
+}
+
+function buildMockClawgraph() {
+  const nodes = [];
+  const edges = [];
+  const nodeIds = new Set();
+  const edgeIds = new Set();
+
+  const addNode = (node) => {
+    if (nodeIds.has(node.id)) return;
+    nodeIds.add(node.id);
+    nodes.push(node);
+  };
+
+  const addEdge = (edge) => {
+    if (edgeIds.has(edge.id)) return;
+    edgeIds.add(edge.id);
+    edges.push(edge);
+  };
+
+  const topicById = new Map(store.topics.map((topic) => [topic.id, topic]));
+  const taskById = new Map(store.tasks.map((task) => [task.id, task]));
+  const agentSeen = new Set();
+
+  for (const topic of store.topics) {
+    addNode({
+      id: `topic:${topic.id}`,
+      label: topic.name || topic.id,
+      type: "topic",
+      score: 2.2,
+      size: 18,
+      color: "#ff8a4a",
+      meta: { topicId: topic.id },
+    });
+  }
+
+  for (const task of store.tasks) {
+    addNode({
+      id: `task:${task.id}`,
+      label: task.title || task.id,
+      type: "task",
+      score: task.status === "doing" ? 1.9 : task.status === "blocked" ? 1.7 : 1.4,
+      size: 14,
+      color: "#4ea1ff",
+      meta: { taskId: task.id, topicId: task.topicId || null, status: task.status || "todo" },
+    });
+    if (task.topicId && topicById.has(task.topicId)) {
+      addEdge({
+        id: `edge:topic-task:${task.topicId}:${task.id}`,
+        source: `topic:${task.topicId}`,
+        target: `task:${task.id}`,
+        type: "has_task",
+        weight: 1.2,
+        evidence: 1,
+      });
+    }
+  }
+
+  const recentLogs = [...store.logs]
+    .map(normalizeLog)
+    .sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1))
+    .slice(0, 400);
+
+  for (const log of recentLogs) {
+    const label = (log.agentLabel || log.agentId || "").trim();
+    if (!label) continue;
+    const agentId = `agent:${slug(label)}`;
+    if (!agentSeen.has(agentId)) {
+      agentSeen.add(agentId);
+      addNode({
+        id: agentId,
+        label: label.slice(0, 36),
+        type: "agent",
+        score: 1.1,
+        size: 11,
+        color: "#f2c84b",
+        meta: { agentLabel: label },
+      });
+    }
+    if (log.topicId && topicById.has(log.topicId)) {
+      addEdge({
+        id: `edge:agent-topic:${agentId}:${log.topicId}`,
+        source: agentId,
+        target: `topic:${log.topicId}`,
+        type: "agent_focus",
+        weight: 0.7,
+        evidence: 1,
+      });
+    }
+    if (log.taskId && taskById.has(log.taskId)) {
+      addEdge({
+        id: `edge:agent-task:${agentId}:${log.taskId}`,
+        source: agentId,
+        target: `task:${log.taskId}`,
+        type: "mentions",
+        weight: 0.6,
+        evidence: 1,
+      });
+    }
+  }
+
+  const densityBase = Math.max(1, (nodes.length * (nodes.length - 1)) / 2);
+  return {
+    generatedAt: nowIso(),
+    stats: {
+      nodeCount: nodes.length,
+      edgeCount: edges.length,
+      topicCount: nodes.filter((node) => node.type === "topic").length,
+      taskCount: nodes.filter((node) => node.type === "task").length,
+      entityCount: nodes.filter((node) => node.type === "entity").length,
+      agentCount: nodes.filter((node) => node.type === "agent").length,
+      density: Math.min(1, Number((edges.length / densityBase).toFixed(4))),
+    },
+    nodes,
+    edges,
+  };
+}
+
 store.logs = Array.isArray(store.logs) ? store.logs.map(normalizeLog) : [];
 
 const server = http.createServer(async (req, res) => {
@@ -148,6 +271,14 @@ const server = http.createServer(async (req, res) => {
       tasks: filterSince(store.tasks, "updatedAt"),
       logs: filterSince(store.logs, "updatedAt"),
     });
+  }
+
+  if (url.pathname === "/api/clawgraph" && req.method === "GET") {
+    return sendJson(res, 200, buildMockClawgraph());
+  }
+
+  if (url.pathname === "/api/reindex" && req.method === "POST") {
+    return sendJson(res, 200, { ok: true, queued: true });
   }
 
   if (url.pathname === "/api/topics") {

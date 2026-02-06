@@ -25,6 +25,10 @@ class InstanceConfig(SQLModel, table=True):
 class Topic(SQLModel, table=True):
     id: str = Field(primary_key=True, description="Topic ID.")
     name: str = Field(description="Topic name.")
+    color: Optional[str] = Field(
+        default=None,
+        description="Topic display color in #RRGGBB format.",
+    )
     description: Optional[str] = Field(
         default=None,
         description="Topic description.",
@@ -66,6 +70,10 @@ class Task(SQLModel, table=True):
         description="Parent topic ID (nullable).",
     )
     title: str = Field(description="Task title.")
+    color: Optional[str] = Field(
+        default=None,
+        description="Task display color in #RRGGBB format.",
+    )
     status: str = Field(
         description="Task status (todo | doing | blocked | done).",
     )

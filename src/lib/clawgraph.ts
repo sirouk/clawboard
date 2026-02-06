@@ -175,6 +175,9 @@ function extractEntities(text: string) {
   const camel = source.match(/\b[A-Z][a-z]+(?:[A-Z][a-z0-9]+)+\b/g) ?? [];
   camel.forEach(addToken);
 
+  const titledSingle = source.match(/\b[A-Z][a-z0-9]{2,}\b/g) ?? [];
+  titledSingle.forEach(addToken);
+
   const titled = source.match(/\b[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+){1,2}\b/g) ?? [];
   titled.forEach(addToken);
 

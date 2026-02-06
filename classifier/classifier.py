@@ -32,6 +32,7 @@ TASK_NAME_SIM_THRESHOLD = float(os.environ.get("CLASSIFIER_TASK_NAME_SIM_THRESHO
 SUMMARY_MAX = int(os.environ.get("CLASSIFIER_SUMMARY_MAX", "72"))
 
 LOCK_PATH = os.environ.get("CLASSIFIER_LOCK_PATH", "/data/classifier.lock")
+REINDEX_QUEUE_PATH = os.environ.get("CLASSIFIER_REINDEX_QUEUE_PATH", "/data/reindex-queue.jsonl")
 
 OPENCLAW_MEMORY_DB_PATH = os.environ.get("OPENCLAW_MEMORY_DB_PATH")
 OPENCLAW_MEMORY_DB_FALLBACK = os.environ.get("OPENCLAW_MEMORY_DB_FALLBACK", "/data/openclaw-memory/main.sqlite")
@@ -369,6 +370,70 @@ def release_lock():
         os.unlink(LOCK_PATH)
     except FileNotFoundError:
         pass
+
+
+def _drain_reindex_queue():
+    queue_path = REINDEX_QUEUE_PATH
+    if not queue_path:
+        return []
+    processing_path = f"{queue_path}.processing.{os.getpid()}"
+    try:
+        os.replace(queue_path, processing_path)
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        print(f"classifier: failed to open reindex queue: {exc}")
+        return []
+
+    requests_out = []
+    try:
+        with open(processing_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    requests_out.append(json.loads(line))
+                except Exception:
+                    continue
+    finally:
+        try:
+            os.unlink(processing_path)
+        except Exception:
+            pass
+    return requests_out
+
+
+def process_reindex_queue():
+    pending = _drain_reindex_queue()
+    if not pending:
+        return
+
+    # Keep the latest request per target.
+    latest: dict[tuple[str, str, str], dict] = {}
+    for item in pending:
+        kind = str(item.get("kind") or "").strip().lower()
+        item_id = str(item.get("id") or "").strip()
+        topic_id = str(item.get("topicId") or "").strip()
+        if not kind or not item_id:
+            continue
+        latest[(kind, item_id, topic_id)] = item
+
+    for (kind, item_id, topic_id), item in latest.items():
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        vec = embed_text(text)
+        if vec is None:
+            continue
+        try:
+            if kind == "topic":
+                embed_upsert("topic", item_id, vec)
+            elif kind == "task":
+                namespace = f"task:{topic_id or 'unassigned'}"
+                embed_upsert(namespace, item_id, vec)
+        except Exception as exc:
+            print(f"classifier: reindex update failed for {kind}:{item_id}: {exc}")
 
 
 def list_logs(params: dict):
@@ -1055,6 +1120,7 @@ def classify_session(session_key: str):
 
 def main():
     while True:
+        process_reindex_queue()
         if not acquire_lock():
             time.sleep(INTERVAL)
             continue

@@ -135,6 +135,13 @@ def _extract_entities(text: str) -> set[str]:
         if len(token) >= 3:
             entities.add(token)
 
+    # Single TitleCase entities ("Discord", "OpenClaw", "Tailscale").
+    for match in re.finditer(r"\b[A-Z][a-z0-9]{2,}\b", source):
+        token = match.group(0).strip()
+        if token in ENTITY_BLOCKLIST:
+            continue
+        entities.add(token)
+
     # Multi-word named entities ("Open Claw", "Discord Bot", "Docker Desktop")
     for match in re.finditer(r"\b[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+){1,2}\b", source):
         token = match.group(0).strip()
