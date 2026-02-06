@@ -243,7 +243,11 @@
       "summary": "Instance seeded with default topics.",
       "createdAt": "2026-02-01T14:00:00.000Z",
       "agentId": "system",
-      "agentLabel": "System"
+      "agentLabel": "System",
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-01T14:00:00.000Z",
+      "taskId": null,
+      "source": null
     },
     {
       "id": "log-2",
@@ -260,7 +264,9 @@
         "channel": "discord",
         "sessionKey": "main",
         "messageId": "msg-001"
-      }
+      },
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-02T10:05:00.000Z"
     },
     {
       "id": "log-3",
@@ -275,7 +281,9 @@
       "source": {
         "channel": "terminal",
         "sessionKey": "coding"
-      }
+      },
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-02T10:25:00.000Z"
     },
     {
       "id": "log-4",
@@ -292,7 +300,9 @@
         "channel": "discord",
         "sessionKey": "main",
         "messageId": "msg-002"
-      }
+      },
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-02T11:20:00.000Z"
     },
     {
       "id": "log-5",
@@ -302,7 +312,11 @@
       "summary": "Imported 24 historical entries.",
       "createdAt": "2026-02-02T12:10:00.000Z",
       "agentId": "system",
-      "agentLabel": "System"
+      "agentLabel": "System",
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-02T12:10:00.000Z",
+      "taskId": null,
+      "source": null
     },
     {
       "id": "log-6",
@@ -319,7 +333,9 @@
         "channel": "discord",
         "sessionKey": "main",
         "messageId": "msg-003"
-      }
+      },
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-02T13:40:00.000Z"
     },
     {
       "id": "log-7",
@@ -334,7 +350,9 @@
       "source": {
         "channel": "terminal",
         "sessionKey": "coding"
-      }
+      },
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-02T14:05:00.000Z"
     },
     {
       "id": "log-8",
@@ -345,7 +363,10 @@
       "summary": "Capture privacy-first emphasis for release notes.",
       "createdAt": "2026-02-02T15:30:00.000Z",
       "agentId": "main",
-      "agentLabel": "User"
+      "agentLabel": "User",
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-02T15:30:00.000Z",
+      "source": null
     },
     {
       "id": "log-9",
@@ -357,7 +378,10 @@
       "raw": "User: Send a status update to the client by Friday.\nAssistant: Will draft the update and confirm delivery time.",
       "createdAt": "2026-02-02T16:20:00.000Z",
       "agentId": "main",
-      "agentLabel": "User"
+      "agentLabel": "User",
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-02T16:20:00.000Z",
+      "source": null
     },
     {
       "id": "log-10",
@@ -368,7 +392,10 @@
       "summary": "Generated monthly status report draft.",
       "createdAt": "2026-02-02T17:10:00.000Z",
       "agentId": "system",
-      "agentLabel": "System"
+      "agentLabel": "System",
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-02T17:10:00.000Z",
+      "source": null
     },
     {
       "id": "log-11",
@@ -380,7 +407,10 @@
       "raw": "User: Evaluate memory search ranking improvements for session queries.\nAssistant: We'll run ranking tests and compare the top-5 results.",
       "createdAt": "2026-02-02T18:05:00.000Z",
       "agentId": "main",
-      "agentLabel": "User"
+      "agentLabel": "User",
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-02T18:05:00.000Z",
+      "source": null
     },
     {
       "id": "log-12",
@@ -395,7 +425,9 @@
       "source": {
         "channel": "terminal",
         "sessionKey": "coding"
-      }
+      },
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-02T19:15:00.000Z"
     },
     {
       "id": "log-13",
@@ -407,7 +439,10 @@
       "raw": "User: Plan a focused week with three priorities.\nAssistant: We'll define three outcomes and map them to tasks.",
       "createdAt": "2026-02-03T09:20:00.000Z",
       "agentId": "main",
-      "agentLabel": "User"
+      "agentLabel": "User",
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-03T09:20:00.000Z",
+      "source": null
     },
     {
       "id": "log-14",
@@ -418,7 +453,10 @@
       "summary": "Logger hook enabled.",
       "createdAt": "2026-02-03T10:40:00.000Z",
       "agentId": "system",
-      "agentLabel": "System"
+      "agentLabel": "System",
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-03T10:40:00.000Z",
+      "source": null
     },
     {
       "id": "log-15",
@@ -429,7 +467,10 @@
       "summary": "Prepared demo dataset for testing.",
       "createdAt": "2026-02-03T11:15:00.000Z",
       "agentId": "coding",
-      "agentLabel": "Coding Agent"
+      "agentLabel": "Coding Agent",
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-03T11:15:00.000Z",
+      "source": null
     },
     {
       "id": "log-16",
@@ -440,7 +481,11 @@
       "raw": "User: Make unified view the default navigation surface.\nAssistant: We'll update routes and keep deep links intact.",
       "createdAt": "2026-02-03T12:30:00.000Z",
       "agentId": "main",
-      "agentLabel": "User"
+      "agentLabel": "User",
+      "classificationStatus": "classified",
+      "updatedAt": "2026-02-03T12:30:00.000Z",
+      "taskId": null,
+      "source": null
     }
   ]
 }

@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
+import { LogsPage } from "@/components/logs-page";
 
 export default function LogPage() {
-  redirect("/u");
+  return <LogsPage />;
 }

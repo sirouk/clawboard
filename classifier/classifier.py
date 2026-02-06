@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import sqlite3
 import time
 import requests
 
@@ -24,6 +26,10 @@ TASK_SIM_THRESHOLD = float(os.environ.get("CLASSIFIER_TASK_SIM_THRESHOLD", "0.80
 EMBED_MODEL = os.environ.get("CLASSIFIER_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 
 LOCK_PATH = os.environ.get("CLASSIFIER_LOCK_PATH", "/data/classifier.lock")
+
+OPENCLAW_MEMORY_DB_PATH = os.environ.get("OPENCLAW_MEMORY_DB_PATH")
+OPENCLAW_MEMORY_DB_FALLBACK = os.environ.get("OPENCLAW_MEMORY_DB_FALLBACK", "/data/openclaw-memory/main.sqlite")
+OPENCLAW_MEMORY_MAX_HITS = int(os.environ.get("OPENCLAW_MEMORY_MAX_HITS", "6"))
 
 _embedder = None
 
@@ -54,6 +60,77 @@ def embedder():
 def embed_text(text: str):
     vec = next(embedder().embed([text]))
     return vec
+
+
+def _memory_db_path() -> str | None:
+    if OPENCLAW_MEMORY_DB_PATH and os.path.exists(OPENCLAW_MEMORY_DB_PATH):
+        return OPENCLAW_MEMORY_DB_PATH
+    if OPENCLAW_MEMORY_DB_FALLBACK and os.path.exists(OPENCLAW_MEMORY_DB_FALLBACK):
+        return OPENCLAW_MEMORY_DB_FALLBACK
+    return None
+
+
+def _fts_query(text: str) -> str | None:
+    words = re.findall(r"[A-Za-z0-9]{4,}", text.lower())
+    if not words:
+        return None
+    uniq: list[str] = []
+    for w in words:
+        if w not in uniq:
+            uniq.append(w)
+    return " OR ".join(uniq[:12])
+
+
+def memory_snippets(query_text: str):
+    path = _memory_db_path()
+    if not path:
+        return []
+    q = _fts_query(query_text)
+    if not q:
+        return []
+    try:
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            """
+            SELECT id, path, start_line, end_line,
+                   snippet(chunks_fts, 0, '', '', ' … ', 20) as snippet,
+                   bm25(chunks_fts) as score
+            FROM chunks_fts
+            WHERE chunks_fts MATCH ?
+            ORDER BY score
+            LIMIT ?
+            """,
+            (q, OPENCLAW_MEMORY_MAX_HITS),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
+def _log_text(entry: dict) -> str:
+    parts = [entry.get("content"), entry.get("summary"), entry.get("raw")]
+    return "\n".join([p for p in parts if isinstance(p, str)]).strip()
+
+
+def _is_classifier_payload(text: str) -> bool:
+    if not text:
+        return False
+    t = text.strip()
+    if not t.startswith("{"):
+        return False
+    markers = ["\"window\"", "\"candidateTopics\"", "\"topic\"", "\"task\"", "\"instructions\""]
+    return any(m in t for m in markers)
+
+
+def _is_context_log(entry: dict) -> bool:
+    if entry.get("type") not in ("conversation", "note"):
+        return False
+    if _is_classifier_payload(_log_text(entry)):
+        return False
+    return True
 
 
 def acquire_lock():
@@ -109,6 +186,21 @@ def list_logs_by_session(session_key: str, limit: int = 200, offset: int = 0, cl
     if classificationStatus:
         params["classificationStatus"] = classificationStatus
     return list_logs(params)
+
+
+def list_logs_by_topic(topic_id: str, limit: int = 50, offset: int = 0):
+    return list_logs({"topicId": topic_id, "limit": limit, "offset": offset})
+
+
+def list_logs_by_task(task_id: str, limit: int = 50, offset: int = 0):
+    return list_logs({"taskId": task_id, "limit": limit, "offset": offset})
+
+
+def list_notes_by_related_ids(related_ids: list[str], limit: int = 200):
+    if not related_ids:
+        return []
+    joined = ",".join(related_ids)
+    return list_logs({"type": "note", "relatedLogId": joined, "limit": limit, "offset": 0})
 
 
 def list_topics():
@@ -226,18 +318,69 @@ def task_candidates(topic_id: str, query_text: str, k: int = 8):
     return out
 
 
-def window_text(window: list[dict]) -> str:
+def build_notes_index(logs: list[dict]):
+    log_ids = [e.get("id") for e in logs if e.get("id")]
+    notes = list_notes_by_related_ids(log_ids, limit=300)
+    index: dict[str, list[str]] = {}
+    for n in notes:
+        rid = n.get("relatedLogId")
+        if not rid:
+            continue
+        text = (n.get("content") or n.get("summary") or "").strip()
+        if not text:
+            continue
+        index.setdefault(rid, []).append(text[:600])
+    return index
+
+
+def summarize_logs(logs: list[dict], notes_index: dict[str, list[str]] | None = None, limit: int = 6):
+    notes_index = notes_index or {}
+    out = []
+    for e in logs:
+        if not _is_context_log(e):
+            continue
+        entry = {
+            "id": e.get("id"),
+            "createdAt": e.get("createdAt"),
+            "type": e.get("type"),
+            "summary": e.get("summary"),
+            "content": (e.get("content") or "")[:400],
+            "agentLabel": e.get("agentLabel") or e.get("agentId"),
+        }
+        notes = notes_index.get(e.get("id") or "", [])
+        if notes:
+            entry["notes"] = notes[:3]
+        out.append(entry)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def window_text(window: list[dict], notes_index: dict[str, list[str]] | None = None) -> str:
     parts = []
+    notes_index = notes_index or {}
     for e in window:
         who = e.get("agentLabel") or e.get("agentId") or "?"
         text = (e.get("content") or e.get("summary") or "").strip()
         if not text:
             continue
-        parts.append(f"{who}: {text}")
+        line = f"{who}: {text}"
+        notes = notes_index.get(e.get("id") or "", [])
+        if notes:
+            line += " | Notes: " + " ; ".join(notes[:3])
+        parts.append(line)
     return "\n".join(parts)[-6000:]
 
 
-def call_classifier(window: list[dict], candidate_topics: list[dict], candidate_tasks: list[dict]):
+def call_classifier(
+    window: list[dict],
+    candidate_topics: list[dict],
+    candidate_tasks: list[dict],
+    notes_index: dict[str, list[str]],
+    topic_contexts: dict[str, list[dict]],
+    task_contexts: dict[str, list[dict]],
+    memory_hits: list[dict],
+):
     prompt = {
         "window": [
             {
@@ -246,18 +389,34 @@ def call_classifier(window: list[dict], candidate_topics: list[dict], candidate_
                 "agentLabel": e.get("agentLabel"),
                 "summary": e.get("summary"),
                 "content": (e.get("content") or "")[:800],
+                "notes": notes_index.get(e.get("id") or "", [])[:3],
             }
             for e in window
         ],
-        "candidateTopics": candidate_topics,
-        "candidateTasks": candidate_tasks,
+        "candidateTopics": [
+            {
+                **t,
+                "recent": topic_contexts.get(t.get("id") or "", [])[:6],
+            }
+            for t in candidate_topics
+        ],
+        "candidateTasks": [
+            {
+                **t,
+                "recent": task_contexts.get(t.get("id") or "", [])[:6],
+            }
+            for t in candidate_tasks
+        ],
+        "memory": memory_hits,
         "instructions": (
             "Return STRICT JSON only with shape: "
             "{\"topic\": {\"id\": string|null, \"name\": string, \"create\": boolean}, "
             "\"task\": {\"id\": string|null, \"title\": string|null, \"create\": boolean}|null}. "
             "Rules: (1) Prefer existing topics/tasks when they clearly match; "
-            "(2) Only create when needed; (3) Topic/task names must be short and human; "
-            "(4) If in doubt, return task=null."
+            "(2) Use notes/curation and memory snippets as high-signal context; "
+            "(3) Only create when needed; (4) Topic/task names must be short and human; "
+            "(5) If an action item exists, pick or create a task; "
+            "(6) If in doubt, return task=null."
         ),
     }
 
@@ -287,16 +446,49 @@ def classify_session(session_key: str):
     # Pull a lookback window of logs for context (conversation + actions).
     ctx_logs = list_logs_by_session(session_key, limit=LOOKBACK_LOGS, offset=0)
     ctx_logs = sorted(ctx_logs, key=lambda e: e.get("createdAt") or "")
+    ctx_context = [e for e in ctx_logs if _is_context_log(e)]
 
     # Window focus: the most recent WINDOW_SIZE conversation items.
-    conversations = [e for e in ctx_logs if e.get("type") == "conversation"]
+    conversations = [e for e in ctx_context if e.get("type") == "conversation"]
     if not conversations:
+        # Still clean up classifier payload noise if present.
+        for e in ctx_logs:
+            if (e.get("classificationStatus") or "pending") != "pending":
+                continue
+            attempts = int(e.get("classificationAttempts") or 0)
+            if attempts >= MAX_ATTEMPTS:
+                continue
+            if e.get("type") == "conversation" and _is_classifier_payload(_log_text(e)):
+                patch_log(
+                    e["id"],
+                    {
+                        "classificationStatus": "failed",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "classifier_payload_noise",
+                    },
+                )
         return
     window = conversations[-WINDOW_SIZE:]
 
     # If there's nothing pending in the window, nothing to do.
     pending_ids = [e["id"] for e in window if (e.get("classificationStatus") or "pending") == "pending"]
     if not pending_ids:
+        # Still clean up classifier payload noise if present.
+        for e in ctx_logs:
+            if (e.get("classificationStatus") or "pending") != "pending":
+                continue
+            attempts = int(e.get("classificationAttempts") or 0)
+            if attempts >= MAX_ATTEMPTS:
+                continue
+            if e.get("type") == "conversation" and _is_classifier_payload(_log_text(e)):
+                patch_log(
+                    e["id"],
+                    {
+                        "classificationStatus": "failed",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "classifier_payload_noise",
+                    },
+                )
         return
 
     # Skip if any are already max-attempts.
@@ -305,7 +497,9 @@ def classify_session(session_key: str):
         if (e.get("classificationStatus") or "pending") == "pending" and attempts >= MAX_ATTEMPTS:
             return
 
-    text = window_text(window)
+    notes_index = build_notes_index(ctx_context)
+    text = window_text(window, notes_index)
+    memory_hits = memory_snippets(text)
 
     ensure_topic_index_seeded()
     topic_cands = topic_candidates(text)
@@ -315,7 +509,25 @@ def classify_session(session_key: str):
     if topic_cands and topic_cands[0]["score"] >= TOPIC_SIM_THRESHOLD:
         task_cands = task_candidates(topic_cands[0]["id"], text)
 
-    result = call_classifier(window, topic_cands, task_cands)
+    topic_contexts: dict[str, list[dict]] = {}
+    for t in topic_cands:
+        tid = t.get("id")
+        if not tid:
+            continue
+        logs = list_logs_by_topic(tid, limit=10, offset=0)
+        topic_notes = build_notes_index(logs)
+        topic_contexts[tid] = summarize_logs(logs, topic_notes, limit=6)
+
+    task_contexts: dict[str, list[dict]] = {}
+    for t in task_cands:
+        tid = t.get("id")
+        if not tid:
+            continue
+        logs = list_logs_by_task(tid, limit=10, offset=0)
+        task_notes = build_notes_index(logs)
+        task_contexts[tid] = summarize_logs(logs, task_notes, limit=6)
+
+    result = call_classifier(window, topic_cands, task_cands, notes_index, topic_contexts, task_contexts, memory_hits)
 
     chosen_topic_id = (result.get("topic") or {}).get("id")
     chosen_topic_name = (result.get("topic") or {}).get("name")
@@ -361,6 +573,16 @@ def classify_session(session_key: str):
             continue
         attempts = int(e.get("classificationAttempts") or 0)
         if attempts >= MAX_ATTEMPTS:
+            continue
+        if e.get("type") == "conversation" and _is_classifier_payload(_log_text(e)):
+            patch_log(
+                e["id"],
+                {
+                    "classificationStatus": "failed",
+                    "classificationAttempts": attempts + 1,
+                    "classificationError": "classifier_payload_noise",
+                },
+            )
             continue
         patch_log(
             e["id"],

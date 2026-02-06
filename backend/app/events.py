@@ -55,4 +55,6 @@ class EventHub:
         return f"id: {event_id}\ndata: {payload}\n\n"
 
 
-event_hub = EventHub()
+import os
+
+event_hub = EventHub(max_buffer=int(os.environ.get("CLAWBOARD_EVENT_BUFFER", "500")))

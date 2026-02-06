@@ -17,7 +17,8 @@ const TYPE_LABELS: Record<string, string> = {
   import: "Import",
 };
 
-type LaneFilter = "all" | "main" | "coding" | "web" | "social";
+type LaneFilter = "all" | string;
+const MESSAGE_TRUNCATE_LIMIT = 220;
 
 export function LogList({
   logs: initialLogs,
@@ -63,20 +64,8 @@ export function LogList({
 
   const matchesLane = (entry: LogEntry, lane: LaneFilter) => {
     if (lane === "all") return true;
-    const label = `${entry.agentLabel ?? ""} ${entry.agentId ?? ""}`.toLowerCase();
-    if (lane === "main") {
-      return label.includes("openclaw") || label.includes("assistant") || label.includes("main");
-    }
-    if (lane === "coding") {
-      return label.includes("coding");
-    }
-    if (lane === "web") {
-      return label.includes("web");
-    }
-    if (lane === "social") {
-      return label.includes("social") || label.includes("grok");
-    }
-    return false;
+    const label = entry.agentLabel || entry.agentId || "Unknown";
+    return label === lane;
   };
 
   useEffect(() => {
@@ -144,7 +133,19 @@ export function LogList({
     return new Map(topics.map((topic) => [topic.id, topic.name]));
   }, [topics]);
 
-  const agentLabels = Array.from(new Set(logs.map((entry) => entry.agentLabel || entry.agentId).filter(Boolean)));
+  const agentLabelCounts = useMemo(() => {
+    return logs.reduce<Record<string, number>>((acc, entry) => {
+      const label = entry.agentLabel || entry.agentId || "Unknown";
+      acc[label] = (acc[label] ?? 0) + 1;
+      return acc;
+    }, {});
+  }, [logs]);
+
+  const agentLabels = useMemo(() => {
+    return Object.entries(agentLabelCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([label]) => label);
+  }, [agentLabelCounts]);
 
   const summarize = (value: string) => {
     const clean = value.trim().replace(/\s+/g, " ");
@@ -219,19 +220,22 @@ export function LogList({
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Agent lanes</span>
-            {(["all", "main", "coding", "web", "social"] as LaneFilter[]).map((lane) => (
+            <Button variant={laneFilter === "all" ? "secondary" : "ghost"} size="sm" onClick={() => setLaneFilter("all")}>
+              All
+            </Button>
+            {agentLabels.map((lane) => (
               <Button
                 key={lane}
                 variant={laneFilter === lane ? "secondary" : "ghost"}
                 size="sm"
                 onClick={() => setLaneFilter(lane)}
               >
-                {lane === "all" ? "All" : lane.charAt(0).toUpperCase() + lane.slice(1)}
+                {lane}
               </Button>
             ))}
             {showRawToggle && (
               <Button variant="secondary" size="sm" onClick={() => setShowRawAll(!showRawAll)}>
-                {showRawAll ? "Show summaries" : "Show full prompts"}
+                {showRawAll ? "Hide full messages" : "Show full messages"}
               </Button>
             )}
             <Button variant="secondary" size="sm" onClick={() => setGroupByDay((prev) => !prev)}>
@@ -244,7 +248,7 @@ export function LogList({
       {!showFilters && showRawToggle && (
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="secondary" size="sm" onClick={() => setShowRawAll(!showRawAll)}>
-            {showRawAll ? "Show summaries" : "Show full prompts"}
+            {showRawAll ? "Hide full messages" : "Show full messages"}
           </Button>
         </div>
       )}
@@ -353,8 +357,13 @@ function LogRow({
   };
 
   const typeLabel = TYPE_LABELS[entry.type] ?? entry.type;
+  const isConversation = entry.type === "conversation";
   const agentLabel = entry.agentLabel || entry.agentId;
   const showAgentBadge = Boolean(agentLabel && agentLabel.trim().toLowerCase() !== typeLabel.trim().toLowerCase());
+  const messageSource = entry.raw ?? entry.content ?? entry.summary ?? "";
+  const shouldTruncate = !showRawAll && !expanded && messageSource.length > MESSAGE_TRUNCATE_LIMIT;
+  const messageText = shouldTruncate ? `${messageSource.slice(0, MESSAGE_TRUNCATE_LIMIT).trim()}…` : messageSource;
+  const bubbleAlign = (entry.agentId || "").toLowerCase() === "assistant" ? "ml-auto" : "mr-auto";
 
   return (
     <div
@@ -385,20 +394,43 @@ function LogRow({
         </div>
         <span className="text-xs text-[rgb(var(--claw-muted))]">{formatDateTime(entry.createdAt)}</span>
       </div>
-      <p className="mt-3 text-sm leading-relaxed text-[rgb(var(--claw-text))]">{summary}</p>
-      {entry.raw && (
-        <div className="mt-3">
-          {!showRawAll && (
-            <Button variant="ghost" size="sm" onClick={() => setExpanded((prev) => !prev)}>
-              {expanded ? "Hide raw" : "Show raw"}
-            </Button>
+
+      {isConversation ? (
+        <div className={`mt-3 max-w-[680px] rounded-[22px] border border-[rgba(255,255,255,0.08)] bg-[rgba(12,14,18,0.6)] px-4 py-3 text-sm leading-relaxed text-[rgb(var(--claw-text))] ${bubbleAlign}`}>
+          {messageText || summary || "(empty)"}
+          {shouldTruncate && (
+            <div className="mt-2">
+              <Button variant="ghost" size="sm" onClick={() => setExpanded(true)}>
+                Show full message
+              </Button>
+            </div>
           )}
-          {showRaw && (
-            <pre className="mt-2 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
-              {entry.raw}
-            </pre>
+          {!showRawAll && expanded && messageSource.length > MESSAGE_TRUNCATE_LIMIT && (
+            <div className="mt-2">
+              <Button variant="ghost" size="sm" onClick={() => setExpanded(false)}>
+                Hide full message
+              </Button>
+            </div>
           )}
         </div>
+      ) : (
+        <>
+          <p className="mt-3 text-sm leading-relaxed text-[rgb(var(--claw-text))]">{summary}</p>
+          {entry.raw && (
+            <div className="mt-3">
+              {!showRawAll && (
+                <Button variant="ghost" size="sm" onClick={() => setExpanded((prev) => !prev)}>
+                  {expanded ? "Hide full message" : "Show full message"}
+                </Button>
+              )}
+              {showRaw && (
+                <pre className="mt-2 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+                  {entry.raw}
+                </pre>
+              )}
+            </div>
+          )}
+        </>
       )}
       {allowNotes && entry.type !== "note" && (
         <div className="mt-3">

@@ -26,10 +26,19 @@ services:
       OPENCLAW_MODEL: ${OPENCLAW_MODEL:-openai-codex/gpt-5.2}
       CLASSIFIER_INTERVAL_SECONDS: ${CLASSIFIER_INTERVAL_SECONDS:-10}
       CLASSIFIER_MAX_ATTEMPTS: ${CLASSIFIER_MAX_ATTEMPTS:-3}
+      CLASSIFIER_WINDOW_SIZE: ${CLASSIFIER_WINDOW_SIZE:-24}
+      CLASSIFIER_LOOKBACK_LOGS: ${CLASSIFIER_LOOKBACK_LOGS:-80}
+      CLASSIFIER_TOPIC_SIM_THRESHOLD: ${CLASSIFIER_TOPIC_SIM_THRESHOLD:-0.78}
+      CLASSIFIER_TASK_SIM_THRESHOLD: ${CLASSIFIER_TASK_SIM_THRESHOLD:-0.80}
+      CLASSIFIER_EMBED_MODEL: ${CLASSIFIER_EMBED_MODEL:-BAAI/bge-small-en-v1.5}
+      QDRANT_URL: ${QDRANT_URL:-}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-clawboard_embeddings}
+      QDRANT_DIM: ${QDRANT_DIM:-384}
     depends_on:
       - api
     volumes:
       - ./data:/data
+      - ${HOME}/.openclaw/memory:/data/openclaw-memory:ro
     restart: unless-stopped
 
   web:
@@ -47,3 +56,29 @@ services:
       - api
     ports:
       - "3010:3000"
+
+  db:
+    image: postgres:16
+    profiles: ["scale"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-clawboard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clawboard}
+      POSTGRES_DB: ${POSTGRES_DB:-clawboard}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    profiles: ["scale"]
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    ports:
+      - "6333:6333"
+
+  redis:
+    image: redis:7-alpine
+    profiles: ["scale"]
+    ports:
+      - "6379:6379"

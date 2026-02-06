@@ -34,6 +34,16 @@ const ICONS: Record<string, React.ReactElement> = {
       <path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a2 2 0 0 1-4 0v-.2a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a2 2 0 0 1-2.8-2.8l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a2 2 0 0 1 0-4h.2a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a2 2 0 0 1 2.8-2.8l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V4a2 2 0 0 1 4 0v.2a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a2 2 0 0 1 2.8 2.8l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6H20a2 2 0 0 1 0 4h-.2a1 1 0 0 0-.9.6z" />
     </svg>
   ),
+  log: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 6h14" />
+      <path d="M5 12h14" />
+      <path d="M5 18h14" />
+      <path d="M7 4v4" />
+      <path d="M7 10v4" />
+      <path d="M7 16v4" />
+    </svg>
+  ),
   providers: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 3v18" />
@@ -46,6 +56,7 @@ const ICONS: Record<string, React.ReactElement> = {
 const NAV_ITEMS = [
   { href: "/u", label: "Home", id: "home" },
   { href: "/stats", label: "Stats", id: "stats" },
+  { href: "/log", label: "Logs", id: "log" },
   { href: "/providers", label: "Providers", id: "providers" },
   { href: "/setup", label: "Setup", id: "setup" },
 ];

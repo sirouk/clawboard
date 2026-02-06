@@ -16,6 +16,7 @@ Then open `http://localhost:3000` (or `http://localhost:3010` if running via Doc
 - `CLAWBOARD_TOKEN`: if set, write actions require the matching `X-Clawboard-Token` header.
 - `NEXT_PUBLIC_CLAWBOARD_API_BASE`: base URL for the FastAPI backend (e.g. `http://localhost:8010`).
 - `CLAWBOARD_DB_URL`: database URL for FastAPI (defaults to `sqlite:///./data/clawboard.db`).
+- `CLAWBOARD_INTEGRATION_LEVEL`: default integration level for /api/config (`manual` | `write` | `full`).
 
 Clawboard does not read local JSON for runtime data. All UI data is fetched from the FastAPI-backed SQLite database.
 Live updates use an SSE stream (`/api/stream`) so OpenClaw writes are reflected instantly without manual refresh.
@@ -26,6 +27,7 @@ The UI will reconcile on reconnect using `/api/changes?since=...` to avoid missi
 The backend API now lives in FastAPI (Swagger docs at `http://localhost:8010/docs`).
 By default it uses SQLite at `./data/clawboard.db` and supports the same schema as the UI.
 The Next.js API routes have been removed; set `NEXT_PUBLIC_CLAWBOARD_API_BASE` for the UI to function.
+You can also set the API base at runtime via the Setup panel in the UI (stored in localStorage).
 
 ## Tests (Playwright)
 
@@ -63,7 +65,7 @@ mkdir -p ~/.openclaw/skills
 cp -R skills/clawboard ~/.openclaw/skills/clawboard
 ```
 
-Then point your OpenClaw instance at the Clawboard base URL and token (if required).
+Then point your OpenClaw instance at the Clawboard API base URL (`http://localhost:8010`) and token (if required).
 
 ## Docker compose (web + api)
 
@@ -78,6 +80,24 @@ Or use the helper:
 ```bash
 bash deploy.sh
 ```
+
+## Bootstrap installer (recommended)
+
+One command to deploy Clawboard + install the OpenClaw skill + logger plugin:
+
+```bash
+bash scripts/bootstrap_openclaw.sh
+```
+
+By default the installer sets `integrationLevel` to `full` (full backfill). Use the flags below to change it.
+
+Useful flags:
+
+- `--integration-level full|write|manual` (default: `full`)
+- `--no-backfill` (shortcut for `manual`)
+- `--title "My Clawboard"`
+- `--api-url http://localhost:8010`
+- `--web-url http://localhost:3010`
 
 ## Chutes provider bootstrap (optional)
 
@@ -116,7 +136,7 @@ Set plugin config in your OpenClaw config:
       "clawboard-logger": {
         "enabled": true,
         "config": {
-          "baseUrl": "http://clawboard:3000",
+          "baseUrl": "http://clawboard:8010",
           "token": "YOUR_TOKEN"
         }
       }
@@ -128,7 +148,7 @@ Set plugin config in your OpenClaw config:
 ## API quick test
 
 ```bash
-curl -X POST http://localhost:3000/api/topics \
+curl -X POST http://localhost:8010/api/topics \
   -H 'Content-Type: application/json' \
   -H 'X-Clawboard-Token: YOUR_TOKEN' \
   -d '{"name":"Clawboard"}'

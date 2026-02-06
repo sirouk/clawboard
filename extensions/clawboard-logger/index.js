@@ -52,6 +52,8 @@ export default function register(api) {
   const baseUrl = rawConfig.baseUrl ? normalizeBaseUrl(rawConfig.baseUrl) : "";
   const token = rawConfig.token;
   const queuePath = rawConfig.queuePath ?? DEFAULT_QUEUE;
+  const useQueue = rawConfig.queue === true;
+  const ingestPath = rawConfig.ingestPath ?? (useQueue ? "/api/ingest" : "/api/log");
   const defaultTopicId = rawConfig.defaultTopicId;
   const defaultTaskId = rawConfig.defaultTaskId;
   // Default OFF: session buckets are not meaningful topics.
@@ -124,6 +126,20 @@ export default function register(api) {
     return { agentId: "assistant", agentLabel: "OpenClaw" };
   }
 
+  function resolveAgentLabel(agentId, sessionKey) {
+    const fromCtx = agentId && agentId !== "agent" ? agentId : void 0;
+    let fromSession;
+    if (!fromCtx && sessionKey && sessionKey.startsWith("agent:")) {
+      const parts = sessionKey.split(":");
+      if (parts.length >= 2)
+        fromSession = parts[1];
+    }
+    const resolved = fromCtx ?? fromSession;
+    if (!resolved || resolved === "main")
+      return "OpenClaw";
+    return `Agent ${resolved}`;
+  }
+
   async function enqueue(payload) {
     await ensureDir(queuePath);
     await fs.appendFile(queuePath, `${JSON.stringify(payload)}\n`, "utf8");
@@ -131,7 +147,7 @@ export default function register(api) {
 
   async function postLog(payload) {
     try {
-      const res = await fetch(`${baseUrl}/api/log`, {
+      const res = await fetch(`${baseUrl}${ingestPath}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -201,19 +217,40 @@ export default function register(api) {
 
   let lastChannelId;
   let lastEffectiveSessionKey;
+  let lastMessageAt = 0;
+  const inboundBySession = /* @__PURE__ */ new Map();
+
+  const resolveSessionKey = (meta, ctx2) => {
+    const metaSession = meta?.sessionKey;
+    if (typeof metaSession === "string" && metaSession.startsWith("channel:"))
+      return metaSession;
+    if (ctx2?.channelId)
+      return `channel:${ctx2.channelId}`;
+    return metaSession ?? ctx2?.sessionKey;
+  };
 
   api.on("message_received", async (event, ctx) => {
     const raw = event.content ?? "";
     const meta = event.metadata ?? undefined;
-    const sessionKey = meta?.sessionKey ?? ctx?.sessionKey;
-
-    const fallbackKey = ctx?.channelId;
-    const effectiveSessionKey = sessionKey ?? (fallbackKey ? `channel:${fallbackKey}` : undefined);
+    const effectiveSessionKey = resolveSessionKey(meta, ctx);
+    lastChannelId = ctx.channelId;
+    lastEffectiveSessionKey = effectiveSessionKey;
+    lastMessageAt = Date.now();
+    const ctxSessionKey = ctx?.sessionKey ?? meta?.sessionKey;
+    if (ctxSessionKey) {
+      inboundBySession.set(ctxSessionKey, {
+        ts: lastMessageAt,
+        channelId: ctx.channelId,
+        sessionKey: effectiveSessionKey
+      });
+    }
     const topicId = await resolveTopicId(effectiveSessionKey);
     const taskId = resolveTaskId();
 
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? metaSummary : summarize(raw);
+    const incomingKey = `received:${ctx.channelId ?? "nochannel"}:${effectiveSessionKey ?? ""}:${summary}`;
+    rememberIncoming(incomingKey);
 
     await send({
       topicId,
@@ -222,6 +259,7 @@ export default function register(api) {
       content: raw,
       summary,
       raw,
+      idempotencyKey: meta?.messageId ? `discord:${meta.messageId}:user:conversation` : void 0,
       agentId: "user",
       agentLabel: "User",
       source: {
@@ -245,19 +283,28 @@ export default function register(api) {
     }
     setTimeout(() => recentOutgoing.delete(key), 30e3).unref?.();
   };
+  const recentIncoming = /* @__PURE__ */ new Set();
+  const rememberIncoming = (key) => {
+    recentIncoming.add(key);
+    if (recentIncoming.size > 200) {
+      const first = recentIncoming.values().next().value;
+      if (first)
+        recentIncoming.delete(first);
+    }
+    setTimeout(() => recentIncoming.delete(key), 30e3).unref?.();
+  };
 
   api.on("message_sending", async (event, ctx) => {
     const raw = event.content ?? "";
     const meta = event.metadata ?? void 0;
-    const sessionKey = meta?.sessionKey ?? ctx?.sessionKey;
-    const effectiveSessionKey = sessionKey ?? (ctx.channelId ? `channel:${ctx.channelId}` : void 0);
+    const effectiveSessionKey = resolveSessionKey(meta, ctx);
     const topicId = await resolveTopicId(effectiveSessionKey);
     const taskId = resolveTaskId();
     const agentId = "assistant";
-    const agentLabel = "OpenClaw";
+    const agentLabel = resolveAgentLabel(ctx.agentId, meta?.sessionKey ?? ctx?.sessionKey);
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? metaSummary : summarize(raw);
-    const dedupeKey = `sending:${ctx.channelId}:${sessionKey ?? ""}:${summary}`;
+    const dedupeKey = `sending:${ctx.channelId}:${effectiveSessionKey ?? ""}:${summary}`;
     rememberOutgoing(dedupeKey);
     await send({
       topicId,
@@ -339,7 +386,7 @@ export default function register(api) {
 
     const messages = Array.isArray(event.messages) ? event.messages : [];
     const agentId = "assistant";
-    const agentLabel = "OpenClaw";
+    const agentLabel = resolveAgentLabel(ctx.agentId, ctx.sessionKey);
 
     try {
       const shape = messages.slice(-20).map((m) => ({
@@ -361,53 +408,106 @@ export default function register(api) {
     } catch {
     }
 
-    const extractText = (value) => {
-      if (!value) return void 0;
+    const extractText = (value, depth = 0) => {
+      if (!value || depth > 4) return void 0;
       if (typeof value === "string") return value;
       if (Array.isArray(value)) {
-        const parts = value
-          .map((part) => {
-            if (typeof part === "string") return part;
-            if (part && typeof part === "object") {
-              const obj = part;
-              if (typeof obj.text === "string") return obj.text;
-              if (typeof obj.content === "string") return obj.content;
-            }
-            return "";
-          })
-          .filter(Boolean);
-        return parts.join("\n");
+        const parts = value.map((part) => extractText(part, depth + 1)).filter(Boolean);
+        return parts.length ? parts.join("\n") : void 0;
       }
       if (typeof value === "object") {
         const obj = value;
-        if (typeof obj.text === "string") return obj.text;
-        if (typeof obj.content === "string") return obj.content;
+        const keys = ["text", "content", "value", "message", "output_text", "input_text"];
+        const parts = [];
+        for (const key of keys) {
+          const extracted = extractText(obj[key], depth + 1);
+          if (extracted)
+            parts.push(extracted);
+        }
+        return parts.length ? parts.join("\n") : void 0;
       }
       return void 0;
     };
 
-    for (const msg of messages) {
+    const anchor = ctx.sessionKey ? inboundBySession.get(ctx.sessionKey) : void 0;
+    const anchorFresh = !!anchor && Date.now() - anchor.ts < 2 * 60 * 1e3;
+    const channelFresh = Date.now() - lastMessageAt < 2 * 60 * 1e3;
+    let inferredSessionKey = (anchorFresh ? anchor?.sessionKey : void 0) ?? ctx.sessionKey;
+    const discordSignal = messages.some((msg) => {
       const role = typeof msg?.role === "string" ? msg.role : void 0;
-      if (role !== "assistant")
-        continue;
-      const content = extractText(msg.content);
-      if (!content || !content.trim())
-        continue;
-      const summary = summarize(content);
-      await send({
-        topicId,
-        taskId,
-        type: "conversation",
-        content,
-        summary,
-        raw: truncateRaw(content),
-        agentId,
-        agentLabel,
-        source: {
-          channel: inferredChannelId,
-          sessionKey: inferredSessionKey
+      if (role !== "user")
+        return false;
+      const text = extractText(msg.content) ?? "";
+      return /\[Discord /i.test(text) || /channel:discord/i.test(text);
+    });
+    if (discordSignal && channelFresh && lastEffectiveSessionKey?.startsWith("channel:")) {
+      inferredSessionKey = lastEffectiveSessionKey;
+    }
+    if (!inferredSessionKey) {
+      const agentTag = ctx.agentId ?? "unknown";
+      inferredSessionKey = `agent:${agentTag}:adhoc:${Date.now()}`;
+    }
+    const inferredChannelId = (anchorFresh ? anchor?.channelId : void 0) ?? (inferredSessionKey.startsWith("channel:") && channelFresh ? lastChannelId : void 0);
+
+    if (!inferredSessionKey) {
+    } else {
+      for (const msg of messages) {
+        const role = typeof msg?.role === "string" ? msg.role : void 0;
+        if (role !== "assistant" && role !== "user")
+          continue;
+        const content = extractText(msg.content);
+        if (!content || !content.trim())
+          continue;
+        const summary = summarize(content);
+        const isChannelSession = inferredSessionKey.startsWith("channel:");
+        const isJsonLike = content.trim().startsWith("{") && (content.includes("\"window\"") || content.includes("\"topic\"") || content.includes("\"candidateTopics\""));
+        if (isChannelSession && isJsonLike)
+          continue;
+        if (role === "user" && isChannelSession && channelFresh) {
+          const dedupeKey = `received:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${summary}`;
+          if (recentIncoming.has(dedupeKey))
+            continue;
         }
-      });
+        if (role === "assistant") {
+          const dedupeKey = `sending:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${summary}`;
+          if (recentOutgoing.has(dedupeKey))
+            continue;
+          rememberOutgoing(dedupeKey);
+          await send({
+            topicId,
+            taskId,
+            type: "conversation",
+            content,
+            summary,
+            raw: truncateRaw(content),
+            agentId,
+            agentLabel,
+            source: {
+              channel: inferredChannelId,
+              sessionKey: inferredSessionKey
+            }
+          });
+        } else {
+          const dedupeKey = `received:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${summary}`;
+          if (recentIncoming.has(dedupeKey))
+            continue;
+          rememberIncoming(dedupeKey);
+          await send({
+            topicId,
+            taskId,
+            type: "conversation",
+            content,
+            summary,
+            raw: truncateRaw(content),
+            agentId: "user",
+            agentLabel: "User",
+            source: {
+              channel: inferredChannelId,
+              sessionKey: inferredSessionKey
+            }
+          });
+        }
+      }
     }
 
     await send({

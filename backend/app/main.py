@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
 import asyncio
+import threading
+import time
+from datetime import datetime, timezone
 from fastapi import Request
 from uuid import uuid4
-from fastapi import FastAPI, Depends, Query, Body, HTTPException
+from fastapi import FastAPI, Depends, Query, Body, HTTPException, Header
 from fastapi.responses import StreamingResponse
 from typing import List
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +15,7 @@ from sqlmodel import select
 
 from .auth import require_token, is_token_required
 from .db import init_db, get_session
-from .models import InstanceConfig, Topic, Task, LogEntry
+from .models import InstanceConfig, Topic, Task, LogEntry, IngestQueue
 from .schemas import (
     InstanceUpdate,
     InstanceResponse,
@@ -62,11 +64,121 @@ def create_id(prefix: str) -> str:
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    if os.getenv("CLAWBOARD_INGEST_MODE", "").lower() == "queue":
+        thread = threading.Thread(target=_queue_worker, daemon=True)
+        thread.start()
 
 
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+def _queue_worker() -> None:
+    poll_interval = float(os.getenv("CLAWBOARD_QUEUE_POLL_SECONDS", "1.5"))
+    batch_size = int(os.getenv("CLAWBOARD_QUEUE_BATCH", "25"))
+    while True:
+        try:
+            with get_session() as session:
+                pending = session.exec(
+                    select(IngestQueue).where(IngestQueue.status == "pending").order_by(IngestQueue.id).limit(batch_size)
+                ).all()
+                for job in pending:
+                    job.status = "processing"
+                session.commit()
+
+                for job in pending:
+                    try:
+                        payload = LogAppend.model_validate(job.payload)
+                        idem = _idempotency_key(payload, None)
+                        append_log_entry(session, payload, idem)
+                        job.status = "done"
+                        job.attempts += 1
+                        job.lastError = None
+                    except Exception as exc:
+                        job.status = "failed"
+                        job.attempts += 1
+                        job.lastError = str(exc)
+                    session.add(job)
+                session.commit()
+        except Exception:
+            pass
+        time.sleep(poll_interval)
+
+
+def _idempotency_key(payload: LogAppend, header_key: str | None) -> str | None:
+    if header_key and header_key.strip():
+        return header_key.strip()
+    if payload.idempotencyKey and payload.idempotencyKey.strip():
+        return payload.idempotencyKey.strip()
+    return None
+
+
+def _find_by_idempotency(session, key: str):
+    return session.exec(select(LogEntry).where(LogEntry.idempotencyKey == key)).first()
+
+
+def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = None) -> LogEntry:
+    timestamp = payload.createdAt or now_iso()
+
+    if idempotency_key:
+        existing = _find_by_idempotency(session, idempotency_key)
+        if existing:
+            return existing
+
+    # Idempotency guard: if the source messageId is present, avoid duplicating
+    # logs when the logger retries / replays its queue.
+    if payload.source and isinstance(payload.source, dict):
+        msg_id = payload.source.get("messageId")
+        if msg_id and payload.type == "conversation":
+            existing = session.exec(select(LogEntry).where(LogEntry.type == payload.type)).all()
+            for entry in existing:
+                src = getattr(entry, "source", None) or {}
+                if not isinstance(src, dict):
+                    continue
+                if src.get("messageId") != msg_id:
+                    continue
+                if entry.type != payload.type:
+                    continue
+                if (entry.agentId or None) != (payload.agentId or None):
+                    continue
+                return entry
+
+    topic_id = payload.topicId
+    task_id = payload.taskId
+
+    if topic_id:
+        exists = session.get(Topic, topic_id)
+        if not exists:
+            topic_id = None
+
+    if task_id:
+        exists = session.get(Task, task_id)
+        if not exists:
+            task_id = None
+
+    entry = LogEntry(
+        id=create_id("log"),
+        topicId=topic_id,
+        taskId=task_id,
+        relatedLogId=payload.relatedLogId,
+        idempotencyKey=idempotency_key,
+        type=payload.type,
+        content=payload.content,
+        summary=payload.summary,
+        raw=payload.raw,
+        createdAt=timestamp,
+        updatedAt=timestamp,
+        agentId=payload.agentId,
+        agentLabel=payload.agentLabel,
+        source=payload.source,
+        classificationStatus=payload.classificationStatus or "pending",
+    )
+    session.add(entry)
+    session.commit()
+    session.refresh(entry)
+    event_hub.publish({"type": "log.appended", "data": entry.model_dump(), "eventTs": entry.updatedAt})
+    return entry
 
 
 @app.get("/api/stream")
@@ -320,6 +432,11 @@ def upsert_task(
 def list_logs(
     topicId: str | None = Query(default=None, description="Filter logs by topic ID.", example="topic-1"),
     taskId: str | None = Query(default=None, description="Filter logs by task ID.", example="task-1"),
+    relatedLogId: str | None = Query(
+        default=None,
+        description="Filter logs by relatedLogId (comma-separated allowed).",
+        example="log-12",
+    ),
     sessionKey: str | None = Query(
         default=None,
         description="Filter logs by source.sessionKey.",
@@ -345,6 +462,9 @@ def list_logs(
             logs = [l for l in logs if l.topicId == topicId]
         if taskId:
             logs = [l for l in logs if l.taskId == taskId]
+        if relatedLogId:
+            related_ids = {rid.strip() for rid in relatedLogId.split(",") if rid.strip()}
+            logs = [l for l in logs if getattr(l, "relatedLogId", None) in related_ids]
         if sessionKey:
             logs = [
                 l
@@ -381,69 +501,34 @@ def append_log(
                 },
             }
         },
-    )
+    ),
+    x_idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
 ):
     """Append a timeline entry."""
     with get_session() as session:
-        timestamp = payload.createdAt or now_iso()
+        idem = _idempotency_key(payload, x_idempotency_key)
+        return append_log_entry(session, payload, idem)
 
-        # Idempotency guard: if the source messageId is present, avoid duplicating
-        # logs when the logger retries / replays its queue.
-        if payload.source and isinstance(payload.source, dict):
-            msg_id = payload.source.get("messageId")
-            if msg_id and payload.type == "conversation":
-                existing = session.exec(select(LogEntry).where(LogEntry.type == payload.type)).all()
-                for entry in existing:
-                    src = getattr(entry, "source", None) or {}
-                    if not isinstance(src, dict):
-                        continue
-                    if src.get("messageId") != msg_id:
-                        continue
-                    if entry.type != payload.type:
-                        continue
-                    if (entry.agentId or None) != (payload.agentId or None):
-                        continue
-                    # Found duplicate; return existing row without appending.
-                    return entry
 
-        # Allow stage-1 logging to append without pre-creating topics/tasks.
-        # Stage-2 classifier will attach valid topic/task IDs later.
-        topic_id = payload.topicId
-        task_id = payload.taskId
-
-        if topic_id:
-            exists = session.get(Topic, topic_id)
-            if not exists:
-                topic_id = None
-
-        if task_id:
-            exists = session.get(Task, task_id)
-            if not exists:
-                task_id = None
-
-        entry = LogEntry(
-            id=create_id("log"),
-            topicId=topic_id,
-            taskId=task_id,
-            relatedLogId=payload.relatedLogId,
-            type=payload.type,
-            content=payload.content,
-            summary=payload.summary,
-            raw=payload.raw,
-            classificationStatus=payload.classificationStatus or "pending",
-            classificationAttempts=0,
-            classificationError=None,
-            createdAt=timestamp,
-            updatedAt=timestamp,
-            agentId=payload.agentId,
-            agentLabel=payload.agentLabel,
-            source=payload.source,
+@app.post("/api/ingest", dependencies=[Depends(require_token)], tags=["logs"])
+def enqueue_log(
+    payload: LogAppend = Body(...),
+):
+    """Queue a log entry for async ingestion (high-scale mode)."""
+    if os.getenv("CLAWBOARD_INGEST_MODE", "").lower() != "queue":
+        raise HTTPException(status_code=400, detail="Queue ingestion not enabled")
+    with get_session() as session:
+        job = IngestQueue(
+            payload=payload.model_dump(),
+            status="pending",
+            attempts=0,
+            lastError=None,
+            createdAt=now_iso(),
         )
-        session.add(entry)
+        session.add(job)
         session.commit()
-        session.refresh(entry)
-        event_hub.publish({"type": "log.appended", "data": entry.model_dump(), "eventTs": entry.updatedAt})
-        return entry
+        session.refresh(job)
+        return {"queued": True, "id": job.id}
 
 
 @app.patch("/api/log/{log_id}", dependencies=[Depends(require_token)], response_model=LogOut, tags=["logs"])
@@ -480,6 +565,19 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
         return entry
 
 
+@app.delete("/api/log/{log_id}", dependencies=[Depends(require_token)], tags=["logs"])
+def delete_log(log_id: str):
+    """Delete a log entry (admin cleanup)."""
+    with get_session() as session:
+        entry = session.get(LogEntry, log_id)
+        if not entry:
+            return {"ok": True, "deleted": False}
+        session.delete(entry)
+        session.commit()
+        event_hub.publish({"type": "log.deleted", "data": {"id": log_id}, "eventTs": now_iso()})
+        return {"ok": True, "deleted": True}
+
+
 @app.get("/api/changes", response_model=ChangesResponse, tags=["changes"])
 def list_changes(
     since: str | None = Query(
@@ -503,3 +601,26 @@ def list_changes(
         tasks.sort(key=lambda t: t.updatedAt, reverse=True)
         logs.sort(key=lambda l: l.createdAt, reverse=True)
         return {"topics": topics, "tasks": tasks, "logs": logs}
+
+
+@app.get("/api/metrics", tags=["metrics"])
+def metrics():
+    """Operational metrics for ingestion + classifier lag."""
+    with get_session() as session:
+        logs = session.exec(select(LogEntry)).all()
+        total = len(logs)
+        pending = [l for l in logs if (l.classificationStatus or "pending") == "pending"]
+        failed = [l for l in logs if (l.classificationStatus or "pending") == "failed"]
+        classified = total - len(pending) - len(failed)
+        newest = max((l.createdAt for l in logs), default=None)
+        oldest_pending = min((l.createdAt for l in pending), default=None)
+        return {
+            "logs": {
+                "total": total,
+                "pending": len(pending),
+                "classified": classified,
+                "failed": len(failed),
+                "newestCreatedAt": newest,
+                "oldestPendingAt": oldest_pending,
+            }
+        }

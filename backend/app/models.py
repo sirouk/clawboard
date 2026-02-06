@@ -105,6 +105,10 @@ class LogEntry(SQLModel, table=True):
         default=None,
         description="If this is a curated note, link to the original log ID.",
     )
+    idempotencyKey: Optional[str] = Field(
+        default=None,
+        description="Optional idempotency key for exact-once ingestion.",
+    )
     type: str = Field(
         description="Log type (conversation | action | note | system | import).",
     )
@@ -151,3 +155,12 @@ class LogEntry(SQLModel, table=True):
         sa_column=Column(JSON),
         description="Source metadata (channel, sessionKey, messageId).",
     )
+
+
+class IngestQueue(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    payload: Dict[str, Any] = Field(sa_column=Column(JSON))
+    status: str = Field(default="pending", description="pending|processing|failed|done")
+    attempts: int = Field(default=0)
+    lastError: Optional[str] = Field(default=None)
+    createdAt: str = Field(description="ISO timestamp when enqueued.")

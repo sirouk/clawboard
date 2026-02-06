@@ -527,7 +527,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 pushUrl({ raw: next ? "1" : "0" });
               }}
             >
-              {showRaw ? "Show summaries" : "Show full prompts"}
+              {showRaw ? "Hide full messages" : "Show full messages"}
             </Button>
             <Button
               variant="secondary"
@@ -564,7 +564,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const doingCount = taskList.filter((task) => task.status === "doing").length;
           const blockedCount = taskList.filter((task) => task.status === "blocked").length;
           const lastActivity = logsByTopic.get(topicId)?.[0]?.createdAt ?? topic.updatedAt;
-          const showTasks = !normalizedSearch || taskList.length > 0;
+          const topicLogs = logsByTopic.get(topicId) ?? [];
+          const topicOnlyLogs = topicLogs.filter((entry) => !entry.taskId && matchesLogSearch(entry));
+          const showTasks = !normalizedSearch || taskList.length > 0 || topicOnlyLogs.length > 0;
           const isExpanded = expandedTopicsSafe.has(topicId);
 
           return (
@@ -790,6 +792,40 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     return matchesTaskSearch(task);
                   }).length === 0 && (
                     <p className="text-sm text-[rgb(var(--claw-muted))]">No tasks match your filters.</p>
+                  )}
+
+                  {topicOnlyLogs.length > 0 && (
+                    <div className="rounded-[var(--radius-md)] border border-[rgba(255,90,45,0.25)] bg-[rgba(255,90,45,0.06)] p-4">
+                      <div className="mb-3 flex items-center justify-between">
+                        <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Topic Chat</div>
+                        <span className="text-xs text-[rgb(var(--claw-muted))]">{topicOnlyLogs.length} entries</span>
+                      </div>
+                      <LogList
+                        logs={topicOnlyLogs.slice(0, timelineLimits[topicId] ?? DEFAULT_TIMELINE_LIMIT)}
+                        topics={topics}
+                        showFilters={false}
+                        showRawToggle={false}
+                        showRawAll={showRaw}
+                        allowNotes
+                        enableNavigation={false}
+                      />
+                      {topicOnlyLogs.length > (timelineLimits[topicId] ?? DEFAULT_TIMELINE_LIMIT) && (
+                        <div className="mt-3 flex justify-end">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() =>
+                              setTimelineLimits((prev) => ({
+                                ...prev,
+                                [topicId]: (prev[topicId] ?? DEFAULT_TIMELINE_LIMIT) + DEFAULT_TIMELINE_LIMIT,
+                              }))
+                            }
+                          >
+                            Load 5 more
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               )}

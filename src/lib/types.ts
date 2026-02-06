@@ -32,6 +32,7 @@ export type LogEntry = {
   topicId: string | null;
   taskId?: string | null;
   relatedLogId?: string | null;
+  idempotencyKey?: string | null;
   type: "note" | "conversation" | "action" | "system" | "import";
   content: string;
   summary?: string;

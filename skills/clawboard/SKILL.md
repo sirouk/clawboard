@@ -91,7 +91,7 @@ Set plugin config with the Clawboard base URL and token (if required):
     "clawboard-logger": {
       "enabled": true,
       "config": {
-        "baseUrl": "http://clawboard:3000",
+        "baseUrl": "http://clawboard:8010",
         "token": "YOUR_TOKEN"
       }
     }

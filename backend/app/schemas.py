@@ -75,6 +75,7 @@ class LogOut(ModelBase):
     topicId: Optional[str] = Field(description="Associated topic ID (nullable).", examples=["topic-1"])
     taskId: Optional[str] = Field(description="Associated task ID (nullable).", examples=["task-1"])
     relatedLogId: Optional[str] = Field(description="Link to original log (for notes).", examples=["log-12"])
+    idempotencyKey: Optional[str] = Field(description="Idempotency key if provided.", examples=["discord:msg:assistant"])
     type: str = Field(description="Log type (conversation | action | note | system | import).", examples=["conversation"])
     content: str = Field(description="Full log content.", examples=["Defined onboarding wizard steps and token flow."])
     summary: Optional[str] = Field(description="Concise summary.", examples=["Defined onboarding wizard steps."])
@@ -164,6 +165,11 @@ class LogAppend(BaseModel):
     topicId: Optional[str] = Field(default=None, description="Topic ID (nullable).", examples=["topic-1"])
     taskId: Optional[str] = Field(default=None, description="Task ID (nullable).", examples=["task-1"])
     relatedLogId: Optional[str] = Field(default=None, description="Link to original log (for notes).", examples=["log-12"])
+    idempotencyKey: Optional[str] = Field(
+        default=None,
+        description="Optional idempotency key to enforce exact-once ingestion.",
+        examples=["discord:1469:assistant:conversation"],
+    )
 
     # Stage-1 capture should leave logs as pending; stage-2 classifier PATCHes.
     classificationStatus: Optional[str] = Field(

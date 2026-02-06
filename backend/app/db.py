@@ -38,6 +38,8 @@ def init_db() -> None:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN classificationError TEXT;")
             if "updatedAt" not in existing:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN updatedAt TEXT NOT NULL DEFAULT '';")
+            if "idempotencyKey" not in existing:
+                conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN idempotencyKey TEXT;")
 
 
 def get_session() -> Session:

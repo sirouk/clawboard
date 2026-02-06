@@ -24,7 +24,7 @@ function sendJson(res, status, body) {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "*",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PATCH,OPTIONS",
   });
   res.end(JSON.stringify(body));
 }
@@ -68,6 +68,18 @@ function nextId(prefix, arr) {
   }, 0);
   return `${prefix}-${max + 1}`;
 }
+
+function normalizeLog(entry) {
+  const createdAt = entry.createdAt || nowIso();
+  return {
+    ...entry,
+    classificationStatus: entry.classificationStatus ?? "classified",
+    createdAt,
+    updatedAt: entry.updatedAt || createdAt,
+  };
+}
+
+store.logs = Array.isArray(store.logs) ? store.logs.map(normalizeLog) : [];
 
 const server = http.createServer(async (req, res) => {
   if (!req.url) return sendJson(res, 404, { error: "Not found" });
@@ -134,7 +146,7 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, {
       topics: filterSince(store.topics, "updatedAt"),
       tasks: filterSince(store.tasks, "updatedAt"),
-      logs: filterSince(store.logs, "createdAt"),
+      logs: filterSince(store.logs, "updatedAt"),
     });
   }
 
@@ -209,26 +221,47 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET") {
       const topicId = url.searchParams.get("topicId");
       const taskId = url.searchParams.get("taskId");
+      const sessionKey = url.searchParams.get("sessionKey");
+      const type = url.searchParams.get("type");
+      const classificationStatus = url.searchParams.get("classificationStatus");
       const limit = Number(url.searchParams.get("limit") || 200);
       const offset = Number(url.searchParams.get("offset") || 0);
-      let logs = [...store.logs];
+      let logs = [...store.logs].map(normalizeLog);
       if (topicId) logs = logs.filter((l) => l.topicId === topicId);
       if (taskId) logs = logs.filter((l) => l.taskId === taskId);
+      if (sessionKey)
+        logs = logs.filter((l) => (l.source || {}).sessionKey === sessionKey);
+      if (type) logs = logs.filter((l) => l.type === type);
+      if (classificationStatus) logs = logs.filter((l) => l.classificationStatus === classificationStatus);
       logs.sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1));
       return sendJson(res, 200, logs.slice(offset, offset + limit));
     }
     if (req.method === "POST") {
       const payload = await parseBody(req);
       const now = payload.createdAt || nowIso();
-      const entry = {
-        id: nextId("log", store.logs),
+      const entry = normalizeLog({
+        id: payload.id || nextId("log", store.logs),
         ...payload,
         createdAt: now,
-      };
+        updatedAt: payload.updatedAt || now,
+        classificationStatus: payload.classificationStatus ?? "pending",
+      });
       store.logs.push(entry);
       pushEvent("log.appended", entry);
       return sendJson(res, 200, entry);
     }
+  }
+
+  if (url.pathname.startsWith("/api/log/") && req.method === "PATCH") {
+    const logId = url.pathname.split("/").pop();
+    const payload = await parseBody(req);
+    const entry = store.logs.find((log) => log.id === logId);
+    if (!entry) return sendJson(res, 404, { error: "Not found" });
+    Object.assign(entry, payload, { updatedAt: nowIso() });
+    const normalized = normalizeLog(entry);
+    Object.assign(entry, normalized);
+    pushEvent("log.patched", entry);
+    return sendJson(res, 200, entry);
   }
 
   return sendJson(res, 404, { error: "Not found" });

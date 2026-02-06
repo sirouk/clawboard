@@ -33,9 +33,9 @@ export function TaskDetailClient({
           ]}
         />
         <div className="flex items-center gap-3">
-          <Badge tone={showRaw ? "accent" : "muted"}>{showRaw ? "Raw prompts" : "Summaries"}</Badge>
+          <Badge tone={showRaw ? "accent" : "muted"}>{showRaw ? "Full messages" : "Summaries"}</Badge>
           <Button size="sm" variant="secondary" onClick={() => setShowRaw((prev) => !prev)}>
-            {showRaw ? "Show summaries" : "Show full prompts"}
+            {showRaw ? "Hide full messages" : "Show full messages"}
           </Button>
         </div>
       </div>

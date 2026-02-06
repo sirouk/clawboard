@@ -28,6 +28,10 @@ export function prependUnique<T extends { id: string }>(items: T[], next: T): T[
   return [next, ...items];
 }
 
+export function removeById<T extends { id: string }>(items: T[], id: string): T[] {
+  return items.filter((item) => item.id !== id);
+}
+
 export function mergeById<T extends { id: string }>(items: T[], incoming: T[]): T[] {
   if (incoming.length === 0) return items;
   let next = items;

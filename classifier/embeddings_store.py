@@ -1,11 +1,19 @@
 import os
 import sqlite3
 import time
-from typing import Iterable, Optional
+from typing import Iterable
 
 import numpy as np
+import requests
 
 DB_PATH = os.environ.get("CLASSIFIER_EMBED_DB", "/data/classifier_embeddings.db")
+QDRANT_URL = os.environ.get("QDRANT_URL")
+QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "clawboard_embeddings")
+QDRANT_DIM = int(os.environ.get("QDRANT_DIM", "384"))
+
+
+def _use_qdrant() -> bool:
+    return bool(QDRANT_URL)
 
 
 def _conn():
@@ -26,7 +34,40 @@ def _conn():
     return conn
 
 
+def _qdrant_headers():
+    return {"Content-Type": "application/json"}
+
+
+def _ensure_qdrant_collection():
+    if not _use_qdrant():
+        return
+    try:
+        r = requests.get(f"{QDRANT_URL}/collections/{QDRANT_COLLECTION}", timeout=10)
+        if r.status_code == 200:
+            return
+    except Exception:
+        pass
+    payload = {"vectors": {"size": QDRANT_DIM, "distance": "Cosine"}}
+    requests.put(
+        f"{QDRANT_URL}/collections/{QDRANT_COLLECTION}",
+        headers=_qdrant_headers(),
+        json=payload,
+        timeout=20,
+    ).raise_for_status()
+
+
 def upsert(kind: str, item_id: str, vector: Iterable[float]):
+    if _use_qdrant():
+        _ensure_qdrant_collection()
+        vec = list(vector)
+        payload = {"points": [{"id": f"{kind}:{item_id}", "vector": vec, "payload": {"kind": kind, "id": item_id}}]}
+        requests.put(
+            f"{QDRANT_URL}/collections/{QDRANT_COLLECTION}/points",
+            headers=_qdrant_headers(),
+            json=payload,
+            timeout=20,
+        ).raise_for_status()
+        return
     arr = np.asarray(list(vector), dtype=np.float32)
     blob = arr.tobytes()
     now = int(time.time())
@@ -40,6 +81,10 @@ def upsert(kind: str, item_id: str, vector: Iterable[float]):
 
 
 def get_all(kind: str):
+    if _use_qdrant():
+        _ensure_qdrant_collection()
+        # Qdrant doesn't provide a cheap full scan without scroll; avoid for qdrant mode.
+        return []
     with _conn() as conn:
         rows = conn.execute("SELECT id, vector, dim FROM embeddings WHERE kind=?", (kind,)).fetchall()
     out = []
@@ -57,6 +102,23 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def topk(kind: str, query_vec: Iterable[float], k: int = 5):
+    if _use_qdrant():
+        _ensure_qdrant_collection()
+        payload = {
+            "vector": list(query_vec),
+            "limit": k,
+            "with_payload": True,
+            "filter": {"must": [{"key": "kind", "match": {"value": kind}}]},
+        }
+        r = requests.post(
+            f"{QDRANT_URL}/collections/{QDRANT_COLLECTION}/points/search",
+            headers=_qdrant_headers(),
+            json=payload,
+            timeout=20,
+        )
+        r.raise_for_status()
+        res = r.json().get("result", [])
+        return [(hit["payload"]["id"], float(hit["score"])) for hit in res if hit.get("payload")]
     q = np.asarray(list(query_vec), dtype=np.float32)
     scored = []
     for item_id, vec in get_all(kind):

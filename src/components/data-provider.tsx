@@ -4,7 +4,7 @@ import { createContext, useContext, useMemo, useState } from "react";
 import type { LogEntry, Task, Topic } from "@/lib/types";
 import { apiUrl } from "@/lib/api";
 import { useLiveUpdates } from "@/lib/use-live-updates";
-import { LiveEvent, mergeById, mergeLogs, maxTimestamp, prependUnique, upsertById } from "@/lib/live-utils";
+import { LiveEvent, mergeById, mergeLogs, maxTimestamp, prependUnique, removeById, upsertById } from "@/lib/live-utils";
 
 type DataContextValue = {
   topics: Topic[];
@@ -59,6 +59,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         typeof event.data === "object"
       ) {
         appendLog(event.data as LogEntry);
+        return;
+      }
+      if (event.type === "log.deleted" && event.data && typeof event.data === "object") {
+        const id = (event.data as { id?: string }).id;
+        if (id) setLogs((prev) => removeById(prev, id));
       }
     },
     reconcile,

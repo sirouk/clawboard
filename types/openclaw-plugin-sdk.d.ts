@@ -1,6 +1,8 @@
 declare module "openclaw/plugin-sdk" {
   export type PluginHookMessageContext = {
     channelId?: string;
+    sessionKey?: string;
+    agentId?: string;
   };
 
   export type PluginHookToolContext = {
@@ -14,6 +16,11 @@ declare module "openclaw/plugin-sdk" {
   };
 
   export type PluginHookMessageReceivedEvent = {
+    content?: string;
+    metadata?: Record<string, unknown>;
+  };
+
+  export type PluginHookMessageSendingEvent = {
     content?: string;
     metadata?: Record<string, unknown>;
   };
@@ -55,6 +62,10 @@ declare module "openclaw/plugin-sdk" {
     on(
       event: "message_sent",
       handler: (event: PluginHookMessageSentEvent, ctx: PluginHookMessageContext) => void | Promise<void>
+    ): void;
+    on(
+      event: "message_sending",
+      handler: (event: PluginHookMessageSendingEvent, ctx: PluginHookMessageContext) => void | Promise<void>
     ): void;
     on(
       event: "before_tool_call",

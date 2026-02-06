@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { Button, Input, Select, Badge, Card } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import type { IntegrationLevel } from "@/lib/types";
-import { apiUrl, getApiBase } from "@/lib/api";
+import { apiUrl, getApiBase, setApiBase } from "@/lib/api";
 
 const STEPS = [
   { id: 1, title: "Instance", description: "Name your Clawboard and set integration depth." },
@@ -25,9 +25,10 @@ export function SetupWizard() {
     return window.location.origin;
   }, []);
   const apiBase = useMemo(() => getApiBase() || origin, [origin]);
+  const [localApiBase, setLocalApiBase] = useState(apiBase);
 
   const connectionSnippet = useMemo(() => {
-    const target = apiBase || "<clawboard-api-url>";
+    const target = localApiBase || "<clawboard-api-url>";
     const safeToken = token && token.trim().length > 0 ? token.trim() : "<optional-token>";
     const name = localTitle?.trim() || "Clawboard";
     const level = localIntegration || "manual";
@@ -38,12 +39,15 @@ export function SetupWizard() {
 4) Integration level: manual / write / full backfill. -> ${level}
 
 Once I have those, I’ll validate /api/health and /api/config and start logging.`;
-  }, [apiBase, localIntegration, localTitle, token]);
+  }, [localApiBase, localIntegration, localTitle, token]);
 
   const saveInstance = async () => {
     setSaving(true);
     setMessage(null);
     try {
+      if (localApiBase && localApiBase.trim().length > 0) {
+        setApiBase(localApiBase);
+      }
       const res = await fetch(apiUrl("/api/config"), {
         method: "POST",
         headers: {
@@ -100,7 +104,7 @@ openclaw plugins enable clawboard-logger`;
     "clawboard-logger": {
       "enabled": true,
       "config": {
-        "baseUrl": "${apiBase || "<clawboard-api-url>"}",
+        "baseUrl": "${localApiBase || "<clawboard-api-url>"}",
         "token": "${token && token.trim().length > 0 ? token.trim() : "YOUR_TOKEN"}"
       }
     }
@@ -153,6 +157,17 @@ openclaw plugins enable clawboard-logger`;
                 <option value="write">Assistant can write</option>
                 <option value="full">Full backfill</option>
               </Select>
+            </div>
+            <div>
+              <label className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">API Base URL</label>
+              <Input
+                value={localApiBase}
+                onChange={(event) => setLocalApiBase(event.target.value)}
+                placeholder="http://localhost:8010"
+              />
+              <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
+                Stored locally in your browser so you can switch Tailscale endpoints without rebuilding.
+              </p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <Button onClick={saveInstance} disabled={saving}>
@@ -208,11 +223,13 @@ openclaw plugins enable clawboard-logger`;
                     <div className="text-sm font-semibold">Clawboard API base URL</div>
                     <div className="text-xs text-[rgb(var(--claw-muted))]">FastAPI base URL used by OpenClaw.</div>
                   </div>
-                  <Button size="sm" variant="secondary" onClick={() => copyToClipboard(apiBase)}>
+                  <Button size="sm" variant="secondary" onClick={() => copyToClipboard(localApiBase)}>
                     Copy
                   </Button>
                 </div>
-                <div className="mt-2 text-sm text-[rgb(var(--claw-text))]">{apiBase || "(set NEXT_PUBLIC_CLAWBOARD_API_BASE)"}</div>
+                <div className="mt-2 text-sm text-[rgb(var(--claw-text))]">
+                  {localApiBase || "(set NEXT_PUBLIC_CLAWBOARD_API_BASE)"}
+                </div>
               </div>
 
               <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">

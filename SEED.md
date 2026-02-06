@@ -43,6 +43,8 @@ curl -X POST 'http://localhost:8010/api/config' \
 - `write`
 - `full`
 
+Installer defaults to `full` unless you pass `--integration-level` (or `--no-backfill`) to `scripts/bootstrap_openclaw.sh`.
+
 ## Minimal connectivity checks
 
 ```bash
