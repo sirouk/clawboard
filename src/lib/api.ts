@@ -1,3 +1,5 @@
+import { normalizeTokenInput } from "@/lib/token";
+
 export function getApiBase() {
   if (typeof window !== "undefined") {
     const runtimeBase =
@@ -27,4 +29,40 @@ export function apiUrl(path: string) {
   if (!base) return path;
   if (path.startsWith("/")) return `${base}${path}`;
   return `${base}/${path}`;
+}
+
+const TOKEN_STORAGE_KEY = "clawboard.token";
+
+export function getApiToken() {
+  if (typeof window === "undefined") return "";
+  const value = window.localStorage.getItem(TOKEN_STORAGE_KEY) ?? "";
+  const normalized = normalizeTokenInput(value);
+  if (normalized !== value) {
+    window.localStorage.setItem(TOKEN_STORAGE_KEY, normalized);
+  }
+  return normalized;
+}
+
+function withTokenHeader(headers: HeadersInit | undefined, token: string): Headers {
+  const next = new Headers(headers);
+  if (token) {
+    next.set("X-Clawboard-Token", token);
+  }
+  return next;
+}
+
+export function apiFetch(path: string, init: RequestInit = {}, tokenOverride?: string) {
+  const token = (tokenOverride ?? getApiToken()).trim();
+  return fetch(apiUrl(path), {
+    ...init,
+    headers: withTokenHeader(init.headers, token),
+  });
+}
+
+export function apiUrlWithToken(path: string, tokenOverride?: string) {
+  const token = (tokenOverride ?? getApiToken()).trim();
+  const url = apiUrl(path);
+  if (!token) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}token=${encodeURIComponent(token)}`;
 }

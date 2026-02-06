@@ -13,12 +13,13 @@ from datetime import datetime, timezone
 from fastapi import Request
 from uuid import uuid4
 from fastapi import FastAPI, Depends, Query, Body, HTTPException, Header
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Any
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
-from .auth import require_token, is_token_required
+from .auth import ensure_read_access, ensure_write_access, is_token_configured, is_token_required, require_token
 from .db import init_db, get_session
 from .models import InstanceConfig, Topic, Task, LogEntry, IngestQueue
 from .schemas import (
@@ -60,6 +61,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def enforce_api_access_policy(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api"):
+        return await call_next(request)
+
+    method = request.method.upper()
+    if method == "OPTIONS":
+        return await call_next(request)
+
+    provided_token = request.headers.get("x-clawboard-token") or request.query_params.get("token")
+    try:
+        if method in {"GET", "HEAD"}:
+            ensure_read_access(request, provided_token)
+        else:
+            ensure_write_access(provided_token)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    return await call_next(request)
 
 
 def now_iso() -> str:
@@ -264,6 +287,14 @@ def _idempotency_key(payload: LogAppend, header_key: str | None) -> str | None:
         return header_key.strip()
     if payload.idempotencyKey and payload.idempotencyKey.strip():
         return payload.idempotencyKey.strip()
+    source = payload.source if isinstance(payload.source, dict) else None
+    if source:
+        message_id = str(source.get("messageId") or "").strip()
+        if message_id:
+            channel = str(source.get("channel") or "").strip().lower()
+            actor = str(payload.agentId or payload.agentLabel or "").strip().lower()
+            entry_type = str(payload.type or "").strip().lower()
+            return f"src:{entry_type}:{channel}:{actor}:{message_id}"
     return None
 
 
@@ -328,7 +359,15 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         classificationStatus=payload.classificationStatus or "pending",
     )
     session.add(entry)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        if idempotency_key:
+            existing = _find_by_idempotency(session, idempotency_key)
+            if existing:
+                return existing
+        raise
     session.refresh(entry)
     event_hub.publish({"type": "log.appended", "data": entry.model_dump(), "eventTs": entry.updatedAt})
     _enqueue_log_reindex(entry)
@@ -387,13 +426,17 @@ def get_config():
             instance = InstanceConfig(
                 id=1,
                 title="Clawboard",
-                integrationLevel="manual",
+                integrationLevel="write",
                 updatedAt=now_iso(),
             )
             session.add(instance)
             session.commit()
             session.refresh(instance)
-        return {"instance": instance.model_dump(), "tokenRequired": is_token_required()}
+        return {
+            "instance": instance.model_dump(),
+            "tokenRequired": is_token_required(),
+            "tokenConfigured": is_token_configured(),
+        }
 
 
 @app.post("/api/config", dependencies=[Depends(require_token)], response_model=InstanceResponse, tags=["config"])
@@ -403,7 +446,7 @@ def update_config(
         examples={
             "default": {
                 "summary": "Update instance config",
-                "value": {"title": "Clawboard Ops", "integrationLevel": "manual"},
+                "value": {"title": "Clawboard Ops", "integrationLevel": "write"},
             }
         },
     )
@@ -415,7 +458,7 @@ def update_config(
             instance = InstanceConfig(
                 id=1,
                 title=payload.title or "Clawboard",
-                integrationLevel=payload.integrationLevel or "manual",
+                integrationLevel=payload.integrationLevel or "write",
                 updatedAt=now_iso(),
             )
         else:
@@ -434,7 +477,11 @@ def update_config(
                 "eventTs": instance.updatedAt,
             }
         )
-        return {"instance": instance.model_dump(), "tokenRequired": is_token_required()}
+        return {
+            "instance": instance.model_dump(),
+            "tokenRequired": is_token_required(),
+            "tokenConfigured": is_token_configured(),
+        }
 
 
 @app.get("/api/topics", response_model=List[TopicOut], tags=["topics"])
@@ -553,6 +600,46 @@ def upsert_topic(
         return topic
 
 
+@app.delete("/api/topics/{topic_id}", dependencies=[Depends(require_token)], tags=["topics"])
+def delete_topic(topic_id: str):
+    """Delete a topic and detach dependent tasks/logs to keep history intact."""
+    with get_session() as session:
+        topic = session.get(Topic, topic_id)
+        if not topic:
+            return {"ok": True, "deleted": False, "detachedTasks": 0, "detachedLogs": 0}
+
+        detached_at = now_iso()
+        tasks = session.exec(select(Task).where(Task.topicId == topic_id)).all()
+        logs = session.exec(select(LogEntry).where(LogEntry.topicId == topic_id)).all()
+
+        for task in tasks:
+            task.topicId = None
+            task.updatedAt = detached_at
+            session.add(task)
+
+        for entry in logs:
+            entry.topicId = None
+            entry.updatedAt = detached_at
+            session.add(entry)
+
+        session.delete(topic)
+        session.commit()
+
+        for task in tasks:
+            event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
+        for entry in logs:
+            event_hub.publish({"type": "log.patched", "data": entry.model_dump(), "eventTs": entry.updatedAt})
+        event_hub.publish({"type": "topic.deleted", "data": {"id": topic_id}, "eventTs": detached_at})
+
+        return {
+            "ok": True,
+            "deleted": True,
+            "id": topic_id,
+            "detachedTasks": len(tasks),
+            "detachedLogs": len(logs),
+        }
+
+
 @app.get("/api/tasks", response_model=List[TaskOut], tags=["tasks"])
 def list_tasks(
     topicId: str | None = Query(
@@ -669,6 +756,37 @@ def upsert_task(
         event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
         enqueue_reindex_request({"kind": "task", "id": task.id, "topicId": task.topicId, "text": task.title})
         return task
+
+
+@app.delete("/api/tasks/{task_id}", dependencies=[Depends(require_token)], tags=["tasks"])
+def delete_task(task_id: str):
+    """Delete a task and detach dependent logs so conversation history remains visible."""
+    with get_session() as session:
+        task = session.get(Task, task_id)
+        if not task:
+            return {"ok": True, "deleted": False, "detachedLogs": 0}
+
+        detached_at = now_iso()
+        logs = session.exec(select(LogEntry).where(LogEntry.taskId == task_id)).all()
+
+        for entry in logs:
+            entry.taskId = None
+            entry.updatedAt = detached_at
+            session.add(entry)
+
+        session.delete(task)
+        session.commit()
+
+        for entry in logs:
+            event_hub.publish({"type": "log.patched", "data": entry.model_dump(), "eventTs": entry.updatedAt})
+        event_hub.publish({"type": "task.deleted", "data": {"id": task_id}, "eventTs": detached_at})
+
+        return {
+            "ok": True,
+            "deleted": True,
+            "id": task_id,
+            "detachedLogs": len(logs),
+        }
 
 
 @app.get("/api/log", response_model=List[LogOut], tags=["logs"])
@@ -813,15 +931,20 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
 
 @app.delete("/api/log/{log_id}", dependencies=[Depends(require_token)], tags=["logs"])
 def delete_log(log_id: str):
-    """Delete a log entry (admin cleanup)."""
+    """Delete a log entry and its attached note rows."""
     with get_session() as session:
-        entry = session.get(LogEntry, log_id)
-        if not entry:
-            return {"ok": True, "deleted": False}
-        session.delete(entry)
+        rows = session.exec(select(LogEntry)).all()
+        to_delete = [row for row in rows if row.id == log_id or row.relatedLogId == log_id]
+        if not to_delete:
+            return {"ok": True, "deleted": False, "deletedIds": []}
+        deleted_ids = [row.id for row in to_delete]
+        for row in to_delete:
+            session.delete(row)
         session.commit()
-        event_hub.publish({"type": "log.deleted", "data": {"id": log_id}, "eventTs": now_iso()})
-        return {"ok": True, "deleted": True}
+        event_ts = now_iso()
+        for deleted_id in deleted_ids:
+            event_hub.publish({"type": "log.deleted", "data": {"id": deleted_id, "rootId": log_id}, "eventTs": event_ts})
+        return {"ok": True, "deleted": True, "deletedIds": deleted_ids}
 
 
 @app.get("/api/changes", response_model=ChangesResponse, tags=["changes"])
@@ -885,9 +1008,9 @@ def search(
     topicId: str | None = Query(default=None, description="Restrict search to one topic ID."),
     sessionKey: str | None = Query(default=None, description="Session key continuity boost (source.sessionKey)."),
     includePending: bool = Query(default=True, description="Include pending logs in matching."),
-    limitTopics: int = Query(default=24, ge=1, le=120, description="Max topic matches."),
-    limitTasks: int = Query(default=48, ge=1, le=240, description="Max task matches."),
-    limitLogs: int = Query(default=360, ge=10, le=2000, description="Max log matches."),
+    limitTopics: int = Query(default=24, ge=1, le=800, description="Max topic matches."),
+    limitTasks: int = Query(default=48, ge=1, le=2000, description="Max task matches."),
+    limitLogs: int = Query(default=360, ge=10, le=5000, description="Max log matches."),
 ):
     """Hybrid semantic + lexical search across topics, tasks, and logs."""
     query = (q or "").strip()
@@ -970,11 +1093,20 @@ def search(
         topic_base_score: dict[str, float] = {
             str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("topics", [])
         }
+        topic_search_rows: dict[str, dict[str, Any]] = {
+            str(item.get("id") or ""): item for item in search_result.get("topics", []) if item.get("id")
+        }
         task_base_score: dict[str, float] = {
             str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("tasks", [])
         }
+        task_search_rows: dict[str, dict[str, Any]] = {
+            str(item.get("id") or ""): item for item in search_result.get("tasks", []) if item.get("id")
+        }
         log_base_score: dict[str, float] = {
             str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("logs", [])
+        }
+        log_search_rows: dict[str, dict[str, Any]] = {
+            str(item.get("id") or ""): item for item in search_result.get("logs", []) if item.get("id")
         }
 
         # Parent propagation from matched logs.
@@ -1004,6 +1136,12 @@ def search(
                     "name": topic.name,
                     "description": topic.description,
                     "score": round(score, 6),
+                    "vectorScore": float((topic_search_rows.get(topic_id) or {}).get("vectorScore") or 0.0),
+                    "bm25Score": float((topic_search_rows.get(topic_id) or {}).get("bm25Score") or 0.0),
+                    "lexicalScore": float((topic_search_rows.get(topic_id) or {}).get("lexicalScore") or 0.0),
+                    "rrfScore": float((topic_search_rows.get(topic_id) or {}).get("rrfScore") or 0.0),
+                    "rerankScore": float((topic_search_rows.get(topic_id) or {}).get("rerankScore") or 0.0),
+                    "bestChunk": (topic_search_rows.get(topic_id) or {}).get("bestChunk"),
                     "noteWeight": round(min(0.26, note_weight_by_topic.get(topic_id, 0.0)), 6),
                     "sessionBoosted": topic_id in session_topic_ids,
                 }
@@ -1027,6 +1165,12 @@ def search(
                     "title": task.title,
                     "status": task.status,
                     "score": round(score, 6),
+                    "vectorScore": float((task_search_rows.get(task_id) or {}).get("vectorScore") or 0.0),
+                    "bm25Score": float((task_search_rows.get(task_id) or {}).get("bm25Score") or 0.0),
+                    "lexicalScore": float((task_search_rows.get(task_id) or {}).get("lexicalScore") or 0.0),
+                    "rrfScore": float((task_search_rows.get(task_id) or {}).get("rrfScore") or 0.0),
+                    "rerankScore": float((task_search_rows.get(task_id) or {}).get("rerankScore") or 0.0),
+                    "bestChunk": (task_search_rows.get(task_id) or {}).get("bestChunk"),
                     "noteWeight": round(min(0.26, note_weight_by_task.get(task_id, 0.0)), 6),
                     "sessionBoosted": task_id in session_task_ids,
                 }
@@ -1057,6 +1201,12 @@ def search(
                     "content": _clip(_sanitize_log_text(entry.content or ""), 320),
                     "createdAt": entry.createdAt,
                     "score": round(score, 6),
+                    "vectorScore": float((log_search_rows.get(log_id) or {}).get("vectorScore") or 0.0),
+                    "bm25Score": float((log_search_rows.get(log_id) or {}).get("bm25Score") or 0.0),
+                    "lexicalScore": float((log_search_rows.get(log_id) or {}).get("lexicalScore") or 0.0),
+                    "rrfScore": float((log_search_rows.get(log_id) or {}).get("rrfScore") or 0.0),
+                    "rerankScore": float((log_search_rows.get(log_id) or {}).get("rerankScore") or 0.0),
+                    "bestChunk": (log_search_rows.get(log_id) or {}).get("bestChunk"),
                     "noteCount": note_count,
                     "noteWeight": round(note_weight, 6),
                     "sessionBoosted": log_id in session_log_ids,

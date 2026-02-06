@@ -67,6 +67,20 @@ class ClawgraphBuildTests(unittest.TestCase):
                 classificationStatus="classified",
                 createdAt="2026-02-06T00:02:00.000Z",
             ),
+            SimpleNamespace(
+                id="log-4",
+                topicId="topic-2",
+                taskId=None,
+                type="conversation",
+                summary="Ok do you remember Thomas",
+                content="Ok do you remember Thomas",
+                raw="",
+                agentId="user",
+                agentLabel="User",
+                relatedLogId=None,
+                classificationStatus="classified",
+                createdAt="2026-02-06T00:03:00.000Z",
+            ),
         ]
         return topics, tasks, logs
 
@@ -99,6 +113,18 @@ class ClawgraphBuildTests(unittest.TestCase):
         ]
         self.assertTrue(mention_weights, "Expected at least one mention edge to Discord entity")
         self.assertGreater(max(mention_weights), 0.8)
+
+    def test_entity_normalization_avoids_thomas_ok_duplicate(self):
+        topics, tasks, logs = self._sample_rows()
+        graph = build_clawgraph(topics, tasks, logs, max_entities=60, max_nodes=140, min_edge_weight=0.0)
+
+        entity_nodes = [node for node in graph["nodes"] if node["type"] == "entity"]
+        entity_keys = [str(node.get("meta", {}).get("entityKey", "")) for node in entity_nodes]
+        self.assertNotIn("thomas ok", entity_keys)
+        self.assertNotIn("thomas\nok", entity_keys)
+
+        thomas_entities = [node for node in entity_nodes if str(node.get("meta", {}).get("entityKey")) == "thomas"]
+        self.assertEqual(len(thomas_entities), 1)
 
 
 if __name__ == "__main__":

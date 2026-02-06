@@ -4,6 +4,7 @@ import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Tuple
 
 
@@ -43,6 +44,19 @@ STOP_WORDS = {
     "agent",
 }
 
+ENTITY_NOISE_TOKENS = {
+    "ok",
+    "okay",
+    "yeah",
+    "yes",
+    "hey",
+    "so",
+    "please",
+    "pls",
+    "thanks",
+    "thx",
+}
+
 ENTITY_BLOCKLIST = {
     "EST",
     "UTC",
@@ -67,6 +81,33 @@ ENTITY_BLOCKLIST = {
     "December",
 }
 
+ENTITY_ALIAS_MAP = {
+    "open claw": "openclaw",
+    "open-claw": "openclaw",
+    "claw board": "clawboard",
+    "claw-board": "clawboard",
+    "open clawboard": "clawboard",
+    "open-clawboard": "clawboard",
+}
+
+ENTITY_TYPE_PRIORITY = {
+    "url": 6,
+    "file": 5,
+    "command": 4,
+    "org": 3,
+    "project": 2,
+    "person": 1,
+}
+
+ENTITY_TYPE_WEIGHT = {
+    "url": 0.72,
+    "file": 0.8,
+    "command": 0.86,
+    "org": 0.94,
+    "project": 1.0,
+    "person": 0.9,
+}
+
 TOPIC_COLOR = "#ff8a4a"
 TASK_COLOR = "#4ea1ff"
 ENTITY_COLOR = "#45c4a0"
@@ -83,6 +124,14 @@ class NodeBuild:
     meta: Dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class EntityHit:
+    label: str
+    key: str
+    entity_type: str
+    base_weight: float
+
+
 def _slug(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
     return cleaned or "node"
@@ -95,6 +144,23 @@ def _normalize_text(value: str) -> str:
     text = re.sub(r"(?i)\[message[_\s-]?id:[^\]]+\]", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        ts = datetime.fromisoformat(raw)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+    except Exception:
+        return None
 
 
 def _words(value: str) -> set[str]:
@@ -115,32 +181,82 @@ def _jaccard(a: str, b: str) -> float:
     return inter / union
 
 
-def _extract_entities(text: str) -> set[str]:
+def _canonical_entity_key(text: str) -> str:
+    normalized = _normalize_text(text).lower()
+    normalized = normalized.strip("`*[](){}:;,.!?\"'")
+    normalized = re.sub(r"[_\-]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return ""
+    normalized = ENTITY_ALIAS_MAP.get(normalized, normalized)
+    normalized = normalized.strip()
+    parts = [part for part in normalized.split(" ") if part]
+    while parts and parts[0] in ENTITY_NOISE_TOKENS:
+        parts.pop(0)
+    while parts and parts[-1] in ENTITY_NOISE_TOKENS:
+        parts.pop()
+    if not parts:
+        return ""
+    return " ".join(parts)
+
+
+def _extract_entities(text: str) -> list[EntityHit]:
     source = _normalize_text(text)
     if not source:
-        return set()
+        return []
+    source = re.sub(r"\s+", " ", source)
 
-    entities: set[str] = set()
+    entities: list[tuple[str, str, float]] = []
+
+    # URLs
+    for match in re.finditer(r"\bhttps?://[^\s)\]>]+", source):
+        token = match.group(0).strip("`*[](){}:;,.!?\"'")
+        if len(token) >= 8:
+            entities.append((token, "url", 1.12))
+
+    # File paths (unix + relative file refs)
+    for match in re.finditer(r"(?:\./|~/|/)[A-Za-z0-9._/\-]{3,}", source):
+        token = match.group(0).strip("`*[](){}:;,.!?\"'")
+        if len(token) >= 4:
+            entities.append((token, "file", 1.03))
+    for match in re.finditer(r"\b[A-Za-z0-9._/\-]+\.[A-Za-z0-9]{2,6}\b", source):
+        token = match.group(0).strip("`*[](){}:;,.!?\"'")
+        if "/" in token or "." in token:
+            entities.append((token, "file", 0.94))
+
+    # Commands and CLI snippets.
+    for match in re.finditer(r"`([^`]{2,90})`", source):
+        snippet = match.group(1).strip()
+        if re.search(r"\b(openclaw|docker|npm|pnpm|curl|git|python|node|uvicorn|tailscale|sqlite3|pytest)\b", snippet, flags=re.IGNORECASE):
+            entities.append((snippet, "command", 0.92))
+    for match in re.finditer(r"\b(openclaw|docker|npm|pnpm|curl|git|python|node|uvicorn|tailscale|sqlite3|pytest)\b(?:\s+[A-Za-z0-9./:_-]+){0,4}", source, flags=re.IGNORECASE):
+        snippet = match.group(0).strip()
+        if len(snippet) >= 3:
+            entities.append((snippet, "command", 0.84))
+
+    # Handles/usernames.
+    for match in re.finditer(r"@[A-Za-z0-9_]{3,32}", source):
+        entities.append((match.group(0), "person", 0.88))
 
     # Uppercase tokens and acronyms.
     for match in re.finditer(r"\b[A-Z][A-Z0-9_-]{2,}\b", source):
         token = match.group(0).strip()
         if token in ENTITY_BLOCKLIST:
             continue
-        entities.add(token)
+        entities.append((token, "org", 1.0))
 
     # CamelCase and TitleCase words.
     for match in re.finditer(r"\b[A-Z][a-z]+(?:[A-Z][a-z0-9]+)+\b", source):
         token = match.group(0).strip()
         if len(token) >= 3:
-            entities.add(token)
+            entities.append((token, "project", 0.94))
 
     # Single TitleCase entities ("Discord", "OpenClaw", "Tailscale").
     for match in re.finditer(r"\b[A-Z][a-z0-9]{2,}\b", source):
         token = match.group(0).strip()
         if token in ENTITY_BLOCKLIST:
             continue
-        entities.add(token)
+        entities.append((token, "project", 0.8))
 
     # Multi-word named entities ("Open Claw", "Discord Bot", "Docker Desktop")
     for match in re.finditer(r"\b[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+){1,2}\b", source):
@@ -149,19 +265,48 @@ def _extract_entities(text: str) -> set[str]:
             continue
         if len(token) < 4:
             continue
-        entities.add(token)
+        entity_type = "person" if len(token.split(" ")) == 2 else "org"
+        entities.append((token, entity_type, 0.92))
 
-    cleaned: set[str] = set()
-    for entity in entities:
-        entity = entity.strip("`*[](){}:;,.!?'\"")
+    canonical: dict[str, EntityHit] = {}
+    for raw_entity, entity_type, base_weight in entities:
+        entity = raw_entity.strip("`*[](){}:;,.!?'\"")
+        entity = re.sub(r"\s+", " ", entity).strip()
         if not entity:
             continue
-        if entity.lower() in STOP_WORDS:
+        parts = [part for part in entity.split(" ") if part]
+        while parts and parts[0].lower() in ENTITY_NOISE_TOKENS:
+            parts.pop(0)
+        while parts and parts[-1].lower() in ENTITY_NOISE_TOKENS:
+            parts.pop()
+        if not parts:
+            continue
+        entity = " ".join(parts).strip()
+        key = _canonical_entity_key(entity)
+        if not key:
+            continue
+        if key.upper() in ENTITY_BLOCKLIST:
+            continue
+        if key in STOP_WORDS:
             continue
         if len(entity) > 48:
             entity = entity[:48].rstrip()
-        cleaned.add(entity)
-    return cleaned
+            key = _canonical_entity_key(entity)
+            if not key:
+                continue
+        if len(entity) < 3:
+            continue
+        existing = canonical.get(key)
+        if not existing:
+            canonical[key] = EntityHit(label=entity, key=key, entity_type=entity_type, base_weight=base_weight)
+            continue
+        existing_priority = ENTITY_TYPE_PRIORITY.get(existing.entity_type, 0)
+        next_priority = ENTITY_TYPE_PRIORITY.get(entity_type, 0)
+        chosen_type = entity_type if next_priority >= existing_priority else existing.entity_type
+        chosen_weight = max(existing.base_weight, base_weight)
+        chosen_label = entity if len(entity) >= len(existing.label) else existing.label
+        canonical[key] = EntityHit(label=chosen_label, key=key, entity_type=chosen_type, base_weight=chosen_weight)
+    return list(canonical.values())
 
 
 def _edge_key(source: str, target: str, kind: str, undirected: bool = False) -> Tuple[str, str, str]:
@@ -280,9 +425,14 @@ def build_clawgraph(
 
     entity_score: Dict[str, float] = defaultdict(float)
     entity_label: Dict[str, str] = {}
+    entity_type: Dict[str, str] = {}
     topic_entities: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
     task_entities: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
     agent_entities: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+
+    created_values = [_parse_iso(getattr(row, "createdAt", None)) for row in log_rows]
+    created_values = [value for value in created_values if value is not None]
+    newest_ts = max(created_values) if created_values else None
 
     for row in log_rows:
         log_id = str(getattr(row, "id", "") or "")
@@ -321,29 +471,44 @@ def build_clawgraph(
             "import": 0.45,
         }.get(log_type, 0.66)
         note_boost = 1.0 + min(0.8, len(attached_notes) * 0.2)
-        weight = base_weight * note_boost
+        created_at = _parse_iso(getattr(row, "createdAt", None))
+        recency_boost = 1.0
+        if newest_ts and created_at:
+            age_hours = max(0.0, (newest_ts - created_at).total_seconds() / 3600.0)
+            # Temporal signal: recent interactions retain stronger influence.
+            recency_boost = 0.35 + (0.65 * math.exp(-age_hours / 96.0))
+        weight = base_weight * note_boost * recency_boost
 
         entity_ids: List[str] = []
         for ent in entities:
-            key = ent.lower()
+            key = ent.key
             if not key:
                 continue
-            entity_score[key] += weight
+            type_weight = ENTITY_TYPE_WEIGHT.get(ent.entity_type, 1.0)
+            weighted = weight * ent.base_weight * type_weight
+            entity_score[key] += weighted
             if key not in entity_label:
-                entity_label[key] = ent
+                entity_label[key] = ent.label
             else:
                 # Prefer the longer title-cased label as canonical display text.
-                if len(ent) > len(entity_label[key]):
-                    entity_label[key] = ent
+                if len(ent.label) > len(entity_label[key]):
+                    entity_label[key] = ent.label
+            if key not in entity_type:
+                entity_type[key] = ent.entity_type
+            else:
+                current_priority = ENTITY_TYPE_PRIORITY.get(entity_type[key], 0)
+                next_priority = ENTITY_TYPE_PRIORITY.get(ent.entity_type, 0)
+                if next_priority >= current_priority:
+                    entity_type[key] = ent.entity_type
 
             entity_id = f"entity:{_slug(key)}"
             entity_ids.append(entity_id)
             if topic_id:
-                topic_entities[topic_id][entity_id] += weight
+                topic_entities[topic_id][entity_id] += weighted
             if task_id:
-                task_entities[task_id][entity_id] += weight
+                task_entities[task_id][entity_id] += weighted
             if agent_label:
-                agent_entities[agent_label][entity_id] += weight * 0.85
+                agent_entities[agent_label][entity_id] += weighted * 0.85
 
         # Entity co-occurrence links.
         uniq_ids = sorted(set(entity_ids))
@@ -367,7 +532,11 @@ def build_clawgraph(
             label=label,
             kind="entity",
             score=0.9 + score,
-            meta={"entityKey": ent_key, "mentions": round(score, 3)},
+            meta={
+                "entityKey": ent_key,
+                "entityType": entity_type.get(ent_key, "project"),
+                "mentions": round(score, 3),
+            },
         )
 
     # Mentions edges to selected entities.

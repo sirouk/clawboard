@@ -76,3 +76,60 @@ export type TopicStats = {
 };
 
 export type TopicWithStats = Topic & { stats?: TopicStats };
+
+export type SemanticTopicMatch = {
+  id: string;
+  name: string;
+  description?: string | null;
+  score: number;
+  noteWeight?: number;
+  sessionBoosted?: boolean;
+};
+
+export type SemanticTaskMatch = {
+  id: string;
+  topicId?: string | null;
+  title: string;
+  status?: TaskStatus;
+  score: number;
+  noteWeight?: number;
+  sessionBoosted?: boolean;
+};
+
+export type SemanticLogMatch = {
+  id: string;
+  topicId?: string | null;
+  taskId?: string | null;
+  type: LogEntry["type"];
+  agentId?: string | null;
+  agentLabel?: string | null;
+  summary?: string;
+  content?: string;
+  createdAt?: string;
+  score: number;
+  noteCount?: number;
+  noteWeight?: number;
+  sessionBoosted?: boolean;
+};
+
+export type SemanticNoteMatch = {
+  id: string;
+  relatedLogId?: string | null;
+  topicId?: string | null;
+  taskId?: string | null;
+  summary?: string;
+  content?: string;
+  createdAt?: string;
+};
+
+export type SemanticSearchResponse = {
+  query: string;
+  mode: string;
+  topics: SemanticTopicMatch[];
+  tasks: SemanticTaskMatch[];
+  logs: SemanticLogMatch[];
+  notes: SemanticNoteMatch[];
+  matchedTopicIds: string[];
+  matchedTaskIds: string[];
+  matchedLogIds: string[];
+};

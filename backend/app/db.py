@@ -61,6 +61,22 @@ def init_db() -> None:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN updatedAt TEXT NOT NULL DEFAULT '';")
             if "idempotencyKey" not in existing:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN idempotencyKey TEXT;")
+            duplicate_keys = conn.exec_driver_sql(
+                'SELECT "idempotencyKey", COUNT(*) FROM logentry '
+                'WHERE "idempotencyKey" IS NOT NULL GROUP BY "idempotencyKey" HAVING COUNT(*) > 1;'
+            ).fetchall()
+            for key_value, _count in duplicate_keys:
+                rows = conn.exec_driver_sql(
+                    'SELECT id FROM logentry WHERE "idempotencyKey" = ? '
+                    'ORDER BY "createdAt" ASC, id ASC;',
+                    (key_value,),
+                ).fetchall()
+                for row in rows[1:]:
+                    conn.exec_driver_sql("DELETE FROM logentry WHERE id = ?;", (row[0],))
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_logentry_idempotency_key "
+                'ON logentry("idempotencyKey") WHERE "idempotencyKey" IS NOT NULL;'
+            )
 
             topic_cols = conn.exec_driver_sql("PRAGMA table_info(topic);").fetchall()
             topic_existing = {row[1] for row in topic_cols}

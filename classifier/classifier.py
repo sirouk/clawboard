@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import sqlite3
@@ -6,6 +7,7 @@ import time
 import shutil
 from difflib import SequenceMatcher
 import requests
+import numpy as np
 
 from fastembed import TextEmbedding
 
@@ -40,6 +42,8 @@ OPENCLAW_MEMORY_MAX_HITS = int(os.environ.get("OPENCLAW_MEMORY_MAX_HITS", "6"))
 
 _embedder = None
 _embed_failed = False
+_embed_cache: dict[str, np.ndarray] = {}
+_EMBED_CACHE_MAX = 1200
 SUMMARY_DROP_WORDS = {
     "the",
     "a",
@@ -131,12 +135,25 @@ def embedder():
 
 
 def embed_text(text: str):
+    key = (text or "").strip()
+    if not key:
+        return None
+    cached = _embed_cache.get(key)
+    if cached is not None:
+        return cached
+
     emb = embedder()
     if emb is None:
         return None
     try:
-        vec = next(emb.embed([text]))
-        return vec
+        vec = next(emb.embed([key]))
+        arr = np.asarray(vec, dtype=np.float32)
+        if arr.size == 0:
+            return None
+        if len(_embed_cache) >= _EMBED_CACHE_MAX:
+            _embed_cache.clear()
+        _embed_cache[key] = arr
+        return arr
     except Exception as exc:
         print(f"classifier: embeddings encode failed: {exc}")
         return None
@@ -282,6 +299,97 @@ def _token_set(text: str) -> set[str]:
         "an",
     }
     return {w for w in _normalize_text(text).split(" ") if len(w) > 2 and w not in stop_words}
+
+
+def _token_list(text: str) -> list[str]:
+    return [w for w in _normalize_text(text).split(" ") if len(w) > 1]
+
+
+def _bm25_scores(query_text: str, docs: dict[str, str], k1: float = 1.6, b: float = 0.68):
+    query_tokens = [token for token in _token_list(query_text) if token]
+    if not query_tokens or not docs:
+        return {}
+
+    tokenized: dict[str, list[str]] = {doc_id: _token_list(text) for doc_id, text in docs.items()}
+    tokenized = {doc_id: tokens for doc_id, tokens in tokenized.items() if tokens}
+    if not tokenized:
+        return {}
+
+    doc_count = len(tokenized)
+    avg_len = sum(len(tokens) for tokens in tokenized.values()) / max(1, doc_count)
+    term_doc_freq: dict[str, int] = {}
+    tf_per_doc: dict[str, dict[str, int]] = {}
+    for doc_id, tokens in tokenized.items():
+        counts: dict[str, int] = {}
+        for token in tokens:
+            counts[token] = counts.get(token, 0) + 1
+        tf_per_doc[doc_id] = counts
+        for token in counts.keys():
+            term_doc_freq[token] = term_doc_freq.get(token, 0) + 1
+
+    unique_query = list(dict.fromkeys(query_tokens))
+    scores: dict[str, float] = {}
+    for doc_id, tokens in tokenized.items():
+        dl = max(1, len(tokens))
+        counts = tf_per_doc.get(doc_id, {})
+        score = 0.0
+        for token in unique_query:
+            tf = counts.get(token, 0)
+            if tf <= 0:
+                continue
+            df = term_doc_freq.get(token, 0)
+            idf = math.log(1 + ((doc_count - df + 0.5) / (df + 0.5)))
+            numerator = tf * (k1 + 1.0)
+            denominator = tf + k1 * (1.0 - b + b * (dl / max(1e-8, avg_len)))
+            score += idf * (numerator / max(1e-8, denominator))
+        if score > 0:
+            scores[doc_id] = float(score)
+    return scores
+
+
+def _normalize_score_map(scores: dict[str, float]):
+    if not scores:
+        return {}
+    values = [float(v) for v in scores.values()]
+    hi = max(values)
+    lo = min(values)
+    if hi <= lo:
+        return {k: 1.0 for k in scores}
+    return {k: (float(v) - lo) / (hi - lo) for k, v in scores.items()}
+
+
+def _rrf_fuse(score_maps: list[dict[str, float]], weights: list[float] | None = None, k: int = 60):
+    if not score_maps:
+        return {}
+    if not weights:
+        weights = [1.0 for _ in score_maps]
+    fused: dict[str, float] = {}
+    for score_map, weight in zip(score_maps, weights):
+        ranked = sorted(score_map.items(), key=lambda item: item[1], reverse=True)
+        for rank, (doc_id, _score) in enumerate(ranked, start=1):
+            fused[doc_id] = fused.get(doc_id, 0.0) + (float(weight) / float(k + rank))
+    return fused
+
+
+def _late_interaction_score(query_text: str, candidate_text: str) -> float:
+    lexical = _name_similarity(query_text, candidate_text)
+    q_tokens = _token_set(query_text)
+    c_tokens = _token_set(candidate_text)
+    coverage = (len(q_tokens & c_tokens) / max(1, len(q_tokens))) if q_tokens else 0.0
+    phrase = 1.0 if _normalize_text(query_text) in _normalize_text(candidate_text) else 0.0
+    dense = 0.0
+    q_vec = embed_text(query_text)
+    c_vec = embed_text(candidate_text)
+    if q_vec is not None and c_vec is not None:
+        try:
+            q_arr = np.asarray(q_vec, dtype=np.float32)
+            c_arr = np.asarray(c_vec, dtype=np.float32)
+            denom = float(np.linalg.norm(q_arr) * np.linalg.norm(c_arr))
+            if denom > 0:
+                dense = max(0.0, float(np.dot(q_arr, c_arr) / denom))
+        except Exception:
+            dense = 0.0
+    return (dense * 0.56) + (coverage * 0.24) + (lexical * 0.16) + (phrase * 0.04)
 
 
 def _name_similarity(a: str, b: str) -> float:
@@ -547,7 +655,12 @@ def process_reindex_queue():
 
 
 def list_logs(params: dict):
-    r = requests.get(f"{CLAWBOARD_API_BASE}/api/log", params=params, timeout=15)
+    r = requests.get(
+        f"{CLAWBOARD_API_BASE}/api/log",
+        params=params,
+        headers=headers_clawboard(),
+        timeout=15,
+    )
     r.raise_for_status()
     return r.json()
 
@@ -588,13 +701,18 @@ def list_notes_by_related_ids(related_ids: list[str], limit: int = 200):
 
 
 def list_topics():
-    r = requests.get(f"{CLAWBOARD_API_BASE}/api/topics", timeout=15)
+    r = requests.get(f"{CLAWBOARD_API_BASE}/api/topics", headers=headers_clawboard(), timeout=15)
     r.raise_for_status()
     return r.json()
 
 
 def list_tasks(topic_id: str):
-    r = requests.get(f"{CLAWBOARD_API_BASE}/api/tasks", params={"topicId": topic_id}, timeout=15)
+    r = requests.get(
+        f"{CLAWBOARD_API_BASE}/api/tasks",
+        params={"topicId": topic_id},
+        headers=headers_clawboard(),
+        timeout=15,
+    )
     r.raise_for_status()
     return r.json()
 
@@ -682,21 +800,51 @@ def topic_candidates(query_text: str, k: int = 6):
         for topic_id, score in embed_topk("topic", q, k=max(k * 4, 20)):
             vector_scores[topic_id] = max(vector_scores.get(topic_id, 0.0), max(0.0, float(score)))
 
+    topic_text: dict[str, str] = {}
+    lexical_scores: dict[str, float] = {}
+    for topic in topics:
+        tid = topic.get("id")
+        name = topic.get("name") or ""
+        description = topic.get("description") or ""
+        if not tid or not name:
+            continue
+        text = f"{name} {description}".strip()
+        topic_text[tid] = text
+        lexical_scores[tid] = _name_similarity(query_text, name)
+
+    bm25_scores = _bm25_scores(query_text, topic_text)
+    rrf_scores = _rrf_fuse([vector_scores, bm25_scores, lexical_scores], weights=[1.0, 0.92, 0.56])
+    vector_norm = _normalize_score_map(vector_scores)
+    bm25_norm = _normalize_score_map(bm25_scores)
+    lexical_norm = _normalize_score_map(lexical_scores)
+    rrf_norm = _normalize_score_map(rrf_scores)
+
     out = []
     for topic in topics:
         tid = topic.get("id")
         name = topic.get("name") or ""
         if not tid or not name:
             continue
-        lexical = _name_similarity(query_text, name)
         vector = vector_scores.get(tid, 0.0)
-        hybrid = (vector * 0.72) + (lexical * 0.28)
+        lexical = lexical_scores.get(tid, 0.0)
+        bm25 = bm25_scores.get(tid, 0.0)
+        base = (
+            (rrf_norm.get(tid, 0.0) * 0.44)
+            + (vector_norm.get(tid, 0.0) * 0.24)
+            + (bm25_norm.get(tid, 0.0) * 0.2)
+            + (lexical_norm.get(tid, 0.0) * 0.12)
+        )
+        rerank = _late_interaction_score(query_text, topic_text.get(tid, name))
+        hybrid = (base * 0.72) + (rerank * 0.28)
         out.append(
             {
                 "id": tid,
                 "name": name,
                 "score": hybrid,
                 "vectorScore": vector,
+                "bm25Score": bm25,
+                "rrfScore": rrf_scores.get(tid, 0.0),
+                "rerankScore": rerank,
                 "lexicalScore": lexical,
             }
         )
@@ -717,21 +865,51 @@ def task_candidates(topic_id: str, query_text: str, k: int = 8):
         for task_id, score in embed_topk(f"task:{topic_id}", q, k=max(k * 4, 24)):
             vector_scores[task_id] = max(vector_scores.get(task_id, 0.0), max(0.0, float(score)))
 
+    task_text: dict[str, str] = {}
+    lexical_scores: dict[str, float] = {}
+    for task in tasks:
+        tid = task.get("id")
+        title = task.get("title") or ""
+        status = task.get("status") or "todo"
+        if not tid or not title:
+            continue
+        text = f"{title} {status}".strip()
+        task_text[tid] = text
+        lexical_scores[tid] = _name_similarity(query_text, title)
+
+    bm25_scores = _bm25_scores(query_text, task_text)
+    rrf_scores = _rrf_fuse([vector_scores, bm25_scores, lexical_scores], weights=[1.0, 0.92, 0.58])
+    vector_norm = _normalize_score_map(vector_scores)
+    bm25_norm = _normalize_score_map(bm25_scores)
+    lexical_norm = _normalize_score_map(lexical_scores)
+    rrf_norm = _normalize_score_map(rrf_scores)
+
     out = []
     for task in tasks:
         tid = task.get("id")
         title = task.get("title") or ""
         if not tid or not title:
             continue
-        lexical = _name_similarity(query_text, title)
+        lexical = lexical_scores.get(tid, 0.0)
         vector = vector_scores.get(tid, 0.0)
-        hybrid = (vector * 0.7) + (lexical * 0.3)
+        bm25 = bm25_scores.get(tid, 0.0)
+        base = (
+            (rrf_norm.get(tid, 0.0) * 0.44)
+            + (vector_norm.get(tid, 0.0) * 0.24)
+            + (bm25_norm.get(tid, 0.0) * 0.2)
+            + (lexical_norm.get(tid, 0.0) * 0.12)
+        )
+        rerank = _late_interaction_score(query_text, task_text.get(tid, title))
+        hybrid = (base * 0.72) + (rerank * 0.28)
         out.append(
             {
                 "id": tid,
                 "title": title,
                 "score": hybrid,
                 "vectorScore": vector,
+                "bm25Score": bm25,
+                "rrfScore": rrf_scores.get(tid, 0.0),
+                "rerankScore": rerank,
                 "lexicalScore": lexical,
             }
         )

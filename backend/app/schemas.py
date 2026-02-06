@@ -33,8 +33,12 @@ class InstanceUpdate(BaseModel):
 class InstanceResponse(BaseModel):
     instance: InstanceOut = Field(description="Instance configuration object.")
     tokenRequired: bool = Field(
-        description="Whether write endpoints require X-Clawboard-Token.",
-        examples=[False],
+        description="Whether API token auth is enforced (writes and non-localhost reads).",
+        examples=[True],
+    )
+    tokenConfigured: bool = Field(
+        description="Whether CLAWBOARD_TOKEN is configured on the API server.",
+        examples=[True],
     )
 
 
