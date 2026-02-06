@@ -24,4 +24,9 @@ test("clawgraph renders and supports interaction controls", async ({ page }) => 
 
   await page.getByPlaceholder("Search entity, topic, task, or agent").fill("discord");
   await expect(page.getByText(/Query matches:/)).toBeVisible();
+
+  const strongestLink = page.getByTestId("strongest-link-action").first();
+  await expect(strongestLink).toBeVisible();
+  await strongestLink.click();
+  await expect(page).toHaveURL(/\/(u|log)(\/|\?|$)/);
 });

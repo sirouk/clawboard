@@ -37,6 +37,7 @@ const TASK_TIMELINE_LIMIT = 2;
 const TOPIC_TIMELINE_LIMIT = 4;
 const TOPIC_FALLBACK_COLORS = ["#FF8A4A", "#4DA39E", "#6FA8FF", "#E0B35A", "#8BC17E", "#F17C8E"];
 const TASK_FALLBACK_COLORS = ["#4EA1FF", "#59C3A6", "#F4B55F", "#9A8BFF", "#F0897C", "#6FB8D8"];
+const topicChatLimitKey = (topicId: string) => `topic-chat:${topicId}`;
 
 function normalizeHexColor(value: string | undefined | null) {
   if (!value) return null;
@@ -166,6 +167,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [initialUrlState] = useState(() => getInitialUrlState(basePath));
   const [expandedTopics, setExpandedTopics] = useState<Set<string>>(new Set(initialUrlState.topics));
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set(initialUrlState.tasks));
+  const [expandedTopicChats, setExpandedTopicChats] = useState<Set<string>>(new Set());
   const [showRaw, setShowRaw] = useState(initialUrlState.raw);
   const [search, setSearch] = useState(initialUrlState.search);
   const [showDone, setShowDone] = useState(initialUrlState.done);
@@ -227,6 +229,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const taskIds = new Set(tasks.map((task) => task.id));
     return new Set([...expandedTasks].filter((id) => taskIds.has(id)));
   }, [expandedTasks, tasks]);
+
+  const expandedTopicChatsSafe = useMemo(() => {
+    const topicIds = new Set(topics.map((topic) => topic.id));
+    return new Set([...expandedTopicChats].filter((id) => topicIds.has(id)));
+  }, [expandedTopicChats, topics]);
 
   const tasksByTopic = useMemo(() => {
     const map = new Map<string, Task[]>();
@@ -409,10 +416,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (!current) return;
     const res = await fetch(apiUrl("/api/tasks"), {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Clawboard-Token": token,
-      },
+      headers: writeHeaders,
       body: JSON.stringify({ ...current, ...updates }),
     });
 
@@ -420,8 +424,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       return;
     }
 
+    const updated = (await res.json().catch(() => null)) as Task | null;
     setTasks((prev) =>
-      prev.map((task) => (task.id === taskId ? { ...task, ...updates, updatedAt: new Date().toISOString() } : task))
+      prev.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              ...(updated ?? updates),
+              updatedAt: updated?.updatedAt ?? new Date().toISOString(),
+            }
+          : task
+      )
     );
   };
 
@@ -578,11 +591,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const expandAll = () => {
     setExpandedTopics(new Set(orderedTopics.map((topic) => topic.id)));
     setExpandedTasks(new Set(tasks.map((task) => task.id)));
+    setExpandedTopicChats(new Set(orderedTopics.map((topic) => topic.id)));
   };
 
   const collapseAll = () => {
     setExpandedTopics(new Set());
     setExpandedTasks(new Set());
+    setExpandedTopicChats(new Set());
   };
 
   const toggleTopicExpanded = (topicId: string) => {
@@ -605,6 +620,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     setExpandedTasks(next);
     pushUrl({ tasks: Array.from(next) });
+  };
+
+  const toggleTopicChatExpanded = (topicId: string) => {
+    const next = new Set(expandedTopicChatsSafe);
+    if (next.has(topicId)) {
+      next.delete(topicId);
+    } else {
+      next.add(topicId);
+    }
+    setExpandedTopicChats(next);
   };
 
   const toggleDoneVisibility = () => {
@@ -642,7 +667,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const allExpanded =
       hasAnyExpandable &&
       expandedTopicsSafe.size === allTopics.length &&
-      expandedTasksSafe.size === allTasks.length;
+      expandedTasksSafe.size === allTasks.length &&
+      expandedTopicChatsSafe.size === allTopics.length;
     if (allExpanded) {
       collapseAll();
       pushUrl({ topics: [], tasks: [] });
@@ -956,6 +982,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const topicOnlyLogs = topicLogs.filter((entry) => !entry.taskId && matchesLogSearch(entry));
           const showTasks = !normalizedSearch || taskList.length > 0 || topicOnlyLogs.length > 0;
           const isExpanded = expandedTopicsSafe.has(topicId);
+          const topicChatExpanded = expandedTopicChatsSafe.has(topicId);
+          const topicChatLimit = timelineLimits[topicChatLimitKey(topicId)] ?? TOPIC_TIMELINE_LIMIT;
+          const topicChatLogs = topicOnlyLogs.slice(0, topicChatLimit);
+          const topicChatTruncated = topicOnlyLogs.length > topicChatLimit;
           const topicColor =
             topicDisplayColors.get(topicId) ??
             normalizeHexColor(topic.color) ??
@@ -1304,6 +1334,25 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
+                            <Select
+                              data-testid={`task-status-${task.id}`}
+                              value={task.status}
+                              disabled={readOnly}
+                              className="h-9 w-[128px] text-xs"
+                              onClick={(event) => event.stopPropagation()}
+                              onChange={(event) => {
+                                event.stopPropagation();
+                                const nextStatus = event.target.value as Task["status"];
+                                if (nextStatus !== task.status) {
+                                  void updateTask(task.id, { status: nextStatus });
+                                }
+                              }}
+                            >
+                              <option value="todo">To Do</option>
+                              <option value="doing">Doing</option>
+                              <option value="blocked">Blocked</option>
+                              <option value="done">Done</option>
+                            </Select>
                             <StatusPill tone={STATUS_TONE[task.status]} label={STATUS_LABELS[task.status] ?? task.status} />
                             <Button
                               variant="secondary"
@@ -1423,34 +1472,71 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   )}
 
                   {topicOnlyLogs.length > 0 && (
-                    <div className="rounded-[var(--radius-md)] border border-[rgba(255,90,45,0.25)] bg-[rgba(255,90,45,0.06)] p-4">
-                      <div className="mb-3 flex items-center justify-between">
-                        <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">TOPIC CHAT</div>
-                        <span className="text-xs text-[rgb(var(--claw-muted))]">{topicOnlyLogs.length} entries</span>
+                    <div
+                      className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300"
+                      style={taskGlowStyle(topicColor, taskList.length, topicChatExpanded)}
+                    >
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        className="flex flex-wrap items-center justify-between gap-3 text-left"
+                        onClick={(event) => {
+                          if (!allowToggle(event.target as HTMLElement)) return;
+                          toggleTopicChatExpanded(topicId);
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            toggleTopicChatExpanded(topicId);
+                          }
+                        }}
+                        aria-expanded={topicChatExpanded}
+                      >
+                        <div>
+                          <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">TOPIC CHAT</div>
+                          <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topicOnlyLogs.length} entries</div>
+                        </div>
+                        <Button
+                          data-testid={`toggle-topic-chat-${topicId}`}
+                          variant="secondary"
+                          size="sm"
+                          className="min-w-[104px]"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggleTopicChatExpanded(topicId);
+                          }}
+                        >
+                          {topicChatExpanded ? "Collapse" : "Expand"}
+                        </Button>
                       </div>
-                      <LogList
-                        logs={topicOnlyLogs.slice(0, timelineLimits[topicId] ?? TOPIC_TIMELINE_LIMIT)}
-                        topics={topics}
-                        showFilters={false}
-                        showRawToggle={false}
-                        showRawAll={showRaw}
-                        allowNotes
-                        enableNavigation={false}
-                      />
-                      {topicOnlyLogs.length > (timelineLimits[topicId] ?? TOPIC_TIMELINE_LIMIT) && (
-                        <div className="mt-3 flex justify-end">
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            onClick={() =>
-                              setTimelineLimits((prev) => ({
-                                ...prev,
-                                [topicId]: (prev[topicId] ?? TOPIC_TIMELINE_LIMIT) + TOPIC_TIMELINE_LIMIT,
-                              }))
-                            }
-                          >
-                            Load 4 more
-                          </Button>
+                      {topicChatExpanded && (
+                        <div className="mt-3 rounded-[var(--radius-md)] border border-[rgba(255,90,45,0.25)] bg-[rgba(255,90,45,0.06)] p-4">
+                          <LogList
+                            logs={topicChatLogs}
+                            topics={topics}
+                            showFilters={false}
+                            showRawToggle={false}
+                            showRawAll={showRaw}
+                            allowNotes
+                            enableNavigation={false}
+                          />
+                          {topicChatTruncated && (
+                            <div className="mt-3 flex justify-end">
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                onClick={() =>
+                                  setTimelineLimits((prev) => ({
+                                    ...prev,
+                                    [topicChatLimitKey(topicId)]:
+                                      (prev[topicChatLimitKey(topicId)] ?? TOPIC_TIMELINE_LIMIT) + TOPIC_TIMELINE_LIMIT,
+                                  }))
+                                }
+                              >
+                                Load 4 more
+                              </Button>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>

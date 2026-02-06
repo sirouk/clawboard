@@ -72,8 +72,8 @@ test("unified chat renders natural bubbles and topic-only chat entries", async (
   await page.goto("/u");
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
-  await page.getByRole("button", { name: new RegExp(topicName) }).first().click();
-  await page.getByRole("button", { name: new RegExp(taskTitle) }).first().click();
+  await page.locator("div[role='button']").filter({ hasText: topicName }).first().click();
+  await page.locator("div[role='button']").filter({ hasText: taskTitle }).first().click();
 
   const assistantBubble = page.getByTestId(`message-bubble-${assistantLog.id}`);
   const userBubble = page.getByTestId(`message-bubble-${userLog.id}`);
@@ -93,5 +93,6 @@ test("unified chat renders natural bubbles and topic-only chat entries", async (
   await expect(page.getByText("TASK CHAT")).toBeVisible();
 
   await expect(page.getByText("TOPIC CHAT")).toBeVisible();
+  await page.getByTestId(`toggle-topic-chat-${topicId}`).click();
   await expect(page.getByText(topicOnlyMessage, { exact: false })).toBeVisible();
 });

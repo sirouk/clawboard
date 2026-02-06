@@ -5,9 +5,17 @@ import { useRouter } from "next/navigation";
 import { Badge, Button, Card, CardHeader, Input } from "@/components/ui";
 import { useDataStore } from "@/components/data-provider";
 import { apiUrl } from "@/lib/api";
-import { buildClawgraphFromData, layoutClawgraph, type ClawgraphData, type ClawgraphEdge, type ClawgraphNode } from "@/lib/clawgraph";
+import {
+  buildClawgraphFromData,
+  layoutClawgraph,
+  type ClawgraphData,
+  type ClawgraphEdge,
+  type ClawgraphNode,
+  type ClawgraphNodeType,
+} from "@/lib/clawgraph";
 import { cn } from "@/lib/cn";
 import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
+import type { Task, Topic } from "@/lib/types";
 
 const EDGE_COLORS: Record<string, string> = {
   has_task: "rgba(78,161,255,0.72)",
@@ -21,6 +29,13 @@ const EDGE_COLORS: Record<string, string> = {
 const MIN_ZOOM = 0.38;
 const MAX_ZOOM = 2.6;
 
+const NODE_THEME: Record<ClawgraphNodeType, { color: string; glow: string }> = {
+  topic: { color: "#FF8A4A", glow: "#FF8A4A" },
+  task: { color: "#4EA1FF", glow: "#4EA1FF" },
+  entity: { color: "#59C3A6", glow: "#59C3A6" },
+  agent: { color: "#F4B55F", glow: "#F4B55F" },
+};
+
 type DragState = {
   pointerId: number;
   startX: number;
@@ -33,10 +48,42 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function hexToRgb(hex: string) {
+  const normalized = hex.replace("#", "");
+  const padded = normalized.length === 3 ? normalized.split("").map((char) => `${char}${char}`).join("") : normalized;
+  if (!/^[0-9a-fA-F]{6}$/.test(padded)) return { r: 78, g: 161, b: 255 };
+  return {
+    r: Number.parseInt(padded.slice(0, 2), 16),
+    g: Number.parseInt(padded.slice(2, 4), 16),
+    b: Number.parseInt(padded.slice(4, 6), 16),
+  };
+}
+
+function toRgba(hex: string, alpha: number) {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 function summarizeEdge(edge: ClawgraphEdge, nodeById: Map<string, ClawgraphNode>) {
   const source = nodeById.get(edge.source)?.label ?? edge.source;
   const target = nodeById.get(edge.target)?.label ?? edge.target;
   return `${source} -> ${target}`;
+}
+
+function topicFromNode(node: ClawgraphNode | null, topics: Topic[]) {
+  if (!node || node.type !== "topic") return null;
+  const topicIdFromMeta = String(node.meta?.topicId ?? "").trim();
+  const topicId = topicIdFromMeta || node.id.replace(/^topic:/, "");
+  if (!topicId) return null;
+  return topics.find((topic) => topic.id === topicId) ?? null;
+}
+
+function taskFromNode(node: ClawgraphNode | null, tasks: Task[]) {
+  if (!node || node.type !== "task") return null;
+  const taskIdFromMeta = String(node.meta?.taskId ?? "").trim();
+  const taskId = taskIdFromMeta || node.id.replace(/^task:/, "");
+  if (!taskId) return null;
+  return tasks.find((task) => task.id === taskId) ?? null;
 }
 
 export function ClawgraphLive() {
@@ -44,7 +91,7 @@ export function ClawgraphLive() {
   const { topics, tasks, logs } = useDataStore();
   const [query, setQuery] = useState("");
   const [showAdvancedControls, setShowAdvancedControls] = useState(false);
-  const [edgeThreshold, setEdgeThreshold] = useState(0.16);
+  const [strengthPercent, setStrengthPercent] = useState(12);
   const [showEntityLinks, setShowEntityLinks] = useState(true);
   const [showLabels, setShowLabels] = useState(true);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
@@ -54,6 +101,7 @@ export function ClawgraphLive() {
   const [isFetching, setIsFetching] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const didDragRef = useRef(false);
   const [viewportSize, setViewportSize] = useState({ width: 1080, height: 680 });
   const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
 
@@ -118,12 +166,25 @@ export function ClawgraphLive() {
   const graph = remoteGraph ?? localGraph;
   const nodeById = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph.nodes]);
 
-  const filteredEdges = useMemo(() => {
+  const candidateEdges = useMemo(() => {
     return graph.edges.filter((edge) => {
       if (!showEntityLinks && edge.type === "co_occurs") return false;
-      return edge.weight >= edgeThreshold;
+      return true;
     });
-  }, [edgeThreshold, graph.edges, showEntityLinks]);
+  }, [graph.edges, showEntityLinks]);
+
+  const edgeThreshold = useMemo(() => {
+    if (candidateEdges.length === 0) return 0;
+    const weights = candidateEdges.map((edge) => edge.weight).sort((a, b) => a - b);
+    if (strengthPercent <= 0) return weights[0] - 1e-6;
+    if (strengthPercent >= 100) return weights[weights.length - 1];
+    const rank = Math.floor((strengthPercent / 100) * (weights.length - 1));
+    return weights[rank] ?? weights[weights.length - 1];
+  }, [candidateEdges, strengthPercent]);
+
+  const filteredEdges = useMemo(() => {
+    return candidateEdges.filter((edge) => edge.weight >= edgeThreshold);
+  }, [candidateEdges, edgeThreshold]);
 
   const nodeIdsFromEdges = useMemo(() => {
     const ids = new Set<string>();
@@ -131,14 +192,18 @@ export function ClawgraphLive() {
       ids.add(edge.source);
       ids.add(edge.target);
     });
-    graph.nodes.forEach((node) => {
-      if (node.type === "topic" || node.type === "task") ids.add(node.id);
-    });
     return ids;
-  }, [filteredEdges, graph.nodes]);
+  }, [filteredEdges]);
 
   const displayNodes = useMemo(() => graph.nodes.filter((node) => nodeIdsFromEdges.has(node.id)), [graph.nodes, nodeIdsFromEdges]);
   const displayNodeById = useMemo(() => new Map(displayNodes.map((node) => [node.id, node])), [displayNodes]);
+
+  useEffect(() => {
+    if (!selectedNodeId) return;
+    if (!displayNodeById.has(selectedNodeId)) {
+      setSelectedNodeId(null);
+    }
+  }, [displayNodeById, selectedNodeId]);
 
   const positions = useMemo(
     () => layoutClawgraph(displayNodes, filteredEdges, viewportSize.width, viewportSize.height),
@@ -188,24 +253,70 @@ export function ClawgraphLive() {
       .filter((item): item is ClawgraphNode => Boolean(item));
   }, [connectedEdges, displayNodeById, selectedNodeId]);
 
-  const selectedTopic = useMemo(() => {
-    if (!selectedNode || selectedNode.type !== "topic") return null;
-    const topicId = String(selectedNode.meta?.topicId ?? "").trim();
-    if (!topicId) return null;
-    return topics.find((topic) => topic.id === topicId) ?? null;
-  }, [selectedNode, topics]);
+  const selectedTopic = useMemo(() => topicFromNode(selectedNode, topics), [selectedNode, topics]);
 
-  const selectedTask = useMemo(() => {
-    if (!selectedNode || selectedNode.type !== "task") return null;
-    const taskId = String(selectedNode.meta?.taskId ?? "").trim();
-    if (!taskId) return null;
-    return tasks.find((task) => task.id === taskId) ?? null;
-  }, [selectedNode, tasks]);
+  const selectedTask = useMemo(() => taskFromNode(selectedNode, tasks), [selectedNode, tasks]);
 
   const selectedTopicUrl = selectedTopic ? buildTopicUrl(selectedTopic, topics) : null;
   const selectedTaskUrl = selectedTask ? buildTaskUrl(selectedTask, topics) : null;
   const selectedSearchUrl = selectedNode ? `${UNIFIED_BASE}?q=${encodeURIComponent(selectedNode.label)}` : null;
   const selectedLogUrl = selectedNode ? `/log?q=${encodeURIComponent(selectedNode.label)}` : null;
+
+  const connectedEdgeRows = useMemo(() => {
+    if (!selectedNodeId || !selectedNode) return [] as Array<{
+      edge: ClawgraphEdge;
+      summary: string;
+      href: string;
+      surface: "board" | "logs";
+      actionLabel: string;
+    }>;
+
+    return connectedEdges.map((edge) => {
+      const oppositeNodeId = edge.source === selectedNodeId ? edge.target : edge.source;
+      const oppositeNode = displayNodeById.get(oppositeNodeId) ?? nodeById.get(oppositeNodeId) ?? null;
+      const oppositeTopic = topicFromNode(oppositeNode, topics);
+      const oppositeTask = taskFromNode(oppositeNode, tasks);
+      const shouldOpenBoard =
+        Boolean(oppositeTopic || oppositeTask) ||
+        edge.type === "has_task" ||
+        edge.type === "related_topic" ||
+        edge.type === "related_task";
+
+      let href = "";
+      const surface: "board" | "logs" = shouldOpenBoard ? "board" : "logs";
+
+      if (oppositeTopic) {
+        href = buildTopicUrl(oppositeTopic, topics);
+      } else if (oppositeTask) {
+        href = buildTaskUrl(oppositeTask, topics);
+      } else if (surface === "board") {
+        const params = new URLSearchParams();
+        if (oppositeNode?.label) params.set("q", oppositeNode.label);
+        href = params.size > 0 ? `${UNIFIED_BASE}?${params.toString()}` : UNIFIED_BASE;
+      } else {
+        const params = new URLSearchParams();
+        const terms = [selectedNode.label, oppositeNode?.label ?? ""].filter(Boolean).join(" ").trim();
+        if (terms) params.set("q", terms);
+        if (selectedTopic?.id) {
+          params.set("topic", selectedTopic.id);
+        } else if (selectedTask?.topicId) {
+          params.set("topic", selectedTask.topicId);
+        }
+        if (oppositeNode?.type === "agent") {
+          params.set("agent", oppositeNode.label);
+        }
+        href = params.size > 0 ? `/log?${params.toString()}` : "/log";
+      }
+
+      return {
+        edge,
+        summary: summarizeEdge(edge, nodeById),
+        href,
+        surface,
+        actionLabel: surface === "board" ? "Open board" : "Open logs",
+      };
+    });
+  }, [connectedEdges, displayNodeById, nodeById, selectedNode, selectedNodeId, selectedTask, selectedTopic, tasks, topics]);
 
   const resetView = () => setView({ x: 0, y: 0, scale: 1 });
 
@@ -234,6 +345,7 @@ export function ClawgraphLive() {
 
   const handlePointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
     if (event.button !== 0) return;
+    didDragRef.current = false;
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -249,6 +361,9 @@ export function ClawgraphLive() {
     if (!drag || drag.pointerId !== event.pointerId) return;
     const deltaX = event.clientX - drag.startX;
     const deltaY = event.clientY - drag.startY;
+    if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
+      didDragRef.current = true;
+    }
     setView((prev) => ({ ...prev, x: drag.panX + deltaX, y: drag.panY + deltaY }));
   };
 
@@ -283,7 +398,7 @@ export function ClawgraphLive() {
           <h2 className="text-lg font-semibold">Controls</h2>
           <Badge tone={isFetching ? "warning" : "muted"}>{isFetching ? "Refreshing graph" : "Stable"}</Badge>
         </CardHeader>
-        <div className="grid gap-3 md:grid-cols-[1.5fr_auto_auto]">
+        <div className="grid gap-3 md:grid-cols-[1.4fr_auto]">
           <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search entity, topic, task, or agent" />
           <div className="flex items-center gap-2 justify-self-start">
             <Button size="sm" variant="secondary" onClick={resetView}>
@@ -298,22 +413,23 @@ export function ClawgraphLive() {
               {showAdvancedControls ? "Hide advanced" : "Advanced"}
             </Button>
           </div>
+          <label className="md:col-span-2 flex flex-col gap-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-xs uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))] sm:flex-row sm:items-center">
+            Strength
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={strengthPercent}
+              onChange={(event) => setStrengthPercent(Number(event.target.value))}
+              className="w-full accent-[rgb(var(--claw-accent))]"
+            />
+            <span className="tabular-nums text-[rgb(var(--claw-text))]">{strengthPercent}</span>
+            <span className="tabular-nums text-[rgb(var(--claw-muted))]">cutoff {edgeThreshold.toFixed(2)}</span>
+          </label>
         </div>
         {showAdvancedControls && (
-          <div className="mt-3 grid gap-3 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.9)] p-3 md:grid-cols-[1.3fr_1fr_auto]">
-            <label className="flex items-center gap-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-xs uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
-              Edge
-              <input
-                type="range"
-                min={0}
-                max={0.9}
-                step={0.02}
-                value={edgeThreshold}
-                onChange={(event) => setEdgeThreshold(Number(event.target.value))}
-                className="w-full accent-[rgb(var(--claw-accent))]"
-              />
-              <span className="tabular-nums text-[rgb(var(--claw-text))]">{edgeThreshold.toFixed(2)}</span>
-            </label>
+          <div className="mt-3 grid gap-3 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.9)] p-3 md:grid-cols-[1fr_auto]">
             <div className="flex flex-wrap items-center gap-2">
               <Button variant={showEntityLinks ? "secondary" : "ghost"} size="sm" onClick={() => setShowEntityLinks((prev) => !prev)}>
                 {showEntityLinks ? "Hide co-occur" : "Show co-occur"}
@@ -339,22 +455,48 @@ export function ClawgraphLive() {
           <CardHeader>
             <h2 className="text-lg font-semibold">Memory Map</h2>
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="rounded-full border border-[rgba(255,138,74,0.6)] px-2 py-1 text-[rgb(var(--claw-muted))]">Topics</span>
-              <span className="rounded-full border border-[rgba(78,161,255,0.7)] px-2 py-1 text-[rgb(var(--claw-muted))]">Tasks</span>
-              <span className="rounded-full border border-[rgba(69,196,160,0.7)] px-2 py-1 text-[rgb(var(--claw-muted))]">Entities</span>
-              <span className="rounded-full border border-[rgba(242,200,75,0.7)] px-2 py-1 text-[rgb(var(--claw-muted))]">Agents</span>
+              {(
+                [
+                  { type: "topic", label: "Topics" },
+                  { type: "task", label: "Tasks" },
+                  { type: "entity", label: "Entities" },
+                  { type: "agent", label: "Agents" },
+                ] as Array<{ type: ClawgraphNodeType; label: string }>
+              ).map((chip) => {
+                const theme = NODE_THEME[chip.type];
+                return (
+                  <span
+                    key={chip.type}
+                    className="rounded-full border px-2 py-1 text-[rgb(var(--claw-muted))]"
+                    style={{
+                      borderColor: toRgba(theme.color, 0.55),
+                      background: `linear-gradient(145deg, ${toRgba(theme.color, 0.16)}, rgba(16,19,24,0.88))`,
+                      boxShadow: `0 0 0 1px ${toRgba(theme.color, 0.18)}, 0 0 18px ${toRgba(theme.glow, 0.16)}`,
+                    }}
+                  >
+                    {chip.label}
+                  </span>
+                );
+              })}
             </div>
           </CardHeader>
           <div ref={containerRef} className="relative px-3 pb-3">
             <svg
               data-testid="clawgraph-canvas"
               viewBox={`0 0 ${viewportSize.width} ${viewportSize.height}`}
-              className="h-[68vh] min-h-[420px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[radial-gradient(circle_at_30%_20%,rgba(255,90,45,0.11),transparent_44%),radial-gradient(circle_at_70%_80%,rgba(77,163,255,0.12),transparent_48%),rgba(10,12,16,0.95)]"
+              className="h-[68vh] min-h-[420px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[radial-gradient(circle_at_18%_14%,rgba(255,138,74,0.17),transparent_44%),radial-gradient(circle_at_82%_18%,rgba(78,161,255,0.15),transparent_44%),radial-gradient(circle_at_56%_86%,rgba(89,195,166,0.13),transparent_48%),radial-gradient(circle_at_90%_80%,rgba(244,181,95,0.1),transparent_46%),rgba(10,12,16,0.95)]"
               onWheel={handleWheel}
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
               onPointerCancel={handlePointerUp}
+              onClick={() => {
+                if (didDragRef.current) {
+                  didDragRef.current = false;
+                  return;
+                }
+                setSelectedNodeId(null);
+              }}
               role="img"
               aria-label="Clawgraph node relationship map"
             >
@@ -392,9 +534,13 @@ export function ClawgraphLive() {
                   const dimmed = normalizedQuery.length > 0 && !matched && !connectedMatch;
                   const selected = node.id === selectedNodeId;
                   const hovered = node.id === hoveredNodeId;
+                  const nodeTheme = NODE_THEME[node.type];
+                  const nodeColor = node.color || nodeTheme.color;
                   const allowScaleLabel = view.scale >= 1.02;
                   const allowPriorityLabel = node.type === "topic" || node.type === "task" || node.score >= 2.1;
                   const showNodeLabel = selected || matched || hovered || (showLabels && (allowScaleLabel || allowPriorityLabel));
+                  const primaryGlow = toRgba(nodeColor, selected ? 0.44 : hovered ? 0.34 : 0.26);
+                  const secondaryGlow = toRgba(nodeTheme.glow, selected ? 0.28 : hovered ? 0.2 : 0.14);
                   return (
                     <g
                       key={node.id}
@@ -406,15 +552,22 @@ export function ClawgraphLive() {
                       onMouseLeave={() => setHoveredNodeId((prev) => (prev === node.id ? null : prev))}
                       onClick={(event) => {
                         event.stopPropagation();
-                        setSelectedNodeId(node.id);
+                        setSelectedNodeId((prev) => (prev === node.id ? null : node.id));
                       }}
                     >
                       <circle
                         r={selected ? node.size * 0.62 : node.size * 0.52}
-                        fill={node.color}
+                        fill={nodeColor}
                         fillOpacity={dimmed ? 0.22 : selected ? 0.96 : 0.78}
-                        stroke="rgba(255,255,255,0.84)"
+                        stroke={selected ? "rgba(255,255,255,0.92)" : toRgba(nodeColor, matched || hovered ? 0.86 : 0.68)}
                         strokeWidth={selected ? 1.9 : matched ? 1.5 : 1.05}
+                        style={{
+                          filter: dimmed
+                            ? undefined
+                            : `drop-shadow(0 0 ${selected ? 16 : hovered ? 13 : 10}px ${primaryGlow}) drop-shadow(0 0 ${
+                                selected ? 30 : hovered ? 24 : 18
+                              }px ${secondaryGlow})`,
+                        }}
                       />
                       {showNodeLabel && (
                         <text
@@ -479,14 +632,23 @@ export function ClawgraphLive() {
                 </div>
                 <div className="space-y-2">
                   <div className="text-xs uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">Strongest links</div>
-                  {connectedEdges.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No visible links.</p>}
-                  {connectedEdges.map((edge) => (
-                    <div key={edge.id} className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
-                      <div className="text-xs text-[rgb(var(--claw-text))]">{summarizeEdge(edge, nodeById)}</div>
-                      <div className="mt-1 text-[11px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
-                        {edge.type} · {edge.weight.toFixed(2)} · evidence {edge.evidence}
+                  {connectedEdgeRows.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No visible links.</p>}
+                  {connectedEdgeRows.map((row) => (
+                    <button
+                      key={row.edge.id}
+                      type="button"
+                      data-testid="strongest-link-action"
+                      className="w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2 text-left transition hover:border-[rgba(255,90,45,0.35)]"
+                      onClick={() => router.push(row.href)}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-xs text-[rgb(var(--claw-text))]">{row.summary}</div>
+                        <Badge tone={row.surface === "board" ? "accent2" : "muted"}>{row.actionLabel}</Badge>
                       </div>
-                    </div>
+                      <div className="mt-1 text-[11px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
+                        {row.edge.type} · {row.edge.weight.toFixed(2)} · evidence {row.edge.evidence}
+                      </div>
+                    </button>
                   ))}
                 </div>
               </div>
