@@ -2,9 +2,9 @@
 
 import { createContext, useContext, useMemo, useState } from "react";
 import type { LogEntry, Task, Topic } from "@/lib/types";
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 import { useLiveUpdates } from "@/lib/use-live-updates";
-import { LiveEvent, mergeById, mergeLogs, maxTimestamp, prependUnique, removeById, upsertById } from "@/lib/live-utils";
+import { LiveEvent, mergeById, mergeLogs, maxTimestamp, removeById, upsertById } from "@/lib/live-utils";
 
 type DataContextValue = {
   topics: Topic[];
@@ -31,7 +31,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const reconcile = async (since?: string) => {
     const url = since ? `/api/changes?since=${encodeURIComponent(since)}` : "/api/changes";
-    const res = await fetch(apiUrl(url), { cache: "no-store" });
+    const res = await apiFetch(url, { cache: "no-store" });
     if (!res.ok) return;
     const payload = await res.json().catch(() => null);
     if (!payload) return;
@@ -49,8 +49,25 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         upsertTopic(event.data as Topic);
         return;
       }
+      if (event.type === "topic.deleted" && event.data && typeof event.data === "object") {
+        const id = (event.data as { id?: string }).id;
+        if (id) {
+          setTopics((prev) => removeById(prev, id));
+          setTasks((prev) => prev.map((item) => (item.topicId === id ? { ...item, topicId: null } : item)));
+          setLogs((prev) => prev.map((item) => (item.topicId === id ? { ...item, topicId: null } : item)));
+        }
+        return;
+      }
       if (event.type === "task.upserted" && event.data && typeof event.data === "object") {
         upsertTask(event.data as Task);
+        return;
+      }
+      if (event.type === "task.deleted" && event.data && typeof event.data === "object") {
+        const id = (event.data as { id?: string }).id;
+        if (id) {
+          setTasks((prev) => removeById(prev, id));
+          setLogs((prev) => prev.map((item) => (item.taskId === id ? { ...item, taskId: null } : item)));
+        }
         return;
       }
       if (

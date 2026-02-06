@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { apiUrl, getApiBase } from "@/lib/api";
+import { apiUrlWithToken, getApiBase, getApiToken } from "@/lib/api";
 import type { LiveEvent } from "@/lib/live-utils";
 
 type ReconcileFn = (since?: string) => Promise<string | void>;
@@ -20,10 +20,12 @@ export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; r
     reconcileRef.current = options.reconcile;
   }, [options.reconcile]);
 
+  const token = getApiToken();
+
   useEffect(() => {
     if (process.env.NEXT_PUBLIC_CLAWBOARD_DISABLE_STREAM === "1") return;
     const base = getApiBase();
-    const streamUrl = apiUrl("/api/stream");
+    const streamUrl = apiUrlWithToken("/api/stream", token);
     if (!base && !streamUrl.startsWith("/")) return;
 
     const source = new EventSource(streamUrl);
@@ -77,5 +79,5 @@ export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; r
     return () => {
       source.close();
     };
-  }, []);
+  }, [token]);
 }

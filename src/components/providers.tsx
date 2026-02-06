@@ -2,12 +2,15 @@
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { IntegrationLevel } from "@/lib/types";
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { normalizeTokenInput } from "@/lib/token";
 
 export type AppConfig = {
   instanceTitle: string;
   token: string;
   tokenRequired: boolean;
+  tokenConfigured: boolean;
+  remoteReadLocked: boolean;
   integrationLevel: IntegrationLevel;
 };
 
@@ -26,19 +29,30 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
   });
   const [token, setTokenState] = useState(() => {
     if (typeof window === "undefined") return "";
-    return window.localStorage.getItem("clawboard.token") ?? "";
+    return normalizeTokenInput(window.localStorage.getItem("clawboard.token") ?? "");
   });
-  const [tokenRequired, setTokenRequired] = useState(false);
+  const [tokenRequired, setTokenRequired] = useState(true);
+  const [tokenConfigured, setTokenConfigured] = useState(false);
+  const [remoteReadLocked, setRemoteReadLocked] = useState(false);
   const [integrationLevel, setIntegrationLevelState] = useState<IntegrationLevel>(() => {
-    if (typeof window === "undefined") return "manual";
-    return (window.localStorage.getItem("clawboard.integrationLevel") as IntegrationLevel) ?? "manual";
+    if (typeof window === "undefined") return "write";
+    return (window.localStorage.getItem("clawboard.integrationLevel") as IntegrationLevel) ?? "write";
   });
 
   useEffect(() => {
     const storedTitle = window.localStorage.getItem("clawboard.instanceTitle");
-    fetch(apiUrl("/api/config"))
-      .then((res) => res.json())
-      .then((data) => {
+    apiFetch("/api/config", { cache: "no-store" }, token)
+      .then(async (res) => {
+        if (!res.ok) {
+          if (res.status === 401) {
+            setRemoteReadLocked(true);
+            return null;
+          }
+          throw new Error(`Config request failed (${res.status})`);
+        }
+        const data = await res.json().catch(() => null);
+        if (!data) return null;
+        setRemoteReadLocked(false);
         if (!storedTitle && data?.instance?.title) {
           setInstanceTitleState(data.instance.title);
         }
@@ -48,13 +62,18 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
         if (typeof data?.tokenRequired === "boolean") {
           setTokenRequired(data.tokenRequired);
         }
+        if (typeof data?.tokenConfigured === "boolean") {
+          setTokenConfigured(data.tokenConfigured);
+        }
+        return null;
       })
       .catch(() => null);
-  }, []);
+  }, [token]);
 
   const setToken = (value: string) => {
-    setTokenState(value);
-    window.localStorage.setItem("clawboard.token", value);
+    const normalized = normalizeTokenInput(value);
+    setTokenState(normalized);
+    window.localStorage.setItem("clawboard.token", normalized);
   };
 
   const setInstanceTitle = (value: string) => {
@@ -72,12 +91,14 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
       instanceTitle,
       token,
       tokenRequired,
+      tokenConfigured,
+      remoteReadLocked,
       integrationLevel,
       setInstanceTitle,
       setToken,
       setIntegrationLevel,
     }),
-    [instanceTitle, token, tokenRequired, integrationLevel]
+    [instanceTitle, token, tokenRequired, tokenConfigured, remoteReadLocked, integrationLevel]
   );
 
   return <AppConfigContext.Provider value={value}>{children}</AppConfigContext.Provider>;

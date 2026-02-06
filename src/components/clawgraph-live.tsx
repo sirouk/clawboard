@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Badge, Button, Card, CardHeader, Input } from "@/components/ui";
 import { useDataStore } from "@/components/data-provider";
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 import {
   buildClawgraphFromData,
   layoutClawgraph,
@@ -16,6 +16,7 @@ import {
 import { cn } from "@/lib/cn";
 import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
 import type { Task, Topic } from "@/lib/types";
+import { useSemanticSearch } from "@/lib/use-semantic-search";
 
 const EDGE_COLORS: Record<string, string> = {
   has_task: "rgba(78,161,255,0.72)",
@@ -86,13 +87,21 @@ function taskFromNode(node: ClawgraphNode | null, tasks: Task[]) {
   return tasks.find((task) => task.id === taskId) ?? null;
 }
 
+function slug(value: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "unknown";
+}
+
 export function ClawgraphLive() {
   const router = useRouter();
   const { topics, tasks, logs } = useDataStore();
   const [query, setQuery] = useState("");
   const [showAdvancedControls, setShowAdvancedControls] = useState(false);
-  const [strengthPercent, setStrengthPercent] = useState(12);
-  const [showEntityLinks, setShowEntityLinks] = useState(true);
+  const [strengthPercent, setStrengthPercent] = useState(50);
+  const [showEntityLinks, setShowEntityLinks] = useState(false);
   const [showLabels, setShowLabels] = useState(true);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -127,7 +136,7 @@ export function ClawgraphLive() {
           limitLogs: "3200",
           includePending: "true",
         });
-        const res = await fetch(apiUrl(`/api/clawgraph?${params.toString()}`), { cache: "no-store" });
+        const res = await apiFetch(`/api/clawgraph?${params.toString()}`, { cache: "no-store" });
         if (!res.ok) throw new Error(`status_${res.status}`);
         const payload = (await res.json()) as ClawgraphData;
         if (!payload || !Array.isArray(payload.nodes) || !Array.isArray(payload.edges)) throw new Error("invalid_graph");
@@ -211,15 +220,62 @@ export function ClawgraphLive() {
   );
 
   const normalizedQuery = query.trim().toLowerCase();
+  const semanticRefreshKey = useMemo(() => {
+    const latestTopic = topics.reduce((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), "");
+    const latestTask = tasks.reduce((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), "");
+    const latestLog = logs.reduce((acc, item) => {
+      const stamp = item.updatedAt || item.createdAt || "";
+      return stamp > acc ? stamp : acc;
+    }, "");
+    return `${topics.length}:${tasks.length}:${logs.length}:${latestTopic}:${latestTask}:${latestLog}`;
+  }, [logs, tasks, topics]);
+  const semanticSearch = useSemanticSearch({
+    query: normalizedQuery,
+    includePending: true,
+    limitTopics: Math.min(Math.max(topics.length, 120), 500),
+    limitTasks: Math.min(Math.max(tasks.length, 240), 1200),
+    limitLogs: Math.min(Math.max(logs.length, 800), 4000),
+    refreshKey: semanticRefreshKey,
+  });
+
+  const semanticForQuery = useMemo(() => {
+    if (!semanticSearch.data) return null;
+    const resultQuery = semanticSearch.data.query.trim().toLowerCase();
+    if (!resultQuery || resultQuery !== normalizedQuery) return null;
+    return semanticSearch.data;
+  }, [normalizedQuery, semanticSearch.data]);
+
+  const semanticMatchedNodes = useMemo(() => {
+    if (!semanticForQuery) return new Set<string>();
+    const ids = new Set<string>();
+    for (const topicId of semanticForQuery.matchedTopicIds ?? []) {
+      if (!topicId) continue;
+      ids.add(`topic:${topicId}`);
+    }
+    for (const taskId of semanticForQuery.matchedTaskIds ?? []) {
+      if (!taskId) continue;
+      ids.add(`task:${taskId}`);
+    }
+    const matchedLogIds = new Set(semanticForQuery.matchedLogIds ?? []);
+    for (const entry of logs) {
+      if (!matchedLogIds.has(entry.id)) continue;
+      if (entry.topicId) ids.add(`topic:${entry.topicId}`);
+      if (entry.taskId) ids.add(`task:${entry.taskId}`);
+      const agentLabel = String(entry.agentLabel || entry.agentId || "").trim();
+      if (agentLabel) ids.add(`agent:${slug(agentLabel)}`);
+    }
+    return ids;
+  }, [logs, semanticForQuery]);
+
   const matchedNodes = useMemo(() => {
     if (!normalizedQuery) return new Set<string>();
-    const ids = new Set<string>();
+    const ids = new Set<string>(Array.from(semanticMatchedNodes).filter((id) => displayNodeById.has(id)));
     displayNodes.forEach((node) => {
       const haystack = `${node.label} ${JSON.stringify(node.meta ?? {})}`.toLowerCase();
       if (haystack.includes(normalizedQuery)) ids.add(node.id);
     });
     return ids;
-  }, [displayNodes, normalizedQuery]);
+  }, [displayNodeById, displayNodes, normalizedQuery, semanticMatchedNodes]);
 
   const connectedToMatch = useMemo(() => {
     if (matchedNodes.size === 0) return new Set<string>();
@@ -267,8 +323,6 @@ export function ClawgraphLive() {
       edge: ClawgraphEdge;
       summary: string;
       href: string;
-      surface: "board" | "logs";
-      actionLabel: string;
     }>;
 
     return connectedEdges.map((edge) => {
@@ -276,44 +330,27 @@ export function ClawgraphLive() {
       const oppositeNode = displayNodeById.get(oppositeNodeId) ?? nodeById.get(oppositeNodeId) ?? null;
       const oppositeTopic = topicFromNode(oppositeNode, topics);
       const oppositeTask = taskFromNode(oppositeNode, tasks);
-      const shouldOpenBoard =
-        Boolean(oppositeTopic || oppositeTask) ||
-        edge.type === "has_task" ||
-        edge.type === "related_topic" ||
-        edge.type === "related_task";
-
-      let href = "";
-      const surface: "board" | "logs" = shouldOpenBoard ? "board" : "logs";
-
-      if (oppositeTopic) {
-        href = buildTopicUrl(oppositeTopic, topics);
-      } else if (oppositeTask) {
-        href = buildTaskUrl(oppositeTask, topics);
-      } else if (surface === "board") {
-        const params = new URLSearchParams();
-        if (oppositeNode?.label) params.set("q", oppositeNode.label);
-        href = params.size > 0 ? `${UNIFIED_BASE}?${params.toString()}` : UNIFIED_BASE;
-      } else {
-        const params = new URLSearchParams();
-        const terms = [selectedNode.label, oppositeNode?.label ?? ""].filter(Boolean).join(" ").trim();
-        if (terms) params.set("q", terms);
-        if (selectedTopic?.id) {
-          params.set("topic", selectedTopic.id);
-        } else if (selectedTask?.topicId) {
-          params.set("topic", selectedTask.topicId);
-        }
-        if (oppositeNode?.type === "agent") {
-          params.set("agent", oppositeNode.label);
-        }
-        href = params.size > 0 ? `/log?${params.toString()}` : "/log";
+      const params = new URLSearchParams();
+      const terms = [selectedNode.label, oppositeNode?.label ?? ""].filter(Boolean).join(" ").trim();
+      if (terms) params.set("q", terms);
+      if (oppositeTopic?.id) {
+        params.set("topic", oppositeTopic.id);
+      } else if (selectedTopic?.id) {
+        params.set("topic", selectedTopic.id);
+      } else if (oppositeTask?.topicId) {
+        params.set("topic", oppositeTask.topicId);
+      } else if (selectedTask?.topicId) {
+        params.set("topic", selectedTask.topicId);
       }
+      if (oppositeNode?.type === "agent") {
+        params.set("agent", oppositeNode.label);
+      }
+      const href = params.size > 0 ? `/log?${params.toString()}` : "/log";
 
       return {
         edge,
         summary: summarizeEdge(edge, nodeById),
         href,
-        surface,
-        actionLabel: surface === "board" ? "Open board" : "Open logs",
       };
     });
   }, [connectedEdges, displayNodeById, nodeById, selectedNode, selectedNodeId, selectedTask, selectedTopic, tasks, topics]);
@@ -428,6 +465,17 @@ export function ClawgraphLive() {
             <span className="tabular-nums text-[rgb(var(--claw-muted))]">cutoff {edgeThreshold.toFixed(2)}</span>
           </label>
         </div>
+        {normalizedQuery && (
+          <p className="text-xs text-[rgb(var(--claw-muted))]">
+            {semanticSearch.loading
+              ? "Searching memory index…"
+              : semanticForQuery
+                ? `Semantic search (${semanticForQuery.mode}) + graph label match`
+                : semanticSearch.error
+                  ? "Semantic search unavailable, using graph label fallback."
+                  : "Searching…"}
+          </p>
+        )}
         {showAdvancedControls && (
           <div className="mt-3 grid gap-3 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.9)] p-3 md:grid-cols-[1fr_auto]">
             <div className="flex flex-wrap items-center gap-2">
@@ -641,10 +689,7 @@ export function ClawgraphLive() {
                       className="w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2 text-left transition hover:border-[rgba(255,90,45,0.35)]"
                       onClick={() => router.push(row.href)}
                     >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="text-xs text-[rgb(var(--claw-text))]">{row.summary}</div>
-                        <Badge tone={row.surface === "board" ? "accent2" : "muted"}>{row.actionLabel}</Badge>
-                      </div>
+                      <div className="text-xs text-[rgb(var(--claw-text))]">{row.summary}</div>
                       <div className="mt-1 text-[11px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
                         {row.edge.type} · {row.edge.weight.toFixed(2)} · evidence {row.edge.evidence}
                       </div>

@@ -79,6 +79,28 @@ function normalizeLog(entry) {
   };
 }
 
+function normalizeText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function scoreText(query, text) {
+  const q = normalizeText(query);
+  const target = normalizeText(text);
+  if (!q || !target) return 0;
+  if (target.includes(q)) return 1;
+  const tokens = q.split(" ").filter(Boolean);
+  if (tokens.length === 0) return 0;
+  let hits = 0;
+  for (const token of tokens) {
+    if (target.includes(token)) hits += 1;
+  }
+  if (hits === 0) return 0;
+  return Number((hits / tokens.length).toFixed(6));
+}
+
 function slug(value) {
   return String(value || "")
     .toLowerCase()
@@ -279,6 +301,89 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/reindex" && req.method === "POST") {
     return sendJson(res, 200, { ok: true, queued: true });
+  }
+
+  if (url.pathname === "/api/search" && req.method === "GET") {
+    const q = url.searchParams.get("q") || "";
+    const topicId = url.searchParams.get("topicId");
+    const includePending = url.searchParams.get("includePending") !== "false";
+    const limitTopics = Number(url.searchParams.get("limitTopics") || 24);
+    const limitTasks = Number(url.searchParams.get("limitTasks") || 48);
+    const limitLogs = Number(url.searchParams.get("limitLogs") || 360);
+
+    const topics = [...store.topics]
+      .map((topic) => ({
+        id: topic.id,
+        name: topic.name,
+        description: topic.description || "",
+        score: scoreText(q, `${topic.name || ""} ${topic.description || ""}`),
+      }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(1, limitTopics));
+
+    const topicIdSet = new Set(topics.map((item) => item.id));
+
+    const tasks = [...store.tasks]
+      .filter((task) => (topicId ? task.topicId === topicId : true))
+      .map((task) => {
+        const score = scoreText(q, `${task.title || ""} ${task.status || ""}`);
+        const parentBoost = task.topicId && topicIdSet.has(task.topicId) ? 0.12 : 0;
+        return {
+          id: task.id,
+          topicId: task.topicId ?? null,
+          title: task.title,
+          status: task.status,
+          score: Number((score + parentBoost).toFixed(6)),
+          noteWeight: 0,
+          sessionBoosted: false,
+        };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(1, limitTasks));
+
+    const taskIdSet = new Set(tasks.map((item) => item.id));
+
+    const logs = store.logs
+      .map(normalizeLog)
+      .filter((entry) => (topicId ? entry.topicId === topicId : true))
+      .filter((entry) => (includePending ? true : (entry.classificationStatus || "pending") === "classified"))
+      .map((entry) => {
+        const score = scoreText(q, `${entry.summary || ""} ${entry.content || ""} ${entry.raw || ""}`);
+        const parentBoost =
+          (entry.topicId && topicIdSet.has(entry.topicId) ? 0.08 : 0) + (entry.taskId && taskIdSet.has(entry.taskId) ? 0.08 : 0);
+        return {
+          id: entry.id,
+          topicId: entry.topicId ?? null,
+          taskId: entry.taskId ?? null,
+          type: entry.type,
+          agentId: entry.agentId || "",
+          agentLabel: entry.agentLabel || "",
+          summary: entry.summary || "",
+          content: entry.content || "",
+          createdAt: entry.createdAt,
+          score: Number((score + parentBoost).toFixed(6)),
+          noteCount: 0,
+          noteWeight: 0,
+          sessionBoosted: false,
+        };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => (b.score !== a.score ? b.score - a.score : a.createdAt < b.createdAt ? 1 : -1))
+      .slice(0, Math.max(10, limitLogs));
+
+    return sendJson(res, 200, {
+      query: q,
+      mode: "lexical",
+      topics,
+      tasks,
+      logs,
+      notes: [],
+      matchedTopicIds: topics.map((item) => item.id),
+      matchedTaskIds: tasks.map((item) => item.id),
+      matchedLogIds: logs.map((item) => item.id),
+    });
   }
 
   if (url.pathname === "/api/topics") {

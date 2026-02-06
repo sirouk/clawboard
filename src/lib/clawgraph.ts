@@ -113,6 +113,8 @@ const ENTITY_BLOCKLIST = new Set([
   "December",
 ]);
 
+const ENTITY_NOISE_TOKENS = new Set(["ok", "okay", "yeah", "yes", "hey", "so", "please", "pls", "thanks", "thx"]);
+
 const NODE_COLORS: Record<ClawgraphNodeType, string> = {
   topic: "#ff8a4a",
   task: "#4ea1ff",
@@ -155,18 +157,34 @@ function jaccard(a: string, b: string) {
 }
 
 function extractEntities(text: string) {
-  const source = cleanText(text);
+  const source = cleanText(text).replace(/\s+/g, " ");
   if (!source) return new Set<string>();
-  const entities = new Set<string>();
+  const canonicalByKey = new Map<string, string>();
 
   const addToken = (token: string) => {
-    const normalized = token.trim().replace(/^[`*[\]{}()'"!.,:;]+|[`*[\]{}()'"!.,:;]+$/g, "");
+    let normalized = token.trim().replace(/^[`*[\]{}()'"!.,:;]+|[`*[\]{}()'"!.,:;]+$/g, "");
+    normalized = normalized.replace(/\s+/g, " ").trim();
+    if (!normalized) return;
+
+    const parts = normalized.split(" ").filter(Boolean);
+    while (parts.length > 0 && ENTITY_NOISE_TOKENS.has(parts[0].toLowerCase())) {
+      parts.shift();
+    }
+    while (parts.length > 0 && ENTITY_NOISE_TOKENS.has(parts[parts.length - 1].toLowerCase())) {
+      parts.pop();
+    }
+    normalized = parts.join(" ").trim();
     if (!normalized) return;
     if (normalized.length < 3) return;
     if (normalized.length > 48) return;
     if (ENTITY_BLOCKLIST.has(normalized)) return;
-    if (STOP_WORDS.has(normalized.toLowerCase())) return;
-    entities.add(normalized);
+    const key = normalized.toLowerCase();
+    if (STOP_WORDS.has(key)) return;
+
+    const existing = canonicalByKey.get(key);
+    if (!existing || normalized.length > existing.length) {
+      canonicalByKey.set(key, normalized);
+    }
   };
 
   const upper = source.match(/\b[A-Z][A-Z0-9_-]{2,}\b/g) ?? [];
@@ -181,7 +199,7 @@ function extractEntities(text: string) {
   const titled = source.match(/\b[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+){1,2}\b/g) ?? [];
   titled.forEach(addToken);
 
-  return entities;
+  return new Set(canonicalByKey.values());
 }
 
 function nodeSize(type: ClawgraphNodeType, score: number) {

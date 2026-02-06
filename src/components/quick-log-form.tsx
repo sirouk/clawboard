@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Select, TextArea } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 
 export function QuickLogForm({ topicId, taskId }: { topicId?: string | null; taskId?: string | null }) {
   const router = useRouter();
@@ -27,11 +27,12 @@ export function QuickLogForm({ topicId, taskId }: { topicId?: string | null; tas
 
     setSaving(true);
     try {
-      const res = await fetch(apiUrl("/api/log"), {
+      const res = await apiFetch(
+        "/api/log",
+        {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Clawboard-Token": token,
         },
         body: JSON.stringify({
           topicId: topicId ?? null,
@@ -42,7 +43,9 @@ export function QuickLogForm({ topicId, taskId }: { topicId?: string | null; tas
           agentId: "ui",
           agentLabel: "Clawboard UI",
         }),
-      });
+        },
+        token
+      );
 
       if (!res.ok) {
         throw new Error("Failed to create log entry.");

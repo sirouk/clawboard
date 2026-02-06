@@ -96,3 +96,40 @@ a {
 button {
   font-family: inherit;
 }
+
+.claw-scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.claw-scrollbar-none::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.claw-truncate-fade {
+  position: relative;
+}
+
+.claw-truncate-fade::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: 64px;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(7, 9, 13, 0), rgba(7, 9, 13, 0.92) 72%);
+}
+
+.claw-truncate-fade::before {
+  content: "...";
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: rgba(var(--claw-muted), 0.95);
+  letter-spacing: 0.08em;
+}

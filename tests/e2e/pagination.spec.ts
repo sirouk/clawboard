@@ -112,6 +112,8 @@ test("unified view uses task=2 and topic=4 load increments", async ({ page, requ
   await expect(page.locator(`[data-log-id="${hiddenTaskLogId}"]`)).toBeVisible();
 
   await expect(page.locator(`[data-log-id="${hiddenTopicLogId}"]`)).toHaveCount(0);
+  await page.getByTestId(`toggle-topic-chat-${topicId}`).click();
+  await page.getByRole("button", { name: "Load 4 more" }).first().waitFor();
   await page.getByRole("button", { name: "Load 4 more" }).first().click();
   await expect(page.locator(`[data-log-id="${hiddenTopicLogId}"]`)).toBeVisible();
 });

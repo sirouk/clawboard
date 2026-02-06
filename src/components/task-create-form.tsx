@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import type { Topic } from "@/lib/types";
 import { Button, Input, Select } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 
 export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; defaultTopicId?: string | null }) {
   const router = useRouter();
@@ -28,18 +28,21 @@ export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; de
 
     setSaving(true);
     try {
-      const res = await fetch(apiUrl("/api/tasks"), {
+      const res = await apiFetch(
+        "/api/tasks",
+        {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Clawboard-Token": token,
         },
         body: JSON.stringify({
           title: title.trim(),
           topicId: topicId || null,
           status: "todo",
         }),
-      });
+        },
+        token
+      );
 
       if (!res.ok) {
         throw new Error("Failed to create task.");

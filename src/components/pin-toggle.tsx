@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import type { Topic } from "@/lib/types";
 import { useAppConfig } from "@/components/providers";
 import { cn } from "@/lib/cn";
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 
 export function PinToggle({
   topic,
@@ -25,18 +25,21 @@ export function PinToggle({
     event.stopPropagation();
     if (readOnly || saving) return;
     setSaving(true);
-    const res = await fetch(apiUrl("/api/topics"), {
+    const res = await apiFetch(
+      "/api/topics",
+      {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Clawboard-Token": token,
       },
       body: JSON.stringify({
         ...topic,
         name: topic.name,
         pinned: !topic.pinned,
       }),
-    });
+      },
+      token
+    );
     if (res.ok) {
       onToggled?.(!topic.pinned);
       if (!onToggled) {

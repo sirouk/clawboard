@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Badge, Button, Card, CardHeader } from "@/components/ui";
+import { cn } from "@/lib/cn";
 
 const HUMAN_UNIX_COMMAND = "curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash";
 const HUMAN_WINDOWS_COMMAND = "iwr -useb https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash";
@@ -9,6 +10,19 @@ const AGENT_PROMPT = "Follow the instructions at skills/chutes/SKILL.md to set u
 
 export default function ProvidersPage() {
   const [message, setMessage] = useState<string | null>(null);
+  const [unlockedBlocks, setUnlockedBlocks] = useState<Record<string, boolean>>({});
+
+  const unlockOverflow = (key: string) => {
+    setUnlockedBlocks((prev) => (prev[key] ? prev : { ...prev, [key]: true }));
+  };
+
+  const codeBlockClass = (key: string) =>
+    cn(
+      "mt-2 rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))] claw-scrollbar-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[rgba(255,90,45,0.4)]",
+      unlockedBlocks[key]
+        ? "overflow-x-auto whitespace-pre"
+        : "claw-truncate-fade overflow-hidden whitespace-nowrap text-ellipsis cursor-pointer select-none"
+    );
 
   const copyToClipboard = async (value: string) => {
     try {
@@ -61,9 +75,19 @@ export default function ProvidersPage() {
                     Copy
                   </Button>
                 </div>
-                <pre className="mt-2 overflow-x-auto whitespace-pre rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
-{HUMAN_UNIX_COMMAND}
-                </pre>
+                <pre
+                  className={codeBlockClass("human-unix")}
+                  tabIndex={0}
+                  role="textbox"
+                  aria-label="Manual setup command"
+                  onClick={() => unlockOverflow("human-unix")}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      unlockOverflow("human-unix");
+                    }
+                  }}
+                >{HUMAN_UNIX_COMMAND}</pre>
               </div>
               <div>
                 <div className="flex items-center justify-between gap-2">
@@ -72,9 +96,19 @@ export default function ProvidersPage() {
                     Copy
                   </Button>
                 </div>
-                <pre className="mt-2 overflow-x-auto whitespace-pre rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
-{HUMAN_WINDOWS_COMMAND}
-                </pre>
+                <pre
+                  className={codeBlockClass("human-windows")}
+                  tabIndex={0}
+                  role="textbox"
+                  aria-label="Windows setup command"
+                  onClick={() => unlockOverflow("human-windows")}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      unlockOverflow("human-windows");
+                    }
+                  }}
+                >{HUMAN_WINDOWS_COMMAND}</pre>
               </div>
             </div>
           </div>
@@ -94,9 +128,19 @@ export default function ProvidersPage() {
                   Copy
                 </Button>
               </div>
-              <pre className="mt-2 overflow-x-auto whitespace-pre rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
-{AGENT_PROMPT}
-              </pre>
+              <pre
+                className={codeBlockClass("agent-prompt")}
+                tabIndex={0}
+                role="textbox"
+                aria-label="Agent prompt"
+                onClick={() => unlockOverflow("agent-prompt")}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    unlockOverflow("agent-prompt");
+                  }
+                }}
+              >{AGENT_PROMPT}</pre>
             </div>
           </div>
         </div>

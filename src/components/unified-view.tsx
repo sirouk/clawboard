@@ -10,8 +10,9 @@ import { PinToggle } from "@/components/pin-toggle";
 import { TaskPinToggle } from "@/components/task-pin-toggle";
 import { decodeSlugId, encodeTaskSlug, encodeTopicSlug, slugify } from "@/lib/slug";
 import { cn } from "@/lib/cn";
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 import { useDataStore } from "@/components/data-provider";
+import { useSemanticSearch } from "@/lib/use-semantic-search";
 
 const STATUS_TONE: Record<string, "muted" | "accent" | "accent2" | "warning" | "success"> = {
   todo: "muted",
@@ -35,6 +36,7 @@ const isTaskStatusFilter = (value: string): value is TaskStatusFilter =>
 
 const TASK_TIMELINE_LIMIT = 2;
 const TOPIC_TIMELINE_LIMIT = 4;
+type MessageDensity = "comfortable" | "compact";
 const TOPIC_FALLBACK_COLORS = ["#FF8A4A", "#4DA39E", "#6FA8FF", "#E0B35A", "#8BC17E", "#F17C8E"];
 const TASK_FALLBACK_COLORS = ["#4EA1FF", "#59C3A6", "#F4B55F", "#9A8BFF", "#F0897C", "#6FB8D8"];
 const topicChatLimitKey = (topicId: string) => `topic-chat:${topicId}`;
@@ -102,6 +104,7 @@ function taskGlowStyle(color: string, index: number, expanded: boolean): CSSProp
 type UrlState = {
   search: string;
   raw: boolean;
+  density: MessageDensity;
   done: boolean;
   status: string;
   page: number;
@@ -111,7 +114,7 @@ type UrlState = {
 
 function getInitialUrlState(basePath: string): UrlState {
   if (typeof window === "undefined") {
-    return { search: "", raw: false, done: false, status: "all", page: 1, topics: [], tasks: [] };
+    return { search: "", raw: false, density: "comfortable", done: false, status: "all", page: 1, topics: [], tasks: [] };
   }
   const url = new URL(window.location.href);
   const params = url.searchParams;
@@ -148,9 +151,11 @@ function getInitialUrlState(basePath: string): UrlState {
     const legacyTasks = params.get("tasks")?.split(",").filter(Boolean) ?? [];
     nextTasks = legacyTasks.map((value) => decodeSlugId(value)).filter(Boolean);
   }
+  const density: MessageDensity = params.get("density") === "compact" ? "compact" : "comfortable";
   return {
     search: params.get("q") ?? "",
     raw: params.get("raw") === "1",
+    density,
     done: params.get("done") === "1",
     status: params.get("status") ?? "all",
     page: Math.max(1, Number(params.get("page") ?? 1)),
@@ -161,7 +166,7 @@ function getInitialUrlState(basePath: string): UrlState {
 
 export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const { token, tokenRequired } = useAppConfig();
-  const { topics, tasks, logs, setTopics, setTasks } = useDataStore();
+  const { topics, tasks, logs, setTopics, setTasks, setLogs } = useDataStore();
   const readOnly = tokenRequired && !token;
   const scrollMemory = useRef<Record<string, number>>({});
   const [initialUrlState] = useState(() => getInitialUrlState(basePath));
@@ -169,6 +174,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set(initialUrlState.tasks));
   const [expandedTopicChats, setExpandedTopicChats] = useState<Set<string>>(new Set());
   const [showRaw, setShowRaw] = useState(initialUrlState.raw);
+  const [messageDensity, setMessageDensity] = useState<MessageDensity>(initialUrlState.density);
   const [search, setSearch] = useState(initialUrlState.search);
   const [showDone, setShowDone] = useState(initialUrlState.done);
   const [statusFilter, setStatusFilter] = useState<TaskStatusFilter>(
@@ -184,6 +190,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [taskNameDraft, setTaskNameDraft] = useState("");
   const [taskColorDraft, setTaskColorDraft] = useState("#4EA1FF");
   const [renameSavingKey, setRenameSavingKey] = useState<string | null>(null);
+  const [deleteArmedKey, setDeleteArmedKey] = useState<string | null>(null);
+  const [deleteInFlightKey, setDeleteInFlightKey] = useState<string | null>(null);
   const [renameErrors, setRenameErrors] = useState<Record<string, string>>({});
   const [page, setPage] = useState(initialUrlState.page);
   const [isSticky, setIsSticky] = useState(false);
@@ -283,18 +291,69 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const normalizedSearch = search.trim().toLowerCase();
 
+  const semanticLimits = useMemo(
+    () => ({
+      topics: Math.min(Math.max(topics.length, 120), 500),
+      tasks: Math.min(Math.max(tasks.length, 240), 1200),
+      logs: Math.min(Math.max(visibleLogs.length, 800), 4000),
+    }),
+    [topics.length, tasks.length, visibleLogs.length]
+  );
+
+  const semanticRefreshKey = useMemo(() => {
+    const latestTopic = topics.reduce((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), "");
+    const latestTask = tasks.reduce((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), "");
+    const latestLog = visibleLogs.reduce((acc, item) => {
+      const stamp = item.updatedAt || item.createdAt || "";
+      return stamp > acc ? stamp : acc;
+    }, "");
+    return `${topics.length}:${tasks.length}:${visibleLogs.length}:${latestTopic}:${latestTask}:${latestLog}:${statusFilter}:${showDone ? 1 : 0}:${showRaw ? 1 : 0}`;
+  }, [showDone, showRaw, statusFilter, tasks, topics, visibleLogs]);
+
+  const semanticSearch = useSemanticSearch({
+    query: normalizedSearch,
+    includePending: showRaw,
+    limitTopics: semanticLimits.topics,
+    limitTasks: semanticLimits.tasks,
+    limitLogs: semanticLimits.logs,
+    refreshKey: semanticRefreshKey,
+  });
+
+  const semanticForQuery = useMemo(() => {
+    if (!semanticSearch.data) return null;
+    const resultQuery = semanticSearch.data.query.trim().toLowerCase();
+    if (!resultQuery || resultQuery !== normalizedSearch) return null;
+    return semanticSearch.data;
+  }, [normalizedSearch, semanticSearch.data]);
+
+  const semanticTopicIds = useMemo(() => new Set(semanticForQuery?.matchedTopicIds ?? []), [semanticForQuery]);
+  const semanticTaskIds = useMemo(() => new Set(semanticForQuery?.matchedTaskIds ?? []), [semanticForQuery]);
+  const semanticLogIds = useMemo(() => new Set(semanticForQuery?.matchedLogIds ?? []), [semanticForQuery]);
+  const semanticTopicScores = useMemo(
+    () => new Map((semanticForQuery?.topics ?? []).map((item) => [item.id, Number(item.score) || 0])),
+    [semanticForQuery]
+  );
+
   const matchesLogSearch = useCallback((entry: LogEntry) => {
     if (!normalizedSearch) return true;
+    if (semanticForQuery) {
+      return semanticLogIds.has(entry.id);
+    }
     const haystack = `${entry.summary ?? ""} ${entry.content ?? ""} ${entry.raw ?? ""}`.toLowerCase();
     return haystack.includes(normalizedSearch);
-  }, [normalizedSearch]);
+  }, [normalizedSearch, semanticForQuery, semanticLogIds]);
 
   const matchesTaskSearch = useCallback((task: Task) => {
     if (!normalizedSearch) return true;
+    if (semanticForQuery) {
+      if (semanticTaskIds.has(task.id)) return true;
+      const logMatches = logsByTask.get(task.id)?.some((entry) => semanticLogIds.has(entry.id));
+      return Boolean(logMatches);
+    }
     if (task.title.toLowerCase().includes(normalizedSearch)) return true;
     const logMatches = logsByTask.get(task.id)?.some(matchesLogSearch);
     return Boolean(logMatches);
-  }, [logsByTask, matchesLogSearch, normalizedSearch]);
+  }, [logsByTask, matchesLogSearch, normalizedSearch, semanticForQuery, semanticLogIds, semanticTaskIds]);
 
   const matchesStatusFilter = useCallback(
     (task: Task) => {
@@ -312,6 +371,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         lastActivity: logsByTopic.get(topic.id)?.[0]?.createdAt ?? topic.updatedAt,
       }))
       .sort((a, b) => {
+        if (normalizedSearch && semanticForQuery) {
+          const aScore = semanticTopicScores.get(a.id) ?? 0;
+          const bScore = semanticTopicScores.get(b.id) ?? 0;
+          if (aScore !== bScore) return bScore - aScore;
+        }
         if (a.pinned && !b.pinned) return -1;
         if (!a.pinned && b.pinned) return 1;
         return a.lastActivity < b.lastActivity ? 1 : -1;
@@ -323,6 +387,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         return taskList.some((task) => matchesStatusFilter(task) && matchesTaskSearch(task));
       }
       if (!normalizedSearch) return true;
+      if (semanticForQuery) {
+        if (semanticTopicIds.has(topic.id)) return true;
+        if (taskList.some((task) => matchesStatusFilter(task) && matchesTaskSearch(task))) return true;
+        const topicLogs = logsByTopic.get(topic.id) ?? [];
+        return topicLogs.some((entry) => semanticLogIds.has(entry.id));
+      }
       const topicHit = `${topic.name} ${topic.description ?? ""}`.toLowerCase().includes(normalizedSearch);
       if (topicHit) return true;
       if (taskList.some((task) => matchesStatusFilter(task) && matchesTaskSearch(task))) return true;
@@ -347,7 +417,20 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
 
     return filtered;
-  }, [topics, tasksByTopic, statusFilter, normalizedSearch, logsByTopic, matchesLogSearch, matchesStatusFilter, matchesTaskSearch]);
+  }, [
+    topics,
+    logsByTopic,
+    matchesLogSearch,
+    matchesStatusFilter,
+    matchesTaskSearch,
+    normalizedSearch,
+    semanticForQuery,
+    semanticLogIds,
+    semanticTopicIds,
+    semanticTopicScores,
+    statusFilter,
+    tasksByTopic,
+  ]);
 
   const pageSize = 10;
   const pageCount = Math.ceil(orderedTopics.length / pageSize);
@@ -383,7 +466,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const writeHeaders = {
     "Content-Type": "application/json",
-    ...(token ? { "X-Clawboard-Token": token } : {}),
   };
 
   const setRenameError = (key: string, message?: string) => {
@@ -400,11 +482,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const requestEmbeddingRefresh = async (payload: { kind: "topic" | "task"; id: string; text: string; topicId?: string | null }) => {
     try {
-      await fetch(apiUrl("/api/reindex"), {
-        method: "POST",
-        headers: writeHeaders,
-        body: JSON.stringify(payload),
-      });
+      await apiFetch(
+        "/api/reindex",
+        {
+          method: "POST",
+          headers: writeHeaders,
+          body: JSON.stringify(payload),
+        },
+        token
+      );
     } catch {
       // Best-effort only; DB update remains source of truth.
     }
@@ -414,11 +500,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (readOnly) return;
     const current = tasks.find((task) => task.id === taskId);
     if (!current) return;
-    const res = await fetch(apiUrl("/api/tasks"), {
-      method: "POST",
-      headers: writeHeaders,
-      body: JSON.stringify({ ...current, ...updates }),
-    });
+    const res = await apiFetch(
+      "/api/tasks",
+      {
+        method: "POST",
+        headers: writeHeaders,
+        body: JSON.stringify({ ...current, ...updates }),
+      },
+      token
+    );
 
     if (!res.ok) {
       return;
@@ -457,21 +547,26 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       setEditingTopicId(null);
       setTopicNameDraft("");
       setTopicColorDraft(currentColor);
+      setDeleteArmedKey(null);
       setRenameError(renameKey);
       return;
     }
     setRenameSavingKey(renameKey);
     setRenameError(renameKey);
     try {
-      const res = await fetch(apiUrl("/api/topics"), {
-        method: "POST",
-        headers: writeHeaders,
-        body: JSON.stringify({
-          id: topic.id,
-          name: nameChanged ? nextName : topic.name,
-          color: nextColor,
-        }),
-      });
+      const res = await apiFetch(
+        "/api/topics",
+        {
+          method: "POST",
+          headers: writeHeaders,
+          body: JSON.stringify({
+            id: topic.id,
+            name: nameChanged ? nextName : topic.name,
+            color: nextColor,
+          }),
+        },
+        token
+      );
       if (!res.ok) {
         setRenameError(renameKey, "Failed to rename topic.");
         return;
@@ -501,6 +596,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       setEditingTopicId(null);
       setTopicNameDraft("");
       setTopicColorDraft(currentColor);
+      setDeleteArmedKey(null);
       setRenameError(renameKey);
     } finally {
       setRenameSavingKey(null);
@@ -526,22 +622,27 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       setEditingTaskId(null);
       setTaskNameDraft("");
       setTaskColorDraft(currentColor);
+      setDeleteArmedKey(null);
       setRenameError(renameKey);
       return;
     }
     setRenameSavingKey(renameKey);
     setRenameError(renameKey);
     try {
-      const res = await fetch(apiUrl("/api/tasks"), {
-        method: "POST",
-        headers: writeHeaders,
-        body: JSON.stringify({
-          id: task.id,
-          title: titleChanged ? nextTitle : task.title,
-          color: nextColor,
-          topicId: task.topicId,
-        }),
-      });
+      const res = await apiFetch(
+        "/api/tasks",
+        {
+          method: "POST",
+          headers: writeHeaders,
+          body: JSON.stringify({
+            id: task.id,
+            title: titleChanged ? nextTitle : task.title,
+            color: nextColor,
+            topicId: task.topicId,
+          }),
+        },
+        token
+      );
       if (!res.ok) {
         setRenameError(renameKey, "Failed to rename task.");
         return;
@@ -582,9 +683,85 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       setEditingTaskId(null);
       setTaskNameDraft("");
       setTaskColorDraft(currentColor);
+      setDeleteArmedKey(null);
       setRenameError(renameKey);
     } finally {
       setRenameSavingKey(null);
+    }
+  };
+
+  const deleteTopic = async (topic: Topic) => {
+    const deleteKey = `topic:${topic.id}`;
+    if (readOnly || topic.id === "unassigned") return;
+    setDeleteInFlightKey(deleteKey);
+    setRenameError(deleteKey);
+    try {
+      const res = await apiFetch(`/api/topics/${encodeURIComponent(topic.id)}`, { method: "DELETE" }, token);
+      if (!res.ok) {
+        setRenameError(deleteKey, "Failed to delete topic.");
+        return;
+      }
+      const payload = (await res.json().catch(() => null)) as { deleted?: boolean } | null;
+      if (!payload?.deleted) {
+        setRenameError(deleteKey, "Topic not found.");
+        return;
+      }
+      const updatedAt = new Date().toISOString();
+      setTopics((prev) => prev.filter((item) => item.id !== topic.id));
+      setTasks((prev) =>
+        prev.map((item) => (item.topicId === topic.id ? { ...item, topicId: null, updatedAt } : item))
+      );
+      setLogs((prev) =>
+        prev.map((item) => (item.topicId === topic.id ? { ...item, topicId: null, updatedAt } : item))
+      );
+      const nextTopics = Array.from(expandedTopicsSafe).filter((id) => id !== topic.id);
+      setExpandedTopics(new Set(nextTopics));
+      setExpandedTopicChats((prev) => {
+        const next = new Set(prev);
+        next.delete(topic.id);
+        return next;
+      });
+      pushUrl({ topics: nextTopics }, "replace");
+      setEditingTopicId(null);
+      setTopicNameDraft("");
+      setDeleteArmedKey(null);
+      setRenameError(deleteKey);
+    } finally {
+      setDeleteInFlightKey(null);
+    }
+  };
+
+  const deleteTask = async (task: Task) => {
+    const deleteKey = `task:${task.id}`;
+    if (readOnly) return;
+    setDeleteInFlightKey(deleteKey);
+    setRenameError(deleteKey);
+    try {
+      const res = await apiFetch(`/api/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" }, token);
+      if (!res.ok) {
+        setRenameError(deleteKey, "Failed to delete task.");
+        return;
+      }
+      const payload = (await res.json().catch(() => null)) as { deleted?: boolean } | null;
+      if (!payload?.deleted) {
+        setRenameError(deleteKey, "Task not found.");
+        return;
+      }
+      const updatedAt = new Date().toISOString();
+      setTasks((prev) => prev.filter((item) => item.id !== task.id));
+      setLogs((prev) =>
+        prev.map((item) => (item.taskId === task.id ? { ...item, taskId: null, updatedAt } : item))
+      );
+      const nextTasks = Array.from(expandedTasksSafe).filter((id) => id !== task.id);
+      setExpandedTasks(new Set(nextTasks));
+      pushUrl({ tasks: nextTasks }, "replace");
+      setMoveTaskId((prev) => (prev === task.id ? null : prev));
+      setEditingTaskId(null);
+      setTaskNameDraft("");
+      setDeleteArmedKey(null);
+      setRenameError(deleteKey);
+    } finally {
+      setDeleteInFlightKey(null);
     }
   };
 
@@ -647,6 +824,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const next = !showRaw;
     setShowRaw(next);
     pushUrl({ raw: next ? "1" : "0" });
+  };
+
+  const toggleMessageDensity = () => {
+    const next: MessageDensity = messageDensity === "compact" ? "comfortable" : "compact";
+    setMessageDensity(next);
+    pushUrl({ density: next });
   };
 
   const updateStatusFilter = (nextValue: string) => {
@@ -752,6 +935,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const hasPathSelections = parsed.topics.length > 0 || parsed.tasks.length > 0;
     const nextSearch = params.get("q") ?? "";
     const nextRaw = params.get("raw") === "1";
+    const nextDensity: MessageDensity = params.get("density") === "compact" ? "compact" : "comfortable";
     const nextShowDone = params.get("done") === "1";
     const nextStatusRaw = params.get("status") ?? "all";
     const nextStatus = isTaskStatusFilter(nextStatusRaw) ? nextStatusRaw : "all";
@@ -780,6 +964,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setSearch(nextSearch);
     committedSearch.current = nextSearch;
     setShowRaw(nextRaw);
+    setMessageDensity(nextDensity);
     setStatusFilter(nextStatus);
     setShowDone(nextShowDone || nextStatus === "done");
     setPage(Number.isNaN(nextPage) ? 1 : nextPage);
@@ -803,12 +988,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const pushUrl = useCallback(
     (
-      overrides: Partial<Record<"q" | "raw" | "done" | "status" | "page", string>> & { topics?: string[]; tasks?: string[] },
+      overrides: Partial<Record<"q" | "raw" | "done" | "status" | "page" | "density", string>> & {
+        topics?: string[];
+        tasks?: string[];
+      },
       mode: "push" | "replace" = "push"
     ) => {
       const params = new URLSearchParams();
       const nextSearch = overrides.q ?? search;
       const nextRaw = overrides.raw ?? (showRaw ? "1" : "0");
+      const nextDensity = overrides.density ?? messageDensity;
       const nextDone = overrides.done ?? (showDone ? "1" : "0");
       const nextStatus = overrides.status ?? statusFilter;
       const nextPage = overrides.page ?? String(safePage);
@@ -817,6 +1006,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
       if (nextSearch) params.set("q", nextSearch);
       if (nextRaw === "1") params.set("raw", "1");
+      if (nextDensity === "compact") params.set("density", "compact");
       if (nextDone === "1") params.set("done", "1");
       if (nextStatus !== "all") params.set("status", nextStatus);
       if (nextPage && nextPage !== "1") params.set("page", nextPage);
@@ -852,6 +1042,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       expandedTopicsSafe,
       safePage,
       search,
+      messageDensity,
       showDone,
       showRaw,
       statusFilter,
@@ -947,6 +1138,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               <Button
                 variant="secondary"
                 size="sm"
+                className={cn(messageDensity === "compact" ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+                onClick={toggleMessageDensity}
+              >
+                {messageDensity === "compact" ? "Comfortable view" : "Compact view"}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
                 className={cn(
                   (orderedTopics.length > 0 || tasks.length > 0) &&
                     expandedTopicsSafe.size === orderedTopics.length &&
@@ -967,6 +1166,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         )}
         {readOnly && (
           <span className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add token to move tasks.</span>
+        )}
+        {normalizedSearch && (
+          <span className="text-xs text-[rgb(var(--claw-muted))]">
+            {semanticSearch.loading
+              ? "Searching memory index…"
+              : semanticForQuery
+                ? `Semantic search (${semanticForQuery.mode})`
+                : semanticSearch.error
+                  ? "Semantic search unavailable, using local match fallback."
+                  : "Searching…"}
+          </span>
         )}
       </div>
 
@@ -1031,6 +1241,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                               event.preventDefault();
                               setEditingTopicId(null);
                               setTopicNameDraft("");
+                              setDeleteArmedKey(null);
                               setRenameError(`topic:${topic.id}`);
                             }
                           }}
@@ -1080,11 +1291,52 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             setEditingTopicId(null);
                             setTopicNameDraft("");
                             setTopicColorDraft(topicColor);
+                            setDeleteArmedKey(null);
                             setRenameError(`topic:${topic.id}`);
                           }}
                         >
                           Cancel
                         </Button>
+                        {deleteArmedKey === `topic:${topic.id}` ? (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="border-[rgba(239,68,68,0.45)] text-[rgb(var(--claw-danger))]"
+                              disabled={readOnly || deleteInFlightKey === `topic:${topic.id}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void deleteTopic(topic);
+                              }}
+                            >
+                              {deleteInFlightKey === `topic:${topic.id}` ? "Deleting..." : "Confirm delete"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setDeleteArmedKey(null);
+                              }}
+                            >
+                              Keep
+                            </Button>
+                          </>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-[rgb(var(--claw-danger))]"
+                            disabled={readOnly || topic.id === "unassigned"}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setDeleteArmedKey(`topic:${topic.id}`);
+                              setRenameError(`topic:${topic.id}`);
+                            }}
+                          >
+                            Delete
+                          </Button>
+                        )}
                       </div>
                     ) : (
                       <>
@@ -1110,6 +1362,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             setEditingTopicId(topic.id);
                             setTopicNameDraft(topic.name);
                             setTopicColorDraft(topicColor);
+                            setDeleteArmedKey(null);
                             setRenameError(`topic:${topic.id}`);
                           }}
                           className={cn(
@@ -1225,6 +1478,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                         event.preventDefault();
                                         setEditingTaskId(null);
                                         setTaskNameDraft("");
+                                        setDeleteArmedKey(null);
                                         setRenameError(`task:${task.id}`);
                                       }
                                     }}
@@ -1274,11 +1528,52 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       setEditingTaskId(null);
                                       setTaskNameDraft("");
                                       setTaskColorDraft(taskColor);
+                                      setDeleteArmedKey(null);
                                       setRenameError(`task:${task.id}`);
                                     }}
                                   >
                                     Cancel
                                   </Button>
+                                  {deleteArmedKey === `task:${task.id}` ? (
+                                    <>
+                                      <Button
+                                        size="sm"
+                                        variant="secondary"
+                                        className="border-[rgba(239,68,68,0.45)] text-[rgb(var(--claw-danger))]"
+                                        disabled={readOnly || deleteInFlightKey === `task:${task.id}`}
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          void deleteTask(task);
+                                        }}
+                                      >
+                                        {deleteInFlightKey === `task:${task.id}` ? "Deleting..." : "Confirm delete"}
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          setDeleteArmedKey(null);
+                                        }}
+                                      >
+                                        Keep
+                                      </Button>
+                                    </>
+                                  ) : (
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      className="text-[rgb(var(--claw-danger))]"
+                                      disabled={readOnly}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setDeleteArmedKey(`task:${task.id}`);
+                                        setRenameError(`task:${task.id}`);
+                                      }}
+                                    >
+                                      Delete
+                                    </Button>
+                                  )}
                                 </div>
                               ) : (
                                 <>
@@ -1298,6 +1593,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       setEditingTaskId(task.id);
                                       setTaskNameDraft(task.title);
                                       setTaskColorDraft(taskColor);
+                                      setDeleteArmedKey(null);
                                       setRenameError(`task:${task.id}`);
                                     }}
                                     className={cn(
@@ -1434,7 +1730,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                   topics={topics}
                                   showFilters={false}
                                   showRawToggle={false}
+                                  showDensityToggle={false}
                                   showRawAll={showRaw}
+                                  messageDensity={messageDensity}
                                   allowNotes
                                   enableNavigation={false}
                                 />
@@ -1516,7 +1814,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             topics={topics}
                             showFilters={false}
                             showRawToggle={false}
+                            showDensityToggle={false}
                             showRawAll={showRaw}
+                            messageDensity={messageDensity}
                             allowNotes
                             enableNavigation={false}
                           />

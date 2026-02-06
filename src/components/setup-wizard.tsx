@@ -4,17 +4,27 @@ import { useMemo, useState } from "react";
 import { Button, Input, Select, Badge, Card } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import type { IntegrationLevel } from "@/lib/types";
-import { apiUrl, getApiBase, setApiBase } from "@/lib/api";
+import { apiFetch, getApiBase, setApiBase } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
 const STEPS = [
   { id: 1, title: "OpenClaw Skill", description: "Install the skill and connect your agent." },
-  { id: 2, title: "Token", description: "Store the API token locally for writes." },
+  { id: 2, title: "Token", description: "Store the API token locally for authenticated access." },
   { id: 3, title: "Instance", description: "Name your Clawboard and set integration depth." },
 ];
 
 export function SetupWizard() {
-  const { instanceTitle, setInstanceTitle, token, setToken, tokenRequired, integrationLevel, setIntegrationLevel } = useAppConfig();
+  const {
+    instanceTitle,
+    setInstanceTitle,
+    token,
+    setToken,
+    tokenRequired,
+    tokenConfigured,
+    remoteReadLocked,
+    integrationLevel,
+    setIntegrationLevel,
+  } = useAppConfig();
   const [step, setStep] = useState(1);
   const [skillTab, setSkillTab] = useState<"install" | "plugin" | "connect">("install");
   const [localTitle, setLocalTitle] = useState(instanceTitle);
@@ -32,9 +42,9 @@ export function SetupWizard() {
 
   const connectionSnippet = useMemo(() => {
     const target = localApiBase || "<clawboard-api-url>";
-    const safeToken = token && token.trim().length > 0 ? token.trim() : "<optional-token>";
+    const safeToken = token && token.trim().length > 0 ? "<stored-local-token>" : "<required-token>";
     const name = localTitle?.trim() || "Clawboard";
-    const level = localIntegration || "manual";
+    const level = localIntegration || "write";
     return `To connect OpenClaw to Clawboard, I need:
 1) Clawboard API base URL (FastAPI, local or Tailscale). -> ${target}
 2) Does the server require a write token? If yes, paste it. -> ${safeToken}
@@ -51,17 +61,20 @@ Once I have those, I’ll validate /api/health and /api/config and start logging
       if (localApiBase && localApiBase.trim().length > 0) {
         setApiBase(localApiBase);
       }
-      const res = await fetch(apiUrl("/api/config"), {
+      const res = await apiFetch(
+        "/api/config",
+        {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Clawboard-Token": token,
         },
         body: JSON.stringify({
           title: localTitle,
           integrationLevel: localIntegration,
         }),
-      });
+        },
+        token
+      );
 
       if (!res.ok) {
         throw new Error("Failed to update instance. Add token if required.");
@@ -198,7 +211,9 @@ openclaw plugins enable clawboard-logger`;
           <div className="space-y-4">
             <div>
               <h2 className="text-xl font-semibold">API Token</h2>
-              <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">Store your API token once for write access.</p>
+              <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">
+                Store your API token once. Non-localhost reads and all writes require it.
+              </p>
             </div>
             <div>
               <label className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Token</label>
@@ -209,8 +224,20 @@ openclaw plugins enable clawboard-logger`;
                 placeholder={tokenRequired ? "Token required" : "Optional token"}
               />
               <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                {tokenRequired ? "Server requires a token for write operations." : "Token is optional for this server."}
+                {tokenRequired
+                  ? "Server requires a token for writes and for non-localhost reads."
+                  : "Server currently allows unauthenticated reads."}
               </p>
+              {remoteReadLocked && !token && (
+                <p className="mt-2 text-xs text-[rgb(var(--claw-warning))]">
+                  This connection is locked. Enter token to read data from this network.
+                </p>
+              )}
+              {token && !tokenConfigured && (
+                <p className="mt-2 text-xs text-[rgb(var(--claw-warning))]">
+                  API server token is not configured yet. Set <code>CLAWBOARD_TOKEN</code> on the server.
+                </p>
+              )}
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <Button onClick={handleTokenSave}>Save token locally</Button>
@@ -320,8 +347,8 @@ openclaw plugins enable clawboard-logger`;
 {pluginConfigSnippet}
                   </pre>
                   <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                    Use the same token as your API server&apos;s <code>CLAWBOARD_TOKEN</code>. If the server does not require a token,
-                    remove the <code>token</code> field or leave it empty.
+                    Use the same token as your API server&apos;s <code>CLAWBOARD_TOKEN</code>. Keep this set for all write calls and
+                    non-localhost reads.
                   </p>
                 </div>
               )}

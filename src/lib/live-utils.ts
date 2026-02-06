@@ -2,9 +2,12 @@ import type { LogEntry, Task, Topic } from "@/lib/types";
 
 export type LiveEvent =
   | { type: "topic.upserted"; data: Topic }
+  | { type: "topic.deleted"; data: { id: string } }
   | { type: "task.upserted"; data: Task }
+  | { type: "task.deleted"; data: { id: string } }
   | { type: "log.appended"; data: LogEntry }
   | { type: "log.patched"; data: LogEntry }
+  | { type: "log.deleted"; data: { id: string } }
   | { type: "config.updated"; data: unknown }
   | { type: "stream.reset" }
   | { type: string; data?: unknown };

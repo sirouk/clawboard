@@ -76,20 +76,47 @@ const NAV_ITEMS = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { instanceTitle, token, tokenRequired } = useAppConfig();
+  const { instanceTitle, token, tokenRequired, tokenConfigured, remoteReadLocked } = useAppConfig();
   const [collapsed, setCollapsed] = useState(() => {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem("clawboard.navCollapsed") === "true";
   });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  const status = tokenRequired ? (token ? "CONNECTED" : "READ-ONLY") : "OPEN";
-  const statusTone: BadgeTone = tokenRequired ? (token ? "success" : "warning") : "accent2";
-  const statusTitle = tokenRequired
-    ? token
-      ? "Token set. Writes enabled."
-      : "Token required for writes."
-    : "No token required.";
+  const hasToken = token.trim().length > 0;
+  const status = hasToken
+    ? remoteReadLocked
+      ? "AUTH FAIL"
+      : tokenConfigured
+        ? "CONNECTED"
+        : "TOKEN SET"
+    : remoteReadLocked
+      ? "LOCKED"
+      : tokenRequired
+        ? "READ-ONLY"
+        : "OPEN";
+  const statusTone: BadgeTone = hasToken
+    ? remoteReadLocked
+      ? "warning"
+      : tokenConfigured
+        ? "success"
+        : "warning"
+    : remoteReadLocked
+      ? "warning"
+      : tokenRequired
+        ? "warning"
+        : "accent2";
+  const statusTitle = hasToken
+    ? remoteReadLocked
+      ? "Token was provided but rejected by API. Paste raw CLAWBOARD_TOKEN value."
+      : tokenConfigured
+        ? "Token accepted. Read/write access enabled."
+        : "Token stored locally, but API server token is not configured."
+    : remoteReadLocked
+      ? "Non-localhost reads require a token. Add token in Setup."
+      : tokenRequired
+        ? "Token required for writes."
+        : "No token required.";
   const docsHref = `${getApiBase() || ""}/docs`;
   const iconSize = collapsed ? 32 : 48;
 
@@ -252,8 +279,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </aside>
 
           <div className="flex-1">
-            <header className="border-b border-[rgb(var(--claw-border))] bg-[rgba(0,0,0,0.3)] px-6 py-4 backdrop-blur">
-              <div className="mx-auto flex w-full max-w-[1280px] items-center justify-between">
+            <header className="border-b border-[rgb(var(--claw-border))] bg-[rgba(0,0,0,0.3)] pl-5 pr-6 py-4 backdrop-blur">
+              <div className="mr-auto flex w-full max-w-[1280px] items-center justify-between">
                 <Link href="/u" className="block">
                   <div className="text-sm uppercase tracking-[0.3em] text-[rgb(var(--claw-muted))]">Clawboard</div>
                   <div className="text-lg font-semibold text-[rgb(var(--claw-text))]">{instanceTitle}</div>
@@ -266,7 +293,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </div>
               </div>
             </header>
-            <main className="mx-auto w-full max-w-[1280px] px-6 py-8">{children}</main>
+            <main className="mr-auto w-full max-w-[1280px] pl-5 pr-6 py-8">{children}</main>
           </div>
         </div>
         <CommandPalette />

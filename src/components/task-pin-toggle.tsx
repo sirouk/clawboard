@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import type { Task } from "@/lib/types";
 import { useAppConfig } from "@/components/providers";
 import { cn } from "@/lib/cn";
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 
 export function TaskPinToggle({
   task,
@@ -25,17 +25,20 @@ export function TaskPinToggle({
     event.stopPropagation();
     if (readOnly || saving) return;
     setSaving(true);
-    const res = await fetch(apiUrl("/api/tasks"), {
+    const res = await apiFetch(
+      "/api/tasks",
+      {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Clawboard-Token": token,
       },
       body: JSON.stringify({
         ...task,
         pinned: !task.pinned,
       }),
-    });
+      },
+      token
+    );
     if (res.ok) {
       onToggled?.(!task.pinned);
       if (!onToggled) {

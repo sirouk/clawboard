@@ -8,9 +8,9 @@ test("clawgraph renders and supports interaction controls", async ({ page }) => 
   await expect(page.locator("[data-node-id]").first()).toBeVisible();
 
   await page.getByRole("button", { name: "Advanced" }).click();
-  await page.getByRole("button", { name: "Hide co-occur" }).click();
   await expect(page.getByRole("button", { name: "Show co-occur" })).toBeVisible();
   await page.getByRole("button", { name: "Show co-occur" }).click();
+  await expect(page.getByRole("button", { name: "Hide co-occur" })).toBeVisible();
 
   await page.getByRole("button", { name: "Hide labels" }).click();
   await expect(page.getByRole("button", { name: "Show labels" })).toBeVisible();
@@ -28,5 +28,5 @@ test("clawgraph renders and supports interaction controls", async ({ page }) => 
   const strongestLink = page.getByTestId("strongest-link-action").first();
   await expect(strongestLink).toBeVisible();
   await strongestLink.click();
-  await expect(page).toHaveURL(/\/(u|log)(\/|\?|$)/);
+  await expect(page).toHaveURL(/\/log(\?|$)/);
 });

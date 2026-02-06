@@ -7,7 +7,8 @@ import { Badge, Button, Input, Select } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
 import { useAppConfig } from "@/components/providers";
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { useSemanticSearch } from "@/lib/use-semantic-search";
 
 const TYPE_LABELS: Record<string, string> = {
   note: "Note",
@@ -18,6 +19,7 @@ const TYPE_LABELS: Record<string, string> = {
 };
 
 type LaneFilter = "all" | string;
+type MessageDensity = "comfortable" | "compact";
 const MESSAGE_TRUNCATE_LIMIT = 220;
 const SUMMARY_TRUNCATE_LIMIT = 96;
 
@@ -56,6 +58,10 @@ export function LogList({
   showRawAll: showRawAllOverride,
   onShowRawAllChange,
   allowNotes = false,
+  allowDelete = true,
+  showDensityToggle = true,
+  messageDensity: messageDensityOverride,
+  onMessageDensityChange,
   enableNavigation = true,
   initialVisibleCount,
   loadMoreStep,
@@ -72,6 +78,10 @@ export function LogList({
   showRawAll?: boolean;
   onShowRawAllChange?: (value: boolean) => void;
   allowNotes?: boolean;
+  allowDelete?: boolean;
+  showDensityToggle?: boolean;
+  messageDensity?: MessageDensity;
+  onMessageDensityChange?: (value: MessageDensity) => void;
   enableNavigation?: boolean;
   initialVisibleCount?: number;
   loadMoreStep?: number;
@@ -90,6 +100,7 @@ export function LogList({
   const [search, setSearch] = useState(initialSearch || "");
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [localShowRawAll, setLocalShowRawAll] = useState(false);
+  const [localMessageDensity, setLocalMessageDensity] = useState<MessageDensity>("comfortable");
   const [groupByDay, setGroupByDay] = useState(true);
   const loadMoreEnabled = Boolean(initialVisibleCount && initialVisibleCount > 0 && loadMoreStep && loadMoreStep > 0);
   const [visibleCount, setVisibleCount] = useState(() => (loadMoreEnabled ? initialVisibleCount! : 0));
@@ -106,6 +117,9 @@ export function LogList({
 
   const showRawAll = typeof showRawAllOverride === "boolean" ? showRawAllOverride : localShowRawAll;
   const setShowRawAll = typeof showRawAllOverride === "boolean" ? onShowRawAllChange ?? (() => undefined) : setLocalShowRawAll;
+  const messageDensity = messageDensityOverride ?? localMessageDensity;
+  const setMessageDensity =
+    messageDensityOverride !== undefined ? onMessageDensityChange ?? (() => undefined) : setLocalMessageDensity;
 
   const matchesLane = (entry: LogEntry, lane: LaneFilter) => {
     if (lane === "all") return true;
@@ -143,9 +157,40 @@ export function LogList({
   }, [agentFilter, groupByDay, initialVisibleCount, laneFilter, loadMoreEnabled, search, topicFilter, typeFilter]);
 
   const readOnly = tokenRequired && !token;
+  const normalizedSearch = search.trim().toLowerCase();
+  const semanticRefreshKey = useMemo(() => {
+    const latestLog = logs.reduce((acc, item) => {
+      const stamp = item.updatedAt || item.createdAt || "";
+      return stamp > acc ? stamp : acc;
+    }, "");
+    return `${logs.length}:${topics.length}:${latestLog}:${topicFilter}:${typeFilter}:${agentFilter}:${laneFilter}`;
+  }, [agentFilter, laneFilter, logs, topicFilter, topics.length, typeFilter]);
+
+  const semanticSearch = useSemanticSearch({
+    query: normalizedSearch,
+    topicId: topicFilter !== "all" ? topicFilter : undefined,
+    includePending: true,
+    limitTopics: Math.min(Math.max(topics.length, 120), 500),
+    limitTasks: Math.min(Math.max(Math.ceil(logs.length / 2), 240), 1200),
+    limitLogs: Math.min(Math.max(logs.length, 800), 4000),
+    refreshKey: semanticRefreshKey,
+  });
+
+  const semanticForQuery = useMemo(() => {
+    if (!semanticSearch.data) return null;
+    const resultQuery = semanticSearch.data.query.trim().toLowerCase();
+    if (!resultQuery || resultQuery !== normalizedSearch) return null;
+    return semanticSearch.data;
+  }, [normalizedSearch, semanticSearch.data]);
+
+  const semanticLogIds = useMemo(() => new Set(semanticForQuery?.matchedLogIds ?? []), [semanticForQuery]);
+  const semanticLogScores = useMemo(
+    () => new Map((semanticForQuery?.logs ?? []).map((item) => [item.id, Number(item.score) || 0])),
+    [semanticForQuery]
+  );
 
   const filtered = useMemo(() => {
-    return logs.filter((entry) => {
+    const rows = logs.filter((entry) => {
       if (topicFilter !== "all" && entry.topicId !== topicFilter) return false;
       if (typeFilter !== "all" && entry.type !== typeFilter) return false;
       if (laneFilter !== "all" && !matchesLane(entry, laneFilter)) return false;
@@ -153,13 +198,35 @@ export function LogList({
         const label = entry.agentLabel || entry.agentId || "";
         if (label !== agentFilter) return false;
       }
-      if (search.trim().length > 0) {
+      if (normalizedSearch.length > 0) {
+        if (semanticForQuery) {
+          return semanticLogIds.has(entry.id);
+        }
         const haystack = `${entry.summary ?? ""} ${entry.content ?? ""} ${entry.raw ?? ""}`.toLowerCase();
-        if (!haystack.includes(search.toLowerCase())) return false;
+        if (!haystack.includes(normalizedSearch)) return false;
       }
       return true;
     });
-  }, [logs, topicFilter, typeFilter, laneFilter, agentFilter, search]);
+
+    if (!semanticForQuery || normalizedSearch.length < 1 || rows.length < 2) return rows;
+
+    return [...rows].sort((a, b) => {
+      const scoreA = semanticLogScores.get(a.id) ?? 0;
+      const scoreB = semanticLogScores.get(b.id) ?? 0;
+      if (scoreA !== scoreB) return scoreB - scoreA;
+      return a.createdAt < b.createdAt ? 1 : -1;
+    });
+  }, [
+    agentFilter,
+    laneFilter,
+    logs,
+    normalizedSearch,
+    semanticForQuery,
+    semanticLogIds,
+    semanticLogScores,
+    topicFilter,
+    typeFilter,
+  ]);
 
   const visibleFiltered = useMemo(() => {
     if (!loadMoreEnabled) return filtered;
@@ -241,14 +308,17 @@ export function LogList({
       agentLabel: "User",
     };
 
-    const res = await fetch(apiUrl("/api/log"), {
+    const res = await apiFetch(
+      "/api/log",
+      {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Clawboard-Token": token,
       },
       body: JSON.stringify(payload),
-    });
+      },
+      token
+    );
 
     if (!res.ok) {
       return { ok: false, error: "Failed to add note." };
@@ -259,6 +329,22 @@ export function LogList({
     } else {
       setLogs((prev) => [{ ...(payload as LogEntry), id: `tmp-${Date.now()}`, createdAt: new Date().toISOString() }, ...prev]);
     }
+    return { ok: true };
+  };
+
+  const deleteLogEntry = async (entry: LogEntry) => {
+    if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
+
+    const res = await apiFetch(`/api/log/${encodeURIComponent(entry.id)}`, { method: "DELETE" }, token);
+
+    if (!res.ok) {
+      return { ok: false, error: "Failed to delete message." };
+    }
+
+    const data = (await res.json().catch(() => null)) as { deletedIds?: string[] } | null;
+    const deletedIds = Array.isArray(data?.deletedIds) ? data?.deletedIds.filter(Boolean) : [entry.id];
+    const removed = new Set(deletedIds.length > 0 ? deletedIds : [entry.id]);
+    setLogs((prev) => prev.filter((item) => !removed.has(item.id)));
     return { ok: true };
   };
 
@@ -288,6 +374,17 @@ export function LogList({
               {showAdvancedFilters ? "Hide filters" : "More filters"}
             </Button>
           </div>
+          {normalizedSearch && (
+            <p className="text-xs text-[rgb(var(--claw-muted))]">
+              {semanticSearch.loading
+                ? "Searching memory index…"
+                : semanticForQuery
+                  ? `Semantic search (${semanticForQuery.mode})`
+                  : semanticSearch.error
+                    ? "Semantic search unavailable, using local match fallback."
+                    : "Searching…"}
+            </p>
+          )}
           {showAdvancedFilters && (
             <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.9)] p-3">
               <div className="flex flex-wrap items-center gap-3">
@@ -320,6 +417,16 @@ export function LogList({
                     {showRawAll ? "Hide full messages" : "Show full messages"}
                   </Button>
                 )}
+                {showDensityToggle && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className={messageDensity === "compact" ? "border-[rgba(255,90,45,0.5)]" : ""}
+                    onClick={() => setMessageDensity(messageDensity === "compact" ? "comfortable" : "compact")}
+                  >
+                    {messageDensity === "compact" ? "Comfortable view" : "Compact view"}
+                  </Button>
+                )}
                 <Button variant="secondary" size="sm" onClick={() => setGroupByDay((prev) => !prev)}>
                   {groupByDay ? "Ungrouped" : "Group by day"}
                 </Button>
@@ -334,6 +441,16 @@ export function LogList({
           <Button variant="secondary" size="sm" onClick={() => setShowRawAll(!showRawAll)}>
             {showRawAll ? "Hide full messages" : "Show full messages"}
           </Button>
+          {showDensityToggle && (
+            <Button
+              variant="secondary"
+              size="sm"
+              className={messageDensity === "compact" ? "border-[rgba(255,90,45,0.5)]" : ""}
+              onClick={() => setMessageDensity(messageDensity === "compact" ? "comfortable" : "compact")}
+            >
+              {messageDensity === "compact" ? "Comfortable view" : "Compact view"}
+            </Button>
+          )}
         </div>
       )}
 
@@ -381,7 +498,10 @@ export function LogList({
                   topics={topics}
                   showRawAll={showRawAll}
                   allowNotes={allowNotes}
+                  allowDelete={allowDelete}
+                  messageDensity={messageDensity}
                   onAddNote={addNote}
+                  onDelete={deleteLogEntry}
                   readOnly={readOnly}
                   enableNavigation={enableNavigation}
                 />
@@ -416,7 +536,10 @@ function LogRow({
   topics,
   showRawAll,
   allowNotes,
+  allowDelete,
+  messageDensity,
   onAddNote,
+  onDelete,
   readOnly,
   enableNavigation,
 }: {
@@ -425,15 +548,22 @@ function LogRow({
   topics: Topic[];
   showRawAll: boolean;
   allowNotes: boolean;
+  allowDelete: boolean;
+  messageDensity: MessageDensity;
   onAddNote: (entry: LogEntry, note: string) => Promise<{ ok: boolean; error?: string }>;
+  onDelete: (entry: LogEntry) => Promise<{ ok: boolean; error?: string }>;
   readOnly: boolean;
   enableNavigation: boolean;
 }) {
   const router = useRouter();
+  const [compactMessageVisible, setCompactMessageVisible] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [noteOpen, setNoteOpen] = useState(false);
   const [noteText, setNoteText] = useState("");
   const [noteStatus, setNoteStatus] = useState<string | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const [deleteStatus, setDeleteStatus] = useState<string | null>(null);
   const showFullMessage = showRawAll || expanded;
   const summary = entry.summary ?? entry.content;
   const resolvedTopic = entry.topicId ? topics.find((topic) => topic.id === entry.topicId) : null;
@@ -464,6 +594,8 @@ function LogRow({
   const messageText = shouldTruncate ? truncateText(messageSource, MESSAGE_TRUNCATE_LIMIT) : messageSource;
   const summaryText = deriveMessageSummary(entry, messageSource);
   const isUser = (entry.agentId || "").toLowerCase() === "user";
+  const compactMode = messageDensity === "compact";
+  const canShowMessage = !compactMode || compactMessageVisible;
 
   return (
     <div
@@ -488,7 +620,7 @@ function LogRow({
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
-          <Badge tone="accent2">{typeLabel}</Badge>
+          {!isConversation && <Badge tone="accent2">{typeLabel}</Badge>}
           <Badge tone="muted">{topicLabel}</Badge>
           {showAgentBadge && <Badge tone="accent">{agentLabel}</Badge>}
           {entry.relatedLogId && <Badge tone="muted">Curation</Badge>}
@@ -499,40 +631,70 @@ function LogRow({
       {isConversation ? (
         <div className="mt-3 space-y-2">
           <p className="text-sm font-medium text-[rgb(var(--claw-text))]">{summaryText}</p>
-          <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-            <div className={`w-full max-w-[78%] ${isUser ? "text-right" : "text-left"}`}>
-              <p className="mb-1 text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
-                {isUser ? "You" : agentLabel || "Assistant"}
-              </p>
-            </div>
-          </div>
-          <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-            <div
-              data-testid={`message-bubble-${entry.id}`}
-              data-agent-side={isUser ? "right" : "left"}
-              className={`max-w-[78%] rounded-[20px] border px-4 py-3 text-sm leading-relaxed ${
-                isUser
-                  ? "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
-                  : "border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] text-[rgb(var(--claw-text))]"
-              }`}
-            >
-              <p className="whitespace-pre-wrap break-words">{messageText || summary || "(empty)"}</p>
-              {shouldTruncate && (
-                <div className="mt-2">
-                  <Button variant="ghost" size="sm" onClick={() => setExpanded(true)} aria-label="Expand message">
-                    ...
-                  </Button>
-                </div>
-              )}
-              {!showRawAll && expanded && messageSource.length > MESSAGE_TRUNCATE_LIMIT && (
-                <div className="mt-2">
-                  <Button variant="ghost" size="sm" onClick={() => setExpanded(false)}>
-                    Collapse
-                  </Button>
-                </div>
+          {compactMode && (
+            <div>
+              {!compactMessageVisible ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setCompactMessageVisible(true)}
+                  aria-label="Show message"
+                >
+                  Show message
+                </Button>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setCompactMessageVisible(false);
+                    setExpanded(false);
+                  }}
+                  aria-label="Hide message"
+                >
+                  Hide message
+                </Button>
               )}
             </div>
-          </div>
+          )}
+          {canShowMessage && (
+            <>
+              <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+                <div className={`w-full max-w-[78%] ${isUser ? "text-right" : "text-left"}`}>
+                  <p className="mb-1 text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
+                    {isUser ? "You" : agentLabel || "Assistant"}
+                  </p>
+                </div>
+              </div>
+              <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+                <div
+                  data-testid={`message-bubble-${entry.id}`}
+                  data-agent-side={isUser ? "right" : "left"}
+                  className={`max-w-[78%] rounded-[20px] border px-4 py-3 text-sm leading-relaxed ${
+                    isUser
+                      ? "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
+                      : "border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] text-[rgb(var(--claw-text))]"
+                  }`}
+                >
+                  <p className="whitespace-pre-wrap break-words">{messageText || summary || "(empty)"}</p>
+                  {shouldTruncate && (
+                    <div className="mt-2">
+                      <Button variant="ghost" size="sm" onClick={() => setExpanded(true)} aria-label="Expand message">
+                        ...
+                      </Button>
+                    </div>
+                  )}
+                  {!showRawAll && expanded && messageSource.length > MESSAGE_TRUNCATE_LIMIT && (
+                    <div className="mt-2">
+                      <Button variant="ghost" size="sm" onClick={() => setExpanded(false)}>
+                        Collapse
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
         </div>
       ) : (
         <>
@@ -596,6 +758,77 @@ function LogRow({
                 </Button>
                 <Button variant="secondary" size="sm" onClick={() => setNoteOpen(false)}>
                   Cancel
+                </Button>
+              </div>
+              {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}
+            </div>
+          )}
+        </div>
+      )}
+      {allowDelete && (
+        <div className="mt-3">
+          {!editOpen ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={readOnly}
+              title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
+              onClick={() => {
+                setEditOpen(true);
+                setDeleteArmed(false);
+                setDeleteStatus(null);
+              }}
+            >
+              Edit
+            </Button>
+          ) : (
+            <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
+              <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Message actions</div>
+              {deleteStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{deleteStatus}</p>}
+              <div className="flex flex-wrap items-center gap-2">
+                {!deleteArmed ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="border-[rgba(239,68,68,0.45)] text-[rgb(var(--claw-danger))]"
+                    disabled={readOnly}
+                    onClick={() => {
+                      setDeleteArmed(true);
+                      setDeleteStatus(null);
+                    }}
+                  >
+                    Delete
+                  </Button>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="border-[rgba(239,68,68,0.45)] text-[rgb(var(--claw-danger))]"
+                    disabled={readOnly}
+                    onClick={async () => {
+                      setDeleteStatus(null);
+                      const result = await onDelete(entry);
+                      if (!result.ok) {
+                        setDeleteStatus(result.error ?? "Failed to delete message.");
+                        return;
+                      }
+                      setEditOpen(false);
+                      setDeleteArmed(false);
+                    }}
+                  >
+                    Confirm delete
+                  </Button>
+                )}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setEditOpen(false);
+                    setDeleteArmed(false);
+                    setDeleteStatus(null);
+                  }}
+                >
+                  {deleteArmed ? "Keep message" : "Close"}
                 </Button>
               </div>
               {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}

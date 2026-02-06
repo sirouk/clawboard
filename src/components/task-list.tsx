@@ -7,7 +7,7 @@ import { Button, Input, Select, StatusPill } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { formatRelativeTime } from "@/lib/format";
 import { buildTaskUrl } from "@/lib/url";
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 
 const STATUS_OPTIONS: TaskStatus[] = ["todo", "doing", "blocked", "done"];
 
@@ -84,17 +84,20 @@ export function TaskList({
     if (readOnly) return;
     const current = tasks.find((task) => task.id === taskId);
     if (!current) return;
-    const res = await fetch(apiUrl("/api/tasks"), {
+    const res = await apiFetch(
+      "/api/tasks",
+      {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Clawboard-Token": token,
       },
       body: JSON.stringify({
         ...current,
         ...updates,
       }),
-    });
+      },
+      token
+    );
 
     if (!res.ok) {
       throw new Error("Failed to update task.");

@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Badge, Input } from "@/components/ui";
 import type { Topic } from "@/lib/types";
 import { buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 
 type ActionItem = {
   label: string;
@@ -44,11 +44,11 @@ export function CommandPalette() {
 
   useEffect(() => {
     if (!open) return;
-    fetch(apiUrl("/api/topics"))
+    apiFetch("/api/topics", { cache: "no-store" })
       .then((res) => res.json())
       .then((data) => {
-        if (Array.isArray(data?.topics)) {
-          setTopics(data.topics);
+        if (Array.isArray(data)) {
+          setTopics(data);
         }
       })
       .catch(() => null);
