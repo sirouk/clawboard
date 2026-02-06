@@ -9,6 +9,16 @@ Clawboard is a companion memory system for [OpenClaw](https://openclaw.ai):
 
 Clawboard runs alongside OpenClaw. OpenClaw remains the agent runtime; Clawboard provides durable memory capture, classification, curation, and retrieval context.
 
+## Stack Snapshot
+
+- OpenClaw runtime + `clawboard-logger` plugin (stage-1 capture + response-time context extension)
+- `web`: Next.js App Router UI (`src/`)
+- `api`: FastAPI + SQLModel + SQLite (`backend/`)
+- `classifier`: async worker (`classifier/classifier.py`) with embeddings + topic/task classification
+- `qdrant`: vector index for dense retrieval (with SQLite mirror/fallback)
+- Hybrid retrieval path in API search: dense + BM25 + lexical + RRF + late rerank
+- Clawgraph memory map API/UI (`/api/clawgraph`, `/graph`)
+
 ## If OpenClaw Is Not Installed Yet
 
 If you want to use Chutes as your provider, create an account at `https://chutes.ai` first, then run [`add_chutes.sh`](inference-providers/add_chutes.sh) before skill installation.
@@ -75,7 +85,8 @@ Example:
 - `web`: Next.js app (`:3010`)
 - `api`: FastAPI + SQLite (`:8010`)
 - `classifier`: async classifier worker (default 10s cadence)
-- `db` / `qdrant` / `redis` (only when using `--profile scale`) run on an internal Docker network without host port publishing.
+- `qdrant`: vector index service on the internal Docker network (no host port publishing)
+- `db` + `redis`: optional scale profile services (`docker compose --profile scale ...`), internal network only
 
 Data is persisted in `./data` (`clawboard.db`, embeddings store, queue files).
 For install defaults, users interact through `web` and `api`; database services are not exposed externally.
@@ -86,7 +97,7 @@ For install defaults, users interact through `web` and `api`; database services 
 - Clawboard logger plugin (`extensions/clawboard-logger`) for stage-1 firehose capture
 - FastAPI + SQLModel backend (`backend/`)
 - Next.js App Router frontend (`src/`)
-- Classifier worker (`classifier/classifier.py`) with local embeddings + optional Qdrant path
+- Classifier worker (`classifier/classifier.py`) with local embeddings + Qdrant-backed vector retrieval
 - Docker Compose orchestration for `web` + `api` + `classifier` (+ optional scale profile services)
 
 ## How It Works
@@ -106,13 +117,20 @@ For install defaults, users interact through `web` and `api`; database services 
 - Worker path: `classifier/classifier.py` (runs in `classifier` container).
 - Runs every `CLASSIFIER_INTERVAL_SECONDS` (default `10`) with single-flight lock protection.
 - Pulls pending conversation windows by `sessionKey`, then classifies with:
-  - local embeddings (`fastembed`)
-  - lexical matching
+  - embeddings (`fastembed`) + hybrid retrieval
+  - lexical + BM25 scoring
+  - reciprocal rank fusion (RRF) + reranking
   - candidate topic/task retrieval
   - curated user notes (`type=note`) as weighted signals
   - optional OpenClaw memory snippets from sqlite (`OPENCLAW_MEMORY_DB_PATH` fallback support)
 - Patches logs to `classified` with resolved `topicId` / `taskId`.
 - Generates very short message summaries for chips (telegraphic style, no `SUMMARY:` prefix, transport metadata stripped).
+
+Vector storage notes:
+
+- Qdrant collection is auto-created when needed.
+- API search auto-seeds Qdrant from SQLite embeddings if Qdrant is empty.
+- SQLite embeddings remain as portability/fallback storage.
 
 ### Stage 3: Clawgraph Memory Synthesis
 
@@ -284,7 +302,13 @@ docker compose up -d --build
 
 ## Tests
 
-Install Playwright browsers once:
+Full stack checks:
+
+```bash
+./tests.sh --skip-e2e
+```
+
+Playwright browsers (first run only):
 
 ```bash
 npx playwright install
@@ -293,7 +317,7 @@ npx playwright install
 Run E2E:
 
 ```bash
-npm run test
+npm run test:e2e
 ```
 
 Load or clear demo fixtures:

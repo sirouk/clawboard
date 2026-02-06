@@ -11,6 +11,20 @@ description: "Install and operate Clawboard with OpenClaw. Use for scripted/manu
 - Install path today: scripted bootstrap or manual repo install.
 - If OpenClaw is missing and user wants Chutes provider, start with [`add_chutes.sh`](../../inference-providers/add_chutes.sh) after creating a `https://chutes.ai` account.
 
+## Current Architecture Snapshot
+
+- `web` (Next.js): `http://localhost:3010`
+- `api` (FastAPI + SQLite): `http://localhost:8010`
+- `classifier` (async stage-2 worker): topic/task classification loop
+- `qdrant` (vector index): dense retrieval backend on internal Docker network
+- `clawboard-logger` plugin: stage-1 firehose logging + response-time context extension
+
+Retrieval/search stack:
+
+- Dense vectors + BM25 + lexical matching
+- Reciprocal rank fusion + reranking
+- Qdrant primary, SQLite embeddings mirror/fallback
+
 ## Goal
 
 Get a user to a working Clawboard install where:
@@ -36,6 +50,7 @@ What the script does:
 - Generates a token if missing and writes `.env` with `CLAWBOARD_TOKEN`.
 - Detects browser access URLs (Tailscale if available, else localhost) and writes `.env` `CLAWBOARD_PUBLIC_API_BASE` and `CLAWBOARD_PUBLIC_WEB_URL`.
 - Builds and starts Docker services.
+- Ensures `web` + `api` + `classifier` + `qdrant` are running.
 - Installs skill to `$HOME/.openclaw/skills/clawboard`.
 - Installs/enables `clawboard-logger` plugin.
 - Writes plugin config (`baseUrl`, `token`, `enabled`) via `openclaw config set`.
@@ -164,7 +179,7 @@ Security reminder for all methods:
 - `CLAWBOARD_TOKEN` is required for all writes and all non-localhost reads.
 - Localhost reads can run tokenless (read-only default posture).
 - Keep network boundaries strict (localhost/firewall/Tailscale ACLs; avoid Funnel/public exposure unless explicitly intended).
-- Compose defaults keep database/vector/cache services off host ports; use the API as the supported read/write/delete interface.
+- Compose defaults keep vector/db/cache services off host ports; use the API as the supported read/write/delete interface.
 
 ## Validation Checklist
 
@@ -174,6 +189,7 @@ Run:
 curl -s http://localhost:8010/api/health
 curl -s http://localhost:8010/api/config
 openclaw plugins list | rg clawboard-logger
+curl -s "http://localhost:8010/api/search?q=continuity"
 ```
 
 Expect:
@@ -182,6 +198,7 @@ Expect:
 - `tokenRequired` is `true`.
 - `tokenConfigured` is `true`.
 - Logger plugin is enabled.
+- Search endpoint returns mode/details (and will include qdrant mode when vectors are available).
 - New OpenClaw message appears in Clawboard Logs.
 
 ## Optional Helpers
