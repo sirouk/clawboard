@@ -1,13 +1,49 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useDataStore } from "@/components/data-provider";
 import { Badge, Card, CardHeader } from "@/components/ui";
 import { LogList } from "@/components/log-list";
 
+type UrlFilters = {
+  q: string;
+  type: string;
+  agent: string;
+  topic: string;
+  lane: string;
+};
+
+const DEFAULT_URL_FILTERS: UrlFilters = {
+  q: "",
+  type: "all",
+  agent: "all",
+  topic: "all",
+  lane: "all",
+};
+
+function readUrlFilters(): UrlFilters {
+  if (typeof window === "undefined") return DEFAULT_URL_FILTERS;
+  const params = new URLSearchParams(window.location.search);
+  return {
+    q: params.get("q") ?? "",
+    type: params.get("type") ?? "all",
+    agent: params.get("agent") ?? "all",
+    topic: params.get("topic") ?? "all",
+    lane: params.get("lane") ?? "all",
+  };
+}
+
 export function LogsPage() {
   const { logs, topics } = useDataStore();
   const [showRawAll, setShowRawAll] = useState(true);
+  const [urlFilters, setUrlFilters] = useState<UrlFilters>(DEFAULT_URL_FILTERS);
+
+  useEffect(() => {
+    const sync = () => setUrlFilters(readUrlFilters());
+    sync();
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
+  }, []);
 
   const sortedLogs = useMemo(() => {
     return [...logs].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
@@ -58,6 +94,11 @@ export function LogsPage() {
           allowNotes
           initialVisibleCount={50}
           loadMoreStep={50}
+          initialSearch={urlFilters.q}
+          initialTypeFilter={urlFilters.type}
+          initialAgentFilter={urlFilters.agent}
+          initialTopicFilter={urlFilters.topic}
+          initialLaneFilter={urlFilters.lane}
         />
       </Card>
     </div>

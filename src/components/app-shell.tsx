@@ -81,6 +81,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem("clawboard.navCollapsed") === "true";
   });
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const status = tokenRequired ? (token ? "CONNECTED" : "READ-ONLY") : "OPEN";
   const statusTone: BadgeTone = tokenRequired ? (token ? "success" : "warning") : "accent2";
@@ -101,6 +102,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       return next;
     });
   };
+
+  const isItemActive = (href: string) => {
+    const isUnified = href === "/u";
+    return pathname === href || (isUnified && (pathname === "/" || pathname === "/dashboard" || pathname.startsWith("/u")));
+  };
+
+  const mobilePrimaryItems = NAV_ITEMS.slice(0, 4);
+  const mobileOverflowItems = NAV_ITEMS.slice(4);
 
   return (
     <DataProvider>
@@ -132,12 +141,70 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   </Badge>
                 </div>
               </div>
-              <nav className="mt-6 flex gap-3 lg:flex-col">
+              <nav className="mt-4 grid grid-cols-5 gap-2 lg:hidden">
+                {mobilePrimaryItems.map((item) => {
+                  const active = isItemActive(item.href);
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      onClick={() => setMobileMenuOpen(false)}
+                      className={cn(
+                        "flex flex-col items-center gap-1 rounded-[var(--radius-md)] px-2 py-2 text-[11px] transition",
+                        active
+                          ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.04))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]"
+                          : "text-[rgb(var(--claw-muted))]"
+                      )}
+                      aria-label={item.label}
+                      aria-current={active ? "page" : undefined}
+                    >
+                      <span className="h-4 w-4 text-current">{ICONS[item.id]}</span>
+                      <span className="leading-none">{item.label}</span>
+                    </Link>
+                  );
+                })}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setMobileMenuOpen((prev) => !prev)}
+                    className={cn(
+                      "flex h-full w-full flex-col items-center justify-center gap-1 rounded-[var(--radius-md)] px-2 py-2 text-[11px] transition",
+                      mobileMenuOpen ? "text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]" : "text-[rgb(var(--claw-muted))]"
+                    )}
+                    aria-expanded={mobileMenuOpen}
+                    aria-label="More navigation"
+                  >
+                    <span className="text-sm">⋯</span>
+                    <span className="leading-none">More</span>
+                  </button>
+                  {mobileMenuOpen && (
+                    <div className="absolute right-0 top-[108%] z-30 min-w-[170px] rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] p-2 shadow-[0_16px_40px_rgba(0,0,0,0.45)]">
+                      {mobileOverflowItems.map((item) => {
+                        const active = isItemActive(item.href);
+                        return (
+                          <Link
+                            key={item.href}
+                            href={item.href}
+                            onClick={() => setMobileMenuOpen(false)}
+                            className={cn(
+                              "flex items-center gap-2 rounded-[var(--radius-sm)] px-3 py-2 text-xs transition",
+                              active
+                                ? "bg-[rgba(255,90,45,0.15)] text-[rgb(var(--claw-text))]"
+                                : "text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
+                            )}
+                          >
+                            <span className="h-4 w-4 text-current">{ICONS[item.id]}</span>
+                            <span>{item.label}</span>
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </nav>
+              <nav className="mt-6 hidden gap-3 lg:flex lg:flex-col">
                 {NAV_ITEMS.map((item) => {
-                  const isUnified = item.href === "/u";
-                  const active =
-                    pathname === item.href ||
-                    (isUnified && (pathname === "/" || pathname === "/dashboard" || pathname.startsWith("/u")));
+                  const active = isItemActive(item.href);
                   return (
                     <Link
                       key={item.href}

@@ -27,6 +27,12 @@ const STATUS_LABELS: Record<string, string> = {
   done: "Done",
 };
 
+const TASK_STATUS_FILTERS = ["all", "todo", "doing", "blocked", "done"] as const;
+type TaskStatusFilter = (typeof TASK_STATUS_FILTERS)[number];
+
+const isTaskStatusFilter = (value: string): value is TaskStatusFilter =>
+  TASK_STATUS_FILTERS.includes(value as TaskStatusFilter);
+
 const TASK_TIMELINE_LIMIT = 2;
 const TOPIC_TIMELINE_LIMIT = 4;
 const TOPIC_FALLBACK_COLORS = ["#FF8A4A", "#4DA39E", "#6FA8FF", "#E0B35A", "#8BC17E", "#F17C8E"];
@@ -96,6 +102,7 @@ type UrlState = {
   search: string;
   raw: boolean;
   done: boolean;
+  status: string;
   page: number;
   topics: string[];
   tasks: string[];
@@ -103,7 +110,7 @@ type UrlState = {
 
 function getInitialUrlState(basePath: string): UrlState {
   if (typeof window === "undefined") {
-    return { search: "", raw: false, done: false, page: 1, topics: [], tasks: [] };
+    return { search: "", raw: false, done: false, status: "all", page: 1, topics: [], tasks: [] };
   }
   const url = new URL(window.location.href);
   const params = url.searchParams;
@@ -144,6 +151,7 @@ function getInitialUrlState(basePath: string): UrlState {
     search: params.get("q") ?? "",
     raw: params.get("raw") === "1",
     done: params.get("done") === "1",
+    status: params.get("status") ?? "all",
     page: Math.max(1, Number(params.get("page") ?? 1)),
     topics: nextTopics,
     tasks: nextTasks,
@@ -161,6 +169,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [showRaw, setShowRaw] = useState(initialUrlState.raw);
   const [search, setSearch] = useState(initialUrlState.search);
   const [showDone, setShowDone] = useState(initialUrlState.done);
+  const [statusFilter, setStatusFilter] = useState<TaskStatusFilter>(
+    isTaskStatusFilter(initialUrlState.status) ? initialUrlState.status : "all"
+  );
   const [showViewOptions, setShowViewOptions] = useState(false);
   const [timelineLimits, setTimelineLimits] = useState<Record<string, number>>({});
   const [moveTaskId, setMoveTaskId] = useState<string | null>(null);
@@ -278,6 +289,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return Boolean(logMatches);
   }, [logsByTask, matchesLogSearch, normalizedSearch]);
 
+  const matchesStatusFilter = useCallback(
+    (task: Task) => {
+      if (statusFilter !== "all") return task.status === statusFilter;
+      if (!showDone && task.status === "done") return false;
+      return true;
+    },
+    [showDone, statusFilter]
+  );
+
   const orderedTopics = useMemo(() => {
     const base = [...topics]
       .map((topic) => ({
@@ -291,11 +311,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       });
 
     const filtered = base.filter((topic) => {
+      const taskList = tasksByTopic.get(topic.id) ?? [];
+      if (statusFilter !== "all") {
+        return taskList.some((task) => matchesStatusFilter(task) && matchesTaskSearch(task));
+      }
       if (!normalizedSearch) return true;
       const topicHit = `${topic.name} ${topic.description ?? ""}`.toLowerCase().includes(normalizedSearch);
       if (topicHit) return true;
-      const taskList = tasksByTopic.get(topic.id) ?? [];
-      if (taskList.some((task) => matchesTaskSearch(task))) return true;
+      if (taskList.some((task) => matchesStatusFilter(task) && matchesTaskSearch(task))) return true;
       const topicLogs = logsByTopic.get(topic.id) ?? [];
       return topicLogs.some(matchesLogSearch);
     });
@@ -317,7 +340,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
 
     return filtered;
-  }, [topics, tasksByTopic, normalizedSearch, logsByTopic, matchesLogSearch, matchesTaskSearch]);
+  }, [topics, tasksByTopic, statusFilter, normalizedSearch, logsByTopic, matchesLogSearch, matchesStatusFilter, matchesTaskSearch]);
 
   const pageSize = 10;
   const pageCount = Math.ceil(orderedTopics.length / pageSize);
@@ -587,14 +610,29 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const toggleDoneVisibility = () => {
     const next = !showDone;
     setShowDone(next);
+    const nextStatus = !next && statusFilter === "done" ? "all" : statusFilter;
+    if (nextStatus !== statusFilter) {
+      setStatusFilter(nextStatus);
+    }
     setPage(1);
-    pushUrl({ done: next ? "1" : "0", page: "1" });
+    pushUrl({ done: next ? "1" : "0", status: nextStatus, page: "1" });
   };
 
   const toggleRawVisibility = () => {
     const next = !showRaw;
     setShowRaw(next);
     pushUrl({ raw: next ? "1" : "0" });
+  };
+
+  const updateStatusFilter = (nextValue: string) => {
+    const nextStatus = isTaskStatusFilter(nextValue) ? nextValue : "all";
+    setStatusFilter(nextStatus);
+    const mustShowDone = nextStatus === "done";
+    if (mustShowDone && !showDone) {
+      setShowDone(true);
+    }
+    setPage(1);
+    pushUrl({ status: nextStatus, done: mustShowDone || showDone ? "1" : "0", page: "1" });
   };
 
   const toggleExpandAll = () => {
@@ -689,6 +727,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const nextSearch = params.get("q") ?? "";
     const nextRaw = params.get("raw") === "1";
     const nextShowDone = params.get("done") === "1";
+    const nextStatusRaw = params.get("status") ?? "all";
+    const nextStatus = isTaskStatusFilter(nextStatusRaw) ? nextStatusRaw : "all";
     const nextPage = Math.max(1, Number(params.get("page") ?? 1));
     let nextTopics = hasPathSelections
       ? parsed.topics.map((value) => resolveTopicId(value)).filter(Boolean)
@@ -714,7 +754,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setSearch(nextSearch);
     committedSearch.current = nextSearch;
     setShowRaw(nextRaw);
-    setShowDone(nextShowDone);
+    setStatusFilter(nextStatus);
+    setShowDone(nextShowDone || nextStatus === "done");
     setPage(Number.isNaN(nextPage) ? 1 : nextPage);
     setExpandedTopics(new Set(nextTopics));
     setExpandedTasks(new Set(nextTasks));
@@ -736,13 +777,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const pushUrl = useCallback(
     (
-      overrides: Partial<Record<"q" | "raw" | "done" | "page", string>> & { topics?: string[]; tasks?: string[] },
+      overrides: Partial<Record<"q" | "raw" | "done" | "status" | "page", string>> & { topics?: string[]; tasks?: string[] },
       mode: "push" | "replace" = "push"
     ) => {
       const params = new URLSearchParams();
       const nextSearch = overrides.q ?? search;
       const nextRaw = overrides.raw ?? (showRaw ? "1" : "0");
       const nextDone = overrides.done ?? (showDone ? "1" : "0");
+      const nextStatus = overrides.status ?? statusFilter;
       const nextPage = overrides.page ?? String(safePage);
       const nextTopics = overrides.topics ?? Array.from(expandedTopicsSafe);
       const nextTasks = overrides.tasks ?? Array.from(expandedTasksSafe);
@@ -750,6 +792,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (nextSearch) params.set("q", nextSearch);
       if (nextRaw === "1") params.set("raw", "1");
       if (nextDone === "1") params.set("done", "1");
+      if (nextStatus !== "all") params.set("status", nextStatus);
       if (nextPage && nextPage !== "1") params.set("page", nextPage);
       const segments: string[] = [];
       for (const topicId of nextTopics) {
@@ -785,6 +828,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       search,
       showDone,
       showRaw,
+      statusFilter,
       basePath,
     ]
   );
@@ -847,6 +891,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         {showViewOptions && (
           <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.92)] p-3">
             <div className="flex flex-wrap items-center gap-2">
+              <Select
+                value={statusFilter}
+                onChange={(event) => updateStatusFilter(event.target.value)}
+                className="max-w-[190px]"
+              >
+                <option value="all">All statuses</option>
+                <option value="todo">To Do</option>
+                <option value="doing">Doing</option>
+                <option value="blocked">Blocked</option>
+                <option value="done">Done</option>
+              </Select>
               <Button
                 variant="secondary"
                 size="sm"
@@ -1083,7 +1138,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   {taskList.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No tasks yet.</p>}
                   {taskList
                     .filter((task) => {
-                      if (!showDone && task.status === "done") return false;
+                      if (!matchesStatusFilter(task)) return false;
                       return matchesTaskSearch(task);
                     })
                     .map((task, taskIndex) => {
@@ -1361,7 +1416,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     );
                     })}
                   {taskList.filter((task) => {
-                    if (!showDone && task.status === "done") return false;
+                    if (!matchesStatusFilter(task)) return false;
                     return matchesTaskSearch(task);
                   }).length === 0 && (
                     <p className="text-sm text-[rgb(var(--claw-muted))]">No tasks match your filters.</p>

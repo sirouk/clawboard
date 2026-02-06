@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Badge, Button, Card, CardHeader, Input } from "@/components/ui";
 import { useDataStore } from "@/components/data-provider";
 import { apiUrl } from "@/lib/api";
 import { buildClawgraphFromData, layoutClawgraph, type ClawgraphData, type ClawgraphEdge, type ClawgraphNode } from "@/lib/clawgraph";
 import { cn } from "@/lib/cn";
+import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
 
 const EDGE_COLORS: Record<string, string> = {
   has_task: "rgba(78,161,255,0.72)",
@@ -38,11 +40,14 @@ function summarizeEdge(edge: ClawgraphEdge, nodeById: Map<string, ClawgraphNode>
 }
 
 export function ClawgraphLive() {
+  const router = useRouter();
   const { topics, tasks, logs } = useDataStore();
   const [query, setQuery] = useState("");
+  const [showAdvancedControls, setShowAdvancedControls] = useState(false);
   const [edgeThreshold, setEdgeThreshold] = useState(0.16);
   const [showEntityLinks, setShowEntityLinks] = useState(true);
   const [showLabels, setShowLabels] = useState(true);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [remoteGraph, setRemoteGraph] = useState<ClawgraphData | null>(null);
   const [graphMode, setGraphMode] = useState<"api" | "local">("local");
@@ -183,6 +188,25 @@ export function ClawgraphLive() {
       .filter((item): item is ClawgraphNode => Boolean(item));
   }, [connectedEdges, displayNodeById, selectedNodeId]);
 
+  const selectedTopic = useMemo(() => {
+    if (!selectedNode || selectedNode.type !== "topic") return null;
+    const topicId = String(selectedNode.meta?.topicId ?? "").trim();
+    if (!topicId) return null;
+    return topics.find((topic) => topic.id === topicId) ?? null;
+  }, [selectedNode, topics]);
+
+  const selectedTask = useMemo(() => {
+    if (!selectedNode || selectedNode.type !== "task") return null;
+    const taskId = String(selectedNode.meta?.taskId ?? "").trim();
+    if (!taskId) return null;
+    return tasks.find((task) => task.id === taskId) ?? null;
+  }, [selectedNode, tasks]);
+
+  const selectedTopicUrl = selectedTopic ? buildTopicUrl(selectedTopic, topics) : null;
+  const selectedTaskUrl = selectedTask ? buildTaskUrl(selectedTask, topics) : null;
+  const selectedSearchUrl = selectedNode ? `${UNIFIED_BASE}?q=${encodeURIComponent(selectedNode.label)}` : null;
+  const selectedLogUrl = selectedNode ? `/log?q=${encodeURIComponent(selectedNode.label)}` : null;
+
   const resetView = () => setView({ x: 0, y: 0, scale: 1 });
 
   const zoomBy = (factor: number) => {
@@ -259,41 +283,55 @@ export function ClawgraphLive() {
           <h2 className="text-lg font-semibold">Controls</h2>
           <Badge tone={isFetching ? "warning" : "muted"}>{isFetching ? "Refreshing graph" : "Stable"}</Badge>
         </CardHeader>
-        <div className="grid gap-3 md:grid-cols-[1.5fr_1fr_1fr_auto]">
+        <div className="grid gap-3 md:grid-cols-[1.5fr_auto_auto]">
           <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search entity, topic, task, or agent" />
-          <label className="flex items-center gap-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-xs uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
-            Edge
-            <input
-              type="range"
-              min={0}
-              max={0.9}
-              step={0.02}
-              value={edgeThreshold}
-              onChange={(event) => setEdgeThreshold(Number(event.target.value))}
-              className="w-full accent-[rgb(var(--claw-accent))]"
-            />
-            <span className="tabular-nums text-[rgb(var(--claw-text))]">{edgeThreshold.toFixed(2)}</span>
-          </label>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button variant={showEntityLinks ? "secondary" : "ghost"} size="sm" onClick={() => setShowEntityLinks((prev) => !prev)}>
-              {showEntityLinks ? "Hide co-occur" : "Show co-occur"}
-            </Button>
-            <Button variant={showLabels ? "secondary" : "ghost"} size="sm" onClick={() => setShowLabels((prev) => !prev)}>
-              {showLabels ? "Hide labels" : "Show labels"}
-            </Button>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button size="sm" variant="secondary" onClick={() => zoomBy(1.12)}>
-              +
-            </Button>
-            <Button size="sm" variant="secondary" onClick={() => zoomBy(0.9)}>
-              -
-            </Button>
+          <div className="flex items-center gap-2 justify-self-start">
             <Button size="sm" variant="secondary" onClick={resetView}>
               Fit
             </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              className={cn(showAdvancedControls ? "border-[rgba(255,90,45,0.5)]" : "")}
+              onClick={() => setShowAdvancedControls((prev) => !prev)}
+            >
+              {showAdvancedControls ? "Hide advanced" : "Advanced"}
+            </Button>
           </div>
         </div>
+        {showAdvancedControls && (
+          <div className="mt-3 grid gap-3 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.9)] p-3 md:grid-cols-[1.3fr_1fr_auto]">
+            <label className="flex items-center gap-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-xs uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
+              Edge
+              <input
+                type="range"
+                min={0}
+                max={0.9}
+                step={0.02}
+                value={edgeThreshold}
+                onChange={(event) => setEdgeThreshold(Number(event.target.value))}
+                className="w-full accent-[rgb(var(--claw-accent))]"
+              />
+              <span className="tabular-nums text-[rgb(var(--claw-text))]">{edgeThreshold.toFixed(2)}</span>
+            </label>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant={showEntityLinks ? "secondary" : "ghost"} size="sm" onClick={() => setShowEntityLinks((prev) => !prev)}>
+                {showEntityLinks ? "Hide co-occur" : "Show co-occur"}
+              </Button>
+              <Button variant={showLabels ? "secondary" : "ghost"} size="sm" onClick={() => setShowLabels((prev) => !prev)}>
+                {showLabels ? "Hide labels" : "Show labels"}
+              </Button>
+            </div>
+            <div className="flex items-center gap-2 justify-self-start">
+              <Button size="sm" variant="secondary" onClick={() => zoomBy(1.12)}>
+                +
+              </Button>
+              <Button size="sm" variant="secondary" onClick={() => zoomBy(0.9)}>
+                -
+              </Button>
+            </div>
+          </div>
+        )}
       </Card>
 
       <div className="grid gap-6 xl:grid-cols-[2.2fr_1fr]">
@@ -353,6 +391,10 @@ export function ClawgraphLive() {
                   const connectedMatch = normalizedQuery.length > 0 && connectedToMatch.has(node.id);
                   const dimmed = normalizedQuery.length > 0 && !matched && !connectedMatch;
                   const selected = node.id === selectedNodeId;
+                  const hovered = node.id === hoveredNodeId;
+                  const allowScaleLabel = view.scale >= 1.02;
+                  const allowPriorityLabel = node.type === "topic" || node.type === "task" || node.score >= 2.1;
+                  const showNodeLabel = selected || matched || hovered || (showLabels && (allowScaleLabel || allowPriorityLabel));
                   return (
                     <g
                       key={node.id}
@@ -360,6 +402,8 @@ export function ClawgraphLive() {
                       transform={`translate(${pos.x} ${pos.y})`}
                       className="cursor-pointer"
                       onPointerDown={(event) => event.stopPropagation()}
+                      onMouseEnter={() => setHoveredNodeId(node.id)}
+                      onMouseLeave={() => setHoveredNodeId((prev) => (prev === node.id ? null : prev))}
                       onClick={(event) => {
                         event.stopPropagation();
                         setSelectedNodeId(node.id);
@@ -372,12 +416,12 @@ export function ClawgraphLive() {
                         stroke="rgba(255,255,255,0.84)"
                         strokeWidth={selected ? 1.9 : matched ? 1.5 : 1.05}
                       />
-                      {(showLabels || selected || matched) && (
+                      {showNodeLabel && (
                         <text
                           x={node.size * 0.55 + 4}
                           y={4}
                           fill={dimmed ? "rgba(209,220,236,0.36)" : "rgba(229,237,247,0.92)"}
-                          fontSize={selected ? 12 : 10}
+                          fontSize={selected || hovered ? 12 : 10}
                           className="select-none"
                         >
                           {node.label.length > 34 ? `${node.label.slice(0, 33)}…` : node.label}
@@ -410,6 +454,28 @@ export function ClawgraphLive() {
                   <div className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
                     Score {selectedNode.score.toFixed(2)} · size {selectedNode.size.toFixed(1)}
                   </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {selectedTopicUrl && (
+                    <Button size="sm" variant="secondary" onClick={() => router.push(selectedTopicUrl)}>
+                      Open topic
+                    </Button>
+                  )}
+                  {selectedTaskUrl && (
+                    <Button size="sm" variant="secondary" onClick={() => router.push(selectedTaskUrl)}>
+                      Open task
+                    </Button>
+                  )}
+                  {selectedSearchUrl && (
+                    <Button size="sm" variant="secondary" onClick={() => router.push(selectedSearchUrl)}>
+                      Search board
+                    </Button>
+                  )}
+                  {selectedLogUrl && (
+                    <Button size="sm" variant="secondary" onClick={() => router.push(selectedLogUrl)}>
+                      Filter related logs
+                    </Button>
+                  )}
                 </div>
                 <div className="space-y-2">
                   <div className="text-xs uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">Strongest links</div>

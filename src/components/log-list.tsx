@@ -59,6 +59,11 @@ export function LogList({
   enableNavigation = true,
   initialVisibleCount,
   loadMoreStep,
+  initialSearch = "",
+  initialTypeFilter = "all",
+  initialAgentFilter = "all",
+  initialTopicFilter = "all",
+  initialLaneFilter = "all",
 }: {
   logs: LogEntry[];
   topics: Topic[];
@@ -70,14 +75,19 @@ export function LogList({
   enableNavigation?: boolean;
   initialVisibleCount?: number;
   loadMoreStep?: number;
+  initialSearch?: string;
+  initialTypeFilter?: string;
+  initialAgentFilter?: string;
+  initialTopicFilter?: string;
+  initialLaneFilter?: LaneFilter;
 }) {
   const { token, tokenRequired } = useAppConfig();
   const [logs, setLogs] = useState<LogEntry[]>(initialLogs);
-  const [topicFilter, setTopicFilter] = useState("all");
-  const [typeFilter, setTypeFilter] = useState("all");
-  const [agentFilter, setAgentFilter] = useState("all");
-  const [laneFilter, setLaneFilter] = useState<LaneFilter>("all");
-  const [search, setSearch] = useState("");
+  const [topicFilter, setTopicFilter] = useState(initialTopicFilter || "all");
+  const [typeFilter, setTypeFilter] = useState(initialTypeFilter || "all");
+  const [agentFilter, setAgentFilter] = useState(initialAgentFilter || "all");
+  const [laneFilter, setLaneFilter] = useState<LaneFilter>(initialLaneFilter || "all");
+  const [search, setSearch] = useState(initialSearch || "");
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [localShowRawAll, setLocalShowRawAll] = useState(false);
   const [groupByDay, setGroupByDay] = useState(true);
@@ -106,6 +116,26 @@ export function LogList({
   useEffect(() => {
     setLogs(initialLogs);
   }, [initialLogs]);
+
+  useEffect(() => {
+    setSearch(initialSearch || "");
+  }, [initialSearch]);
+
+  useEffect(() => {
+    setTypeFilter(initialTypeFilter || "all");
+  }, [initialTypeFilter]);
+
+  useEffect(() => {
+    setAgentFilter(initialAgentFilter || "all");
+  }, [initialAgentFilter]);
+
+  useEffect(() => {
+    setTopicFilter(initialTopicFilter || "all");
+  }, [initialTopicFilter]);
+
+  useEffect(() => {
+    setLaneFilter(initialLaneFilter || "all");
+  }, [initialLaneFilter]);
 
   useEffect(() => {
     if (!loadMoreEnabled) return;

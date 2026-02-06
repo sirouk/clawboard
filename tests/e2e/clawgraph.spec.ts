@@ -7,6 +7,7 @@ test("clawgraph renders and supports interaction controls", async ({ page }) => 
   await expect(page.getByTestId("clawgraph-canvas")).toBeVisible();
   await expect(page.locator("[data-node-id]").first()).toBeVisible();
 
+  await page.getByRole("button", { name: "Advanced" }).click();
   await page.getByRole("button", { name: "Hide co-occur" }).click();
   await expect(page.getByRole("button", { name: "Show co-occur" })).toBeVisible();
   await page.getByRole("button", { name: "Show co-occur" }).click();
