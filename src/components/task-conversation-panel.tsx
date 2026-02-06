@@ -40,7 +40,16 @@ export function TaskConversationPanel({
           <CardHeader>
             <h2 className="text-lg font-semibold">Task Conversation</h2>
           </CardHeader>
-          <LogList logs={logs} topics={topics} showFilters={false} showRawToggle={false} showRawAll={showRaw} allowNotes />
+          <LogList
+            logs={logs}
+            topics={topics}
+            showFilters={false}
+            showRawToggle={false}
+            showRawAll={showRaw}
+            allowNotes
+            initialVisibleCount={2}
+            loadMoreStep={2}
+          />
         </Card>
       </div>
 

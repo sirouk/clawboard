@@ -19,6 +19,34 @@ const TYPE_LABELS: Record<string, string> = {
 
 type LaneFilter = "all" | string;
 const MESSAGE_TRUNCATE_LIMIT = 220;
+const SUMMARY_TRUNCATE_LIMIT = 96;
+
+function normalizeInlineText(value: string | undefined | null) {
+  return stripTransportNoise(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function stripTransportNoise(value: string) {
+  let text = (value ?? "").replace(/\r\n?/g, "\n").trim();
+  text = text.replace(/^\s*summary\s*[:\-]\s*/gim, "");
+  text = text.replace(/^\[Discord [^\]]+\]\s*/gim, "");
+  text = text.replace(/\[message[_\s-]?id:[^\]]+\]/gi, "");
+  text = text.replace(/\n{3,}/g, "\n\n");
+  return text.trim();
+}
+
+function truncateText(value: string, limit: number) {
+  if (value.length <= limit) return value;
+  return `${value.slice(0, limit - 1).trim()}…`;
+}
+
+function deriveMessageSummary(entry: LogEntry, message: string) {
+  const explicitSummary = normalizeInlineText(entry.summary);
+  if (explicitSummary) {
+    return truncateText(explicitSummary, SUMMARY_TRUNCATE_LIMIT);
+  }
+  const fallback = normalizeInlineText(message || entry.content || "");
+  return fallback ? truncateText(fallback, SUMMARY_TRUNCATE_LIMIT) : "No summary";
+}
 
 export function LogList({
   logs: initialLogs,
@@ -29,6 +57,8 @@ export function LogList({
   onShowRawAllChange,
   allowNotes = false,
   enableNavigation = true,
+  initialVisibleCount,
+  loadMoreStep,
 }: {
   logs: LogEntry[];
   topics: Topic[];
@@ -38,6 +68,8 @@ export function LogList({
   onShowRawAllChange?: (value: boolean) => void;
   allowNotes?: boolean;
   enableNavigation?: boolean;
+  initialVisibleCount?: number;
+  loadMoreStep?: number;
 }) {
   const { token, tokenRequired } = useAppConfig();
   const [logs, setLogs] = useState<LogEntry[]>(initialLogs);
@@ -48,6 +80,8 @@ export function LogList({
   const [search, setSearch] = useState("");
   const [localShowRawAll, setLocalShowRawAll] = useState(false);
   const [groupByDay, setGroupByDay] = useState(true);
+  const loadMoreEnabled = Boolean(initialVisibleCount && initialVisibleCount > 0 && loadMoreStep && loadMoreStep > 0);
+  const [visibleCount, setVisibleCount] = useState(() => (loadMoreEnabled ? initialVisibleCount! : 0));
   const [collapsedDays, setCollapsedDays] = useState<Record<string, boolean>>(() => {
     if (initialLogs.length === 0) return {};
     const dates = Array.from(new Set(initialLogs.map((entry) => entry.createdAt.slice(0, 10)))).sort((a, b) => b.localeCompare(a));
@@ -72,6 +106,11 @@ export function LogList({
     setLogs(initialLogs);
   }, [initialLogs]);
 
+  useEffect(() => {
+    if (!loadMoreEnabled) return;
+    setVisibleCount(initialVisibleCount!);
+  }, [agentFilter, groupByDay, initialVisibleCount, laneFilter, loadMoreEnabled, search, topicFilter, typeFilter]);
+
   const readOnly = tokenRequired && !token;
 
   const filtered = useMemo(() => {
@@ -91,15 +130,20 @@ export function LogList({
     });
   }, [logs, topicFilter, typeFilter, laneFilter, agentFilter, search]);
 
+  const visibleFiltered = useMemo(() => {
+    if (!loadMoreEnabled) return filtered;
+    return filtered.slice(0, visibleCount);
+  }, [filtered, loadMoreEnabled, visibleCount]);
+
   const grouped = useMemo(() => {
-    if (!groupByDay) return { all: filtered };
-    return filtered.reduce<Record<string, LogEntry[]>>((acc, entry) => {
+    if (!groupByDay) return { all: visibleFiltered };
+    return visibleFiltered.reduce<Record<string, LogEntry[]>>((acc, entry) => {
       const date = entry.createdAt.slice(0, 10);
       acc[date] = acc[date] ?? [];
       acc[date].push(entry);
       return acc;
     }, {});
-  }, [filtered, groupByDay]);
+  }, [visibleFiltered, groupByDay]);
 
   useEffect(() => {
     if (!groupByDay) {
@@ -305,7 +349,22 @@ export function LogList({
             </div>
           );
         })}
-        {filtered.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No log entries yet.</p>}
+        {visibleFiltered.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No log entries yet.</p>}
+
+        {loadMoreEnabled && filtered.length > visibleFiltered.length && (
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-[rgb(var(--claw-muted))]">
+            <span>
+              Showing {visibleFiltered.length} of {filtered.length} entries.
+            </span>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setVisibleCount((prev) => prev + loadMoreStep!)}
+            >
+              Load {loadMoreStep} more
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -335,7 +394,7 @@ function LogRow({
   const [noteOpen, setNoteOpen] = useState(false);
   const [noteText, setNoteText] = useState("");
   const [noteStatus, setNoteStatus] = useState<string | null>(null);
-  const showRaw = showRawAll || expanded;
+  const showFullMessage = showRawAll || expanded;
   const summary = entry.summary ?? entry.content;
   const resolvedTopic = entry.topicId ? topics.find((topic) => topic.id === entry.topicId) : null;
   const destination = entry.taskId
@@ -360,13 +419,15 @@ function LogRow({
   const isConversation = entry.type === "conversation";
   const agentLabel = entry.agentLabel || entry.agentId;
   const showAgentBadge = Boolean(agentLabel && agentLabel.trim().toLowerCase() !== typeLabel.trim().toLowerCase());
-  const messageSource = entry.raw ?? entry.content ?? entry.summary ?? "";
-  const shouldTruncate = !showRawAll && !expanded && messageSource.length > MESSAGE_TRUNCATE_LIMIT;
-  const messageText = shouldTruncate ? `${messageSource.slice(0, MESSAGE_TRUNCATE_LIMIT).trim()}…` : messageSource;
-  const bubbleAlign = (entry.agentId || "").toLowerCase() === "assistant" ? "ml-auto" : "mr-auto";
+  const messageSource = stripTransportNoise((entry.content ?? entry.raw ?? entry.summary ?? "").trim());
+  const shouldTruncate = !showFullMessage && messageSource.length > MESSAGE_TRUNCATE_LIMIT;
+  const messageText = shouldTruncate ? truncateText(messageSource, MESSAGE_TRUNCATE_LIMIT) : messageSource;
+  const summaryText = deriveMessageSummary(entry, messageSource);
+  const isUser = (entry.agentId || "").toLowerCase() === "user";
 
   return (
     <div
+      data-log-id={entry.id}
       className={`rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4 ${
         canNavigate ? "cursor-pointer transition hover:border-[rgba(255,90,45,0.35)]" : ""
       }`}
@@ -396,22 +457,42 @@ function LogRow({
       </div>
 
       {isConversation ? (
-        <div className={`mt-3 max-w-[680px] rounded-[22px] border border-[rgba(255,255,255,0.08)] bg-[rgba(12,14,18,0.6)] px-4 py-3 text-sm leading-relaxed text-[rgb(var(--claw-text))] ${bubbleAlign}`}>
-          {messageText || summary || "(empty)"}
-          {shouldTruncate && (
-            <div className="mt-2">
-              <Button variant="ghost" size="sm" onClick={() => setExpanded(true)}>
-                Show full message
-              </Button>
+        <div className="mt-3 space-y-2">
+          <p className="text-xs uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">{summaryText}</p>
+          <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+            <div className={`w-full max-w-[78%] ${isUser ? "text-right" : "text-left"}`}>
+              <p className="mb-1 text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
+                {isUser ? "You" : agentLabel || "Assistant"}
+              </p>
             </div>
-          )}
-          {!showRawAll && expanded && messageSource.length > MESSAGE_TRUNCATE_LIMIT && (
-            <div className="mt-2">
-              <Button variant="ghost" size="sm" onClick={() => setExpanded(false)}>
-                Hide full message
-              </Button>
+          </div>
+          <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+            <div
+              data-testid={`message-bubble-${entry.id}`}
+              data-agent-side={isUser ? "right" : "left"}
+              className={`max-w-[78%] rounded-[20px] border px-4 py-3 text-sm leading-relaxed ${
+                isUser
+                  ? "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
+                  : "border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] text-[rgb(var(--claw-text))]"
+              }`}
+            >
+              <p className="whitespace-pre-wrap break-words">{messageText || summary || "(empty)"}</p>
+              {shouldTruncate && (
+                <div className="mt-2">
+                  <Button variant="ghost" size="sm" onClick={() => setExpanded(true)} aria-label="Expand message">
+                    ...
+                  </Button>
+                </div>
+              )}
+              {!showRawAll && expanded && messageSource.length > MESSAGE_TRUNCATE_LIMIT && (
+                <div className="mt-2">
+                  <Button variant="ghost" size="sm" onClick={() => setExpanded(false)}>
+                    Collapse
+                  </Button>
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
       ) : (
         <>
@@ -423,7 +504,7 @@ function LogRow({
                   {expanded ? "Hide full message" : "Show full message"}
                 </Button>
               )}
-              {showRaw && (
+              {showFullMessage && (
                 <pre className="mt-2 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
                   {entry.raw}
                 </pre>

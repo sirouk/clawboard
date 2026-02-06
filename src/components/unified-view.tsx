@@ -27,7 +27,8 @@ const STATUS_LABELS: Record<string, string> = {
   done: "Done",
 };
 
-const DEFAULT_TIMELINE_LIMIT = 5;
+const TASK_TIMELINE_LIMIT = 2;
+const TOPIC_TIMELINE_LIMIT = 4;
 
 type UrlState = {
   search: string;
@@ -533,21 +534,27 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               variant="secondary"
               size="sm"
               onClick={() => {
+                const allTopics = orderedTopics.map((topic) => topic.id);
+                const allTasks = tasks.map((task) => task.id);
+                const hasAnyExpandable = allTopics.length > 0 || allTasks.length > 0;
+                const allExpanded =
+                  hasAnyExpandable &&
+                  expandedTopicsSafe.size === allTopics.length &&
+                  expandedTasksSafe.size === allTasks.length;
+                if (allExpanded) {
+                  collapseAll();
+                  pushUrl({ topics: [], tasks: [] });
+                  return;
+                }
                 expandAll();
-              pushUrl({ topics: orderedTopics.map((topic) => topic.id), tasks: tasks.map((task) => task.id) });
+                pushUrl({ topics: allTopics, tasks: allTasks });
               }}
             >
-              Expand all
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                collapseAll();
-              pushUrl({ topics: [], tasks: [] });
-              }}
-            >
-              Collapse all
+              {(orderedTopics.length > 0 || tasks.length > 0) &&
+              expandedTopicsSafe.size === orderedTopics.length &&
+              expandedTasksSafe.size === tasks.length
+                ? "Collapse all"
+                : "Expand all"}
             </Button>
           </div>
         </div>
@@ -643,7 +650,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       const taskLogs = logsByTask.get(task.id) ?? [];
                       const taskExpanded = expandedTasksSafe.has(task.id);
                       const visibleLogs = taskLogs.filter(matchesLogSearch);
-                      const limit = timelineLimits[task.id] ?? DEFAULT_TIMELINE_LIMIT;
+                      const limit = timelineLimits[task.id] ?? TASK_TIMELINE_LIMIT;
                       const limitedLogs = visibleLogs.slice(0, limit);
                       const truncated = visibleLogs.length > limit;
                       return (
@@ -772,11 +779,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       onClick={() =>
                                         setTimelineLimits((prev) => ({
                                           ...prev,
-                                          [task.id]: (prev[task.id] ?? DEFAULT_TIMELINE_LIMIT) + DEFAULT_TIMELINE_LIMIT,
+                                          [task.id]: (prev[task.id] ?? TASK_TIMELINE_LIMIT) + TASK_TIMELINE_LIMIT,
                                         }))
                                       }
                                     >
-                                      Load 5 more
+                                      Load 2 more
                                     </Button>
                                   </div>
                                 )}
@@ -801,7 +808,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         <span className="text-xs text-[rgb(var(--claw-muted))]">{topicOnlyLogs.length} entries</span>
                       </div>
                       <LogList
-                        logs={topicOnlyLogs.slice(0, timelineLimits[topicId] ?? DEFAULT_TIMELINE_LIMIT)}
+                        logs={topicOnlyLogs.slice(0, timelineLimits[topicId] ?? TOPIC_TIMELINE_LIMIT)}
                         topics={topics}
                         showFilters={false}
                         showRawToggle={false}
@@ -809,7 +816,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         allowNotes
                         enableNavigation={false}
                       />
-                      {topicOnlyLogs.length > (timelineLimits[topicId] ?? DEFAULT_TIMELINE_LIMIT) && (
+                      {topicOnlyLogs.length > (timelineLimits[topicId] ?? TOPIC_TIMELINE_LIMIT) && (
                         <div className="mt-3 flex justify-end">
                           <Button
                             size="sm"
@@ -817,11 +824,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             onClick={() =>
                               setTimelineLimits((prev) => ({
                                 ...prev,
-                                [topicId]: (prev[topicId] ?? DEFAULT_TIMELINE_LIMIT) + DEFAULT_TIMELINE_LIMIT,
+                                [topicId]: (prev[topicId] ?? TOPIC_TIMELINE_LIMIT) + TOPIC_TIMELINE_LIMIT,
                               }))
                             }
                           >
-                            Load 5 more
+                            Load 4 more
                           </Button>
                         </div>
                       )}

@@ -59,8 +59,9 @@ test("classification patches move logs between topics without refresh", async ({
 
   expect(create.ok()).toBeTruthy();
   const entry = await create.json();
+  const messageLocator = page.getByTestId(`message-bubble-${entry.id}`).getByText(message, { exact: true });
 
-  await expect(page.getByText(message)).toHaveCount(0);
+  await expect(messageLocator).toHaveCount(0);
 
   const classify = await request.patch(`${apiBase}/api/log/${entry.id}`, {
     data: {
@@ -73,7 +74,7 @@ test("classification patches move logs between topics without refresh", async ({
   await topicAButton.click();
   const taskAButton = page.getByRole("button", { name: new RegExp(taskAName) }).first();
   await taskAButton.click();
-  await expect(page.getByText(message)).toBeVisible();
+  await expect(messageLocator).toBeVisible();
 
   const move = await request.patch(`${apiBase}/api/log/${entry.id}`, {
     data: {
@@ -84,9 +85,9 @@ test("classification patches move logs between topics without refresh", async ({
   });
   expect(move.ok()).toBeTruthy();
 
-  await expect(page.getByText(message)).toHaveCount(0);
+  await expect(messageLocator).toHaveCount(0);
   await topicBButton.click();
   const taskBButton = page.getByRole("button", { name: new RegExp(taskBName) }).first();
   await taskBButton.click();
-  await expect(page.getByText(message)).toBeVisible();
+  await expect(messageLocator).toBeVisible();
 });

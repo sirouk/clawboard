@@ -10,7 +10,12 @@
       "baseUrl": { "type": "string" },
       "token": { "type": "string" },
       "enabled": { "type": "boolean" },
-      "queuePath": { "type": "string" }
+      "queuePath": { "type": "string" },
+      "contextAugment": { "type": "boolean" },
+      "contextMaxChars": { "type": "number" },
+      "contextTopicLimit": { "type": "number" },
+      "contextTaskLimit": { "type": "number" },
+      "contextLogLimit": { "type": "number" }
     },
     "required": ["baseUrl"]
   },
@@ -18,6 +23,11 @@
     "baseUrl": { "label": "Clawboard Base URL", "placeholder": "http://clawboard:8010" },
     "token": { "label": "Clawboard Token", "sensitive": true },
     "queuePath": { "label": "Queue file path" },
-    "enabled": { "label": "Enabled" }
+    "enabled": { "label": "Enabled" },
+    "contextAugment": { "label": "Inject context before agent start" },
+    "contextMaxChars": { "label": "Max context chars" },
+    "contextTopicLimit": { "label": "Max context topics" },
+    "contextTaskLimit": { "label": "Max context tasks" },
+    "contextLogLimit": { "label": "Max recent thread entries" }
   }
 }

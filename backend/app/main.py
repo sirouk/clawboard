@@ -4,6 +4,8 @@ import os
 import asyncio
 import threading
 import time
+import re
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from fastapi import Request
 from uuid import uuid4
@@ -28,8 +30,10 @@ from .schemas import (
     LogOut,
     LogPatch,
     ChangesResponse,
+    ClawgraphResponse,
 )
 from .events import event_hub
+from .clawgraph import build_clawgraph
 
 app = FastAPI(
     title="Clawboard API",
@@ -59,6 +63,70 @@ def now_iso() -> str:
 
 def create_id(prefix: str) -> str:
     return f"{prefix}-{uuid4()}"
+
+
+def _normalize_label(value: str | None) -> str:
+    if not value:
+        return ""
+    text = value.lower()
+    replacements = {
+        "ops": "operations",
+        "msg": "message",
+        "msgs": "messages",
+    }
+    for short, full in replacements.items():
+        text = re.sub(rf"\b{short}\b", full, text)
+    text = re.sub(r"[^a-z0-9\s]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _label_similarity(a: str | None, b: str | None) -> float:
+    na = _normalize_label(a)
+    nb = _normalize_label(b)
+    if not na or not nb:
+        return 0.0
+    seq = SequenceMatcher(None, na, nb).ratio()
+    ta = {part for part in na.split(" ") if len(part) > 2}
+    tb = {part for part in nb.split(" ") if len(part) > 2}
+    token = len(ta & tb) / len(ta | tb) if (ta or tb) else 0.0
+    return (seq * 0.72) + (token * 0.28)
+
+
+def _find_similar_topic(session, name: str, threshold: float = 0.80):
+    if not name.strip():
+        return None
+    topics = session.exec(select(Topic)).all()
+    best = None
+    best_score = 0.0
+    for topic in topics:
+        score = _label_similarity(topic.name, name)
+        if score > best_score:
+            best_score = score
+            best = topic
+    if best and best_score >= threshold:
+        return best
+    return None
+
+
+def _find_similar_task(session, topic_id: str | None, title: str, threshold: float = 0.88):
+    if not title.strip():
+        return None
+    tasks = session.exec(select(Task)).all()
+    if topic_id is not None:
+        tasks = [task for task in tasks if task.topicId == topic_id]
+    else:
+        tasks = [task for task in tasks if task.topicId is None]
+    best = None
+    best_score = 0.0
+    for task in tasks:
+        score = _label_similarity(task.title, title)
+        if score > best_score:
+            best_score = score
+            best = task
+    if best and best_score >= threshold:
+        return best
+    return None
 
 
 @app.on_event("startup")
@@ -335,6 +403,25 @@ def upsert_topic(
                 topic.pinned = payload.pinned
             topic.updatedAt = timestamp
         else:
+            duplicate = _find_similar_topic(session, payload.name)
+            if duplicate:
+                if payload.description is not None and not duplicate.description:
+                    duplicate.description = payload.description
+                if payload.tags:
+                    merged = list(dict.fromkeys([*(duplicate.tags or []), *payload.tags]))
+                    duplicate.tags = merged
+                if payload.priority is not None:
+                    duplicate.priority = payload.priority
+                if payload.status is not None:
+                    duplicate.status = payload.status
+                if payload.pinned is not None:
+                    duplicate.pinned = payload.pinned
+                duplicate.updatedAt = timestamp
+                session.add(duplicate)
+                session.commit()
+                session.refresh(duplicate)
+                event_hub.publish({"type": "topic.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
+                return duplicate
             topic = Topic(
                 id=payload.id or create_id("topic"),
                 name=payload.name,
@@ -410,6 +497,22 @@ def upsert_task(
                 task.pinned = payload.pinned
             task.updatedAt = timestamp
         else:
+            duplicate = _find_similar_task(session, payload.topicId, payload.title)
+            if duplicate:
+                if payload.status is not None:
+                    duplicate.status = payload.status
+                if payload.priority is not None:
+                    duplicate.priority = payload.priority
+                if payload.dueDate is not None:
+                    duplicate.dueDate = payload.dueDate
+                if payload.pinned is not None:
+                    duplicate.pinned = payload.pinned
+                duplicate.updatedAt = timestamp
+                session.add(duplicate)
+                session.commit()
+                session.refresh(duplicate)
+                event_hub.publish({"type": "task.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
+                return duplicate
             task = Task(
                 id=payload.id or create_id("task"),
                 topicId=payload.topicId,
@@ -539,21 +642,23 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
         if not entry:
             raise HTTPException(status_code=404, detail="Log not found")
 
-        if payload.topicId is not None:
+        fields = payload.model_fields_set
+
+        if "topicId" in fields:
             entry.topicId = payload.topicId
-        if payload.taskId is not None:
+        if "taskId" in fields:
             entry.taskId = payload.taskId
-        if payload.relatedLogId is not None:
+        if "relatedLogId" in fields:
             entry.relatedLogId = payload.relatedLogId
-        if payload.summary is not None:
+        if "summary" in fields:
             entry.summary = payload.summary
-        if payload.raw is not None:
+        if "raw" in fields:
             entry.raw = payload.raw
-        if payload.classificationStatus is not None:
+        if "classificationStatus" in fields:
             entry.classificationStatus = payload.classificationStatus
-        if payload.classificationAttempts is not None:
+        if "classificationAttempts" in fields:
             entry.classificationAttempts = payload.classificationAttempts
-        if payload.classificationError is not None:
+        if "classificationError" in fields:
             entry.classificationError = payload.classificationError
 
         entry.updatedAt = now_iso()
@@ -601,6 +706,36 @@ def list_changes(
         tasks.sort(key=lambda t: t.updatedAt, reverse=True)
         logs.sort(key=lambda l: l.createdAt, reverse=True)
         return {"topics": topics, "tasks": tasks, "logs": logs}
+
+
+@app.get("/api/clawgraph", response_model=ClawgraphResponse, tags=["clawgraph"])
+def clawgraph(
+    maxEntities: int = Query(default=120, ge=20, le=400, description="Maximum number of entity nodes."),
+    maxNodes: int = Query(default=260, ge=40, le=800, description="Maximum total nodes."),
+    minEdgeWeight: float = Query(default=0.16, ge=0.0, le=2.0, description="Edge weight threshold."),
+    limitLogs: int = Query(default=2400, ge=100, le=20000, description="Recent log window used for graph build."),
+    includePending: bool = Query(default=True, description="Include pending logs in graph extraction."),
+):
+    """Build and return an entity-relationship graph from topics/tasks/logs."""
+    with get_session() as session:
+        topics = session.exec(select(Topic)).all()
+        tasks = session.exec(select(Task)).all()
+        logs = session.exec(select(LogEntry)).all()
+        logs.sort(key=lambda l: l.createdAt, reverse=True)
+        if not includePending:
+            logs = [entry for entry in logs if (entry.classificationStatus or "pending") == "classified"]
+        logs = logs[:limitLogs]
+
+        graph = build_clawgraph(
+            topics,
+            tasks,
+            logs,
+            max_entities=maxEntities,
+            max_nodes=maxNodes,
+            min_edge_weight=minEdgeWeight,
+        )
+        graph["generatedAt"] = now_iso()
+        return graph
 
 
 @app.get("/api/metrics", tags=["metrics"])

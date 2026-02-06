@@ -54,7 +54,7 @@ const ICONS: Record<string, React.ReactElement> = {
 };
 
 const NAV_ITEMS = [
-  { href: "/u", label: "Home", id: "home" },
+  { href: "/u", label: "Board", id: "home" },
   { href: "/stats", label: "Stats", id: "stats" },
   { href: "/log", label: "Logs", id: "log" },
   { href: "/providers", label: "Providers", id: "providers" },

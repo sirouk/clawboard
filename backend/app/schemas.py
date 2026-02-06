@@ -212,3 +212,42 @@ class ChangesResponse(BaseModel):
     topics: List[TopicOut] = Field(description="Topics updated since timestamp.")
     tasks: List[TaskOut] = Field(description="Tasks updated since timestamp.")
     logs: List[LogOut] = Field(description="Logs created since timestamp.")
+
+
+class ClawgraphNode(BaseModel):
+    id: str = Field(description="Stable graph node ID.", examples=["topic:topic-1"])
+    label: str = Field(description="Human label.", examples=["Clawboard"])
+    type: str = Field(description="Node type (topic|task|entity|agent).", examples=["topic"])
+    score: float = Field(description="Node score (importance/centrality).", examples=[3.42])
+    size: float = Field(description="Visual node size hint.", examples=[18.4])
+    color: str = Field(description="Node color hint.", examples=["#ff8a4a"])
+    meta: Dict[str, Any] = Field(description="Node metadata.", examples=[{"topicId": "topic-1"}])
+
+
+class ClawgraphEdge(BaseModel):
+    id: str = Field(description="Stable edge ID.", examples=["edge-1"])
+    source: str = Field(description="Source node ID.", examples=["topic:topic-1"])
+    target: str = Field(description="Target node ID.", examples=["task:task-2"])
+    type: str = Field(
+        description="Edge type (has_task|mentions|co_occurs|related_topic|related_task|agent_focus).",
+        examples=["has_task"],
+    )
+    weight: float = Field(description="Relationship strength.", examples=[1.23])
+    evidence: int = Field(description="Evidence count.", examples=[4])
+
+
+class ClawgraphStats(BaseModel):
+    nodeCount: int = Field(description="Total nodes in graph.")
+    edgeCount: int = Field(description="Total edges in graph.")
+    topicCount: int = Field(description="Topic nodes.")
+    taskCount: int = Field(description="Task nodes.")
+    entityCount: int = Field(description="Entity nodes.")
+    agentCount: int = Field(description="Agent nodes.")
+    density: float = Field(description="Approximate graph density.", examples=[0.12])
+
+
+class ClawgraphResponse(BaseModel):
+    generatedAt: str = Field(description="ISO timestamp for graph generation.")
+    stats: ClawgraphStats = Field(description="Graph-level statistics.")
+    nodes: List[ClawgraphNode] = Field(description="Graph nodes.")
+    edges: List[ClawgraphEdge] = Field(description="Graph edges.")

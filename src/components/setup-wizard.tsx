@@ -7,9 +7,9 @@ import type { IntegrationLevel } from "@/lib/types";
 import { apiUrl, getApiBase, setApiBase } from "@/lib/api";
 
 const STEPS = [
-  { id: 1, title: "Instance", description: "Name your Clawboard and set integration depth." },
+  { id: 1, title: "OpenClaw Skill", description: "Install the skill and connect your agent." },
   { id: 2, title: "Token", description: "Store the API token locally for writes." },
-  { id: 3, title: "OpenClaw Skill", description: "Install the skill and connect your agent." },
+  { id: 3, title: "Instance", description: "Name your Clawboard and set integration depth." },
 ];
 
 export function SetupWizard() {
@@ -140,7 +140,7 @@ openclaw plugins enable clawboard-logger`;
       </Card>
 
       <Card className="space-y-6">
-        {step === 1 && (
+        {step === 3 && (
           <div className="space-y-4">
             <div>
               <h2 className="text-xl font-semibold">Instance Details</h2>
@@ -207,7 +207,7 @@ openclaw plugins enable clawboard-logger`;
           </div>
         )}
 
-        {step === 3 && (
+        {step === 1 && (
           <div className="space-y-5">
             <div>
               <h2 className="text-xl font-semibold">OpenClaw Skill</h2>

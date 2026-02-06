@@ -56,6 +56,8 @@ export function LogsPage() {
           showRawAll={showRawAll}
           onShowRawAllChange={setShowRawAll}
           allowNotes
+          initialVisibleCount={50}
+          loadMoreStep={50}
         />
       </Card>
     </div>
