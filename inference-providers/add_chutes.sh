@@ -129,14 +129,50 @@ configure_gateway() {
 
 add_chutes_auth() {
   log_info "Configuring Chutes auth via OpenClaw auth profiles..."
-  if [ -n "${CHUTES_API_KEY:-}" ]; then
-    printf "%s" "$CHUTES_API_KEY" | openclaw models auth paste-token --provider chutes >/dev/null 2>&1 \
+  local env_token token
+  env_token="${CHUTES_API_KEY:-}"
+
+  # Opt-in env mode only. Default is interactive prompt every run.
+  if [ "${CHUTES_USE_ENV_TOKEN:-0}" = "1" ]; then
+    if [ -z "${env_token//[[:space:]]/}" ]; then
+      log_error "CHUTES_USE_ENV_TOKEN=1 but CHUTES_API_KEY is empty."
+    fi
+    printf "%s" "$env_token" | openclaw models auth paste-token --provider chutes >/dev/null 2>&1 \
       || log_error "Failed to store Chutes token from CHUTES_API_KEY."
     log_success "Chutes auth stored (from env)."
-  else
-    openclaw models auth paste-token --provider chutes || log_error "Failed to store Chutes token."
-    log_success "Chutes auth stored."
+    return 0
   fi
+
+  if [ -n "${env_token//[[:space:]]/}" ]; then
+    log_info "CHUTES_API_KEY detected; prompting interactively (set CHUTES_USE_ENV_TOKEN=1 to use env token)."
+  fi
+
+  if [ ! -r /dev/tty ]; then
+    log_error "CHUTES_API_KEY is not set and no interactive TTY is available for token input."
+  fi
+
+  token=""
+  echo ""
+  printf "Paste token for Chutes: " > /dev/tty
+  # Read from /dev/tty so this works when script is executed via curl|bash.
+  local restore_echo=false
+  if stty -echo < /dev/tty 2>/dev/null; then
+    restore_echo=true
+  fi
+  IFS= read -r token < /dev/tty
+  if [ "$restore_echo" = true ]; then
+    stty echo < /dev/tty 2>/dev/null || true
+  fi
+  printf "\n" > /dev/tty
+
+  token="${token//$'\r'/}"
+  if [ -z "${token//[[:space:]]/}" ]; then
+    log_error "Chutes token cannot be empty."
+  fi
+
+  printf "%s" "$token" | openclaw models auth paste-token --provider chutes >/dev/null 2>&1 \
+    || log_error "Failed to store Chutes token."
+  log_success "Chutes auth stored."
 }
 
 configure_provider() {
