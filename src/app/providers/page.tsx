@@ -59,9 +59,14 @@ export default function ProvidersPage() {
             </p>
             <div className="mt-4 space-y-3">
               <div>
-                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center justify-between gap-2">
                   <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">macOS / Linux / WSL / Git Bash</div>
-                  <Button size="sm" variant="secondary" onClick={() => void copyToClipboard(HUMAN_UNIX_COMMAND)}>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    aria-label="Copy unix setup command"
+                    onClick={() => void copyToClipboard(HUMAN_UNIX_COMMAND)}
+                  >
                     Copy
                   </Button>
                 </div>
@@ -76,7 +81,12 @@ export default function ProvidersPage() {
               <div>
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Windows (PowerShell + Git Bash/WSL)</div>
-                  <Button size="sm" variant="secondary" onClick={() => void copyToClipboard(HUMAN_WINDOWS_COMMAND)}>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    aria-label="Copy windows setup command"
+                    onClick={() => void copyToClipboard(HUMAN_WINDOWS_COMMAND)}
+                  >
                     Copy
                   </Button>
                 </div>
@@ -102,7 +112,12 @@ export default function ProvidersPage() {
             <div className="mt-4">
               <div className="flex items-center justify-between gap-2">
                 <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Prompt</div>
-                <Button size="sm" variant="secondary" onClick={() => void copyToClipboard(AGENT_PROMPT)}>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  aria-label="Copy agent prompt"
+                  onClick={() => void copyToClipboard(AGENT_PROMPT)}
+                >
                   Copy
                 </Button>
               </div>

@@ -1,5 +1,7 @@
 import { redirect } from "next/navigation";
 
+type MaybePromise<T> = T | Promise<T>;
+
 function safeDecode(value: string) {
   try {
     return decodeURIComponent(value);
@@ -8,8 +10,10 @@ function safeDecode(value: string) {
   }
 }
 
-export default function ChatThreadRedirect({ params }: { params: { threadId: string } }) {
-  const threadId = safeDecode(params.threadId ?? "").trim();
+export default async function ChatThreadRedirect({ params }: { params: MaybePromise<{ threadId: string }> }) {
+  // Next.js can provide `params` as either a plain object or a Promise (depending on runtime mode).
+  const resolved = await params;
+  const threadId = safeDecode(String(resolved?.threadId ?? "")).trim();
 
   if (threadId.startsWith("topic:")) {
     const topicId = threadId.slice("topic:".length).trim();
@@ -28,4 +32,3 @@ export default function ChatThreadRedirect({ params }: { params: { threadId: str
 
   redirect("/u");
 }
-

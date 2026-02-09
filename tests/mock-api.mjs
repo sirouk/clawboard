@@ -325,6 +325,39 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  if (url.pathname === "/api/metrics" && req.method === "GET") {
+    const now = Date.now();
+    const dayAgo = now - 24 * 60 * 60 * 1000;
+    const countCreated24h = (items) =>
+      items.filter((item) => {
+        const stamp = Date.parse(item.createdAt || item.updatedAt || "");
+        if (Number.isNaN(stamp)) return false;
+        return stamp >= dayAgo;
+      }).length;
+    const topicsCreated24h = countCreated24h(store.topics);
+    const tasksCreated24h = countCreated24h(store.tasks);
+    return sendJson(res, 200, {
+      creation: {
+        topics: { total: store.topics.length, created24h: topicsCreated24h },
+        tasks: { total: store.tasks.length, created24h: tasksCreated24h },
+        gate: {
+          topics: {
+            allowedTotal: store.topics.length,
+            blockedTotal: 0,
+            allowed24h: topicsCreated24h,
+            blocked24h: 0,
+          },
+          tasks: {
+            allowedTotal: store.tasks.length,
+            blockedTotal: 0,
+            allowed24h: tasksCreated24h,
+            blocked24h: 0,
+          },
+        },
+      },
+    });
+  }
+
   if (url.pathname === "/api/clawgraph" && req.method === "GET") {
     return sendJson(res, 200, buildMockClawgraph());
   }
