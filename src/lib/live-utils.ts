@@ -50,14 +50,39 @@ export function mergeLogs(items: LogEntry[], incoming: LogEntry[]): LogEntry[] {
   for (const entry of incoming) {
     next = upsertById(next, entry);
   }
-  return next.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  return next.sort(compareLogsDesc);
+}
+
+function parseIsoMs(value: string | undefined): number {
+  if (!value) return Number.NaN;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : Number.NaN;
+}
+
+export function compareLogsDesc(a: LogEntry, b: LogEntry): number {
+  const aCreated = parseIsoMs(a.createdAt);
+  const bCreated = parseIsoMs(b.createdAt);
+  if (Number.isFinite(aCreated) && Number.isFinite(bCreated) && aCreated !== bCreated) return bCreated - aCreated;
+
+  // Deterministic fallback. Not chronological, but stable.
+  if (a.id === b.id) return 0;
+  return a.id < b.id ? 1 : -1;
 }
 
 export function maxTimestamp(items: Array<{ updatedAt?: string; createdAt?: string }>): string | undefined {
   let max = "";
+  let maxMs = Number.NEGATIVE_INFINITY;
   for (const item of items) {
     const value = item.updatedAt ?? item.createdAt ?? "";
-    if (value > max) max = value;
+    const ms = parseIsoMs(value);
+    if (Number.isFinite(ms)) {
+      if (ms > maxMs) {
+        maxMs = ms;
+        max = value;
+      }
+      continue;
+    }
+    if (value > max && !Number.isFinite(maxMs)) max = value;
   }
   return max || undefined;
 }

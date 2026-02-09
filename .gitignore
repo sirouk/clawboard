@@ -25,7 +25,8 @@
 # clawboard data
 /data
 *.db
-backend/__pycache__/
+__pycache__/
+*.py[cod]
 backend/.venv/
 
 # misc
@@ -49,3 +50,4 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+_purge-archive/

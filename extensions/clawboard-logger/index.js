@@ -1,8 +1,14 @@
 import fs from "node:fs/promises";
+import crypto from "node:crypto";
 import path from "node:path";
 import os from "node:os";
+import { DatabaseSync } from "node:sqlite";
 
-const DEFAULT_QUEUE = path.join(os.homedir(), ".openclaw", "clawboard-queue.jsonl");
+import { computeEffectiveSessionKey, parseBoardSessionKey } from "./session-key.js";
+import { getIgnoreSessionPrefixesFromEnv, shouldIgnoreSessionKey } from "./ignore-session.js";
+export { computeEffectiveSessionKey, parseBoardSessionKey };
+
+const DEFAULT_QUEUE = path.join(os.homedir(), ".openclaw", "clawboard-queue.sqlite");
 const SUMMARY_MAX = 72;
 const RAW_MAX = 5000;
 const DEFAULT_CONTEXT_MAX_CHARS = 2200;
@@ -11,6 +17,7 @@ const DEFAULT_CONTEXT_TASK_LIMIT = 3;
 const DEFAULT_CONTEXT_LOG_LIMIT = 6;
 const CLAWBOARD_CONTEXT_BEGIN = "[CLAWBOARD_CONTEXT_BEGIN]";
 const CLAWBOARD_CONTEXT_END = "[CLAWBOARD_CONTEXT_END]";
+const IGNORE_SESSION_PREFIXES = getIgnoreSessionPrefixesFromEnv(process.env);
 
 function normalizeBaseUrl(url) {
   return url.replace(/\/$/, "");
@@ -25,6 +32,9 @@ function sanitizeMessageContent(content) {
   );
   text = text.replace(/^\s*summary\s*[:\-]\s*/gim, "");
   text = text.replace(/^\[Discord [^\]]+\]\s*/gim, "");
+  // OpenClaw/CLI transcripts sometimes include a local-time prefix like:
+  // "[Sun 2026-02-08 09:01 EST] ..." which pollutes classifier/search signals.
+  text = text.replace(/^\[[A-Za-z]{3}\s+\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?\s+[A-Za-z]{2,5}\]\s*/gim, "");
   text = text.replace(/\[message[_\s-]?id:[^\]]+\]/gi, "");
   text = text.replace(/\n{3,}/g, "\n\n");
   return text.trim();
@@ -35,6 +45,13 @@ function summarize(content) {
   if (!trimmed) return "";
   if (trimmed.length <= SUMMARY_MAX) return trimmed;
   return `${trimmed.slice(0, SUMMARY_MAX - 1).trim()}…`;
+}
+
+function dedupeFingerprint(content) {
+  const normalized = sanitizeMessageContent(content).replace(/\s+/g, " ").trim().toLowerCase();
+  if (!normalized)
+    return "empty";
+  return `${normalized.slice(0, 220)}|${normalized.length}`;
 }
 
 function truncateRaw(content) {
@@ -149,7 +166,16 @@ function isClassifierPayloadText(content) {
   if (!text.startsWith("{") && !text.startsWith("```"))
     return false;
   const markers = ["\"window\"", "\"candidateTopics\"", "\"candidateTasks\"", "\"instructions\"", "\"summaries\""];
-  return markers.some((marker) => text.includes(marker));
+  if (markers.some((marker) => text.includes(marker)))
+    return true;
+
+  const controlMarkers = ["\"createTopic\"", "\"createTask\"", "\"topicId\"", "\"taskId\""];
+  let hits = 0;
+  for (const marker of controlMarkers) {
+    if (text.includes(marker))
+      hits += 1;
+  }
+  return hits >= 2;
 }
 
 function redact(value, depth = 0) {
@@ -210,6 +236,128 @@ export default function register(api) {
   let flushing = false;
   const topicCache = new Map();
 
+  let flushTimer;
+
+  function nowMs() {
+    return Date.now();
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function jitter(ms) {
+    const spread = Math.max(10, Math.floor(ms * 0.25));
+    return ms + Math.floor((Math.random() - 0.5) * 2 * spread);
+  }
+
+  function computeBackoffMs(attempt, capMs) {
+    const base = Math.min(capMs, Math.floor(250 * Math.pow(2, Math.max(0, attempt - 1))));
+    return Math.max(50, jitter(base));
+  }
+
+  class SqliteQueue {
+    constructor(filePath) {
+      this.db = new DatabaseSync(filePath);
+      this.db.exec("PRAGMA journal_mode=WAL;");
+      this.db.exec("PRAGMA synchronous=NORMAL;");
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS clawboard_queue (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          created_at_ms INTEGER NOT NULL,
+          next_attempt_at_ms INTEGER NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          payload_json TEXT NOT NULL,
+          last_error TEXT
+        );
+      `);
+      this.db.exec("CREATE INDEX IF NOT EXISTS idx_clawboard_queue_next_attempt ON clawboard_queue(next_attempt_at_ms);");
+      this.insertStmt = this.db.prepare(`
+        INSERT OR IGNORE INTO clawboard_queue
+          (created_at_ms, next_attempt_at_ms, attempts, idempotency_key, payload_json, last_error)
+        VALUES
+          (?1, ?2, ?3, ?4, ?5, ?6);
+      `);
+      this.selectStmt = this.db.prepare(`
+        SELECT id, idempotency_key as idempotencyKey, payload_json as payloadJson, attempts
+        FROM clawboard_queue
+        WHERE next_attempt_at_ms <= ?1
+        ORDER BY id ASC
+        LIMIT ?2;
+      `);
+      this.deleteStmt = this.db.prepare("DELETE FROM clawboard_queue WHERE id = ?1;");
+      this.failStmt = this.db.prepare(`
+        UPDATE clawboard_queue
+        SET attempts = ?2, next_attempt_at_ms = ?3, last_error = ?4
+        WHERE id = ?1;
+      `);
+    }
+    enqueue(idempotencyKey, payload, error) {
+      const ts = nowMs();
+      this.insertStmt.run(ts, ts, 0, idempotencyKey, JSON.stringify(payload), String(error).slice(0, 1200));
+    }
+    pickDue(limit) {
+      const rows = this.selectStmt.all(nowMs(), Math.max(1, Math.min(200, limit)));
+      return rows ?? [];
+    }
+    markSent(id) {
+      this.deleteStmt.run(id);
+    }
+    markFailed(id, attempts, nextAttemptAtMs, error) {
+      this.failStmt.run(id, attempts, nextAttemptAtMs, String(error).slice(0, 1200));
+    }
+  }
+
+  let queueDb;
+
+  async function getQueueDb() {
+    if (queueDb) return queueDb;
+    await ensureDir(queuePath);
+    queueDb = new SqliteQueue(queuePath);
+    return queueDb;
+  }
+
+  function ensureIdempotencyKey(payload) {
+    const existing = payload.idempotencyKey;
+    if (typeof existing === "string" && existing.trim().length > 0) return existing.trim();
+
+    const source = payload.source ?? void 0;
+    const channel = typeof source?.channel === "string" ? source.channel.trim() : "";
+    const sessionKey = typeof source?.sessionKey === "string" ? source.sessionKey.trim() : "";
+    const messageId = typeof source?.messageId === "string" ? source.messageId.trim() : "";
+    const agentId = typeof payload.agentId === "string" ? payload.agentId : "";
+    const type = typeof payload.type === "string" ? payload.type : "";
+
+    if (messageId) {
+      const scope = sessionKey || "na";
+      const key = `clawboard:${channel || "na"}:${scope}:${messageId}:${agentId || "na"}:${type || "log"}`;
+      payload.idempotencyKey = key;
+      return key;
+    }
+
+    const relatedLogId = typeof payload.relatedLogId === "string" ? payload.relatedLogId : "";
+    const content = typeof payload.content === "string" ? payload.content : "";
+    const summary = typeof payload.summary === "string" ? payload.summary : "";
+    const raw = typeof payload.raw === "string" ? payload.raw : "";
+    const fingerprint = dedupeFingerprint(content || summary || raw);
+
+    const createdAt = typeof payload.createdAt === "string" ? payload.createdAt : "";
+    const seed = `${sessionKey}|${channel}|${agentId}|${type}|${relatedLogId}|${fingerprint}|${createdAt}`;
+    const digest = crypto.createHash("sha256").update(seed).digest("hex").slice(0, 24);
+    const key = `clawboard:fp:${digest}`;
+    payload.idempotencyKey = key;
+    return key;
+  }
+
+  function stableAgentEndMessageId(opts) {
+    const seed = opts.rawId
+      ? `${opts.sessionKey}|${opts.role}|${opts.rawId}`
+      : `${opts.sessionKey}|${opts.role}|${opts.index}|${opts.fingerprint}`;
+    const digest = crypto.createHash("sha256").update(seed).digest("hex").slice(0, 24);
+    return `oc:${digest}`;
+  }
+
   function safeId(prefix, raw) {
     const cleaned = String(raw)
       .toLowerCase()
@@ -236,6 +384,9 @@ export default function register(api) {
   }
 
   async function resolveTopicId(sessionKey) {
+    const route = parseBoardSessionKey(sessionKey);
+    if (route?.topicId)
+      return route.topicId;
     if (defaultTopicId) return defaultTopicId;
     if (!autoTopicBySession) return undefined;
     if (!sessionKey) return undefined;
@@ -249,7 +400,12 @@ export default function register(api) {
     return topicId;
   }
 
-  function resolveTaskId() {
+  function resolveTaskId(sessionKey) {
+    const route = parseBoardSessionKey(sessionKey);
+    if (route?.kind === "topic")
+      return void 0;
+    if (route?.kind === "task")
+      return route.taskId;
     return defaultTaskId;
   }
 
@@ -267,25 +423,102 @@ export default function register(api) {
     return `Agent ${resolved}`;
   }
 
-  async function enqueue(payload) {
-    await ensureDir(queuePath);
-    await fs.appendFile(queuePath, `${JSON.stringify(payload)}\n`, "utf8");
+  // When Clawboard isn't reachable (common during local dev restarts and during purge),
+  // Node's fetch throws (often: "TypeError: fetch failed"). Don't spam the logs.
+  const SEND_WARN_INTERVAL_MS = 3e4;
+  let lastSendWarnAt = 0;
+  let lastSendWarnSig = "";
+  let suppressedSendWarns = 0;
+
+  function formatSendError(err) {
+    if (err instanceof Error) {
+      const msg = err.message || String(err);
+      const cause = err.cause;
+      if (cause && typeof cause === "object") {
+        const code = typeof cause.code === "string" ? cause.code : void 0;
+        const cmsg = typeof cause.message === "string" ? cause.message : void 0;
+        if (code || cmsg)
+          return `${msg} (cause: ${code ? `${code} ` : ""}${cmsg ?? ""}`.trim() + ")";
+      }
+      return msg;
+    }
+    return String(err);
+  }
+
+  function warnSendFailure(err) {
+    const now = nowMs();
+    const sig = formatSendError(err);
+    suppressedSendWarns += 1;
+    const shouldLog = lastSendWarnAt === 0 || sig !== lastSendWarnSig || now - lastSendWarnAt >= SEND_WARN_INTERVAL_MS;
+    if (!shouldLog) return;
+
+    const suppressed = Math.max(0, suppressedSendWarns - 1);
+    const suffix = suppressed > 0 ? ` (suppressed ${suppressed} similar error(s))` : "";
+    api.logger.warn(`[clawboard-logger] failed to send log: ${sig}${suffix}`);
+    lastSendWarnAt = now;
+    lastSendWarnSig = sig;
+    suppressedSendWarns = 0;
   }
 
   async function postLog(payload) {
+    const idempotencyKey = ensureIdempotencyKey(payload);
     try {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 8e3);
       const res = await fetch(`${baseUrl}${ingestPath}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(token ? { "X-Clawboard-Token": token } : {}),
+          "X-Idempotency-Key": idempotencyKey,
         },
+        signal: controller.signal,
         body: JSON.stringify(payload),
       });
+      clearTimeout(t);
       return res.ok;
     } catch (err) {
-      api.logger.warn(`[clawboard-logger] failed to send log: ${String(err)}`);
+      warnSendFailure(err);
       return false;
+    }
+  }
+
+  async function postLogWithRetry(payload) {
+    const deadline = nowMs() + 1e4;
+    let attempt = 0;
+    while (true) {
+      attempt += 1;
+      const ok = await postLog(payload);
+      if (ok) return true;
+      if (nowMs() >= deadline) return false;
+      await sleep(computeBackoffMs(attempt, 2500));
+    }
+  }
+
+  async function flushQueueOnce(limit = 25) {
+    const db = await getQueueDb();
+    const rows = db.pickDue(limit);
+    if (rows.length === 0) return;
+
+    for (const row of rows) {
+      let payload;
+      try {
+        payload = JSON.parse(row.payloadJson);
+      } catch (err) {
+        db.markFailed(row.id, row.attempts + 1, nowMs() + 6e4, `json parse failed: ${String(err)}`);
+        continue;
+      }
+
+      payload.idempotencyKey = row.idempotencyKey;
+      const ok = await postLog(payload);
+      if (ok) {
+        db.markSent(row.id);
+        continue;
+      }
+
+      const attempts = row.attempts + 1;
+      const backoff = computeBackoffMs(attempts, 3e5);
+      db.markFailed(row.id, attempts, nowMs() + backoff, "send failed");
     }
   }
 
@@ -293,43 +526,47 @@ export default function register(api) {
     if (flushing) return;
     flushing = true;
     try {
-      const exists = await fs
-        .stat(queuePath)
-        .then(() => true)
-        .catch(() => false);
-      if (!exists) return;
-      const raw = await fs.readFile(queuePath, "utf8");
-      if (!raw.trim()) return;
-      const lines = raw.split("\n").filter(Boolean);
-      const remaining = [];
-      for (const line of lines) {
-        try {
-          const payload = JSON.parse(line);
-          const ok = await postLog(payload);
-          if (!ok) remaining.push(line);
-        } catch {
-          remaining.push(line);
-        }
-      }
-      if (remaining.length === 0) {
-        await fs.unlink(queuePath).catch(() => undefined);
-      } else {
-        await fs.writeFile(queuePath, remaining.join("\n") + "\n", "utf8");
-      }
+      await flushQueueOnce(50);
     } finally {
       flushing = false;
     }
   }
 
+  function ensureFlushLoop() {
+    if (flushTimer) return;
+    flushTimer = setInterval(() => {
+      flushQueue().catch(() => undefined);
+    }, 2e3);
+    flushTimer?.unref?.();
+  }
+
+  async function enqueueDurable(payload, error) {
+    const db = await getQueueDb();
+    const idempotencyKey = ensureIdempotencyKey(payload);
+    db.enqueue(idempotencyKey, payload, error);
+    ensureFlushLoop();
+  }
+
   async function send(payload) {
-    const ok = await postLog(payload);
+    ensureIdempotencyKey(payload);
+    const ok = await postLogWithRetry(payload);
     if (!ok) {
-      await enqueue(payload);
+      await enqueueDurable(payload, "retry window exceeded");
       return;
     }
+    ensureFlushLoop();
     await flushQueue();
   }
 
+  let sendChain = Promise.resolve();
+
+  function sendAsync(payload) {
+    sendChain = sendChain.then(() => send(payload)).catch((err) => {
+      warnSendFailure(err);
+    });
+  }
+
+  ensureFlushLoop();
   flushQueue().catch(() => undefined);
 
   // Startup marker (helps verify the running code version and routing behavior).
@@ -351,6 +588,9 @@ export default function register(api) {
     ...(token ? { "X-Clawboard-Token": token } : {})
   };
 
+  const CONTEXT_FETCH_TIMEOUT_MS = 1200;
+  const CONTEXT_TOTAL_BUDGET_MS = 2200;
+
   async function getJson(pathname, params) {
     try {
       const url = new URL(`${baseUrl}${pathname}`);
@@ -361,7 +601,10 @@ export default function register(api) {
           url.searchParams.set(key, String(value));
         }
       }
-      const res = await fetch(url.toString(), { headers: apiHeaders });
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), CONTEXT_FETCH_TIMEOUT_MS);
+      const res = await fetch(url.toString(), { headers: apiHeaders, signal: controller.signal });
+      clearTimeout(t);
       if (!res.ok)
         return null;
       return await res.json();
@@ -684,9 +927,18 @@ export default function register(api) {
     if (!contextAugment)
       return;
     const input = latestUserInput(event.prompt, event.messages);
-    const retrievalQuery = input && input.trim().length > 0 ? input : "current conversation continuity, active topics, active tasks, and curated notes";
+    const cleanInput = sanitizeMessageContent(input ?? "");
+    const effectiveSessionKey = computeEffectiveSessionKey(void 0, ctx);
+    if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
+      return;
+    if (cleanInput && isClassifierPayloadText(cleanInput))
+      return;
+    const retrievalQuery = cleanInput && cleanInput.trim().length > 0 ? clip(cleanInput, 320) : "current conversation continuity, active topics, active tasks, and curated notes";
     const upstream = extractUpstreamMemorySignals(event.prompt, event.messages);
-    const context = await retrieveContext(retrievalQuery, ctx?.sessionKey, upstream);
+    const context = await Promise.race([
+      retrieveContext(retrievalQuery, effectiveSessionKey ?? ctx?.sessionKey, upstream),
+      sleep(CONTEXT_TOTAL_BUDGET_MS).then(() => void 0)
+    ]);
     if (!context)
       return;
     const prependContext = [
@@ -705,20 +957,14 @@ export default function register(api) {
   let lastEffectiveSessionKey;
   let lastMessageAt = 0;
   const inboundBySession = /* @__PURE__ */ new Map();
+  const agentEndCursorBySession = /* @__PURE__ */ new Map();
 
   const resolveSessionKey = (meta, ctx2) => {
-    const metaSession = meta?.sessionKey;
-    if (typeof metaSession === "string" && metaSession.startsWith("channel:"))
-      return metaSession;
-    if (ctx2?.channelId)
-      return `channel:${ctx2.channelId}`;
-    const ctxSession = ctx2?.sessionKey;
-    if (ctxSession)
-      return ctxSession;
-    return metaSession;
+    return computeEffectiveSessionKey(meta, ctx2);
   };
 
   api.on("message_received", async (event, ctx) => {
+    const createdAt = new Date().toISOString();
     const raw = event.content ?? "";
     const cleanRaw = sanitizeMessageContent(raw);
     if (isClassifierPayloadText(cleanRaw))
@@ -727,6 +973,10 @@ export default function register(api) {
       return;
     const meta = event.metadata ?? undefined;
     const effectiveSessionKey = resolveSessionKey(meta, ctx);
+    if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
+      return;
+    if (parseBoardSessionKey(effectiveSessionKey ?? ctx?.sessionKey) && !ctx.channelId)
+      return;
     lastChannelId = ctx.channelId;
     lastEffectiveSessionKey = effectiveSessionKey;
     lastMessageAt = Date.now();
@@ -739,27 +989,31 @@ export default function register(api) {
       });
     }
     const topicId = await resolveTopicId(effectiveSessionKey);
-    const taskId = resolveTaskId();
+    const taskId = resolveTaskId(effectiveSessionKey);
 
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? summarize(metaSummary) : summarize(cleanRaw);
-    const incomingKey = `received:${ctx.channelId ?? "nochannel"}:${effectiveSessionKey ?? ""}:${summary}`;
-    rememberIncoming(incomingKey);
+    const messageId = typeof meta?.messageId === "string" ? meta.messageId : void 0;
+    const incomingKey = messageId ? `received:${ctx.channelId ?? "nochannel"}:${effectiveSessionKey ?? ""}:${messageId}` : null;
+    if (incomingKey && recentIncoming.has(incomingKey))
+      return;
+    if (incomingKey)
+      rememberIncoming(incomingKey);
 
-    await send({
+    sendAsync({
       topicId,
       taskId,
       type: "conversation",
       content: cleanRaw,
       summary,
       raw: truncateRaw(cleanRaw),
-      idempotencyKey: meta?.messageId ? `discord:${meta.messageId}:user:conversation` : void 0,
+      createdAt,
       agentId: "user",
       agentLabel: "User",
       source: {
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
-        messageId: meta?.messageId,
+        messageId,
       },
     });
 
@@ -789,6 +1043,7 @@ export default function register(api) {
   };
 
   api.on("message_sending", async (event, ctx) => {
+    const createdAt = new Date().toISOString();
     const raw = event.content ?? "";
     const cleanRaw = sanitizeMessageContent(raw);
     if (isClassifierPayloadText(cleanRaw))
@@ -797,26 +1052,34 @@ export default function register(api) {
       return;
     const meta = event.metadata ?? void 0;
     const effectiveSessionKey = resolveSessionKey(meta, ctx);
+    if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
+      return;
     const topicId = await resolveTopicId(effectiveSessionKey);
-    const taskId = resolveTaskId();
+    const taskId = resolveTaskId(effectiveSessionKey);
     const agentId = "assistant";
     const agentLabel = resolveAgentLabel(ctx.agentId, meta?.sessionKey ?? ctx?.sessionKey);
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? summarize(metaSummary) : summarize(cleanRaw);
-    const dedupeKey = `sending:${ctx.channelId}:${effectiveSessionKey ?? ""}:${summary}`;
-    rememberOutgoing(dedupeKey);
-    await send({
+    const messageId = typeof meta?.messageId === "string" ? meta.messageId : void 0;
+    const dedupeKey = messageId ? `sending:${ctx.channelId ?? "nochannel"}:${effectiveSessionKey ?? ""}:${messageId}` : null;
+    if (dedupeKey && recentOutgoing.has(dedupeKey))
+      return;
+    if (dedupeKey)
+      rememberOutgoing(dedupeKey);
+    sendAsync({
       topicId,
       taskId,
       type: "conversation",
       content: cleanRaw,
       summary,
       raw: truncateRaw(cleanRaw),
+      createdAt,
       agentId,
       agentLabel,
       source: {
         channel: ctx.channelId,
-        sessionKey: effectiveSessionKey
+        sessionKey: effectiveSessionKey,
+        messageId
       }
     });
   });
@@ -826,53 +1089,68 @@ export default function register(api) {
     const meta = event ?? {};
     const sessionKey = meta?.sessionKey ?? ctx?.sessionKey;
     const effectiveSessionKey = sessionKey ?? (ctx.channelId ? `channel:${ctx.channelId}` : void 0);
-    const summary = summarize(raw);
-    const dedupeKey = `sending:${ctx.channelId}:${effectiveSessionKey ?? ""}:${summary}`;
+    if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
+      return;
+    const dedupeKey = `sending:${ctx.channelId ?? "nochannel"}:${effectiveSessionKey ?? ""}:${dedupeFingerprint(raw)}`;
     if (recentOutgoing.has(dedupeKey))
       return;
   });
 
   api.on("before_tool_call", async (event, ctx) => {
+    const createdAt = new Date().toISOString();
     const redacted = redact(event.params);
-    const topicId = await resolveTopicId(ctx.sessionKey);
-    const taskId = resolveTaskId();
+    const effectiveSessionKey = resolveSessionKey(void 0, ctx);
+    if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
+      return;
+    const topicId = await resolveTopicId(effectiveSessionKey);
+    const taskId = resolveTaskId(effectiveSessionKey);
 
-    await send({
+    sendAsync({
       topicId,
       taskId,
       type: "action",
       content: `Tool call: ${event.toolName}`,
       summary: `Tool call: ${event.toolName}`,
       raw: JSON.stringify(redacted, null, 2),
+      createdAt,
       agentId: ctx.agentId,
-      agentLabel: ctx.agentId ? `Agent ${ctx.agentId}` : "Agent",
+      agentLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey),
       source: {
-        sessionKey: ctx.sessionKey,
+        channel: ctx.channelId,
+        sessionKey: effectiveSessionKey,
       },
     });
   });
 
   api.on("after_tool_call", async (event, ctx) => {
+    const createdAt = new Date().toISOString();
     const payload = event.error ? { error: event.error } : { result: redact(event.result), durationMs: event.durationMs };
-    const topicId = await resolveTopicId(ctx.sessionKey);
-    const taskId = resolveTaskId();
+    const effectiveSessionKey = resolveSessionKey(void 0, ctx);
+    if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
+      return;
+    const topicId = await resolveTopicId(effectiveSessionKey);
+    const taskId = resolveTaskId(effectiveSessionKey);
 
-    await send({
+    sendAsync({
       topicId,
       taskId,
       type: "action",
       content: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
       summary: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
       raw: JSON.stringify(payload, null, 2),
+      createdAt,
       agentId: ctx.agentId,
-      agentLabel: ctx.agentId ? `Agent ${ctx.agentId}` : "Agent",
+      agentLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey),
       source: {
-        sessionKey: ctx.sessionKey,
+        channel: ctx.channelId,
+        sessionKey: effectiveSessionKey,
       },
     });
   });
 
   api.on("agent_end", async (event, ctx) => {
+    const createdAtBaseMs = Date.now();
+    const createdAt = new Date(createdAtBaseMs).toISOString();
     const payload = {
       success: event.success,
       error: event.error,
@@ -880,34 +1158,7 @@ export default function register(api) {
       messageCount: event.messages?.length ?? 0,
     };
 
-    const topicId = await resolveTopicId(ctx.sessionKey);
-    const taskId = resolveTaskId();
-
     const messages = Array.isArray(event.messages) ? event.messages : [];
-    const agentId = "assistant";
-    const agentLabel = resolveAgentLabel(ctx.agentId, ctx.sessionKey);
-
-    if (debug) {
-      try {
-        const shape = messages.slice(-20).map((m) => ({
-          role: typeof m?.role === "string" ? m.role : typeof m?.role,
-          contentType: Array.isArray(m?.content) ? "array" : typeof m?.content,
-          keys: m && typeof m === "object" ? Object.keys(m).slice(0, 12) : []
-        }));
-        await send({
-          topicId,
-          taskId,
-          type: "action",
-          content: "clawboard-logger: agent_end message shape",
-          summary: "clawboard-logger: agent_end message shape",
-          raw: JSON.stringify(shape, null, 2),
-          agentId: "system",
-          agentLabel: "Clawboard Logger",
-          source: { sessionKey: ctx.sessionKey }
-        });
-      } catch {
-      }
-    }
 
     const extractText = (value, depth = 0) => {
       if (!value || depth > 4) return void 0;
@@ -948,13 +1199,66 @@ export default function register(api) {
       const agentTag = ctx.agentId ?? "unknown";
       inferredSessionKey = `agent:${agentTag}:adhoc:${Date.now()}`;
     }
+    if (shouldIgnoreSessionKey(inferredSessionKey, IGNORE_SESSION_PREFIXES))
+      return;
     const inferredChannelId = (anchorFresh ? anchor?.channelId : void 0) ?? (inferredSessionKey.startsWith("channel:") && channelFresh ? lastChannelId : void 0);
+    const sourceChannel = inferredChannelId ?? ctx.channelId ?? (typeof ctx.messageProvider === "string" ? ctx.messageProvider : void 0) ?? (typeof ctx.provider === "string" ? ctx.provider : void 0) ?? "direct";
+
+    const topicId = await resolveTopicId(inferredSessionKey);
+    const taskId = resolveTaskId(inferredSessionKey);
+
+    const agentId = "assistant";
+    const agentLabel = resolveAgentLabel(ctx.agentId, inferredSessionKey);
+
+    if (debug) {
+      try {
+        const shape = messages.slice(-20).map((m) => ({
+          role: typeof m?.role === "string" ? m.role : typeof m?.role,
+          contentType: Array.isArray(m?.content) ? "array" : typeof m?.content,
+          keys: m && typeof m === "object" ? Object.keys(m).slice(0, 12) : []
+        }));
+        sendAsync({
+          topicId,
+          taskId,
+          type: "action",
+          content: "clawboard-logger: agent_end message shape",
+          summary: "clawboard-logger: agent_end message shape",
+          raw: JSON.stringify(shape, null, 2),
+          createdAt,
+          agentId: "system",
+          agentLabel: "Clawboard Logger",
+          source: { channel: inferredChannelId, sessionKey: inferredSessionKey }
+        });
+      } catch {
+      }
+    }
 
     if (!inferredSessionKey) {
     } else {
-      for (const msg of messages) {
+      const isChannelSession = inferredSessionKey.startsWith("channel:");
+      const isBoardSession = Boolean(parseBoardSessionKey(inferredSessionKey));
+      let startIdx = 0;
+      if (!isChannelSession) {
+        const prev = agentEndCursorBySession.get(inferredSessionKey);
+        if (typeof prev === "number" && Number.isFinite(prev)) {
+          startIdx = Math.max(0, Math.floor(prev));
+        } else {
+          startIdx = Math.max(0, messages.length - 24);
+        }
+      if (startIdx > messages.length)
+        startIdx = Math.max(0, messages.length - 24);
+    }
+
+      let agentEndSeq = 0;
+
+      for (let idx = startIdx; idx < messages.length; idx += 1) {
+        const msg = messages[idx];
         const role = typeof msg?.role === "string" ? msg.role : void 0;
         if (role !== "assistant" && role !== "user")
+          continue;
+        if (isBoardSession && role === "user")
+          continue;
+        if (isChannelSession && role === "user")
           continue;
         const content = extractText(msg.content);
         if (!content || !content.trim())
@@ -964,70 +1268,94 @@ export default function register(api) {
           continue;
         if (isClassifierPayloadText(cleanedContent))
           continue;
+        if (cleanedContent.trim() === "NO_REPLY")
+          continue;
         const summary = summarize(cleanedContent);
+        const fingerprint = dedupeFingerprint(cleanedContent);
+        const rawId = typeof msg?.id === "string" ? msg.id : void 0;
+        const messageId = stableAgentEndMessageId({
+          sessionKey: inferredSessionKey,
+          role,
+          index: idx,
+          fingerprint,
+          rawId
+        });
         const isJsonLike = cleanedContent.trim().startsWith("{") && (cleanedContent.includes("\"window\"") || cleanedContent.includes("\"topic\"") || cleanedContent.includes("\"candidateTopics\""));
         if (isJsonLike)
           continue;
-        const isChannelSession = inferredSessionKey.startsWith("channel:");
         if (role === "user" && isChannelSession && channelFresh) {
-          const dedupeKey = `received:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${summary}`;
+          const dedupeKey = `received:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${messageId}`;
           if (recentIncoming.has(dedupeKey))
             continue;
         }
         if (role === "assistant") {
-          const dedupeKey = `sending:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${summary}`;
+          const dedupeKey = `sending:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${messageId}`;
           if (recentOutgoing.has(dedupeKey))
             continue;
           rememberOutgoing(dedupeKey);
-          await send({
+          const messageCreatedAt = new Date(createdAtBaseMs + agentEndSeq).toISOString();
+          agentEndSeq += 1;
+          sendAsync({
             topicId,
             taskId,
             type: "conversation",
             content: cleanedContent,
             summary,
             raw: truncateRaw(cleanedContent),
+            createdAt: messageCreatedAt,
             agentId,
             agentLabel,
             source: {
-              channel: inferredChannelId,
-              sessionKey: inferredSessionKey
+              channel: sourceChannel,
+              sessionKey: inferredSessionKey,
+              messageId
             }
           });
         } else {
-          const dedupeKey = `received:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${summary}`;
+          const dedupeKey = `received:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${messageId}`;
           if (recentIncoming.has(dedupeKey))
             continue;
           rememberIncoming(dedupeKey);
-          await send({
+          const messageCreatedAt = new Date(createdAtBaseMs + agentEndSeq).toISOString();
+          agentEndSeq += 1;
+          sendAsync({
             topicId,
             taskId,
             type: "conversation",
             content: cleanedContent,
             summary,
             raw: truncateRaw(cleanedContent),
+            createdAt: messageCreatedAt,
             agentId: "user",
             agentLabel: "User",
             source: {
-              channel: inferredChannelId,
-              sessionKey: inferredSessionKey
+              channel: sourceChannel,
+              sessionKey: inferredSessionKey,
+              messageId
             }
           });
         }
       }
+
+      if (!isChannelSession) {
+        agentEndCursorBySession.set(inferredSessionKey, messages.length);
+      }
     }
 
     if (!event.success || debug) {
-      await send({
+      sendAsync({
         topicId,
         taskId,
         type: "action",
         content: event.success ? "Agent run complete" : "Agent run failed",
         summary: event.success ? "Agent run complete" : "Agent run failed",
         raw: JSON.stringify(payload, null, 2),
+        createdAt,
         agentId: ctx.agentId,
         agentLabel: ctx.agentId ? `Agent ${ctx.agentId}` : "Agent",
         source: {
-          sessionKey: ctx.sessionKey,
+          channel: sourceChannel,
+          sessionKey: inferredSessionKey,
         },
       });
     }

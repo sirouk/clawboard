@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Badge, Input } from "@/components/ui";
+import { Input } from "@/components/ui";
 import type { Topic } from "@/lib/types";
 import { buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
 import { apiFetch } from "@/lib/api";
@@ -27,20 +27,6 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [topics, setTopics] = useState<Topic[]>([]);
-
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        setOpen((prev) => !prev);
-      }
-      if (event.key === "Escape") {
-        setOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -78,7 +64,6 @@ export function CommandPalette() {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
-          <Badge tone="accent">⌘K</Badge>
         </div>
         <div className="mt-4 max-h-[60vh] overflow-y-auto">
           {actions.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No matches.</p>}

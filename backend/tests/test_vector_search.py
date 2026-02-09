@@ -80,6 +80,27 @@ class VectorSearchHybridTests(unittest.TestCase):
         self.assertEqual(result["logs"][0]["id"], "log-1")
         self.assertIn("rerankScore", result["logs"][0])
 
+    def test_semantic_search_supports_partial_token_queries_without_vectors(self):
+        topics = [
+            {"id": "topic-sqlmodel", "name": "SQLModel Inserts", "description": "Insert patterns and troubleshooting"},
+            {"id": "topic-docker", "name": "Docker Networking", "description": "Containers and DNS"},
+        ]
+        tasks: list[dict] = []
+        logs: list[dict] = []
+
+        result = vs.semantic_search(
+            "sql",
+            topics,
+            tasks,
+            logs,
+            topic_limit=6,
+            task_limit=6,
+            log_limit=6,
+        )
+
+        topic_ids = [row["id"] for row in result.get("topics", [])]
+        self.assertIn("topic-sqlmodel", topic_ids)
+
     def test_semantic_search_reports_qdrant_mode_when_qdrant_backend_serves_vectors(self):
         topics = [{"id": "topic-ops", "name": "Discord Operations", "description": "Retries"}]
         tasks = [{"id": "task-retry", "topicId": "topic-ops", "title": "Fix retry loop", "status": "doing"}]

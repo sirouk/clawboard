@@ -54,6 +54,23 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/*
+  Prevent iOS Safari from auto-zooming the viewport when focusing form controls.
+  Safari triggers this when computed font-size is < 16px.
+
+  We avoid disabling pinch zoom (accessibility) and instead raise the input font size
+  on touch devices / iOS WebKit.
+*/
+@supports (-webkit-touch-callout: none) {
+  @media (pointer: coarse) {
+    input,
+    textarea,
+    select {
+      font-size: 16px !important;
+    }
+  }
+}
+
 .claw-ambient {
   background:
     linear-gradient(160deg, rgba(255, 90, 45, 0.06), rgba(255, 90, 45, 0.018) 30%, transparent 66%),

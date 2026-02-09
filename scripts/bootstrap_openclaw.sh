@@ -184,6 +184,27 @@ upsert_env_value() {
   mv "$temp_file" "$file_path"
 }
 
+read_env_value_from_file() {
+  local file_path="$1"
+  local key="$2"
+  local line
+  [ -f "$file_path" ] || return 1
+  line="$(awk -v key="$key" '
+    $0 ~ "^[[:space:]]*" key "=" {
+      print substr($0, index($0, "=") + 1)
+    }
+  ' "$file_path" | tail -n1)"
+  line="${line//$'\r'/}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  line="${line%\"}"
+  line="${line#\"}"
+  line="${line%\'}"
+  line="${line#\'}"
+  [ -n "$line" ] || return 1
+  printf "%s" "$line"
+}
+
 extract_url_host() {
   local url="$1"
   local raw="${url#*://}"
@@ -401,6 +422,13 @@ log_info "Writing CLAWBOARD_PUBLIC_API_BASE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" "$ACCESS_API_URL"
 log_info "Writing CLAWBOARD_PUBLIC_WEB_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_WEB_URL" "$ACCESS_WEB_URL"
+
+# Default to production-style web service unless the user opts in.
+if ! read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" >/dev/null 2>&1; then
+  log_info "Writing CLAWBOARD_WEB_HOT_RELOAD=0 in $INSTALL_DIR/.env..."
+  upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" "0"
+fi
+
 chmod 600 "$INSTALL_DIR/.env" || true
 
 if [ "$SKIP_DOCKER" = false ]; then
@@ -439,7 +467,21 @@ if [ "$SKIP_DOCKER" = false ]; then
   fi
 
   log_info "Starting Clawboard via docker compose..."
-  (cd "$INSTALL_DIR" && $COMPOSE up -d --build)
+  WEB_HOT_RELOAD="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" || true)"
+  case "$WEB_HOT_RELOAD" in
+    1|true|TRUE|yes|YES)
+      # Avoid port conflicts: stop the production web service if it is running.
+      (cd "$INSTALL_DIR" && $COMPOSE stop web >/dev/null 2>&1 || true)
+      (cd "$INSTALL_DIR" && $COMPOSE rm -f web >/dev/null 2>&1 || true)
+      (cd "$INSTALL_DIR" && $COMPOSE --profile dev up -d --build api classifier qdrant web-dev)
+      ;;
+    *)
+      # Avoid port conflicts: stop the dev web service if it is running.
+      (cd "$INSTALL_DIR" && $COMPOSE stop web-dev >/dev/null 2>&1 || true)
+      (cd "$INSTALL_DIR" && $COMPOSE rm -f web-dev >/dev/null 2>&1 || true)
+      (cd "$INSTALL_DIR" && $COMPOSE up -d --build)
+      ;;
+  esac
   log_success "Clawboard services running."
 fi
 

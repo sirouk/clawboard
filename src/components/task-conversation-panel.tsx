@@ -1,17 +1,19 @@
 "use client";
 
 import { useMemo } from "react";
-import type { LogEntry, Topic } from "@/lib/types";
+import type { LogEntry, Task, Topic } from "@/lib/types";
 import { Card, CardHeader, Badge } from "@/components/ui";
 import { LogList } from "@/components/log-list";
 
 export function TaskConversationPanel({
   logs,
   topics,
+  tasks,
   showRaw,
 }: {
   logs: LogEntry[];
   topics: Topic[];
+  tasks?: Task[];
   showRaw: boolean;
 }) {
   const summary = useMemo(() => {
@@ -43,10 +45,12 @@ export function TaskConversationPanel({
           <LogList
             logs={logs}
             topics={topics}
+            tasks={tasks}
             showFilters={false}
             showRawToggle={false}
             showRawAll={showRaw}
             allowNotes
+            variant="chat"
             initialVisibleCount={2}
             loadMoreStep={2}
           />

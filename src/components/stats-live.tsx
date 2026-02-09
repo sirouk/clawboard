@@ -158,18 +158,8 @@ export function StatsLive() {
   const gateTopics = creation?.gate?.topics;
   const gateTasks = creation?.gate?.tasks;
 
-  return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Stats</h1>
-          <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">
-            Coverage and momentum across topics, tasks, and conversations.
-          </p>
-        </div>
-        <Badge tone="accent2">Live snapshot</Badge>
-      </div>
-
+	return (
+		<div className="space-y-6">
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <MetricCard title="Topics" count={topics.length} tone="accent" description="Active areas of focus." href="/u" cta="Open board" />
         <MetricCard title="Tasks" count={tasks.length} tone="accent2" description="Total tracked actions." href="/u" cta="Review tasks" />

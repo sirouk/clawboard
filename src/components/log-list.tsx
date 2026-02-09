@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { LogEntry, Topic } from "@/lib/types";
+import type { LogEntry, Task, Topic } from "@/lib/types";
 import { Badge, Button, Input, Select } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
 import { useAppConfig } from "@/components/providers";
 import { apiFetch } from "@/lib/api";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
+import { compareLogsDesc } from "@/lib/live-utils";
 
 const TYPE_LABELS: Record<string, string> = {
   note: "Note",
@@ -20,6 +21,14 @@ const TYPE_LABELS: Record<string, string> = {
 
 type LaneFilter = "all" | string;
 type MessageDensity = "comfortable" | "compact";
+type LogListVariant = "cards" | "chat";
+type LogPatchPayload = Partial<{
+  topicId: string | null;
+  taskId: string | null;
+  content: string;
+  summary: string | null;
+  raw: string | null;
+}>;
 const MESSAGE_TRUNCATE_LIMIT = 220;
 const SUMMARY_TRUNCATE_LIMIT = 96;
 
@@ -38,7 +47,7 @@ function stripTransportNoise(value: string) {
 
 function truncateText(value: string, limit: number) {
   if (value.length <= limit) return value;
-  return `${value.slice(0, limit - 1).trim()}…`;
+  return `${value.slice(0, Math.max(0, limit - 3)).trim()}...`;
 }
 
 function deriveMessageSummary(entry: LogEntry, message: string) {
@@ -53,6 +62,9 @@ function deriveMessageSummary(entry: LogEntry, message: string) {
 export function LogList({
   logs: initialLogs,
   topics,
+  tasks: tasksOverride,
+  scopeTopicId,
+  scopeTaskId,
   showFilters = true,
   showRawToggle = true,
   showRawAll: showRawAllOverride,
@@ -70,9 +82,13 @@ export function LogList({
   initialAgentFilter = "all",
   initialTopicFilter = "all",
   initialLaneFilter = "all",
+  variant = "cards",
 }: {
   logs: LogEntry[];
   topics: Topic[];
+  tasks?: Task[];
+  scopeTopicId?: string | null;
+  scopeTaskId?: string | null;
   showFilters?: boolean;
   showRawToggle?: boolean;
   showRawAll?: boolean;
@@ -90,9 +106,12 @@ export function LogList({
   initialAgentFilter?: string;
   initialTopicFilter?: string;
   initialLaneFilter?: LaneFilter;
+  variant?: LogListVariant;
 }) {
   const { token, tokenRequired } = useAppConfig();
   const [logs, setLogs] = useState<LogEntry[]>(initialLogs);
+  const [tasksCache, setTasksCache] = useState<Record<string, Task[]>>({});
+  const [tasksLoading, setTasksLoading] = useState<Record<string, boolean>>({});
   const [topicFilter, setTopicFilter] = useState(initialTopicFilter || "all");
   const [typeFilter, setTypeFilter] = useState(initialTypeFilter || "all");
   const [agentFilter, setAgentFilter] = useState(initialAgentFilter || "all");
@@ -101,10 +120,11 @@ export function LogList({
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [localShowRawAll, setLocalShowRawAll] = useState(false);
   const [localMessageDensity, setLocalMessageDensity] = useState<MessageDensity>("comfortable");
-  const [groupByDay, setGroupByDay] = useState(true);
+  const [groupByDay, setGroupByDay] = useState(variant !== "chat");
   const loadMoreEnabled = Boolean(initialVisibleCount && initialVisibleCount > 0 && loadMoreStep && loadMoreStep > 0);
   const [visibleCount, setVisibleCount] = useState(() => (loadMoreEnabled ? initialVisibleCount! : 0));
   const [collapsedDays, setCollapsedDays] = useState<Record<string, boolean>>(() => {
+    if (variant === "chat") return {};
     if (initialLogs.length === 0) return {};
     const dates = Array.from(new Set(initialLogs.map((entry) => entry.createdAt.slice(0, 10)))).sort((a, b) => b.localeCompare(a));
     if (dates.length === 0) return {};
@@ -157,6 +177,84 @@ export function LogList({
   }, [agentFilter, groupByDay, initialVisibleCount, laneFilter, loadMoreEnabled, search, topicFilter, typeFilter]);
 
   const readOnly = tokenRequired && !token;
+  const topicKey = (topicId: string | null | undefined) => (topicId ? topicId : "__null__");
+
+  const tasksFromOverride = tasksOverride ?? [];
+  const getTasksForTopic = (topicId: string | null) => {
+    // Prefer caller-provided tasks (already in memory); fall back to on-demand fetch cache.
+    if (tasksFromOverride.length > 0) {
+      return tasksFromOverride.filter((task) => (topicId ? task.topicId === topicId : task.topicId == null));
+    }
+    return tasksCache[topicKey(topicId)] ?? [];
+  };
+
+  const ensureTasksForTopic = async (topicId: string | null) => {
+    if (tasksFromOverride.length > 0) return;
+    const key = topicKey(topicId);
+    if (tasksCache[key]) return;
+    if (tasksLoading[key]) return;
+    setTasksLoading((prev) => ({ ...prev, [key]: true }));
+    try {
+      const url = topicId ? `/api/tasks?topicId=${encodeURIComponent(topicId)}` : "/api/tasks";
+      const res = await apiFetch(url, { cache: "no-store" });
+      if (!res.ok) return;
+      const payload = (await res.json().catch(() => null)) as Task[] | null;
+      if (!payload || !Array.isArray(payload)) return;
+      const next = topicId ? payload : payload.filter((task) => task.topicId == null);
+      setTasksCache((prev) => ({ ...prev, [key]: next }));
+    } finally {
+      setTasksLoading((prev) => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const isTasksLoadingForTopic = (topicId: string | null) => Boolean(tasksLoading[topicKey(topicId)]);
+
+  const patchLogEntry = async (
+    entry: LogEntry,
+    patch: LogPatchPayload
+  ) => {
+    if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
+    const res = await apiFetch(
+      `/api/log/${encodeURIComponent(entry.id)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      },
+      token
+    );
+    if (!res.ok) {
+      const detail = await res.json().catch(() => null);
+      const msg = typeof detail?.detail === "string" ? detail.detail : "Failed to edit message.";
+      return { ok: false, error: msg };
+    }
+    const updated = (await res.json().catch(() => null)) as LogEntry | null;
+    if (!updated) return { ok: false, error: "Failed to edit message." };
+    setLogs((prev) => {
+      const next = prev.map((item) => (item.id === entry.id ? updated : item));
+      const scoped = scopeTopicId !== undefined || scopeTaskId !== undefined;
+      if (!scoped) return next;
+      return next.filter((row) => {
+        if (scopeTopicId !== undefined) {
+          if (scopeTopicId == null) {
+            if (row.topicId != null) return false;
+          } else if (row.topicId !== scopeTopicId) {
+            return false;
+          }
+        }
+        if (scopeTaskId !== undefined) {
+          if (scopeTaskId == null) {
+            if (row.taskId != null) return false;
+          } else if ((row.taskId ?? null) !== scopeTaskId) {
+            return false;
+          }
+        }
+        return true;
+      });
+    });
+    return { ok: true, entry: updated };
+  };
+
   const normalizedSearch = search.trim().toLowerCase();
   const semanticRefreshKey = useMemo(() => {
     const latestLog = logs.reduce((acc, item) => {
@@ -214,7 +312,7 @@ export function LogList({
       const scoreA = semanticLogScores.get(a.id) ?? 0;
       const scoreB = semanticLogScores.get(b.id) ?? 0;
       if (scoreA !== scoreB) return scoreB - scoreA;
-      return a.createdAt < b.createdAt ? 1 : -1;
+      return compareLogsDesc(a, b);
     });
   }, [
     agentFilter,
@@ -473,15 +571,6 @@ export function LogList({
                       [date]: !prev[date],
                     }))
                   }
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      setCollapsedDays((prev) => ({
-                        ...prev,
-                        [date]: !prev[date],
-                      }));
-                    }
-                  }}
                   aria-label={collapsed ? "Expand day" : "Collapse day"}
                   title={collapsed ? "Expand" : "Collapse"}
                 >
@@ -502,8 +591,13 @@ export function LogList({
                   messageDensity={messageDensity}
                   onAddNote={addNote}
                   onDelete={deleteLogEntry}
+                  onPatch={patchLogEntry}
+                  getTasksForTopic={getTasksForTopic}
+                  ensureTasksForTopic={ensureTasksForTopic}
+                  isTasksLoadingForTopic={isTasksLoadingForTopic}
                   readOnly={readOnly}
                   enableNavigation={enableNavigation}
+                  variant={variant}
                 />
                 ))}
             </div>
@@ -540,8 +634,13 @@ function LogRow({
   messageDensity,
   onAddNote,
   onDelete,
+  onPatch,
+  getTasksForTopic,
+  ensureTasksForTopic,
+  isTasksLoadingForTopic,
   readOnly,
   enableNavigation,
+  variant,
 }: {
   entry: LogEntry;
   topicLabel: string;
@@ -552,8 +651,16 @@ function LogRow({
   messageDensity: MessageDensity;
   onAddNote: (entry: LogEntry, note: string) => Promise<{ ok: boolean; error?: string }>;
   onDelete: (entry: LogEntry) => Promise<{ ok: boolean; error?: string }>;
+  onPatch: (
+    entry: LogEntry,
+    patch: LogPatchPayload
+  ) => Promise<{ ok: boolean; error?: string; entry?: LogEntry }>;
+  getTasksForTopic: (topicId: string | null) => Task[];
+  ensureTasksForTopic: (topicId: string | null) => Promise<void>;
+  isTasksLoadingForTopic: (topicId: string | null) => boolean;
   readOnly: boolean;
   enableNavigation: boolean;
+  variant: LogListVariant;
 }) {
   const router = useRouter();
   const [compactMessageVisible, setCompactMessageVisible] = useState(false);
@@ -561,7 +668,15 @@ function LogRow({
   const [noteOpen, setNoteOpen] = useState(false);
   const [noteText, setNoteText] = useState("");
   const [noteStatus, setNoteStatus] = useState<string | null>(null);
+  const notePanelRef = useRef<HTMLDivElement | null>(null);
+  const noteTextAreaRef = useRef<HTMLTextAreaElement | null>(null);
   const [editOpen, setEditOpen] = useState(false);
+  const [editTopicId, setEditTopicId] = useState(entry.topicId ?? "");
+  const [editTaskId, setEditTaskId] = useState(entry.taskId ?? "");
+  const [editContent, setEditContent] = useState(entry.content ?? "");
+  const [editSummary, setEditSummary] = useState(entry.summary ?? "");
+  const [editStatus, setEditStatus] = useState<string | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
   const [deleteArmed, setDeleteArmed] = useState(false);
   const [deleteStatus, setDeleteStatus] = useState<string | null>(null);
   const showFullMessage = showRawAll || expanded;
@@ -579,6 +694,24 @@ function LogRow({
 
   const canNavigate = Boolean(destination) && enableNavigation;
 
+  useEffect(() => {
+    if (!noteOpen) return;
+    if (readOnly) return;
+    if (typeof window === "undefined") return;
+    // Wait for the textarea to mount (note is conditional).
+    const raf = window.requestAnimationFrame(() => {
+      // Ensure the note bubble is visible inside whichever scroll container owns it.
+      notePanelRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      // Focus without a second scroll jump (best-effort).
+      try {
+        noteTextAreaRef.current?.focus({ preventScroll: true } as FocusOptions);
+      } catch {
+        noteTextAreaRef.current?.focus();
+      }
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [noteOpen, readOnly]);
+
   const handleNavigate = (target: HTMLElement | null) => {
     if (!canNavigate || !destination) return false;
     if (target?.closest("a, button, input, select, textarea, option")) return false;
@@ -594,8 +727,606 @@ function LogRow({
   const messageText = shouldTruncate ? truncateText(messageSource, MESSAGE_TRUNCATE_LIMIT) : messageSource;
   const summaryText = deriveMessageSummary(entry, messageSource);
   const isUser = (entry.agentId || "").toLowerCase() === "user";
+  const classificationStatus = entry.classificationStatus ?? "pending";
+  const isPending = classificationStatus !== "classified";
   const compactMode = messageDensity === "compact";
-  const canShowMessage = !compactMode || compactMessageVisible;
+  // Compact mode should still show chat bubbles; it mainly affects density/styling.
+  const canShowMessage = variant === "chat" ? true : !compactMode || compactMessageVisible;
+  const sourceMetaParts = [
+    entry.source?.channel ? `channel: ${entry.source.channel}` : null,
+    entry.source?.sessionKey ? `session: ${entry.source.sessionKey}` : null,
+    entry.source?.messageId ? `msg: ${entry.source.messageId}` : null,
+  ].filter(Boolean);
+  const sourceMeta = sourceMetaParts.length > 0 ? sourceMetaParts.join(" · ") : null;
+  const editTopicValue = editTopicId || "";
+  const editTopicNullable = editTopicId ? editTopicId : null;
+  const taskOptions = getTasksForTopic(editTopicNullable);
+  const tasksLoadingForEdit = isTasksLoadingForTopic(editTopicNullable);
+
+  if (variant === "chat") {
+    const chatBubbleText = (() => {
+      if (!isConversation) return summary || "(empty)";
+      return messageText || summary || "(empty)";
+    })();
+    const bubbleTitle = sourceMeta ? `${formatDateTime(entry.createdAt)}\n${sourceMeta}` : formatDateTime(entry.createdAt);
+
+    return (
+      <div
+        data-log-id={entry.id}
+        className={`py-1 ${canNavigate ? "cursor-pointer" : ""}`}
+        role={canNavigate ? "button" : undefined}
+        tabIndex={canNavigate ? 0 : undefined}
+        onClick={(event) => {
+          if (!handleNavigate(event.target as HTMLElement)) return;
+          router.push(destination!);
+        }}
+        aria-label={canNavigate ? "Open related conversation" : undefined}
+      >
+        {isConversation ? (
+          <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+            <div className="w-full max-w-[78%]">
+	              <div className={`mb-1 flex items-center ${isUser ? "justify-end" : "justify-start"}`}>
+	                <span className="text-xs text-[rgb(var(--claw-muted))]">{formatDateTime(entry.createdAt)}</span>
+	                {isPending && (
+	                  <span className="ml-2 text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">
+	                    pending
+	                  </span>
+	                )}
+	              </div>
+
+	              <div
+	                data-testid={`message-bubble-${entry.id}`}
+	                data-agent-side={isUser ? "right" : "left"}
+	                data-classification-status={classificationStatus}
+	                title={bubbleTitle}
+	                onClick={(event) => {
+	                  // In compact mode we want a simple "click message to expand" interaction.
+	                  if (!shouldTruncate) return;
+	                  if (showRawAll) return;
+	                  if (expanded) return;
+	                  event.stopPropagation();
+	                  setExpanded(true);
+	                }}
+	                className={`rounded-[20px] border px-4 py-3 text-sm leading-relaxed ${isPending ? "opacity-85 " : ""}${
+	                  isUser
+	                    ? "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
+	                    : "border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] text-[rgb(var(--claw-text))]"
+	                }`}
+	              >
+	                <p className="whitespace-pre-wrap break-words">{chatBubbleText}</p>
+	                {shouldTruncate && (
+	                  <div className="mt-2">
+	                    <Button variant="ghost" size="sm" onClick={() => setExpanded(true)} aria-label="Expand message">
+	                      ...
+	                    </Button>
+	                  </div>
+	                )}
+	                {!showRawAll && expanded && messageSource.length > MESSAGE_TRUNCATE_LIMIT && (
+	                  <div className="mt-2">
+	                    <Button variant="ghost" size="sm" onClick={() => setExpanded(false)}>
+	                      Collapse
+	                    </Button>
+	                  </div>
+	                )}
+	              </div>
+
+              {(allowDelete || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen && (
+                <div className={`mt-2 flex flex-wrap items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
+                  {allowDelete && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={readOnly}
+                      title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
+                      onClick={() => {
+                        setEditOpen(true);
+                        setDeleteArmed(false);
+                        setDeleteStatus(null);
+                        setEditTopicId(entry.topicId ?? "");
+                        setEditTaskId(entry.taskId ?? "");
+                        setEditContent(entry.content ?? "");
+                        setEditSummary(entry.summary ?? "");
+                        setEditStatus(null);
+                        void ensureTasksForTopic(entry.topicId ?? null);
+                      }}
+                    >
+                      Edit
+                    </Button>
+                  )}
+                  {allowNotes && entry.type !== "note" && (
+                    <Button variant="ghost" size="sm" onClick={() => setNoteOpen(true)}>
+                      Add note
+                    </Button>
+                  )}
+                </div>
+              )}
+
+	              {allowNotes && entry.type !== "note" && noteOpen && (
+	                <div className="mt-2">
+	                  <div
+	                    ref={notePanelRef}
+	                    className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3"
+	                  >
+	                    <textarea
+	                      ref={noteTextAreaRef}
+	                      value={noteText}
+	                      onChange={(event) => setNoteText(event.target.value)}
+	                      placeholder={
+	                        readOnly
+	                          ? "Add token in Setup to enable curated notes that steer classification."
+                          : "Add a curated note to this conversation..."
+                      }
+                      disabled={readOnly}
+                      readOnly={readOnly}
+                      className={`min-h-[90px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
+                        readOnly ? "cursor-not-allowed opacity-70" : ""
+                      }`}
+                    />
+                    {noteStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{noteStatus}</p>}
+                    <div className={`flex flex-wrap items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
+                      <Button
+                        size="sm"
+                        onClick={async () => {
+                          if (!noteText.trim()) return;
+                          setNoteStatus(null);
+                          const result = await onAddNote(entry, noteText.trim());
+                          if (!result.ok) {
+                            setNoteStatus(result.error ?? "Failed to add note.");
+                            return;
+                          }
+                          setNoteText("");
+                          setNoteOpen(false);
+                        }}
+                        disabled={readOnly}
+                      >
+                        Save note
+                      </Button>
+                      <Button variant="secondary" size="sm" onClick={() => setNoteOpen(false)}>
+                        Cancel
+                      </Button>
+                    </div>
+                    {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}
+                  </div>
+                </div>
+              )}
+
+              {allowDelete && editOpen && (
+                <div className="mt-2">
+                  <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
+                    <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Edit message</div>
+
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <div className="space-y-1">
+                        <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Topic</div>
+                        <Select
+                          value={editTopicValue}
+                          onChange={(event) => {
+                            const next = event.target.value;
+                            setEditTopicId(next);
+                            setEditTaskId("");
+                            setEditStatus(null);
+                            void ensureTasksForTopic(next ? next : null);
+                          }}
+                        >
+                          <option value="">Unassigned</option>
+                          {topics.map((topic) => (
+                            <option key={topic.id} value={topic.id}>
+                              {topic.name}
+                            </option>
+                          ))}
+                        </Select>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Task</div>
+                        <Select
+                          value={editTaskId || ""}
+                          disabled={tasksLoadingForEdit}
+                          onChange={(event) => {
+                            setEditTaskId(event.target.value);
+                            setEditStatus(null);
+                          }}
+                        >
+                          <option value="">No task</option>
+                          {taskOptions.map((task) => (
+                            <option key={task.id} value={task.id}>
+                              {task.title}
+                            </option>
+                          ))}
+                        </Select>
+                        {tasksLoadingForEdit && <div className="text-xs text-[rgb(var(--claw-muted))]">Loading tasks…</div>}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Summary (optional)</div>
+                      <Input
+                        value={editSummary}
+                        onChange={(event) => setEditSummary(event.target.value)}
+                        placeholder="Short summary"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Content</div>
+                      <textarea
+                        value={editContent}
+                        onChange={(event) => setEditContent(event.target.value)}
+                        disabled={readOnly}
+                        readOnly={readOnly}
+                        className={`min-h-[110px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
+                          readOnly ? "cursor-not-allowed opacity-70" : ""
+                        }`}
+                      />
+                    </div>
+
+                    {editStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{editStatus}</p>}
+
+                    <div className={`flex flex-wrap items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
+                      <Button
+                        size="sm"
+                        disabled={readOnly || editSaving}
+                        onClick={async () => {
+                          setEditSaving(true);
+                          setEditStatus(null);
+                          const result = await onPatch(entry, {
+                            topicId: editTopicId ? editTopicId : null,
+                            taskId: editTaskId ? editTaskId : null,
+                            content: editContent ?? "",
+                            summary: editSummary.trim() ? editSummary.trim() : null,
+                          });
+                          setEditSaving(false);
+                          if (!result.ok) {
+                            setEditStatus(result.error ?? "Failed to edit message.");
+                            return;
+                          }
+                          setEditOpen(false);
+                          setDeleteArmed(false);
+                          setDeleteStatus(null);
+                        }}
+                      >
+                        {editSaving ? "Saving…" : "Save"}
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => {
+                          setEditOpen(false);
+                          setDeleteArmed(false);
+                          setDeleteStatus(null);
+                          setEditStatus(null);
+                        }}
+                      >
+                        Close
+                      </Button>
+                    </div>
+
+                    <div className="pt-2">
+                      <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Danger zone</div>
+                      {deleteStatus && <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{deleteStatus}</p>}
+                      <div className={`mt-2 flex flex-wrap items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
+                        {!deleteArmed ? (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            className="border-[rgba(239,68,68,0.45)] text-[rgb(var(--claw-danger))]"
+                            disabled={readOnly}
+                            onClick={() => {
+                              setDeleteArmed(true);
+                              setDeleteStatus(null);
+                            }}
+                          >
+                            Delete
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            className="border-[rgba(239,68,68,0.45)] text-[rgb(var(--claw-danger))]"
+                            disabled={readOnly}
+                            onClick={async () => {
+                              setDeleteStatus(null);
+                              const result = await onDelete(entry);
+                              if (!result.ok) {
+                                setDeleteStatus(result.error ?? "Failed to delete message.");
+                                return;
+                              }
+                              setEditOpen(false);
+                              setDeleteArmed(false);
+                            }}
+                          >
+                            Confirm delete
+                          </Button>
+                        )}
+                        {deleteArmed && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => {
+                              setDeleteArmed(false);
+                              setDeleteStatus(null);
+                            }}
+                          >
+                            Keep message
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+
+                    {sourceMeta && (
+                      <div className="pt-2 text-xs text-[rgb(var(--claw-muted))]">
+                        <span className="font-mono">{sourceMeta}</span>
+                      </div>
+                    )}
+                    {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+	        ) : (
+	          <div className="flex flex-col items-center">
+	            <div
+	              title={bubbleTitle}
+	              data-classification-status={classificationStatus}
+	              className={`max-w-[90%] rounded-[14px] border border-[rgba(255,255,255,0.10)] bg-[rgba(20,24,31,0.55)] px-4 py-2 text-xs text-[rgb(var(--claw-muted))] ${
+	                isPending ? "opacity-90" : ""
+	              }`}
+	            >
+	              <span className="uppercase tracking-[0.14em]">{typeLabel}</span>
+	              {isPending ? <span className="ml-2 text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">pending</span> : null}
+	              {chatBubbleText ? (
+	                <span className="ml-2 normal-case tracking-normal text-[rgb(var(--claw-text))]">{chatBubbleText}</span>
+	              ) : null}
+	            </div>
+
+            {(allowDelete || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen && (
+              <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+                {allowDelete && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={readOnly}
+                    title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
+                    onClick={() => {
+                      setEditOpen(true);
+                      setDeleteArmed(false);
+                      setDeleteStatus(null);
+                      setEditTopicId(entry.topicId ?? "");
+                      setEditTaskId(entry.taskId ?? "");
+                      setEditContent(entry.content ?? "");
+                      setEditSummary(entry.summary ?? "");
+                      setEditStatus(null);
+                      void ensureTasksForTopic(entry.topicId ?? null);
+                    }}
+                  >
+                    Edit
+                  </Button>
+                )}
+                {allowNotes && entry.type !== "note" && (
+                  <Button variant="ghost" size="sm" onClick={() => setNoteOpen(true)}>
+                    Add note
+                  </Button>
+                )}
+              </div>
+            )}
+
+            {allowNotes && entry.type !== "note" && noteOpen && (
+              <div className="mt-2 w-full max-w-[90%]">
+                <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
+                  <textarea
+                    value={noteText}
+                    onChange={(event) => setNoteText(event.target.value)}
+                    placeholder={
+                      readOnly
+                        ? "Add token in Setup to enable curated notes that steer classification."
+                        : "Add a curated note to this conversation..."
+                    }
+                    disabled={readOnly}
+                    readOnly={readOnly}
+                    className={`min-h-[90px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
+                      readOnly ? "cursor-not-allowed opacity-70" : ""
+                    }`}
+                  />
+                  {noteStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{noteStatus}</p>}
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <Button
+                      size="sm"
+                      onClick={async () => {
+                        if (!noteText.trim()) return;
+                        setNoteStatus(null);
+                        const result = await onAddNote(entry, noteText.trim());
+                        if (!result.ok) {
+                          setNoteStatus(result.error ?? "Failed to add note.");
+                          return;
+                        }
+                        setNoteText("");
+                        setNoteOpen(false);
+                      }}
+                      disabled={readOnly}
+                    >
+                      Save note
+                    </Button>
+                    <Button variant="secondary" size="sm" onClick={() => setNoteOpen(false)}>
+                      Cancel
+                    </Button>
+                  </div>
+                  {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}
+                </div>
+              </div>
+            )}
+
+            {allowDelete && editOpen && (
+              <div className="mt-2 w-full max-w-[90%]">
+                <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
+                  <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Edit message</div>
+
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div className="space-y-1">
+                      <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Topic</div>
+                      <Select
+                        value={editTopicValue}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          setEditTopicId(next);
+                          setEditTaskId("");
+                          setEditStatus(null);
+                          void ensureTasksForTopic(next ? next : null);
+                        }}
+                      >
+                        <option value="">Unassigned</option>
+                        {topics.map((topic) => (
+                          <option key={topic.id} value={topic.id}>
+                            {topic.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Task</div>
+                      <Select
+                        value={editTaskId || ""}
+                        disabled={tasksLoadingForEdit}
+                        onChange={(event) => {
+                          setEditTaskId(event.target.value);
+                          setEditStatus(null);
+                        }}
+                      >
+                        <option value="">No task</option>
+                        {taskOptions.map((task) => (
+                          <option key={task.id} value={task.id}>
+                            {task.title}
+                          </option>
+                        ))}
+                      </Select>
+                      {tasksLoadingForEdit && <div className="text-xs text-[rgb(var(--claw-muted))]">Loading tasks…</div>}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Summary (optional)</div>
+                    <Input value={editSummary} onChange={(event) => setEditSummary(event.target.value)} placeholder="Short summary" />
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Content</div>
+                    <textarea
+                      value={editContent}
+                      onChange={(event) => setEditContent(event.target.value)}
+                      disabled={readOnly}
+                      readOnly={readOnly}
+                      className={`min-h-[110px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
+                        readOnly ? "cursor-not-allowed opacity-70" : ""
+                      }`}
+                    />
+                  </div>
+
+                  {editStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{editStatus}</p>}
+
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <Button
+                      size="sm"
+                      disabled={readOnly || editSaving}
+                      onClick={async () => {
+                        setEditSaving(true);
+                        setEditStatus(null);
+                        const result = await onPatch(entry, {
+                          topicId: editTopicId ? editTopicId : null,
+                          taskId: editTaskId ? editTaskId : null,
+                          content: editContent ?? "",
+                          summary: editSummary.trim() ? editSummary.trim() : null,
+                        });
+                        setEditSaving(false);
+                        if (!result.ok) {
+                          setEditStatus(result.error ?? "Failed to edit message.");
+                          return;
+                        }
+                        setEditOpen(false);
+                        setDeleteArmed(false);
+                        setDeleteStatus(null);
+                      }}
+                    >
+                      {editSaving ? "Saving…" : "Save"}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        setEditOpen(false);
+                        setDeleteArmed(false);
+                        setDeleteStatus(null);
+                        setEditStatus(null);
+                      }}
+                    >
+                      Close
+                    </Button>
+                  </div>
+
+                  <div className="pt-2">
+                    <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Danger zone</div>
+                    {deleteStatus && <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{deleteStatus}</p>}
+                    <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+                      {!deleteArmed ? (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          className="border-[rgba(239,68,68,0.45)] text-[rgb(var(--claw-danger))]"
+                          disabled={readOnly}
+                          onClick={() => {
+                            setDeleteArmed(true);
+                            setDeleteStatus(null);
+                          }}
+                        >
+                          Delete
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          className="border-[rgba(239,68,68,0.45)] text-[rgb(var(--claw-danger))]"
+                          disabled={readOnly}
+                          onClick={async () => {
+                            setDeleteStatus(null);
+                            const result = await onDelete(entry);
+                            if (!result.ok) {
+                              setDeleteStatus(result.error ?? "Failed to delete message.");
+                              return;
+                            }
+                            setEditOpen(false);
+                            setDeleteArmed(false);
+                          }}
+                        >
+                          Confirm delete
+                        </Button>
+                      )}
+                      {deleteArmed && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => {
+                            setDeleteArmed(false);
+                            setDeleteStatus(null);
+                          }}
+                        >
+                          Keep message
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  {sourceMeta && (
+                    <div className="pt-2 text-xs text-[rgb(var(--claw-muted))]">
+                      <span className="font-mono">{sourceMeta}</span>
+                    </div>
+                  )}
+                  {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -609,13 +1340,6 @@ function LogRow({
         if (!handleNavigate(event.target as HTMLElement)) return;
         router.push(destination!);
       }}
-      onKeyDown={(event) => {
-        if (!canNavigate || !destination) return;
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          router.push(destination);
-        }
-      }}
       aria-label={canNavigate ? "Open related conversation" : undefined}
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -625,7 +1349,9 @@ function LogRow({
           {showAgentBadge && <Badge tone="accent">{agentLabel}</Badge>}
           {entry.relatedLogId && <Badge tone="muted">Curation</Badge>}
         </div>
-        <span className="text-xs text-[rgb(var(--claw-muted))]">{formatDateTime(entry.createdAt)}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-[rgb(var(--claw-muted))]">{formatDateTime(entry.createdAt)}</span>
+        </div>
       </div>
 
       {isConversation ? (
@@ -634,14 +1360,17 @@ function LogRow({
           {compactMode && (
             <div>
               {!compactMessageVisible ? (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setCompactMessageVisible(true)}
-                  aria-label="Show message"
+                <button
+                  type="button"
+                  className="text-xs text-[rgb(var(--claw-muted))] underline decoration-[rgba(255,255,255,0.18)] underline-offset-4 transition hover:text-[rgb(var(--claw-text))]"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setCompactMessageVisible(true);
+                    if (shouldTruncate && !showRawAll) setExpanded(true);
+                  }}
                 >
-                  Show message
-                </Button>
+                  Show message…
+                </button>
               ) : (
                 <Button
                   variant="ghost"
@@ -666,17 +1395,24 @@ function LogRow({
                   </p>
                 </div>
               </div>
-              <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-                <div
-                  data-testid={`message-bubble-${entry.id}`}
-                  data-agent-side={isUser ? "right" : "left"}
-                  className={`max-w-[78%] rounded-[20px] border px-4 py-3 text-sm leading-relaxed ${
-                    isUser
-                      ? "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
-                      : "border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] text-[rgb(var(--claw-text))]"
-                  }`}
-                >
-                  <p className="whitespace-pre-wrap break-words">{messageText || summary || "(empty)"}</p>
+	              <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+	                <div
+	                  data-testid={`message-bubble-${entry.id}`}
+	                  data-agent-side={isUser ? "right" : "left"}
+	                  onClick={(event) => {
+	                    if (!shouldTruncate) return;
+	                    if (showRawAll) return;
+	                    if (expanded) return;
+	                    event.stopPropagation();
+	                    setExpanded(true);
+	                  }}
+	                  className={`max-w-[78%] rounded-[20px] border px-4 py-3 text-sm leading-relaxed ${
+	                    isUser
+	                      ? "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
+	                      : "border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] text-[rgb(var(--claw-text))]"
+	                  }`}
+	                >
+	                  <p className="whitespace-pre-wrap break-words">{messageText || summary || "(empty)"}</p>
                   {shouldTruncate && (
                     <div className="mt-2">
                       <Button variant="ghost" size="sm" onClick={() => setExpanded(true)} aria-label="Expand message">
@@ -715,59 +1451,9 @@ function LogRow({
           )}
         </>
       )}
-      {allowNotes && entry.type !== "note" && (
-        <div className="mt-3">
-          {!noteOpen ? (
-            <Button variant="secondary" size="sm" onClick={() => setNoteOpen(true)}>
-              Add note
-            </Button>
-          ) : (
-            <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
-              <textarea
-                value={noteText}
-                onChange={(event) => setNoteText(event.target.value)}
-                placeholder={
-                  readOnly
-                    ? "Add token in Setup to enable curated notes that steer classification."
-                    : "Add a curated note to this conversation..."
-                }
-                disabled={readOnly}
-                readOnly={readOnly}
-                className={`min-h-[90px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
-                  readOnly ? "cursor-not-allowed opacity-70" : ""
-                }`}
-              />
-              {noteStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{noteStatus}</p>}
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  size="sm"
-                  onClick={async () => {
-                    if (!noteText.trim()) return;
-                    setNoteStatus(null);
-                    const result = await onAddNote(entry, noteText.trim());
-                    if (!result.ok) {
-                      setNoteStatus(result.error ?? "Failed to add note.");
-                      return;
-                    }
-                    setNoteText("");
-                    setNoteOpen(false);
-                  }}
-                  disabled={readOnly}
-                >
-                  Save note
-                </Button>
-                <Button variant="secondary" size="sm" onClick={() => setNoteOpen(false)}>
-                  Cancel
-                </Button>
-              </div>
-              {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}
-            </div>
-          )}
-        </div>
-      )}
-      {allowDelete && (
-        <div className="mt-3">
-          {!editOpen ? (
+      {(allowDelete || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {allowDelete && (
             <Button
               variant="secondary"
               size="sm"
@@ -777,15 +1463,182 @@ function LogRow({
                 setEditOpen(true);
                 setDeleteArmed(false);
                 setDeleteStatus(null);
+                setEditTopicId(entry.topicId ?? "");
+                setEditTaskId(entry.taskId ?? "");
+                setEditContent(entry.content ?? "");
+                setEditSummary(entry.summary ?? "");
+                setEditStatus(null);
+                void ensureTasksForTopic(entry.topicId ?? null);
               }}
             >
               Edit
             </Button>
-          ) : (
-            <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
-              <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Message actions</div>
-              {deleteStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{deleteStatus}</p>}
-              <div className="flex flex-wrap items-center gap-2">
+          )}
+          {allowNotes && entry.type !== "note" && (
+            <Button variant="secondary" size="sm" onClick={() => setNoteOpen(true)}>
+              Add note
+            </Button>
+          )}
+        </div>
+      )}
+	      {allowNotes && entry.type !== "note" && noteOpen && (
+	        <div className="mt-3">
+	          <div
+	            ref={notePanelRef}
+	            className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3"
+	          >
+	            <textarea
+	              ref={noteTextAreaRef}
+	              value={noteText}
+	              onChange={(event) => setNoteText(event.target.value)}
+	              placeholder={
+	                readOnly
+	                  ? "Add token in Setup to enable curated notes that steer classification."
+                  : "Add a curated note to this conversation..."
+              }
+              disabled={readOnly}
+              readOnly={readOnly}
+              className={`min-h-[90px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
+                readOnly ? "cursor-not-allowed opacity-70" : ""
+              }`}
+            />
+            {noteStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{noteStatus}</p>}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                onClick={async () => {
+                  if (!noteText.trim()) return;
+                  setNoteStatus(null);
+                  const result = await onAddNote(entry, noteText.trim());
+                  if (!result.ok) {
+                    setNoteStatus(result.error ?? "Failed to add note.");
+                    return;
+                  }
+                  setNoteText("");
+                  setNoteOpen(false);
+                }}
+                disabled={readOnly}
+              >
+                Save note
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => setNoteOpen(false)}>
+                Cancel
+              </Button>
+            </div>
+            {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}
+          </div>
+        </div>
+      )}
+      {allowDelete && editOpen && (
+        <div className="mt-3">
+          <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
+            <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Edit message</div>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              <div className="space-y-1">
+                <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Topic</div>
+                <Select
+                  value={editTopicValue}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setEditTopicId(next);
+                    setEditTaskId("");
+                    setEditStatus(null);
+                    void ensureTasksForTopic(next ? next : null);
+                  }}
+                >
+                  <option value="">Unassigned</option>
+                  {topics.map((topic) => (
+                    <option key={topic.id} value={topic.id}>
+                      {topic.name}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Task</div>
+                <Select
+                  value={editTaskId || ""}
+                  disabled={tasksLoadingForEdit}
+                  onChange={(event) => {
+                    setEditTaskId(event.target.value);
+                    setEditStatus(null);
+                  }}
+                >
+                  <option value="">No task</option>
+                  {taskOptions.map((task) => (
+                    <option key={task.id} value={task.id}>
+                      {task.title}
+                    </option>
+                  ))}
+                </Select>
+                {tasksLoadingForEdit && <div className="text-xs text-[rgb(var(--claw-muted))]">Loading tasks…</div>}
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Summary (optional)</div>
+              <Input value={editSummary} onChange={(event) => setEditSummary(event.target.value)} placeholder="Short summary" />
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Content</div>
+              <textarea
+                value={editContent}
+                onChange={(event) => setEditContent(event.target.value)}
+                disabled={readOnly}
+                readOnly={readOnly}
+                className={`min-h-[110px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
+                  readOnly ? "cursor-not-allowed opacity-70" : ""
+                }`}
+              />
+            </div>
+
+            {editStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{editStatus}</p>}
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                disabled={readOnly || editSaving}
+                onClick={async () => {
+                  setEditSaving(true);
+                  setEditStatus(null);
+                  const result = await onPatch(entry, {
+                    topicId: editTopicId ? editTopicId : null,
+                    taskId: editTaskId ? editTaskId : null,
+                    content: editContent ?? "",
+                    summary: editSummary.trim() ? editSummary.trim() : null,
+                  });
+                  setEditSaving(false);
+                  if (!result.ok) {
+                    setEditStatus(result.error ?? "Failed to edit message.");
+                    return;
+                  }
+                  setEditOpen(false);
+                  setDeleteArmed(false);
+                  setDeleteStatus(null);
+                }}
+              >
+                {editSaving ? "Saving…" : "Save"}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setEditOpen(false);
+                  setDeleteArmed(false);
+                  setDeleteStatus(null);
+                  setEditStatus(null);
+                }}
+              >
+                Close
+              </Button>
+            </div>
+
+            <div className="pt-2">
+              <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Danger zone</div>
+              {deleteStatus && <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{deleteStatus}</p>}
+              <div className="mt-2 flex flex-wrap items-center gap-2">
                 {!deleteArmed ? (
                   <Button
                     variant="secondary"
@@ -819,28 +1672,28 @@ function LogRow({
                     Confirm delete
                   </Button>
                 )}
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => {
-                    setEditOpen(false);
-                    setDeleteArmed(false);
-                    setDeleteStatus(null);
-                  }}
-                >
-                  {deleteArmed ? "Keep message" : "Close"}
-                </Button>
+                {deleteArmed && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      setDeleteArmed(false);
+                      setDeleteStatus(null);
+                    }}
+                  >
+                    Keep message
+                  </Button>
+                )}
               </div>
-              {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}
             </div>
-          )}
-        </div>
-      )}
-      {(entry.source?.sessionKey || entry.source?.channel) && (
-        <div className="mt-3 text-xs text-[rgb(var(--claw-muted))]">
-          {entry.source?.channel ? `channel: ${entry.source.channel}` : null}
-          {entry.source?.sessionKey ? `${entry.source?.channel ? " · " : ""}session: ${entry.source.sessionKey}` : null}
-          {entry.source?.messageId ? ` · msg: ${entry.source.messageId}` : ""}
+
+            {sourceMeta && (
+              <div className="pt-2 text-xs text-[rgb(var(--claw-muted))]">
+                <span className="font-mono">{sourceMeta}</span>
+              </div>
+            )}
+            {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}
+          </div>
         </div>
       )}
     </div>

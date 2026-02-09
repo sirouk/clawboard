@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import math
 import os
@@ -5,19 +7,39 @@ import re
 import sqlite3
 import time
 import shutil
+import signal
+import uuid
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-import requests
-import numpy as np
+try:
+    import requests  # type: ignore
+except Exception:  # pragma: no cover
+    requests = None  # type: ignore
 
-from fastembed import TextEmbedding
+try:
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover
+    np = None  # type: ignore
 
-from embeddings_store import (
-    delete as embed_delete,
-    delete_task_other_namespaces,
-    topk as embed_topk,
-    upsert as embed_upsert,
-)
+try:
+    from fastembed import TextEmbedding  # type: ignore
+except Exception:  # pragma: no cover
+    TextEmbedding = None  # type: ignore
+
+try:
+    from .embeddings_store import (  # type: ignore
+        delete as embed_delete,
+        delete_task_other_namespaces,
+        topk as embed_topk,
+        upsert as embed_upsert,
+    )
+except Exception:  # pragma: no cover
+    from embeddings_store import (  # type: ignore
+        delete as embed_delete,
+        delete_task_other_namespaces,
+        topk as embed_topk,
+        upsert as embed_upsert,
+    )
 
 CLAWBOARD_API_BASE = os.environ.get("CLAWBOARD_API_BASE", "http://localhost:8010").rstrip("/")
 CLAWBOARD_TOKEN = os.environ.get("CLAWBOARD_TOKEN")
@@ -25,10 +47,51 @@ CLAWBOARD_TOKEN = os.environ.get("CLAWBOARD_TOKEN")
 OPENCLAW_BASE_URL = os.environ.get("OPENCLAW_BASE_URL", "http://127.0.0.1:18789").rstrip("/")
 OPENCLAW_GATEWAY_TOKEN = os.environ.get("OPENCLAW_GATEWAY_TOKEN")
 OPENCLAW_MODEL = os.environ.get("OPENCLAW_MODEL", "openai-codex/gpt-5.2")
+CLASSIFIER_LLM_MODE = os.environ.get("CLASSIFIER_LLM_MODE", "auto").strip().lower()
+
+OPENCLAW_INTERNAL_SESSION_PREFIX = os.environ.get(
+    "OPENCLAW_INTERNAL_SESSION_PREFIX",
+    "internal:clawboard-classifier:",
+).strip()
 
 INTERVAL = int(os.environ.get("CLASSIFIER_INTERVAL_SECONDS", "10"))
 MAX_ATTEMPTS = int(os.environ.get("CLASSIFIER_MAX_ATTEMPTS", "3"))
 MAX_SESSIONS_PER_CYCLE = int(os.environ.get("CLASSIFIER_MAX_SESSIONS_PER_CYCLE", "8"))
+MAX_SESSION_SECONDS = float(os.environ.get("CLASSIFIER_MAX_SESSION_SECONDS", "75"))
+CYCLE_BUDGET_SECONDS = float(
+    os.environ.get(
+        "CLASSIFIER_CYCLE_BUDGET_SECONDS",
+        str(max(30, INTERVAL * 3)),
+    )
+)
+LOG_TIMING = os.environ.get("CLASSIFIER_LOG_TIMING", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+class _ClassifierTimeout(Exception):
+    pass
+
+
+def _timeout_handler(_signum, _frame):
+    raise _ClassifierTimeout()
+
+
+def _run_with_timeout(seconds: float, fn, *args, **kwargs):
+    """Best-effort guardrail so one slow session doesn't block the whole cycle."""
+    if seconds <= 0:
+        return fn(*args, **kwargs)
+    if not hasattr(signal, "SIGALRM"):
+        return fn(*args, **kwargs)
+    previous = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        return fn(*args, **kwargs)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        try:
+            signal.signal(signal.SIGALRM, previous)
+        except Exception:
+            pass
 
 WINDOW_SIZE = int(os.environ.get("CLASSIFIER_WINDOW_SIZE", "24"))
 LOOKBACK_LOGS = int(os.environ.get("CLASSIFIER_LOOKBACK_LOGS", "80"))
@@ -161,17 +224,13 @@ TASK_INTENT_CUES = {
     "next step",
     "action item",
     "follow up",
-    "please",
     "need to",
-    "should",
     "must",
     "fix",
     "build",
     "create",
     "implement",
     "update",
-    "check",
-    "review",
     "investigate",
     "test",
     "deploy",
@@ -181,7 +240,90 @@ TASK_INTENT_CUES = {
     "restore",
     "restart",
     "audit",
+    "ship",
+    "complete",
 }
+
+SMALL_TALK_CUES = (
+    # Normalized (lowercased, punctuation stripped) substrings.
+    "how s your day",
+    "hows your day",
+    "your day going",
+    "no big plans",
+    "taking it easy",
+    "this weekend",
+    "latte",
+    "coffee",
+    "cinnamon latte",
+)
+
+INFORMATIONAL_REQUEST_CUES = {
+    "tell me",
+    "all about",
+    "what do you remember",
+    "what do we know",
+    "summarize",
+    "summary",
+    "recap",
+    "explain",
+    "walk me through",
+    "deep in memory",
+}
+
+TOPIC_FOCUS_STOPWORDS = {
+    "the",
+    "this",
+    "that",
+    "these",
+    "those",
+    "work",
+    "project",
+    "topic",
+    "task",
+    "memory",
+    "details",
+    "history",
+}
+
+LOW_SIGNAL_TOPIC_PREFIXES = (
+    "let ",
+    "lets ",
+    "let's ",
+    "can ",
+    "can you",
+    "could ",
+    "would ",
+    "should ",
+    "please ",
+    "i ",
+    "i'm ",
+    "im ",
+    "we ",
+    "what ",
+    "how ",
+    "why ",
+    "tell ",
+    "show ",
+    "review ",
+    "summarize ",
+)
+
+LOW_SIGNAL_SUMMARY_PREFIXES = (
+    "let ",
+    "lets ",
+    "let's ",
+    "can ",
+    "could ",
+    "would ",
+    "please ",
+    "what ",
+    "how ",
+    "why ",
+    "ok ",
+    "okay ",
+    "hey ",
+    "hi ",
+)
 
 AFFIRMATIONS = {
     "yes",
@@ -198,8 +340,24 @@ AFFIRMATIONS = {
     "works for me",
 }
 
+def _llm_enabled() -> bool:
+    mode = CLASSIFIER_LLM_MODE
+    if mode in {"0", "false", "no", "off", "disable", "disabled", "heuristic", "no-llm"}:
+        return False
+    if requests is None:
+        return False
+    # "auto" only enables the LLM when credentials are configured.
+    if not OPENCLAW_GATEWAY_TOKEN:
+        return False
+    if mode in {"1", "true", "yes", "on", "enable", "enabled", "auto"}:
+        return True
+    # Unknown value -> behave like auto (safe default).
+    return True
+
 
 def headers_clawboard():
+    if requests is None:
+        raise RuntimeError("classifier dependency missing: requests")
     h = {"Content-Type": "application/json"}
     if CLAWBOARD_TOKEN:
         h["X-Clawboard-Token"] = CLAWBOARD_TOKEN
@@ -215,8 +373,189 @@ def oc_headers():
     }
 
 
+def oc_headers_with_session(session_key: str | None):
+    headers = oc_headers()
+    if session_key:
+        # OpenClaw gateway honors this header and uses it as the session key for the run.
+        # We tag classifier runs with a stable prefix so Clawboard logger can ignore them.
+        headers["x-openclaw-session-key"] = session_key
+    return headers
+
+
+def _openclaw_internal_session_key(kind: str) -> str:
+    prefix = (OPENCLAW_INTERNAL_SESSION_PREFIX or "internal:clawboard-classifier:").strip()
+    if not prefix.endswith(":"):
+        prefix = prefix + ":"
+    safe_kind = re.sub(r"[^a-z0-9_-]+", "-", (kind or "run").strip().lower())[:32] or "run"
+    return f"{prefix}{safe_kind}:{uuid.uuid4()}"
+
+
+class _StrictJsonError(Exception):
+    pass
+
+
+def _parse_strict_json(text: str):
+    if not isinstance(text, str):
+        raise _StrictJsonError("expected JSON text response")
+    raw = text.strip()
+    if not raw:
+        raise _StrictJsonError("empty JSON response")
+    try:
+        return json.loads(raw)
+    except Exception as exc:
+        preview = raw[:240].replace("\n", "\\n")
+        raise _StrictJsonError(f"invalid JSON response: {preview}") from exc
+
+
+def _validate_classifier_result(obj: object, pending_ids: list[str]) -> dict:
+    if not isinstance(obj, dict):
+        raise _StrictJsonError("classifier output must be a JSON object")
+
+    pending_unique: list[str] = []
+    pending_seen: set[str] = set()
+    for sid in pending_ids:
+        if not isinstance(sid, str):
+            continue
+        key = sid.strip()
+        if not key or key in pending_seen:
+            continue
+        pending_seen.add(key)
+        pending_unique.append(key)
+
+    topic = obj.get("topic")
+    if not isinstance(topic, dict):
+        raise _StrictJsonError("classifier output.topic must be an object")
+    topic_id = topic.get("id")
+    if topic_id is not None and not isinstance(topic_id, str):
+        raise _StrictJsonError("classifier output.topic.id must be string|null")
+    topic_name = topic.get("name")
+    if not isinstance(topic_name, str) or not topic_name.strip():
+        raise _StrictJsonError("classifier output.topic.name must be a non-empty string")
+    topic_create = topic.get("create")
+    if not isinstance(topic_create, bool):
+        raise _StrictJsonError("classifier output.topic.create must be a boolean")
+
+    task_out: dict | None = None
+    task_val = obj.get("task")
+    if task_val is None:
+        task_out = None
+    elif isinstance(task_val, dict):
+        task_id = task_val.get("id")
+        if task_id is not None and not isinstance(task_id, str):
+            raise _StrictJsonError("classifier output.task.id must be string|null")
+        task_title = task_val.get("title")
+        if task_title is not None and not isinstance(task_title, str):
+            raise _StrictJsonError("classifier output.task.title must be string|null")
+        task_create = task_val.get("create")
+        if not isinstance(task_create, bool):
+            raise _StrictJsonError("classifier output.task.create must be a boolean")
+        task_out = {
+            "id": task_id.strip() if isinstance(task_id, str) and task_id.strip() else None,
+            "title": task_title.strip() if isinstance(task_title, str) and task_title.strip() else None,
+            "create": task_create,
+        }
+    else:
+        raise _StrictJsonError("classifier output.task must be object|null")
+
+    summaries = obj.get("summaries")
+    if not isinstance(summaries, list):
+        raise _StrictJsonError("classifier output.summaries must be an array")
+
+    by_id: dict[str, str] = {}
+    for item in summaries:
+        if not isinstance(item, dict):
+            raise _StrictJsonError("classifier output.summaries entries must be objects")
+        sid = item.get("id")
+        summary = item.get("summary")
+        if not isinstance(sid, str) or not sid.strip():
+            raise _StrictJsonError("classifier output.summaries[].id must be a non-empty string")
+        if not isinstance(summary, str) or not summary.strip():
+            raise _StrictJsonError("classifier output.summaries[].summary must be a non-empty string")
+        key = sid.strip()
+        if key not in pending_seen:
+            raise _StrictJsonError("classifier output contains summary for unknown id")
+        if key in by_id:
+            raise _StrictJsonError("classifier output contains duplicate summary ids")
+        by_id[key] = summary.strip()
+
+    missing = [sid for sid in pending_unique if sid not in by_id]
+    if missing:
+        raise _StrictJsonError(f"classifier output missing summaries for {len(missing)} id(s)")
+
+    normalized = {
+        "topic": {
+            "id": topic_id.strip() if isinstance(topic_id, str) and topic_id.strip() else None,
+            "name": topic_name.strip(),
+            "create": topic_create,
+        },
+        "task": task_out,
+        "summaries": [{"id": sid, "summary": by_id[sid]} for sid in pending_unique],
+    }
+    return normalized
+
+
+def _validate_creation_gate_result(obj: object) -> dict:
+    if not isinstance(obj, dict):
+        raise _StrictJsonError("creation gate output must be a JSON object")
+
+    create_topic = obj.get("createTopic")
+    create_task = obj.get("createTask")
+    if not isinstance(create_topic, bool):
+        raise _StrictJsonError("creation gate createTopic must be boolean")
+    if not isinstance(create_task, bool):
+        raise _StrictJsonError("creation gate createTask must be boolean")
+
+    topic_id = obj.get("topicId")
+    task_id = obj.get("taskId")
+    if topic_id is not None and not isinstance(topic_id, str):
+        raise _StrictJsonError("creation gate topicId must be string|null")
+    if task_id is not None and not isinstance(task_id, str):
+        raise _StrictJsonError("creation gate taskId must be string|null")
+
+    return {
+        "createTopic": create_topic,
+        "topicId": topic_id.strip() if isinstance(topic_id, str) and topic_id.strip() else None,
+        "createTask": create_task,
+        "taskId": task_id.strip() if isinstance(task_id, str) and task_id.strip() else None,
+    }
+
+
+def _validate_summary_repair_result(obj: object, pending_ids: list[str]) -> dict[str, str]:
+    if not isinstance(obj, dict):
+        raise _StrictJsonError("summary repair output must be a JSON object")
+    summaries = obj.get("summaries")
+    if not isinstance(summaries, list):
+        raise _StrictJsonError("summary repair summaries must be an array")
+
+    pending_set = {sid.strip() for sid in pending_ids if isinstance(sid, str) and sid.strip()}
+    out: dict[str, str] = {}
+    for item in summaries:
+        if not isinstance(item, dict):
+            raise _StrictJsonError("summary repair summaries entries must be objects")
+        sid = item.get("id")
+        stext = item.get("summary")
+        if not isinstance(sid, str) or not sid.strip():
+            raise _StrictJsonError("summary repair summaries[].id must be a non-empty string")
+        if not isinstance(stext, str) or not stext.strip():
+            raise _StrictJsonError("summary repair summaries[].summary must be a non-empty string")
+        key = sid.strip()
+        if key not in pending_set:
+            raise _StrictJsonError("summary repair contains summary for unknown id")
+        if key in out:
+            raise _StrictJsonError("summary repair contains duplicate summary ids")
+        out[key] = _concise_summary(stext.strip())
+
+    missing = [sid for sid in pending_set if sid not in out]
+    if missing:
+        raise _StrictJsonError(f"summary repair missing {len(missing)} id(s)")
+    return out
+
+
 def embedder():
     global _embedder, _embed_failed
+    if TextEmbedding is None or np is None:
+        _embed_failed = True
+        return None
     if _embed_failed:
         return None
     if _embedder is None:
@@ -303,6 +642,7 @@ def memory_snippets(query_text: str):
                    bm25(chunks_fts) as score
             FROM chunks_fts
             WHERE chunks_fts MATCH ?
+              AND source = 'memory'
             ORDER BY score
             LIMIT ?
             """,
@@ -326,8 +666,25 @@ def _is_classifier_payload(text: str) -> bool:
     t = text.strip()
     if not t.startswith("{"):
         return False
-    markers = ["\"window\"", "\"candidateTopics\"", "\"topic\"", "\"task\"", "\"instructions\""]
-    return any(m in t for m in markers)
+    markers = [
+        "\"window\"",
+        "\"candidateTopics\"",
+        "\"candidateTasks\"",
+        "\"topic\"",
+        "\"task\"",
+        "\"instructions\"",
+        "\"summaries\"",
+    ]
+    if any(m in t for m in markers):
+        return True
+
+    # Some internal control payloads are small (e.g., topic/task creation gates).
+    control_markers = ["\"createTopic\"", "\"createTask\"", "\"topicId\"", "\"taskId\""]
+    hits = 0
+    for m in control_markers:
+        if m in t:
+            hits += 1
+    return hits >= 2
 
 
 def _is_injected_context_artifact(text: str) -> bool:
@@ -400,38 +757,42 @@ def _normalize_text(text: str) -> str:
     return normalized
 
 
+TOKEN_STOP_WORDS = {
+    "a",
+    "an",
+    "about",
+    "and",
+    "are",
+    "been",
+    "for",
+    "from",
+    "has",
+    "have",
+    "in",
+    "into",
+    "is",
+    "of",
+    "on",
+    "that",
+    "the",
+    "this",
+    "to",
+    "were",
+    "what",
+    "when",
+    "where",
+    "with",
+    # Meta tokens that frequently appear in instructions but are weak topic anchors.
+    "e2e",
+}
+
+
 def _token_set(text: str) -> set[str]:
-    stop_words = {
-        "the",
-        "and",
-        "for",
-        "with",
-        "that",
-        "this",
-        "from",
-        "into",
-        "about",
-        "where",
-        "what",
-        "when",
-        "have",
-        "has",
-        "been",
-        "were",
-        "is",
-        "are",
-        "to",
-        "of",
-        "on",
-        "in",
-        "a",
-        "an",
-    }
-    return {w for w in _normalize_text(text).split(" ") if len(w) > 2 and w not in stop_words}
+    return {w for w in _normalize_text(text).split(" ") if len(w) > 2 and w not in TOKEN_STOP_WORDS}
 
 
 def _token_list(text: str) -> list[str]:
-    return [w for w in _normalize_text(text).split(" ") if len(w) > 1]
+    return [w for w in _normalize_text(text).split(" ") if len(w) > 1 and w not in TOKEN_STOP_WORDS]
 
 
 def _bm25_scores(query_text: str, docs: dict[str, str], k1: float = 1.6, b: float = 0.68):
@@ -483,7 +844,20 @@ def _normalize_score_map(scores: dict[str, float]):
     hi = max(values)
     lo = min(values)
     if hi <= lo:
-        return {k: 1.0 for k in scores}
+        # Degenerate case (all scores equal). Returning 1.0 here makes downstream
+        # fusion treat a single candidate as "perfect match", which causes
+        # false-positive topic/task attachments (especially when only one topic exists).
+        #
+        # Instead, preserve magnitude with a stable squash into [0, 1].
+        def squash(x: float) -> float:
+            x = float(x)
+            if x <= 0:
+                return 0.0
+            if x <= 1:
+                return x
+            return x / (x + 1.0)
+
+        return {k: squash(float(v)) for k, v in scores.items()}
     return {k: (float(v) - lo) / (hi - lo) for k, v in scores.items()}
 
 
@@ -596,12 +970,25 @@ def _is_system_artifact_text(text: str) -> bool:
 
 def _is_affirmation(text: str) -> bool:
     cleaned = _strip_transport_noise(text)
+    cleaned = re.sub(r"[^a-zA-Z0-9\s]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
     if not cleaned:
         return False
     if len(cleaned) > 24:
         return False
-    return cleaned in AFFIRMATIONS
+    if cleaned in AFFIRMATIONS:
+        return True
+    # Common patterns like "yes, do it" should count as affirmation.
+    if cleaned.startswith("yes "):
+        rest = cleaned[4:].strip()
+        return rest in AFFIRMATIONS
+    if cleaned.startswith("ok "):
+        rest = cleaned[3:].strip()
+        return rest in AFFIRMATIONS
+    if cleaned.startswith("okay "):
+        rest = cleaned[5:].strip()
+        return rest in AFFIRMATIONS
+    return False
 
 
 def _latest_user_text(window: list[dict]) -> tuple[str, int]:
@@ -663,6 +1050,174 @@ def _telegraphic_phrase(text: str, max_words: int = 14) -> str:
     return " ".join(compact).strip()
 
 
+def _strip_discourse_lead(text: str) -> str:
+    candidate = (text or "").strip()
+    if not candidate:
+        return ""
+    candidate = re.sub(
+        r"(?i)^(?:let(?:'|’)s|please|can you|could you|would you|what(?:'s| is)?|how|why|ok(?:ay)?|hey|hi|i need to|we need to)\b[\s,:-]*",
+        "",
+        candidate,
+    )
+    return candidate.strip("`* ")
+
+
+def _humanize_topic_name(text: str) -> str:
+    raw = _strip_transport_noise(text)
+    raw = _strip_discourse_lead(raw)
+    raw = raw.replace("_", " ")
+    raw = re.sub(r"\s+", " ", raw).strip("`* .,:;!?")
+    if not raw:
+        return ""
+    tokens = [t for t in re.split(r"\s+", raw) if t]
+
+    # Drop trailing run ids / hashes (e.g. "NIMBUS_AUTH_C5ED5D6C" -> "NIMBUS AUTH").
+    while tokens and re.fullmatch(r"(?:[A-F0-9]{6,}|\d{6,})", tokens[-1]):
+        tokens.pop()
+    if not tokens:
+        return ""
+
+    acronyms = {
+        "API",
+        "CPU",
+        "CSS",
+        "DB",
+        "DNS",
+        "GPU",
+        "HTML",
+        "HTTP",
+        "HTTPS",
+        "ID",
+        "JSON",
+        "JWT",
+        "LLM",
+        "RAM",
+        "SSE",
+        "SQL",
+        "SSH",
+        "UI",
+        "URL",
+        "UX",
+        "UUID",
+        "WS",
+    }
+    pretty: list[str] = []
+    for token in tokens[:6]:
+        if re.fullmatch(r"[A-Z0-9-]{2,}", token):
+            # Keep known acronyms, otherwise title-case plain ALLCAPS tokens.
+            if token in acronyms:
+                pretty.append(token)
+            elif re.fullmatch(r"[A-Z]{2,}", token):
+                pretty.append(token[:1] + token[1:].lower())
+            else:
+                pretty.append(token)
+        elif re.search(r"[A-Z]", token[1:]):
+            pretty.append(token)
+        else:
+            pretty.append(token.capitalize())
+    return " ".join(pretty).strip()[:64]
+
+
+def _focus_term_from_memory(memory_hits: list[dict]) -> str | None:
+    counts: dict[str, int] = {}
+    display: dict[str, str] = {}
+    for hit in memory_hits[:10]:
+        blob = " ".join(
+            [
+                str(hit.get("path") or ""),
+                str(hit.get("snippet") or ""),
+            ]
+        )
+        for token in re.findall(r"\b[A-Za-z][A-Za-z0-9_-]{2,}\b", blob):
+            lower = token.lower()
+            if lower in SUMMARY_DROP_WORDS or lower in TOPIC_FOCUS_STOPWORDS or lower in GENERIC_TOPIC_NAMES:
+                continue
+            if lower in {"openclaw", "clawboard", "memory", "snippet", "source", "line", "lines", "chunk"}:
+                continue
+            counts[lower] = counts.get(lower, 0) + 1
+            if lower not in display:
+                display[lower] = token
+    if not counts:
+        return None
+    best = sorted(counts.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))[0][0]
+    return _humanize_topic_name(display.get(best, best))
+
+
+def _is_low_signal_topic_name(name: str, window: list[dict]) -> bool:
+    candidate = _humanize_topic_name(name)
+    if not candidate:
+        return True
+    lower = candidate.lower()
+    if lower in GENERIC_TOPIC_NAMES:
+        return True
+    if any(lower.startswith(prefix) for prefix in LOW_SIGNAL_TOPIC_PREFIXES):
+        return True
+    if candidate.endswith("?"):
+        return True
+    if len(candidate.split()) > 7:
+        return True
+    user_text, _ = _latest_user_text(window)
+    source = _strip_transport_noise(_strip_slash_command(user_text) if user_text else _latest_conversation_text(window))
+    return False
+
+
+def _derive_focus_topic_name(window: list[dict], topic_cands: list[dict], memory_hits: list[dict] | None = None) -> str:
+    memory_hits = memory_hits or []
+    user_text, _idx = _latest_user_text(window)
+    source = _strip_transport_noise(_strip_slash_command(user_text) if user_text else _latest_conversation_text(window))
+    if source:
+        phrase = re.search(
+            r"\b(?:about|on|regarding|around|for)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_-]{2,}(?:\s+[A-Za-z][A-Za-z0-9_-]{2,}){0,2})\b",
+            source,
+            flags=re.IGNORECASE,
+        )
+        if phrase:
+            words = [
+                w
+                for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]{1,}", phrase.group(1))
+                if w.lower() not in TOPIC_FOCUS_STOPWORDS and w.lower() not in SUMMARY_DROP_WORDS
+            ]
+            if words:
+                return _humanize_topic_name(" ".join(words[:3]))
+        caps = re.findall(r"\b[A-Z][A-Z0-9_-]{2,}\b", source)
+        if caps:
+            return caps[0][:48]
+        proper = re.findall(r"\b[A-Z][a-z][A-Za-z0-9_-]{1,}\b", source)
+        for token in proper:
+            if token.lower() in TOPIC_FOCUS_STOPWORDS:
+                continue
+            return _humanize_topic_name(token)
+
+    memory_focus = _focus_term_from_memory(memory_hits)
+    if memory_focus:
+        return memory_focus
+
+    if topic_cands and float(topic_cands[0].get("score") or 0.0) >= 0.34 and topic_cands[0].get("name"):
+        return _humanize_topic_name(str(topic_cands[0].get("name") or ""))
+
+    concise = _concise_summary(source)
+    words = [
+        token
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9'/_-]*", concise)
+        if token.lower() not in SUMMARY_DROP_WORDS and token.lower() not in TOPIC_FOCUS_STOPWORDS
+    ]
+    if words:
+        return _humanize_topic_name(" ".join(words[:4]))
+    return "General"
+
+
+def _refine_topic_name(
+    proposed_name: str | None,
+    window: list[dict],
+    topic_cands: list[dict],
+    memory_hits: list[dict] | None = None,
+) -> str:
+    proposed = _humanize_topic_name(proposed_name or "")
+    if not proposed or _is_low_signal_topic_name(proposed, window):
+        proposed = _derive_focus_topic_name(window, topic_cands, memory_hits or [])
+    return _humanize_topic_name(proposed) or "General"
+
+
 def _concise_summary(text: str) -> str:
     clean = _strip_transport_noise(text)
     clean = re.sub(r"\s+", " ", clean)
@@ -674,10 +1229,25 @@ def _concise_summary(text: str) -> str:
     dense = _dense_clause(clean)
     telegraphic = _telegraphic_phrase(dense)
     candidate = telegraphic if len(telegraphic) >= 8 else dense
+    candidate = _strip_discourse_lead(candidate)
     candidate = re.sub(r"\s+", " ", candidate).strip("`* ")
+    if not candidate:
+        candidate = re.sub(r"\s+", " ", dense).strip("`* ")
     if len(candidate) <= SUMMARY_MAX:
         return candidate
     return f"{candidate[: SUMMARY_MAX - 1].rstrip()}…"
+
+
+def _is_low_signal_summary(summary: str, source_text: str) -> bool:
+    normalized_summary = _normalize_text(summary)
+    if not normalized_summary:
+        return True
+    if any(normalized_summary.startswith(prefix) for prefix in LOW_SIGNAL_SUMMARY_PREFIXES):
+        return True
+    normalized_source = _normalize_text(source_text)
+    if normalized_source and normalized_source.startswith(normalized_summary) and len(normalized_summary.split()) <= 5:
+        return True
+    return False
 
 
 def _looks_actionable(text: str) -> bool:
@@ -688,7 +1258,12 @@ def _looks_actionable(text: str) -> bool:
     if _is_system_artifact_text(t):
         return False
     lower = t.lower()
-    return any(cue in lower for cue in TASK_INTENT_CUES)
+    strong_intent = any(cue in lower for cue in TASK_INTENT_CUES)
+    if any(cue in lower for cue in INFORMATIONAL_REQUEST_CUES) and not strong_intent:
+        return False
+    if "?" in lower and not strong_intent:
+        return False
+    return strong_intent
 
 
 def _latest_conversation_text(window: list[dict]) -> str:
@@ -711,6 +1286,29 @@ def _derive_topic_name(window: list[dict]) -> str:
     text = _strip_transport_noise(text)
     if _is_command_text(text) or _is_system_artifact_text(text):
         return "General"
+
+    # Prefer explicit user-provided labels like "GraphQL caching: ..." when present.
+    # This is a strong signal of the intended durable topic name.
+    prefix = re.match(r"^\s*([A-Za-z][A-Za-z0-9][A-Za-z0-9 _/-]{1,48})\s*:\s*", text)
+    if prefix:
+        label = prefix.group(1).strip("`'\".,:;!?")
+        lower = label.lower()
+        if lower and lower not in TOPIC_FOCUS_STOPWORDS and lower not in GENERIC_TOPIC_NAMES:
+            pretty = _humanize_topic_name(label)
+            if pretty:
+                return pretty[:64]
+
+    focus = re.search(
+        r"\b(?:about|on|regarding)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_-]{2,})\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if focus:
+        candidate = focus.group(1).strip("`'\".,:;!?")
+        if candidate and candidate.lower() not in TOPIC_FOCUS_STOPWORDS:
+            if candidate.isupper():
+                return candidate[:48]
+            return _humanize_topic_name(candidate)[:64] or candidate[:48].title()
     # Favor all-caps tokens like THOMAS when present.
     caps = re.findall(r"\b[A-Z][A-Z0-9_-]{2,}\b", text)
     if caps:
@@ -740,6 +1338,14 @@ def _derive_task_title(window: list[dict]) -> str | None:
     return title[:120]
 
 
+def _window_has_task_intent(window: list[dict], fallback_text: str | None = None) -> bool:
+    if _derive_task_title(window):
+        return True
+    if fallback_text and _looks_actionable(fallback_text):
+        return True
+    return False
+
+
 def _latest_classified_task_for_topic(ctx_logs: list[dict], topic_id: str) -> str | None:
     for item in reversed(ctx_logs):
         if (item.get("classificationStatus") or "pending") != "classified":
@@ -761,12 +1367,27 @@ def _has_topic_intent(window: list[dict], text: str) -> bool:
     lower = candidate.lower()
     if any(cue in lower for cue in TOPIC_INTENT_CUES):
         return True
+    if re.search(r"\b(?:about|on|regarding|around|for)\s+[A-Za-z][A-Za-z0-9_-]{2,}\b", candidate, flags=re.IGNORECASE):
+        return True
+    if re.search(r"\b[A-Z][A-Za-z0-9_-]{2,}\b", candidate):
+        return True
     tokens = [
         t
         for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9'/_-]*", lower)
         if t not in SUMMARY_DROP_WORDS
     ]
     return len(tokens) >= 3 and len(lower) >= 24
+
+
+def _is_small_talk_bundle(window: list[dict], text: str) -> bool:
+    blob = _normalize_text(text)
+    if not blob:
+        return False
+    # Never treat explicit work requests as small talk.
+    if any(cue in blob for cue in TASK_INTENT_CUES):
+        return False
+    # Small talk requires at least one explicit cue.
+    return any(cue in blob for cue in SMALL_TALK_CUES)
 
 
 def _topic_creation_allowed(
@@ -968,14 +1589,17 @@ def list_logs(params: dict):
 def list_pending_conversations(limit=500, offset=0):
     # Only classify user/assistant conversations from real message threads.
     # Skip classifier/agent internal convo-like logs that can be present.
-    return list_logs(
-        {
-            "classificationStatus": "pending",
-            "type": "conversation",
+    r = requests.get(
+        f"{CLAWBOARD_API_BASE}/api/classifier/pending",
+        params={
             "limit": limit,
             "offset": offset,
-        }
+        },
+        headers=headers_clawboard(),
+        timeout=15,
     )
+    r.raise_for_status()
+    return r.json()
 
 
 def list_logs_by_session(session_key: str, limit: int = 200, offset: int = 0, classificationStatus: str | None = None):
@@ -1090,7 +1714,7 @@ def ensure_task_index_seeded(topic_id: str):
 
 
 def topic_candidates(query_text: str, k: int = 6):
-    topics = list_topics()
+    topics = [t for t in list_topics() if isinstance(t.get("name"), str) and "_" not in (t.get("name") or "")]
     if not topics:
         return []
 
@@ -1113,11 +1737,16 @@ def topic_candidates(query_text: str, k: int = 6):
         lexical_scores[tid] = _name_similarity(query_text, name)
 
     bm25_scores = _bm25_scores(query_text, topic_text)
-    rrf_scores = _rrf_fuse([vector_scores, bm25_scores, lexical_scores], weights=[1.0, 0.92, 0.56])
-    vector_norm = _normalize_score_map(vector_scores)
-    bm25_norm = _normalize_score_map(bm25_scores)
-    lexical_norm = _normalize_score_map(lexical_scores)
-    rrf_norm = _normalize_score_map(rrf_scores)
+    # Normalize BM25 relative to the best matching doc. We include zero-scores for
+    # non-matching docs so a single lexical hit can still score as a strong anchor.
+    bm25_norm: dict[str, float] = {}
+    if bm25_scores:
+        hi = max(float(v) for v in bm25_scores.values())
+        if hi > 0:
+            for doc_id in topic_text.keys():
+                bm25_norm[doc_id] = float(bm25_scores.get(doc_id, 0.0)) / hi
+    q_tokens = _token_set(query_text)
+    q_norm = _normalize_text(query_text)
 
     out = []
     for topic in topics:
@@ -1128,23 +1757,30 @@ def topic_candidates(query_text: str, k: int = 6):
         vector = vector_scores.get(tid, 0.0)
         lexical = lexical_scores.get(tid, 0.0)
         bm25 = bm25_scores.get(tid, 0.0)
-        base = (
-            (rrf_norm.get(tid, 0.0) * 0.44)
-            + (vector_norm.get(tid, 0.0) * 0.24)
-            + (bm25_norm.get(tid, 0.0) * 0.2)
-            + (lexical_norm.get(tid, 0.0) * 0.12)
-        )
-        rerank = _late_interaction_score(query_text, topic_text.get(tid, name))
-        hybrid = (base * 0.72) + (rerank * 0.28)
+        bm25n = bm25_norm.get(tid, 0.0)
+
+        cand_text = topic_text.get(tid, name)
+        c_tokens = _token_set(cand_text)
+        coverage = (len(q_tokens & c_tokens) / max(1, len(q_tokens))) if q_tokens else 0.0
+        phrase = 1.0 if q_norm and q_norm in _normalize_text(cand_text) else 0.0
+
+        # Score semantics:
+        # - Use absolute embedding similarity + lexical BM25 as the core signal.
+        # - Avoid rank-based fusion (RRF) as the primary score; on small corpora it can
+        #   overstate confidence and cause false-positive reuse.
+        topical = max(vector, bm25n)
+        support = min(vector, bm25n)
+        score = (topical * 0.62) + (support * 0.18) + (lexical * 0.12) + (coverage * 0.06) + (phrase * 0.02)
         out.append(
             {
                 "id": tid,
                 "name": name,
-                "score": hybrid,
+                "score": score,
                 "vectorScore": vector,
                 "bm25Score": bm25,
-                "rrfScore": rrf_scores.get(tid, 0.0),
-                "rerankScore": rerank,
+                "bm25Norm": bm25n,
+                "coverageScore": coverage,
+                "phraseScore": phrase,
                 "lexicalScore": lexical,
             }
         )
@@ -1178,11 +1814,14 @@ def task_candidates(topic_id: str, query_text: str, k: int = 8):
         lexical_scores[tid] = _name_similarity(query_text, title)
 
     bm25_scores = _bm25_scores(query_text, task_text)
-    rrf_scores = _rrf_fuse([vector_scores, bm25_scores, lexical_scores], weights=[1.0, 0.92, 0.58])
-    vector_norm = _normalize_score_map(vector_scores)
-    bm25_norm = _normalize_score_map(bm25_scores)
-    lexical_norm = _normalize_score_map(lexical_scores)
-    rrf_norm = _normalize_score_map(rrf_scores)
+    bm25_norm: dict[str, float] = {}
+    if bm25_scores:
+        hi = max(float(v) for v in bm25_scores.values())
+        if hi > 0:
+            for doc_id in task_text.keys():
+                bm25_norm[doc_id] = float(bm25_scores.get(doc_id, 0.0)) / hi
+    q_tokens = _token_set(query_text)
+    q_norm = _normalize_text(query_text)
 
     out = []
     for task in tasks:
@@ -1193,23 +1832,26 @@ def task_candidates(topic_id: str, query_text: str, k: int = 8):
         lexical = lexical_scores.get(tid, 0.0)
         vector = vector_scores.get(tid, 0.0)
         bm25 = bm25_scores.get(tid, 0.0)
-        base = (
-            (rrf_norm.get(tid, 0.0) * 0.44)
-            + (vector_norm.get(tid, 0.0) * 0.24)
-            + (bm25_norm.get(tid, 0.0) * 0.2)
-            + (lexical_norm.get(tid, 0.0) * 0.12)
-        )
-        rerank = _late_interaction_score(query_text, task_text.get(tid, title))
-        hybrid = (base * 0.72) + (rerank * 0.28)
+        bm25n = bm25_norm.get(tid, 0.0)
+
+        cand_text = task_text.get(tid, title)
+        c_tokens = _token_set(cand_text)
+        coverage = (len(q_tokens & c_tokens) / max(1, len(q_tokens))) if q_tokens else 0.0
+        phrase = 1.0 if q_norm and q_norm in _normalize_text(cand_text) else 0.0
+
+        topical = max(vector, bm25n)
+        support = min(vector, bm25n)
+        score = (topical * 0.62) + (support * 0.18) + (lexical * 0.12) + (coverage * 0.06) + (phrase * 0.02)
         out.append(
             {
                 "id": tid,
                 "title": title,
-                "score": hybrid,
+                "score": score,
                 "vectorScore": vector,
                 "bm25Score": bm25,
-                "rrfScore": rrf_scores.get(tid, 0.0),
-                "rerankScore": rerank,
+                "bm25Norm": bm25n,
+                "coverageScore": coverage,
+                "phraseScore": phrase,
                 "lexicalScore": lexical,
             }
         )
@@ -1272,6 +1914,29 @@ def window_text(window: list[dict], notes_index: dict[str, list[str]] | None = N
     return "\n".join(parts)[-6000:]
 
 
+def user_window_text(window: list[dict], notes_index: dict[str, list[str]] | None = None) -> str:
+    """User-only retrieval text for stable topic/task candidate selection.
+
+    Including assistant replies in the retrieval query can skew candidate selection
+    toward broad disclaimers (auth/security/etc) instead of the user's intent.
+    """
+
+    parts: list[str] = []
+    notes_index = notes_index or {}
+    for e in window:
+        if _conversation_agent(e) != "user":
+            continue
+        text = _strip_transport_noise(e.get("content") or e.get("summary") or "")
+        if not text:
+            continue
+        line = text
+        notes = notes_index.get(e.get("id") or "", [])
+        if notes:
+            line += " | Notes: " + " ; ".join(notes[:3])
+        parts.append(line)
+    return "\n".join(parts)[-6000:]
+
+
 def call_classifier(
     window: list[dict],
     pending_ids: list[str],
@@ -1286,6 +1951,11 @@ def call_classifier(
         content_limit = 360 if compact else 800
         recent_limit = 3 if compact else 6
         memory_limit = 3 if compact else len(memory_hits)
+        output_template = {
+            "topic": {"id": None, "name": "", "create": False},
+            "task": None,
+            "summaries": [{"id": sid, "summary": ""} for sid in pending_ids if isinstance(sid, str) and sid],
+        }
         return {
             "window": [
                 {
@@ -1314,41 +1984,56 @@ def call_classifier(
             ],
             "memory": memory_hits[:memory_limit],
             "pendingIds": pending_ids,
+            "outputTemplate": output_template,
             "instructions": (
-                "Return STRICT JSON only with shape: "
-                "{\"topic\": {\"id\": string|null, \"name\": string, \"create\": boolean}, "
-                "\"task\": {\"id\": string|null, \"title\": string|null, \"create\": boolean}|null, "
-                "\"summaries\": [{\"id\": string, \"summary\": string}]}. "
-                "Rules: (1) Prefer existing topics/tasks when they clearly match; "
-                "(2) Use notes/curation and memory snippets as high-signal context; "
-                "(3) Only create when needed; (4) Topic/task names must be short and human; "
-                "(5) If an action item exists, pick or create a task; "
-                "(6) If in doubt, return task=null; "
-                "(7) Summaries are REQUIRED for every id in pendingIds (no omissions, one per id); "
-                "(8) Each summary must be ultra concise <=56 chars, 4-10 words, telegraphic style; "
-                "sacrifice grammar for brevity; "
-                "(9) Do not copy first sentence verbatim, rewrite semantically; "
-                "(10) Never prefix with 'SUMMARY:' and never include transport metadata; "
-                "(11) Do NOT create topics from system/tool/memory artifacts or slash commands like /new; "
-                "(12) Only create tasks when user intent is explicit or user confirms an assistant suggestion; "
-                "(13) If unsure, set create=false and task=null."
+                "Return STRICT JSON only (no markdown, no code fences, no leading/trailing text). "
+                "Output MUST be a single JSON object that matches outputTemplate EXACTLY: "
+                "same keys, same nesting, no extra keys. Replace placeholder values with real values. "
+                "Context: pendingIds correspond to ONE coherent request/response bundle. "
+                "Anchor on the earliest meaningful user intent within that bundle; "
+                "if the earliest user turn is only an affirmation ('yes', 'ok', 'do it'), "
+                "anchor on the immediately preceding assistant plan in window. "
+                "Rules: (1) Topic is MANDATORY. Always return a meaningful topic name, never generic placeholders. "
+                "(2) Prefer an existing topic ONLY when it clearly matches the bundle's anchor intent + recent context. "
+                "Do NOT pick an existing topic just because it exists or is the only candidate. "
+                "(3) If no existing topic clearly fits, set topic.id=null and topic.create=true and propose a durable topic.name. "
+                "(4) Topic names must be 1-5 words, noun-centric, human-readable; "
+                "avoid generic names and avoid copying the first words of the user prompt. "
+                "(5) Task is OPTIONAL. Only return/create a task when execution intent is explicit "
+                "(build/fix/implement/ship/next step) or the user confirms an assistant action plan. "
+                "(6) For recall/explanation/brainstorming/status chat, set task=null. "
+                "(7) If task intent exists, prefer an existing matching task before creating. "
+                "(8) Summaries are REQUIRED for every id in pendingIds (no omissions, one per id). "
+                "(9) Each summary: <=56 chars, 4-10 words, telegraphic style; sacrifice grammar for brevity. "
+                "(10) Semantic rewrite: do not copy the first sentence verbatim. "
+                "(11) Never prefix with 'SUMMARY:' and never include transport metadata. "
+                "(12) Do NOT create topics from system/tool/memory artifacts or slash commands like /new. "
+                "(13) If unsure on task, set task=null."
             ),
         }
 
     for compact in (False, True):
+        prompt = build_prompt(compact)
         body = {
             "model": OPENCLAW_MODEL,
             "messages": [
-                {"role": "system", "content": "You are a high-precision classifier for an ops dashboard. STRICT JSON only."},
-                {"role": "user", "content": json.dumps(build_prompt(compact))},
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a high-precision classifier for an ops dashboard. "
+                        "Return ONLY a single JSON object matching the provided outputTemplate. "
+                        "Do not output markdown, code fences, comments, or any explanation."
+                    ),
+                },
+                {"role": "user", "content": json.dumps(prompt)},
             ],
-            "temperature": 0,
+            "temperature": 0.1,
             "max_tokens": 420 if compact else 600,
         }
         try:
             r = requests.post(
                 f"{OPENCLAW_BASE_URL}/v1/chat/completions",
-                headers=oc_headers(),
+                headers=oc_headers_with_session(_openclaw_internal_session_key("classifier")),
                 data=json.dumps(body),
                 timeout=20 if compact else 30,
             )
@@ -1356,12 +2041,46 @@ def call_classifier(
             data = r.json()
             text = data["choices"][0]["message"]["content"]
             try:
-                return json.loads(text)
-            except Exception:
-                match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-                if not match:
-                    raise
-                return json.loads(match.group(0))
+                parsed = _parse_strict_json(text)
+                return _validate_classifier_result(parsed, pending_ids)
+            except _StrictJsonError as exc:
+                # One deterministic retry: ask the model to regenerate strict JSON from the same input.
+                repair_body = {
+                    "model": OPENCLAW_MODEL,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You repair/normalize classifier outputs. "
+                                "Return ONLY a single JSON object matching outputTemplate exactly. "
+                                "No markdown, no code fences, no extra text."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                {
+                                    "input": prompt,
+                                    "invalidOutput": text,
+                                    "validationError": str(exc),
+                                    "instructions": "Return ONLY the JSON object matching input.outputTemplate.",
+                                }
+                            ),
+                        },
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 520 if compact else 720,
+                }
+                rr = requests.post(
+                    f"{OPENCLAW_BASE_URL}/v1/chat/completions",
+                    headers=oc_headers_with_session(_openclaw_internal_session_key("classifier-repair")),
+                    data=json.dumps(repair_body),
+                    timeout=18 if compact else 26,
+                )
+                rr.raise_for_status()
+                repaired_text = rr.json()["choices"][0]["message"]["content"]
+                repaired = _parse_strict_json(repaired_text)
+                return _validate_classifier_result(repaired, pending_ids)
         except requests.exceptions.ReadTimeout:
             if compact:
                 raise
@@ -1415,14 +2134,16 @@ def call_creation_gate(
         },
         "candidateTopics": compact_rows(candidate_topics, "name"),
         "candidateTasks": compact_rows(candidate_tasks, "title"),
+        "outputTemplate": {"createTopic": False, "topicId": None, "createTask": False, "taskId": None},
         "instructions": (
-            "Return STRICT JSON only with shape: "
-            "{\"createTopic\": boolean, \"topicId\": string|null, "
-            "\"createTask\": boolean, \"taskId\": string|null}. "
-            "Rules: (1) Only allow creation if user intent is explicit or user confirmed an assistant suggestion; "
-            "(2) If an existing candidate is a close fit, set create=false and provide its id; "
-            "(3) Never create from system/tool/memory artifacts or slash commands like /new; "
-            "(4) If uncertain, set create=false."
+            "Return STRICT JSON only (no markdown, no code fences). "
+            "Output MUST be a single JSON object that matches outputTemplate EXACTLY: "
+            "same keys, no extra keys. Replace placeholder values with real values. "
+            "Rules: (1) Topic creation is allowed when no candidate is a close fit and the conversation has a stable human theme/entity. "
+            "(2) Task creation is stricter: allow only when execution intent is explicit or user confirmed an assistant action plan. "
+            "(3) If an existing candidate is a close fit, set create=false and provide its id. "
+            "(4) Never create from system/tool/memory artifacts or slash commands like /new. "
+            "(5) If uncertain for task, set createTask=false."
         ),
     }
 
@@ -1431,7 +2152,11 @@ def call_creation_gate(
         "messages": [
             {
                 "role": "system",
-                "content": "You are a cautious gatekeeper for topic/task creation. STRICT JSON only.",
+                "content": (
+                    "You are a cautious gatekeeper for topic/task creation. "
+                    "Return ONLY a single JSON object matching outputTemplate. "
+                    "No markdown, no code fences, no explanation."
+                ),
             },
             {"role": "user", "content": json.dumps(payload)},
         ],
@@ -1440,19 +2165,52 @@ def call_creation_gate(
     }
     r = requests.post(
         f"{OPENCLAW_BASE_URL}/v1/chat/completions",
-        headers=oc_headers(),
+        headers=oc_headers_with_session(_openclaw_internal_session_key("creation-gate")),
         data=json.dumps(body),
         timeout=16,
     )
     r.raise_for_status()
     text = r.json()["choices"][0]["message"]["content"]
     try:
-        return json.loads(text)
-    except Exception:
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if not match:
-            raise
-        return json.loads(match.group(0))
+        parsed = _parse_strict_json(text)
+        return _validate_creation_gate_result(parsed)
+    except _StrictJsonError as exc:
+        repair_body = {
+            "model": OPENCLAW_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You repair/normalize gatekeeper outputs. "
+                        "Return ONLY a single JSON object matching outputTemplate exactly. "
+                        "No markdown, no code fences, no extra text."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "input": payload,
+                            "invalidOutput": text,
+                            "validationError": str(exc),
+                            "instructions": "Return ONLY the JSON object matching input.outputTemplate.",
+                        }
+                    ),
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 220,
+        }
+        rr = requests.post(
+            f"{OPENCLAW_BASE_URL}/v1/chat/completions",
+            headers=oc_headers_with_session(_openclaw_internal_session_key("creation-gate-repair")),
+            data=json.dumps(repair_body),
+            timeout=14,
+        )
+        rr.raise_for_status()
+        repaired_text = rr.json()["choices"][0]["message"]["content"]
+        repaired = _parse_strict_json(repaired_text)
+        return _validate_creation_gate_result(repaired)
 
 
 def call_summary_repair(
@@ -1470,40 +2228,46 @@ def call_summary_repair(
     best: dict[str, str] = {}
     for compact in (False, True):
         content_limit = 320 if compact else 520
+        output_template = {
+            "summaries": [{"id": sid, "summary": ""} for sid in pending_set],
+        }
+        prompt = {
+            "window": [
+                {
+                    "id": e.get("id"),
+                    "agentLabel": e.get("agentLabel") or e.get("agentId"),
+                    "content": _strip_transport_noise(e.get("content") or e.get("summary") or "")[:content_limit],
+                    "notes": notes_index.get(e.get("id") or "", [])[:2],
+                }
+                for e in window
+                if e.get("id") in pending_set
+            ],
+            "pendingIds": list(pending_set),
+            "outputTemplate": output_template,
+            "instructions": (
+                "Return STRICT JSON only (no markdown, no code fences). "
+                "Output MUST be a single JSON object that matches outputTemplate EXACTLY: "
+                "same keys, no extra keys. Replace placeholder values with real values. "
+                "Rules: include every id in pendingIds exactly once; "
+                "summary <=56 chars; 4-10 words; telegraphic style; "
+                "sacrifice grammar for concision; semantic rewrite, not first sentence copy; "
+                "no 'SUMMARY:' prefix; no transport metadata."
+            ),
+        }
         body = {
             "model": OPENCLAW_MODEL,
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a terse summarizer for dashboard message chips. STRICT JSON only.",
+                    "content": (
+                        "You are a terse summarizer for dashboard message chips. "
+                        "Return ONLY a single JSON object matching outputTemplate. "
+                        "No markdown, no code fences, no explanation."
+                    ),
                 },
                 {
                     "role": "user",
-                    "content": json.dumps(
-                        {
-                            "window": [
-                                {
-                                    "id": e.get("id"),
-                                    "agentLabel": e.get("agentLabel") or e.get("agentId"),
-                                    "content": _strip_transport_noise(e.get("content") or e.get("summary") or "")[
-                                        :content_limit
-                                    ],
-                                    "notes": notes_index.get(e.get("id") or "", [])[:2],
-                                }
-                                for e in window
-                                if e.get("id") in pending_set
-                            ],
-                            "pendingIds": list(pending_set),
-                            "instructions": (
-                                "Return STRICT JSON only with shape "
-                                "{\"summaries\":[{\"id\":string,\"summary\":string}]}. "
-                                "Rules: include every id in pendingIds exactly once; "
-                                "summary <=56 chars; 4-10 words; telegraphic style; "
-                                "sacrifice grammar for concision; semantic rewrite, not first sentence copy; "
-                                "no 'SUMMARY:' prefix; no transport metadata."
-                            ),
-                        }
-                    ),
+                    "content": json.dumps(prompt),
                 },
             ],
             "temperature": 0,
@@ -1512,35 +2276,53 @@ def call_summary_repair(
         try:
             response = requests.post(
                 f"{OPENCLAW_BASE_URL}/v1/chat/completions",
-                headers=oc_headers(),
+                headers=oc_headers_with_session(_openclaw_internal_session_key("summary-repair")),
                 data=json.dumps(body),
                 timeout=15 if compact else 22,
             )
             response.raise_for_status()
             raw = response.json()["choices"][0]["message"]["content"]
             try:
-                parsed = json.loads(raw)
-            except Exception:
-                match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-                if not match:
-                    continue
-                parsed = json.loads(match.group(0))
-            rows = parsed.get("summaries") if isinstance(parsed, dict) else None
-            if not isinstance(rows, list):
-                continue
-            out: dict[str, str] = {}
-            for item in rows:
-                if not isinstance(item, dict):
-                    continue
-                sid = item.get("id")
-                stext = item.get("summary")
-                if not isinstance(sid, str) or sid not in pending_set:
-                    continue
-                if not isinstance(stext, str):
-                    continue
-                concise = _concise_summary(stext)
-                if concise:
-                    out[sid] = concise
+                parsed = _parse_strict_json(raw)
+                out = _validate_summary_repair_result(parsed, list(pending_set))
+            except _StrictJsonError as exc:
+                repair_body = {
+                    "model": OPENCLAW_MODEL,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You repair/normalize summarizer outputs. "
+                                "Return ONLY a single JSON object matching outputTemplate exactly. "
+                                "No markdown, no code fences, no extra text."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                {
+                                    "input": prompt,
+                                    "outputTemplate": output_template,
+                                    "invalidOutput": raw,
+                                    "validationError": str(exc),
+                                    "instructions": "Return ONLY the JSON object matching outputTemplate.",
+                                }
+                            ),
+                        },
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 320,
+                }
+                rr = requests.post(
+                    f"{OPENCLAW_BASE_URL}/v1/chat/completions",
+                    headers=oc_headers_with_session(_openclaw_internal_session_key("summary-repair-repair")),
+                    data=json.dumps(repair_body),
+                    timeout=14 if compact else 18,
+                )
+                rr.raise_for_status()
+                repaired_text = rr.json()["choices"][0]["message"]["content"]
+                repaired = _parse_strict_json(repaired_text)
+                out = _validate_summary_repair_result(repaired, list(pending_set))
             if len(out) > len(best):
                 best = out
             if len(best) == len(pending_set):
@@ -1551,7 +2333,14 @@ def call_summary_repair(
     return best
 
 
-def classify_without_llm(window: list[dict], ctx_logs: list[dict], topic_cands: list[dict], text: str):
+def classify_without_llm(
+    window: list[dict],
+    ctx_logs: list[dict],
+    topic_cands: list[dict],
+    text: str,
+    *,
+    prefer_continuity: bool = False,
+):
     topics = list_topics()
     topics_by_id = {t.get("id"): t for t in topics if t.get("id")}
 
@@ -1559,22 +2348,36 @@ def classify_without_llm(window: list[dict], ctx_logs: list[dict], topic_cands: 
     chosen_topic_name = None
     create_topic = False
 
-    # 1) Reuse session topic if one is already classified in this stream.
+    last_topic_id = None
+    last_topic_name = None
     for item in reversed(ctx_logs):
         if (item.get("classificationStatus") or "pending") != "classified":
             continue
         tid = item.get("topicId")
         if tid and tid in topics_by_id:
-            chosen_topic_id = tid
-            chosen_topic_name = topics_by_id[tid].get("name")
+            last_topic_id = tid
+            last_topic_name = topics_by_id[tid].get("name")
             break
 
-    # 2) Otherwise use best hybrid candidate.
-    if not chosen_topic_id and topic_cands:
-        top = topic_cands[0]
-        if float(top.get("score") or 0.0) >= 0.52:
-            chosen_topic_id = top.get("id")
-            chosen_topic_name = top.get("name")
+    # Follow-up user turns (no assistant response yet) are often continuations of the
+    # previous bundle; prefer continuity in those cases to avoid fragmenting topics.
+    if prefer_continuity and last_topic_id:
+        chosen_topic_id = last_topic_id
+        chosen_topic_name = last_topic_name
+    else:
+        # 1) Prefer a strong current-bundle candidate. This prevents "topic lock-in" where
+        # a previously-classified topic in the same session forces unrelated later bundles
+        # into the same topic (multi-bundle sessions should be able to switch topics).
+        if topic_cands:
+            top = topic_cands[0]
+            if float(top.get("score") or 0.0) >= 0.52:
+                chosen_topic_id = top.get("id")
+                chosen_topic_name = top.get("name")
+
+        # 2) Otherwise reuse the latest classified topic in this stream (continuity).
+        if not chosen_topic_id and last_topic_id:
+            chosen_topic_id = last_topic_id
+            chosen_topic_name = last_topic_name
 
     # 3) Otherwise derive a new topic name from latest message context.
     if not chosen_topic_name:
@@ -1590,6 +2393,11 @@ def classify_without_llm(window: list[dict], ctx_logs: list[dict], topic_cands: 
     if not chosen_topic_name:
         chosen_topic_name = "General"
         create_topic = True
+
+    if not chosen_topic_id:
+        chosen_topic_name = _refine_topic_name(chosen_topic_name, window, topic_cands, [])
+    else:
+        chosen_topic_name = _humanize_topic_name(chosen_topic_name or "") or chosen_topic_name or "General"
 
     if create_topic and not _topic_creation_allowed(window, chosen_topic_name, topic_cands, text, topics):
         create_topic = False
@@ -1610,10 +2418,11 @@ def classify_without_llm(window: list[dict], ctx_logs: list[dict], topic_cands: 
 
     task_id = None
     task_title = _derive_task_title(window)
+    task_intent = _window_has_task_intent(window, text)
     task_cands = task_candidates(topic_id, text, k=8)
-    if task_cands and float(task_cands[0].get("score") or 0.0) >= 0.56:
+    if task_intent and task_cands and float(task_cands[0].get("score") or 0.0) >= 0.56:
         task_id = task_cands[0]["id"]
-    elif task_title:
+    elif task_intent and task_title:
         existing = list_tasks(topic_id)
         match, score = _best_name_match(task_title, existing, "title")
         if match and score >= 0.78:
@@ -1621,7 +2430,7 @@ def classify_without_llm(window: list[dict], ctx_logs: list[dict], topic_cands: 
         elif _task_creation_allowed(window, task_title, task_cands):
             task = upsert_task(None, topic_id, task_title)
             task_id = task["id"]
-    if not task_id:
+    if task_intent and not task_id:
         continuity_task = _latest_classified_task_for_topic(ctx_logs, topic_id)
         if continuity_task:
             task_id = continuity_task
@@ -1643,6 +2452,63 @@ def classify_without_llm(window: list[dict], ctx_logs: list[dict], topic_cands: 
     }
 
 
+def _conversation_agent(entry: dict) -> str:
+    return str(entry.get("agentId") or "").strip().lower()
+
+
+def _conversation_text(entry: dict) -> str:
+    return _strip_transport_noise(entry.get("content") or entry.get("summary") or entry.get("raw") or "")
+
+
+def _bundle_range(conversations: list[dict], anchor_idx: int) -> tuple[int, int]:
+    """Return (start_idx, end_idx) for one coherent request/response bundle."""
+    if not conversations:
+        return 0, 0
+    anchor_idx = max(0, min(anchor_idx, len(conversations) - 1))
+
+    # Prefer starting on a user intent. If the anchor is assistant, include the closest
+    # preceding user message so the classifier has intent context.
+    start_idx = anchor_idx
+    anchor = conversations[anchor_idx]
+    if _conversation_agent(anchor) != "user":
+        for j in range(anchor_idx, -1, -1):
+            if _conversation_agent(conversations[j]) == "user":
+                start_idx = j
+                break
+    else:
+        anchor_text = _strip_slash_command(_conversation_text(anchor))
+        if anchor_text and _is_affirmation(anchor_text):
+            # "Yes/ok" is ambiguous; anchor on the closest earlier non-affirmation user intent.
+            for j in range(anchor_idx - 1, -1, -1):
+                if _conversation_agent(conversations[j]) != "user":
+                    continue
+                prev_text = _strip_slash_command(_conversation_text(conversations[j]))
+                if prev_text and not _is_affirmation(prev_text):
+                    start_idx = j
+                    break
+
+    seen_assistant = False
+    end_idx = start_idx
+    for i in range(start_idx, len(conversations)):
+        entry = conversations[i]
+        end_idx = i + 1
+        agent = _conversation_agent(entry)
+        if agent != "user":
+            seen_assistant = True
+            continue
+        if i == start_idx:
+            continue
+        user_text = _strip_slash_command(_conversation_text(entry))
+        # Once the assistant has responded, the next non-affirmation user message
+        # usually starts a new request.
+        if seen_assistant and user_text and not _is_affirmation(user_text):
+            end_idx = i
+            break
+
+    # Always return at least one entry.
+    return start_idx, max(start_idx + 1, end_idx)
+
+
 def classify_session(session_key: str):
     # Pull a lookback window of logs for context (conversation + actions).
     ctx_logs = list_logs_by_session(session_key, limit=LOOKBACK_LOGS, offset=0)
@@ -1661,8 +2527,8 @@ def classify_session(session_key: str):
     ctx_logs = sorted(ctx_logs, key=lambda e: e.get("createdAt") or "")
     ctx_context = [e for e in ctx_logs if _is_context_log(e)]
 
-    # Window focus: a context window around the oldest pending conversation.
-    # This avoids starving older pending rows when new traffic keeps arriving.
+    # Anchor on the oldest pending conversation so older rows don't starve.
+    # We then classify one request/response bundle at a time within this session.
     conversations = [e for e in ctx_context if e.get("type") == "conversation"]
     if not conversations:
         # Still clean up classifier payload noise if present.
@@ -1730,19 +2596,45 @@ def classify_session(session_key: str):
 
     anchor_id = pending_conversations[0].get("id")
     anchor_idx = next((idx for idx, item in enumerate(conversations) if item.get("id") == anchor_id), 0)
-    window_start = max(0, anchor_idx - (WINDOW_SIZE - 1))
-    window = conversations[window_start : window_start + WINDOW_SIZE]
+
+    # Classify in request/response bundles so we don't collapse an entire session into one topic.
+    bundle_start_idx, bundle_end_idx = _bundle_range(conversations, anchor_idx)
+    bundle = conversations[bundle_start_idx:bundle_end_idx]
+
+    # Provide limited prior context (primarily for "yes/ok" style turns) while keeping the
+    # LLM window tight enough to avoid cross-topic contamination.
+    max_context = max(4, int(WINDOW_SIZE / 4))
+    context_slots = min(max_context, max(0, WINDOW_SIZE - len(bundle)))
+    window_start = max(0, bundle_start_idx - context_slots)
+    window = conversations[window_start:bundle_end_idx]
+
     pending_ids = [
         e["id"]
-        for e in window
+        for e in bundle
         if (e.get("classificationStatus") or "pending") == "pending"
         and int(e.get("classificationAttempts") or 0) < MAX_ATTEMPTS
     ]
     if not pending_ids:
         return
 
+    # Patch scope: logs between bundle start and the next user request (exclusive), so
+    # interleaved actions are attached to the same topic/task without stamping the whole session.
+    pos_by_id: dict[str, int] = {str(e.get("id")): idx for idx, e in enumerate(ctx_logs) if e.get("id")}
+    start_id = str(bundle[0].get("id") or "")
+    boundary_id = str(conversations[bundle_end_idx].get("id") or "") if bundle_end_idx < len(conversations) else ""
+    scope_start_pos = pos_by_id.get(start_id)
+    if scope_start_pos is None:
+        pending_positions = [pos_by_id.get(pid) for pid in pending_ids if pid in pos_by_id]
+        scope_start_pos = min([p for p in pending_positions if isinstance(p, int)], default=0)
+    scope_end_pos = pos_by_id.get(boundary_id) if boundary_id else len(ctx_logs)
+    if scope_end_pos is None:
+        scope_end_pos = len(ctx_logs)
+    if scope_end_pos < scope_start_pos:
+        scope_end_pos = len(ctx_logs)
+    scope_logs = ctx_logs[scope_start_pos:scope_end_pos]
+
     def mark_window_failure(error_code: str):
-        for e in window:
+        for e in scope_logs:
             if (e.get("classificationStatus") or "pending") != "pending":
                 continue
             attempts = int(e.get("classificationAttempts") or 0) + 1
@@ -1757,11 +2649,70 @@ def classify_session(session_key: str):
             )
 
     notes_index = build_notes_index(ctx_context)
-    text = window_text(window, notes_index)
+    # If the bundle is just an affirmation ("yes/ok") without a prior user intent inside the
+    # bundle, fall back to the limited-context window so we still have semantic signal.
+    has_non_affirm_user = False
+    for e in bundle:
+        if _conversation_agent(e) != "user":
+            continue
+        utext = _strip_slash_command(_conversation_text(e))
+        if utext and not _is_affirmation(utext):
+            has_non_affirm_user = True
+            break
+
+    # Retrieval text should be anchored on user intent. Including assistant replies
+    # can introduce broad disclaimers (auth/security/etc) that then dominate
+    # candidate retrieval and cause false-positive topic reuse.
+    text = user_window_text(bundle, notes_index) if has_non_affirm_user else window_text(window, notes_index)
+    if not text:
+        text = window_text(bundle, notes_index)
+
+    # Avoid cross-topic contamination: only include prior context in the LLM window
+    # when the bundle itself has no semantic anchor (e.g., "yes/ok" style turns).
+    llm_window = bundle if has_non_affirm_user else window
+
+    # Small-talk fast path: skip the LLM and attach to a stable "Small Talk" topic.
+    # This avoids topic bloat (every small chat turn becoming a new topic) and keeps
+    # the classifier loop fast under casual chatter.
+    if _is_small_talk_bundle(bundle, text):
+        try:
+            all_topics = list_topics()
+            match, score = _best_name_match("Small Talk", all_topics, "name")
+            existing_id = match.get("id") if match and score >= 0.92 else None
+            topic = upsert_topic(existing_id if existing_id else None, "Small Talk")
+            topic_id = topic["id"]
+        except Exception:
+            mark_window_failure("small_talk_topic_error")
+            return
+
+        for entry in scope_logs:
+            if (entry.get("classificationStatus") or "pending") != "pending":
+                continue
+            attempts = int(entry.get("classificationAttempts") or 0)
+            if attempts >= MAX_ATTEMPTS:
+                continue
+            payload = {
+                "topicId": topic_id,
+                "taskId": None,
+                "classificationStatus": "classified",
+                "classificationAttempts": attempts + 1,
+                "classificationError": None,
+            }
+            if entry.get("type") == "conversation":
+                summary = _concise_summary((entry.get("content") or entry.get("summary") or "").strip())
+                if summary:
+                    payload["summary"] = summary
+            patch_log(entry["id"], payload)
+        return
     memory_hits = memory_snippets(text)
 
     ensure_topic_index_seeded()
     topic_cands = topic_candidates(text)
+    # "Small Talk" is a reserved topic handled by the fast path above. Excluding it
+    # here prevents the LLM from using it as a generic bucket for unrelated bundles.
+    topic_cands = [
+        t for t in topic_cands if str(t.get("name") or "").strip().lower() != "small talk"
+    ]
 
     # If we have a strong top topic, also propose task candidates for it.
     task_cands = []
@@ -1769,7 +2720,11 @@ def classify_session(session_key: str):
         task_cands = task_candidates(topic_cands[0]["id"], text)
 
     topic_contexts: dict[str, list[dict]] = {}
-    for t in topic_cands:
+    # Context hydration is expensive (API round-trips). Only fetch "recent" context
+    # for candidates that are plausibly relevant.
+    topic_ctx_min_score = max(0.42, TOPIC_SIM_THRESHOLD - 0.32)
+    topic_ctx_cands = [t for t in topic_cands if float(t.get("score") or 0.0) >= topic_ctx_min_score][:3]
+    for t in topic_ctx_cands:
         tid = t.get("id")
         if not tid:
             continue
@@ -1787,42 +2742,137 @@ def classify_session(session_key: str):
         task_contexts[tid] = summarize_logs(logs, task_notes, limit=6)
 
     fallback_error: str | None = None
-    try:
-        result = call_classifier(
-            window,
-            pending_ids,
-            topic_cands,
-            task_cands,
-            notes_index,
-            topic_contexts,
-            task_contexts,
-            memory_hits,
-        )
-    except requests.exceptions.ReadTimeout:
-        fallback_error = "llm_timeout"
-    except Exception as exc:
-        fallback_error = f"classifier_error:{str(exc)[:120]}"
+    if _llm_enabled():
+        try:
+            result = call_classifier(
+                llm_window,
+                pending_ids,
+                topic_cands,
+                task_cands,
+                notes_index,
+                topic_contexts,
+                task_contexts,
+                memory_hits,
+            )
+        except requests.exceptions.ReadTimeout:
+            fallback_error = "llm_timeout"
+        except Exception as exc:
+            fallback_error = f"classifier_error:{str(exc)[:120]}"
+    else:
+        fallback_error = "llm_disabled"
 
     if fallback_error:
+        prefer_continuity = False
         try:
-            result = classify_without_llm(window, ctx_logs, topic_cands, text)
+            bundle_has_assistant = any(_conversation_agent(e) == "assistant" for e in bundle)
+            prefer_continuity = not bundle_has_assistant
+            result = classify_without_llm(llm_window, ctx_logs, topic_cands, text, prefer_continuity=prefer_continuity)
         except Exception:
-            mark_window_failure(fallback_error)
+            # Last-resort: keep the system moving even if both LLM and heuristic modes fail.
+            # This avoids leaving logs stuck in "pending" forever (which breaks UI + E2E).
+            continuity_topic_id = None
+            for item in reversed(ctx_logs):
+                if (item.get("classificationStatus") or "pending") != "classified":
+                    continue
+                tid = item.get("topicId")
+                if tid:
+                    continuity_topic_id = tid
+                    break
+
+            topic_id = None
+            try:
+                if prefer_continuity and continuity_topic_id:
+                    topic_id = continuity_topic_id
+                elif topic_cands and float(topic_cands[0].get("score") or 0.0) >= TOPIC_SIM_THRESHOLD:
+                    topic_id = topic_cands[0].get("id")
+                if not topic_id:
+                    derived = _derive_topic_name(llm_window) or "General"
+                    refined = _refine_topic_name(derived, llm_window, topic_cands, []) or derived
+                    topic = upsert_topic(None, refined)
+                    topic_id = topic.get("id")
+            except Exception:
+                mark_window_failure(fallback_error)
+                return
+
+            if not topic_id:
+                mark_window_failure(fallback_error)
+                return
+
+            # Patch this bundle scope directly (topic-only, no tasks) and return.
+            for entry in scope_logs:
+                if (entry.get("classificationStatus") or "pending") != "pending":
+                    continue
+                attempts = int(entry.get("classificationAttempts") or 0)
+                if attempts >= MAX_ATTEMPTS:
+                    continue
+                payload = {
+                    "topicId": topic_id,
+                    "taskId": None,
+                    "classificationStatus": "classified",
+                    "classificationAttempts": attempts + 1,
+                    "classificationError": f"fallback:{fallback_error}",
+                }
+                if entry.get("type") == "conversation":
+                    summary = _concise_summary((entry.get("content") or entry.get("summary") or "").strip())
+                    if summary:
+                        payload["summary"] = summary
+                patch_log(entry["id"], payload)
             return
 
     chosen_topic_id = (result.get("topic") or {}).get("id")
     chosen_topic_name = (result.get("topic") or {}).get("name")
     create_topic = bool((result.get("topic") or {}).get("create"))
 
-    # Guardrails: if vector search is confident, do not allow a duplicate topic.
-    if topic_cands and topic_cands[0]["score"] >= TOPIC_SIM_THRESHOLD:
-        chosen_topic_id = topic_cands[0]["id"]
+    # Enforce schema invariants from the prompt: a missing topic id means we are
+    # creating a new topic; a create=true topic must not specify an id.
+    if create_topic:
+        chosen_topic_id = None
+    if not chosen_topic_id:
+        create_topic = True
+
+    # If the LLM selected an existing topic but our retrieval says "no clear match",
+    # prefer creating a new topic. This prevents generic buckets (e.g., "Docker") from
+    # absorbing unrelated, clearly-scoped conversations.
+    #
+    # We only do this when the bundle shows topic intent; low-signal follow-ups should
+    # keep continuity instead of spawning new topics.
+    top_topic_score = float(topic_cands[0].get("score") or 0.0) if topic_cands else 0.0
+    if (
+        chosen_topic_id
+        and not create_topic
+        and top_topic_score < max(0.52, TOPIC_SIM_THRESHOLD - 0.2)
+        and _has_topic_intent(llm_window, text)
+    ):
+        chosen_topic_id = None
+        create_topic = True
+        derived = _derive_topic_name(llm_window)
+        if derived:
+            chosen_topic_name = derived
+
+    # Guardrail: prevent obvious duplicate topics when the LLM proposes a new topic but
+    # the current-bundle search is already a very strong match to an existing one.
+    #
+    # Keep this conservative: dense/vector similarity alone can be too broad (e.g., many
+    # infra questions matching a generic "Docker" topic). Require a lexical anchor too.
+    if (
+        create_topic
+        and not chosen_topic_id
+        and topic_cands
+        and float(topic_cands[0].get("score") or 0.0) >= TOPIC_SIM_THRESHOLD
+        and float(topic_cands[0].get("lexicalScore") or 0.0) >= 0.18
+    ):
+        chosen_topic_id = topic_cands[0].get("id")
         create_topic = False
         if not chosen_topic_name:
-            chosen_topic_name = topic_cands[0]["name"]
+            chosen_topic_name = topic_cands[0].get("name")
 
     if not chosen_topic_name:
         chosen_topic_name = "General"
+
+    if not chosen_topic_id:
+        chosen_topic_name = _refine_topic_name(chosen_topic_name, llm_window, topic_cands, memory_hits)
+    else:
+        chosen_topic_name = _humanize_topic_name(chosen_topic_name or "") or chosen_topic_name or "General"
 
     all_topics = list_topics()
     topic_name_match, topic_name_score = _best_name_match(chosen_topic_name, all_topics, "name")
@@ -1831,12 +2881,12 @@ def classify_session(session_key: str):
         chosen_topic_name = topic_name_match.get("name") or chosen_topic_name
         create_topic = False
 
-    if create_topic and not _topic_creation_allowed(window, chosen_topic_name, topic_cands, text, all_topics):
+    if create_topic and not _topic_creation_allowed(llm_window, chosen_topic_name, topic_cands, text, all_topics):
         create_topic = False
 
     if create_topic:
         try:
-            gate = call_creation_gate(window, topic_cands, task_cands, chosen_topic_name, None)
+            gate = call_creation_gate(llm_window, topic_cands, task_cands, chosen_topic_name, None)
             allowed = bool(gate.get("createTopic"))
             _record_creation_gate("topic", "allow" if allowed else "block", chosen_topic_name, gate.get("topicId"))
             if not allowed:
@@ -1869,6 +2919,7 @@ def classify_session(session_key: str):
     task_id = None
     task_cands2 = task_candidates(topic_id, text)
     task_result = result.get("task")
+    task_intent = _window_has_task_intent(llm_window, text)
     if isinstance(task_result, dict):
         task_title = task_result.get("title")
         create_task = bool(task_result.get("create"))
@@ -1878,21 +2929,30 @@ def classify_session(session_key: str):
         if task_cands2 and task_cands2[0]["score"] >= TASK_SIM_THRESHOLD:
             task_id = task_cands2[0]["id"]
         else:
-            if create_task and not _task_creation_allowed(window, task_title, task_cands2):
+            if create_task and not _task_creation_allowed(llm_window, task_title, task_cands2):
                 create_task = False
             if create_task:
                 try:
-                    gate = call_creation_gate(window, topic_cands, task_cands2, None, task_title)
+                    gate = call_creation_gate(llm_window, topic_cands, task_cands2, None, task_title)
                     allowed = bool(gate.get("createTask"))
                     _record_creation_gate("task", "allow" if allowed else "block", task_title, gate.get("taskId"))
                     if not allowed:
-                        create_task = False
                         gate_task_id = gate.get("taskId")
                         if isinstance(gate_task_id, str) and gate_task_id:
+                            create_task = False
                             task_id = gate_task_id
+                        elif task_intent and _task_creation_allowed(llm_window, task_title, task_cands2):
+                            _record_creation_gate("task", "allow_fallback", task_title, None)
+                            create_task = True
+                        else:
+                            create_task = False
                 except Exception:
-                    _record_creation_gate("task", "block", task_title, None)
-                    create_task = False
+                    if task_intent and _task_creation_allowed(llm_window, task_title, task_cands2):
+                        _record_creation_gate("task", "allow_fallback", task_title, None)
+                        create_task = True
+                    else:
+                        _record_creation_gate("task", "block", task_title, None)
+                        create_task = False
             if proposed_task_id and not create_task:
                 task_id = proposed_task_id
             elif create_task and task_title:
@@ -1904,44 +2964,53 @@ def classify_session(session_key: str):
                     task = upsert_task(None, topic_id, task_title)
                     task_id = task["id"]
 
+    if task_id and not task_intent:
+        task_id = None
+
     # Keep task continuity without creating duplicates.
-    if not task_id:
+    if task_intent and not task_id:
         if task_cands2 and float(task_cands2[0].get("score") or 0.0) >= max(0.46, TASK_SIM_THRESHOLD - 0.24):
             task_id = task_cands2[0]["id"]
 
-    if not task_id:
+    if task_intent and not task_id:
         continuity_task = _latest_classified_task_for_topic(ctx_logs, topic_id)
         if continuity_task:
             task_id = continuity_task
 
-    if not task_id and _looks_actionable(text):
+    if task_intent and not task_id and _looks_actionable(text):
         existing_tasks = list_tasks(topic_id)
         open_tasks = [task for task in existing_tasks if (task.get("status") or "todo") != "done"]
         if len(open_tasks) == 1:
             task_id = open_tasks[0].get("id")
         else:
-            task_title = _derive_task_title(window)
+            task_title = _derive_task_title(llm_window)
             if task_title:
                 task_name_match, task_name_score = _best_name_match(task_title, existing_tasks, "title")
                 if task_name_match and task_name_score >= 0.74:
                     task_id = task_name_match["id"]
-                elif _task_creation_allowed(window, task_title, task_cands2):
+                elif _task_creation_allowed(llm_window, task_title, task_cands2):
                     try:
-                        gate = call_creation_gate(window, topic_cands, task_cands2, None, task_title)
+                        gate = call_creation_gate(llm_window, topic_cands, task_cands2, None, task_title)
                         allowed = bool(gate.get("createTask"))
                         _record_creation_gate("task", "allow" if allowed else "block", task_title, gate.get("taskId"))
                         if not allowed:
                             gate_task_id = gate.get("taskId")
                             if isinstance(gate_task_id, str) and gate_task_id:
                                 task_id = gate_task_id
+                            else:
+                                _record_creation_gate("task", "allow_fallback", task_title, None)
+                                task = upsert_task(None, topic_id, task_title)
+                                task_id = task["id"]
                         else:
                             task = upsert_task(None, topic_id, task_title)
                             task_id = task["id"]
                     except Exception:
-                        _record_creation_gate("task", "block", task_title, None)
-                        pass
+                        _record_creation_gate("task", "allow_fallback", task_title, None)
+                        task = upsert_task(None, topic_id, task_title)
+                        task_id = task["id"]
 
     summary_updates: dict[str, str] = {}
+    window_by_id: dict[str, dict] = {str(e.get("id")): e for e in llm_window if e.get("id")}
     raw_summaries = result.get("summaries")
     if isinstance(raw_summaries, list):
         for item in raw_summaries:
@@ -1954,17 +3023,21 @@ def classify_session(session_key: str):
             if sid not in pending_ids:
                 continue
             concise = _concise_summary(stext)
-            if concise:
+            source_entry = window_by_id.get(sid) or {}
+            source_text = str(source_entry.get("content") or source_entry.get("summary") or source_entry.get("raw") or "")
+            if concise and not _is_low_signal_summary(concise, source_text):
                 summary_updates[sid] = concise
 
     missing_pending = [sid for sid in pending_ids if sid not in summary_updates]
     if missing_pending:
-        repaired = call_summary_repair(window, missing_pending, notes_index)
+        repaired = call_summary_repair(llm_window, missing_pending, notes_index)
         for sid, summary in repaired.items():
-            if sid in missing_pending and summary:
+            source_entry = window_by_id.get(sid) or {}
+            source_text = str(source_entry.get("content") or source_entry.get("summary") or source_entry.get("raw") or "")
+            if sid in missing_pending and summary and not _is_low_signal_summary(summary, source_text):
                 summary_updates[sid] = summary
 
-    for e in window:
+    for e in llm_window:
         if (e.get("classificationStatus") or "pending") != "pending":
             continue
         if e.get("type") != "conversation":
@@ -1976,9 +3049,8 @@ def classify_session(session_key: str):
         if concise:
             summary_updates[sid] = concise
 
-    # Patch all pending logs in this session lookback that are close in time.
-    # For now: patch all pending logs in ctx_logs (conversation+action) to this topic.
-    for e in ctx_logs:
+    # Patch only logs in this bundle scope (conversation + interleaved actions), not the entire session.
+    for e in scope_logs:
         if (e.get("classificationStatus") or "pending") != "pending":
             continue
         attempts = int(e.get("classificationAttempts") or 0)
@@ -2050,6 +3122,8 @@ def main():
             time.sleep(INTERVAL)
             continue
 
+        next_sleep = INTERVAL
+        cycle_start = time.time()
         try:
             # Fetch pending conversations (paged) and group by sessionKey.
             pending: list[dict] = []
@@ -2096,7 +3170,18 @@ def main():
                 sk = ((e.get("source") or {}) or {}).get("sessionKey")
                 if not sk:
                     continue
-                stats = session_stats.setdefault(sk, {"count": 0, "user": 0, "assistant": 0, "channel": False, "messageId": 0})
+                stats = session_stats.setdefault(
+                    sk,
+                    {
+                        "count": 0,
+                        "user": 0,
+                        "assistant": 0,
+                        "channel": False,
+                        "messageId": 0,
+                        # Used to prioritize freshly-active sessions so new messages get classified quickly.
+                        "newestPendingAtTs": 0.0,
+                    },
+                )
                 stats["count"] += 1
                 agent = (e.get("agentId") or "").lower()
                 if agent == "user":
@@ -2108,6 +3193,16 @@ def main():
                     stats["channel"] = True
                 if source.get("messageId"):
                     stats["messageId"] += 1
+                created_at = str(e.get("createdAt") or "").strip()
+                if created_at:
+                    try:
+                        raw = created_at[:-1] + "+00:00" if created_at.endswith("Z") else created_at
+                        ts = datetime.fromisoformat(raw)
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        stats["newestPendingAtTs"] = max(stats["newestPendingAtTs"], float(ts.timestamp()))
+                    except Exception:
+                        pass
 
             session_keys: list[str] = []
             for sk, stats in session_stats.items():
@@ -2117,28 +3212,44 @@ def main():
                     session_keys.append(sk)
                     continue
                 # Fallback for environments where channel session keys are unavailable:
-                # classify any real user<->assistant thread even without message ids
-                # (e.g. agent:main:main sessions from gateway/openclaw CLI).
-                if stats["count"] >= 2 and stats["user"] > 0 and stats["assistant"] > 0:
+                # classify any real conversation thread even with single pending turns
+                # so each user/assistant message lands in a topic quickly.
+                if stats["count"] >= 1 and (stats["user"] > 0 or stats["assistant"] > 0):
                     session_keys.append(sk)
 
             session_keys.sort(
                 key=lambda sk: (
                     0 if session_stats.get(sk, {}).get("channel") else 1,
+                    -float(session_stats.get(sk, {}).get("newestPendingAtTs") or 0.0),
                     -int(session_stats.get(sk, {}).get("count") or 0),
                 )
             )
             session_keys = session_keys[:MAX_SESSIONS_PER_CYCLE]
+            if session_keys:
+                next_sleep = min(INTERVAL, 1.0)
             for sk in session_keys:
+                if (time.time() - cycle_start) > CYCLE_BUDGET_SECONDS:
+                    if LOG_TIMING:
+                        print(
+                            f"classifier: cycle budget reached ({CYCLE_BUDGET_SECONDS:.0f}s); "
+                            f"deferring remaining sessions"
+                        )
+                    break
                 try:
-                    classify_session(sk)
+                    start = time.time()
+                    _run_with_timeout(MAX_SESSION_SECONDS, classify_session, sk)
+                    if LOG_TIMING:
+                        elapsed = time.time() - start
+                        print(f"classifier: classified {sk} in {elapsed:.2f}s")
+                except _ClassifierTimeout:
+                    print(f"classifier: classify_session timeout for {sk} after {MAX_SESSION_SECONDS:.0f}s")
                 except Exception as e:
                     print(f"classifier: classify_session failed for {sk}: {e}")
 
         finally:
             release_lock()
 
-        time.sleep(INTERVAL)
+        time.sleep(next_sleep)
 
 
 if __name__ == "__main__":

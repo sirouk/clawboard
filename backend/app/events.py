@@ -8,14 +8,17 @@ from typing import Any, Deque, Dict, Iterable, Set, Tuple
 
 
 class EventHub:
-    def __init__(self, max_buffer: int = 500) -> None:
+    def __init__(self, max_buffer: int = 500, subscriber_queue_size: int | None = None) -> None:
         self._subscribers: Set[queue.Queue] = set()
         self._lock = threading.Lock()
         self._buffer: Deque[Tuple[int, Dict[str, Any]]] = deque(maxlen=max_buffer)
         self._next_id = 1
+        # Bound per-subscriber queues so a slow/disconnected SSE client cannot
+        # accumulate an unbounded backlog and exhaust RAM (which can deadlock the API).
+        self._subscriber_queue_size = int(subscriber_queue_size or max_buffer or 1)
 
     def subscribe(self) -> queue.Queue:
-        q: queue.Queue = queue.Queue()
+        q: queue.Queue = queue.Queue(maxsize=self._subscriber_queue_size)
         with self._lock:
             self._subscribers.add(q)
         return q
@@ -36,7 +39,15 @@ class EventHub:
             try:
                 q.put_nowait(record)
             except queue.Full:
-                continue
+                # Drop the oldest event to keep tailing live updates.
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    q.put_nowait(record)
+                except queue.Full:
+                    continue
         return payload
 
     def replay(self, last_event_id: int) -> Iterable[Tuple[int, Dict[str, Any]]]:
@@ -57,4 +68,6 @@ class EventHub:
 
 import os
 
-event_hub = EventHub(max_buffer=int(os.environ.get("CLAWBOARD_EVENT_BUFFER", "500")))
+_max_buffer = int(os.environ.get("CLAWBOARD_EVENT_BUFFER", "500"))
+_subscriber_queue = int(os.environ.get("CLAWBOARD_EVENT_SUBSCRIBER_QUEUE", str(_max_buffer)))
+event_hub = EventHub(max_buffer=_max_buffer, subscriber_queue_size=_subscriber_queue)

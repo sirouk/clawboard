@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useDataStore } from "@/components/data-provider";
 import { Badge, Card, CardHeader } from "@/components/ui";
 import { LogList } from "@/components/log-list";
+import { compareLogsDesc } from "@/lib/live-utils";
 
 type UrlFilters = {
   q: string;
@@ -34,7 +35,7 @@ function readUrlFilters(): UrlFilters {
 }
 
 export function LogsPage() {
-  const { logs, topics } = useDataStore();
+  const { logs, topics, tasks } = useDataStore();
   const [showRawAll, setShowRawAll] = useState(true);
   const [urlFilters, setUrlFilters] = useState<UrlFilters>(DEFAULT_URL_FILTERS);
 
@@ -46,7 +47,7 @@ export function LogsPage() {
   }, []);
 
   const sortedLogs = useMemo(() => {
-    return [...logs].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    return [...logs].sort(compareLogsDesc);
   }, [logs]);
 
   const counts = useMemo(() => {
@@ -87,6 +88,7 @@ export function LogsPage() {
         <LogList
           logs={sortedLogs}
           topics={topics}
+          tasks={tasks}
           showFilters
           showRawToggle
           showRawAll={showRawAll}

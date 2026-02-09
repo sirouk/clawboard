@@ -93,6 +93,10 @@ test("unified chat renders natural bubbles and topic-only chat entries", async (
   await expect(page.getByText("TASK CHAT")).toBeVisible();
 
   await expect(page.getByText("TOPIC CHAT")).toBeVisible();
-  await page.getByTestId(`toggle-topic-chat-${topicId}`).click();
+  const topicChatToggle = page.getByTestId(`toggle-topic-chat-${topicId}`);
+  const topicChatToggleLabel = (await topicChatToggle.getAttribute("aria-label")) ?? "";
+  if (/expand/i.test(topicChatToggleLabel)) {
+    await topicChatToggle.click();
+  }
   await expect(page.getByText(topicOnlyMessage, { exact: false })).toBeVisible();
 });

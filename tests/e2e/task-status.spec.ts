@@ -32,6 +32,7 @@ test("task status selector updates and persists", async ({ page, request }) => {
     }
   });
 
+  await page.getByTestId(`rename-task-${taskId}`).click();
   await page.getByTestId(`task-status-${taskId}`).selectOption("done");
   await statusUpdate;
   await expect(page.getByTestId(`task-status-${taskId}`)).toHaveCount(0);

@@ -33,22 +33,12 @@ export function DashboardLive() {
     return UNIFIED_BASE;
   };
 
-  return (
-    <div className="space-y-8">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Dashboard</h1>
-          <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">
-            Your live view of what is active, blocked, and recently discussed.
-          </p>
-        </div>
-        <Badge tone="accent2">Newest-first</Badge>
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-4">
-        <Link href={UNIFIED_BASE} className="block">
-          <Card className="h-full">
-            <CardHeader>
+		return (
+			<div className="space-y-8">
+	      <div className="grid gap-4 lg:grid-cols-4">
+	        <Link href={UNIFIED_BASE} className="block">
+	          <Card className="h-full">
+	            <CardHeader>
               <h2 className="text-lg font-semibold">Active Tasks</h2>
               <Badge tone="accent">{openTasks.length}</Badge>
             </CardHeader>

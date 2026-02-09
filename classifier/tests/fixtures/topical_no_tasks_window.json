@@ -1,0 +1,21 @@
+[
+  {
+    "id": "log-1",
+    "type": "conversation",
+    "agentId": "user",
+    "content": "Can we talk about NIMBUS? I want a high-level explanation of how token-based auth works in an API."
+  },
+  {
+    "id": "log-2",
+    "type": "conversation",
+    "agentId": "assistant",
+    "content": "Sure. At a high level you issue a token after login, then send it on each request in an Authorization header."
+  },
+  {
+    "id": "log-3",
+    "type": "conversation",
+    "agentId": "user",
+    "content": "Got it. What are the main security pitfalls (token leakage, expiration, refresh) and how do teams avoid them?"
+  }
+]
+

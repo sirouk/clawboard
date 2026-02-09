@@ -1,0 +1,21 @@
+[
+  {
+    "id": "log-1",
+    "type": "conversation",
+    "agentId": "user",
+    "content": "We need to fix the login redirect bug in Project NIMBUS and add a regression test so it doesn't come back."
+  },
+  {
+    "id": "log-2",
+    "type": "conversation",
+    "agentId": "assistant",
+    "content": "Plan: reproduce the bug, identify the failing route guard, patch the redirect logic, then add an e2e test that asserts the correct callback URL."
+  },
+  {
+    "id": "log-3",
+    "type": "conversation",
+    "agentId": "user",
+    "content": "Yes, do it."
+  }
+]
+

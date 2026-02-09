@@ -80,6 +80,7 @@ test("unified view uses task=2 and topic=4 load increments", async ({ page, requ
   }
 
   let hiddenTopicLogId = "";
+  let hiddenTopicLogContent = "";
   for (let i = 0; i < 6; i += 1) {
     const content = `topic-paging-${suffix}-${i}`;
     const createLog = await request.post(`${apiBase}/api/log`, {
@@ -96,7 +97,10 @@ test("unified view uses task=2 and topic=4 load increments", async ({ page, requ
     });
     expect(createLog.ok()).toBeTruthy();
     const topicLog = await createLog.json();
-    if (i === 0) hiddenTopicLogId = topicLog.id;
+    if (i === 0) {
+      hiddenTopicLogId = topicLog.id;
+      hiddenTopicLogContent = content;
+    }
   }
 
   await page.goto("/u");
@@ -115,5 +119,5 @@ test("unified view uses task=2 and topic=4 load increments", async ({ page, requ
   await page.getByTestId(`toggle-topic-chat-${topicId}`).click();
   await page.getByRole("button", { name: "Load 4 more" }).first().waitFor();
   await page.getByRole("button", { name: "Load 4 more" }).first().click();
-  await expect(page.locator(`[data-log-id="${hiddenTopicLogId}"]`)).toBeVisible();
+  await expect(page.getByText(hiddenTopicLogContent, { exact: true })).toBeVisible();
 });

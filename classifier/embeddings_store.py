@@ -1,11 +1,19 @@
+from __future__ import annotations
+
 import os
 import sqlite3
 import time
 import uuid
 from typing import Iterable
 
-import numpy as np
-import requests
+try:
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover
+    np = None  # type: ignore
+try:
+    import requests  # type: ignore
+except Exception:  # pragma: no cover
+    requests = None  # type: ignore
 
 DB_PATH = os.environ.get("CLASSIFIER_EMBED_DB", "/data/classifier_embeddings.db")
 QDRANT_URL = os.environ.get("QDRANT_URL")
@@ -72,6 +80,8 @@ def _ensure_qdrant_collection():
 
 
 def upsert(kind: str, item_id: str, vector: Iterable[float]):
+    if np is None:
+        raise RuntimeError("classifier dependency missing: numpy")
     arr = np.asarray(list(vector), dtype=np.float32)
     blob = arr.tobytes()
     now = int(time.time())
@@ -193,6 +203,8 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def topk(kind: str, query_vec: Iterable[float], k: int = 5):
+    if np is None:
+        raise RuntimeError("classifier dependency missing: numpy")
     if _use_qdrant():
         try:
             _ensure_qdrant_collection()

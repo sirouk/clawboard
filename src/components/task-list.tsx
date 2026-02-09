@@ -232,13 +232,6 @@ function TaskRow({
         if (!handleNavigate(event.target as HTMLElement)) return;
         router.push(taskHref);
       }}
-      onKeyDown={(event) => {
-        if (!enableCardNavigation) return;
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          router.push(taskHref);
-        }
-      }}
       aria-label={enableCardNavigation ? `View task ${task.title}` : undefined}
     >
       <div className={`flex gap-3 ${compact ? "flex-col items-stretch" : "flex-wrap items-center justify-between"}`}>

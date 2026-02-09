@@ -1,0 +1,21 @@
+[
+  {
+    "id": "log-1",
+    "type": "conversation",
+    "agentId": "user",
+    "content": "Hey! How's your day going? I finally tried that cinnamon latte everyone talks about."
+  },
+  {
+    "id": "log-2",
+    "type": "conversation",
+    "agentId": "assistant",
+    "content": "Nice. Was it worth the hype?"
+  },
+  {
+    "id": "log-3",
+    "type": "conversation",
+    "agentId": "user",
+    "content": "Yeah, pretty good. No big plans though, just taking it easy this weekend."
+  }
+]
+

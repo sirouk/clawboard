@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Badge, Button, Card, CardHeader, Input } from "@/components/ui";
 import { useDataStore } from "@/components/data-provider";
@@ -49,10 +49,13 @@ type DragState = {
 type NodeDragState = {
   pointerId: number;
   nodeId: string;
+  startClientX: number;
+  startClientY: number;
   startX: number;
   startY: number;
   offsetX: number;
   offsetY: number;
+  dragging: boolean;
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -109,14 +112,12 @@ export function ClawgraphLive() {
   const router = useRouter();
   const { topics, tasks, logs } = useDataStore();
   const [query, setQuery] = useState("");
-  const [showAdvancedControls, setShowAdvancedControls] = useState(false);
-  const [strengthPercent, setStrengthPercent] = useState(50);
-  const [showEntityLinks, setShowEntityLinks] = useState(true);
+  const [strengthPercent, setStrengthPercent] = useState(75);
+  const [showEntityLinks, setShowEntityLinks] = useState(false);
   const [showLabels, setShowLabels] = useState(true);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [remoteGraph, setRemoteGraph] = useState<ClawgraphData | null>(null);
-  const [graphMode, setGraphMode] = useState<"api" | "local">("local");
   const [isFetching, setIsFetching] = useState(false);
   const [isMapFullScreen, setIsMapFullScreen] = useState(false);
   const [nodeOffsets, setNodeOffsets] = useState<Record<string, { x: number; y: number }>>({});
@@ -156,11 +157,9 @@ export function ClawgraphLive() {
         if (!payload || !Array.isArray(payload.nodes) || !Array.isArray(payload.edges)) throw new Error("invalid_graph");
         if (!alive) return;
         setRemoteGraph(payload);
-        setGraphMode("api");
       } catch {
         if (!alive) return;
         setRemoteGraph(null);
-        setGraphMode("local");
       } finally {
         if (alive) setIsFetching(false);
       }
@@ -190,16 +189,9 @@ export function ClawgraphLive() {
   useEffect(() => {
     if (!isMapFullScreen) return;
     const prevOverflow = document.body.style.overflow;
-    const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setIsMapFullScreen(false);
-      }
-    };
     document.body.style.overflow = "hidden";
-    window.addEventListener("keydown", handleKey);
     return () => {
       document.body.style.overflow = prevOverflow;
-      window.removeEventListener("keydown", handleKey);
     };
   }, [isMapFullScreen]);
 
@@ -226,14 +218,45 @@ export function ClawgraphLive() {
     return candidateEdges.filter((edge) => edge.weight >= edgeThreshold);
   }, [candidateEdges, edgeThreshold]);
 
+  const strongestEdgesAllForSelection = useMemo(() => {
+    if (!selectedNodeId) return [] as ClawgraphEdge[];
+    // Strongest links should respect the edge-type toggles, but not the strength cutoff.
+    return [...candidateEdges]
+      .filter((edge) => edge.source === selectedNodeId || edge.target === selectedNodeId)
+      .sort((a, b) => b.weight - a.weight)
+      .slice(0, 14);
+  }, [candidateEdges, selectedNodeId]);
+
+  const strongestEdgesForSelection = useMemo(() => {
+    if (!selectedNodeId) return [] as ClawgraphEdge[];
+    // Apply the strength cutoff to the "strongest links" list, but ensure we still show at least
+    // one relationship (otherwise the detail panel can look broken at high cutoffs).
+    const visible = strongestEdgesAllForSelection.filter((edge) => edge.weight >= edgeThreshold);
+    if (visible.length > 0) return visible;
+    return strongestEdgesAllForSelection.slice(0, 1);
+  }, [edgeThreshold, selectedNodeId, strongestEdgesAllForSelection]);
+
+  const edgesForRender = useMemo(() => {
+    if (!selectedNodeId || strongestEdgesForSelection.length === 0) return filteredEdges;
+    const ids = new Set(filteredEdges.map((edge) => edge.id));
+    const next = [...filteredEdges];
+    for (const edge of strongestEdgesForSelection) {
+      if (ids.has(edge.id)) continue;
+      next.push(edge);
+    }
+    return next;
+  }, [filteredEdges, selectedNodeId, strongestEdgesForSelection]);
+
   const nodeIdsFromEdges = useMemo(() => {
     const ids = new Set<string>();
-    filteredEdges.forEach((edge) => {
+    edgesForRender.forEach((edge) => {
       ids.add(edge.source);
       ids.add(edge.target);
     });
+    // Keep selected node rendered even if filters hide all of its edges.
+    if (selectedNodeId) ids.add(selectedNodeId);
     return ids;
-  }, [filteredEdges]);
+  }, [edgesForRender, selectedNodeId]);
 
   const displayNodes = useMemo(() => graph.nodes.filter((node) => nodeIdsFromEdges.has(node.id)), [graph.nodes, nodeIdsFromEdges]);
   const displayNodeById = useMemo(() => new Map(displayNodes.map((node) => [node.id, node])), [displayNodes]);
@@ -246,8 +269,8 @@ export function ClawgraphLive() {
   }, [displayNodeById, selectedNodeId]);
 
   const basePositions = useMemo(
-    () => layoutClawgraph(displayNodes, filteredEdges, viewportSize.width, viewportSize.height),
-    [displayNodes, filteredEdges, viewportSize.height, viewportSize.width]
+    () => layoutClawgraph(displayNodes, edgesForRender, viewportSize.width, viewportSize.height),
+    [displayNodes, edgesForRender, viewportSize.height, viewportSize.width]
   );
 
   const positions = useMemo(() => {
@@ -337,23 +360,19 @@ export function ClawgraphLive() {
   const connectedToMatch = useMemo(() => {
     if (matchedNodes.size === 0) return new Set<string>();
     const ids = new Set<string>(matchedNodes);
-    filteredEdges.forEach((edge) => {
+    edgesForRender.forEach((edge) => {
       if (matchedNodes.has(edge.source) || matchedNodes.has(edge.target)) {
         ids.add(edge.source);
         ids.add(edge.target);
       }
     });
     return ids;
-  }, [filteredEdges, matchedNodes]);
+  }, [edgesForRender, matchedNodes]);
 
   const selectedNode = selectedNodeId ? displayNodeById.get(selectedNodeId) ?? null : null;
   const connectedEdges = useMemo(() => {
-    if (!selectedNodeId) return [] as ClawgraphEdge[];
-    return filteredEdges
-      .filter((edge) => edge.source === selectedNodeId || edge.target === selectedNodeId)
-      .sort((a, b) => b.weight - a.weight)
-      .slice(0, 14);
-  }, [filteredEdges, selectedNodeId]);
+    return strongestEdgesForSelection;
+  }, [strongestEdgesForSelection]);
 
   const connectedNodes = useMemo(() => {
     if (!selectedNodeId) return [] as ClawgraphNode[];
@@ -376,7 +395,8 @@ export function ClawgraphLive() {
   const connectedEdgeRows = useMemo(() => {
     if (!selectedNodeId || !selectedNode) return [] as Array<{
       edge: ClawgraphEdge;
-      summary: string;
+      title: string;
+      subtitle: string;
       href: string;
     }>;
 
@@ -385,44 +405,42 @@ export function ClawgraphLive() {
       const oppositeNode = displayNodeById.get(oppositeNodeId) ?? nodeById.get(oppositeNodeId) ?? null;
       const oppositeTopic = topicFromNode(oppositeNode, topics);
       const oppositeTask = taskFromNode(oppositeNode, tasks);
-      const params = new URLSearchParams();
-      const topicIds = new Set<string>();
-      const taskIds = new Set<string>();
-      const pushTopic = (id?: string | null) => {
-        if (id) topicIds.add(id);
-      };
-      const pushTask = (task?: Task | null) => {
-        if (!task) return;
-        taskIds.add(task.id);
-        if (task.topicId) topicIds.add(task.topicId);
-      };
-
+      let href = UNIFIED_BASE;
       if (oppositeTask) {
-        pushTask(oppositeTask);
+        href = buildTaskUrl(oppositeTask, topics);
       } else if (oppositeTopic) {
-        pushTopic(oppositeTopic.id);
-      } else if (selectedTask) {
-        pushTask(selectedTask);
-      } else if (selectedTopic) {
-        pushTopic(selectedTopic.id);
-      }
-
-      topicIds.forEach((id) => params.append("topic", id));
-      taskIds.forEach((id) => params.append("task", id));
-      if (topicIds.size === 0 && taskIds.size === 0) {
+        href = buildTopicUrl(oppositeTopic, topics);
+      } else {
         const queryHint = oppositeNode?.label ?? selectedNode.label;
-        if (queryHint) params.set("q", queryHint);
+        const base = selectedTask
+          ? buildTaskUrl(selectedTask, topics)
+          : selectedTopic
+            ? buildTopicUrl(selectedTopic, topics)
+            : UNIFIED_BASE;
+        href = queryHint ? `${base}?q=${encodeURIComponent(queryHint)}` : base;
       }
-
-      const href = params.size > 0 ? `${UNIFIED_BASE}?${params.toString()}` : UNIFIED_BASE;
 
       return {
         edge,
-        summary: summarizeEdge(edge, nodeById),
+        title: oppositeNode?.label ?? summarizeEdge(edge, nodeById),
+        subtitle: `${edge.type} · ${edge.weight.toFixed(2)}${edge.weight < edgeThreshold ? ` (below cutoff ${edgeThreshold.toFixed(2)})` : ""} · evidence ${
+          edge.evidence
+        }`,
         href,
       };
     });
-  }, [connectedEdges, displayNodeById, nodeById, selectedNode, selectedNodeId, selectedTask, selectedTopic, tasks, topics]);
+  }, [
+    connectedEdges,
+    displayNodeById,
+    edgeThreshold,
+    nodeById,
+    selectedNode,
+    selectedNodeId,
+    selectedTask,
+    selectedTopic,
+    tasks,
+    topics,
+  ]);
 
   const pointerToGraph = (event: { clientX: number; clientY: number }) => {
     const rect = canvasRef.current?.getBoundingClientRect() ?? containerRef.current?.getBoundingClientRect();
@@ -438,6 +456,34 @@ export function ClawgraphLive() {
   const clampNodeOffset = (value: number) => clamp(value, -MAX_NODE_DRAG, MAX_NODE_DRAG);
 
   const resetView = () => setView({ x: 0, y: 0, scale: 1 });
+
+  const fitToGraph = useCallback(() => {
+    if (positions.size === 0) return;
+    let minX = Number.POSITIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    positions.forEach((pos) => {
+      minX = Math.min(minX, pos.x);
+      minY = Math.min(minY, pos.y);
+      maxX = Math.max(maxX, pos.x);
+      maxY = Math.max(maxY, pos.y);
+    });
+    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) return;
+    const padding = 84;
+    const boundsWidth = Math.max(120, maxX - minX);
+    const boundsHeight = Math.max(120, maxY - minY);
+    const scale = clamp(
+      Math.min(viewportSize.width / (boundsWidth + padding * 2), viewportSize.height / (boundsHeight + padding * 2)),
+      MIN_ZOOM,
+      MAX_ZOOM
+    );
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+    const x = viewportSize.width / 2 - centerX * scale;
+    const y = viewportSize.height / 2 - centerY * scale;
+    setView({ x, y, scale });
+  }, [positions, viewportSize.height, viewportSize.width]);
 
   const zoomBy = (factor: number) => {
     setView((prev) => ({
@@ -471,10 +517,13 @@ export function ClawgraphLive() {
     nodeDragRef.current = {
       pointerId: event.pointerId,
       nodeId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
       startX: point.x,
       startY: point.y,
       offsetX: offset.x,
       offsetY: offset.y,
+      dragging: false,
     };
     canvasRef.current?.setPointerCapture(event.pointerId);
   };
@@ -495,12 +544,20 @@ export function ClawgraphLive() {
   const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
     const nodeDrag = nodeDragRef.current;
     if (nodeDrag && nodeDrag.pointerId === event.pointerId) {
+      const pixelDeltaX = event.clientX - nodeDrag.startClientX;
+      const pixelDeltaY = event.clientY - nodeDrag.startClientY;
+      // Drag intent must be measured in screen pixels. Measuring in graph-space makes click jitter
+      // look like a drag when zoomed out, which breaks node selection.
+      if (!nodeDrag.dragging) {
+        if (Math.abs(pixelDeltaX) < 5 && Math.abs(pixelDeltaY) < 5) {
+          return;
+        }
+        nodeDrag.dragging = true;
+        didDragRef.current = true;
+      }
       const point = pointerToGraph(event);
       const deltaX = point.x - nodeDrag.startX;
       const deltaY = point.y - nodeDrag.startY;
-      if (Math.abs(deltaX) > 1 || Math.abs(deltaY) > 1) {
-        didDragRef.current = true;
-      }
       setNodeOffsets((prev) => ({
         ...prev,
         [nodeDrag.nodeId]: {
@@ -514,7 +571,7 @@ export function ClawgraphLive() {
     if (!drag || drag.pointerId !== event.pointerId) return;
     const deltaX = event.clientX - drag.startX;
     const deltaY = event.clientY - drag.startY;
-    if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
+    if (Math.abs(deltaX) > 6 || Math.abs(deltaY) > 6) {
       didDragRef.current = true;
     }
     setView((prev) => ({ ...prev, x: drag.panX + deltaX, y: drag.panY + deltaY }));
@@ -535,23 +592,8 @@ export function ClawgraphLive() {
 
   const stats = graph.stats;
 
-  return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Clawgraph</h1>
-          <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">
-            Topic, task, entity, and agent relationships mapped as an interactive memory graph.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge tone="accent2">{graphMode === "api" ? "Graph API" : "Local fallback"}</Badge>
-          <Badge tone="muted">{stats.nodeCount} nodes</Badge>
-          <Badge tone="muted">{stats.edgeCount} edges</Badge>
-          <Badge tone="accent">{Math.round(stats.density * 100)}% density</Badge>
-        </div>
-      </div>
-
+	return (
+		<div className="space-y-6">
       <Card>
         <CardHeader>
           <h2 className="text-lg font-semibold">Controls</h2>
@@ -560,16 +602,11 @@ export function ClawgraphLive() {
         <div className="grid gap-3 md:grid-cols-[1.4fr_auto]">
           <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search entity, topic, task, or agent" />
           <div className="flex items-center gap-2 justify-self-start">
-            <Button size="sm" variant="secondary" onClick={resetView}>
+            <Button size="sm" variant="secondary" onClick={fitToGraph}>
               Fit
             </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              className={cn(showAdvancedControls ? "border-[rgba(255,90,45,0.5)]" : "")}
-              onClick={() => setShowAdvancedControls((prev) => !prev)}
-            >
-              {showAdvancedControls ? "Hide advanced" : "Advanced"}
+            <Button size="sm" variant="ghost" onClick={resetView}>
+              Reset
             </Button>
           </div>
           <label className="md:col-span-2 flex flex-col gap-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-xs uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))] sm:flex-row sm:items-center">
@@ -598,26 +635,24 @@ export function ClawgraphLive() {
                   : "Searching…"}
           </p>
         )}
-        {showAdvancedControls && (
-          <div className="mt-3 grid gap-3 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.9)] p-3 md:grid-cols-[1fr_auto]">
-            <div className="flex flex-wrap items-center gap-2">
-              <Button variant={showEntityLinks ? "secondary" : "ghost"} size="sm" onClick={() => setShowEntityLinks((prev) => !prev)}>
-                {showEntityLinks ? "Hide co-occur" : "Show co-occur"}
-              </Button>
-              <Button variant={showLabels ? "secondary" : "ghost"} size="sm" onClick={() => setShowLabels((prev) => !prev)}>
-                {showLabels ? "Hide labels" : "Show labels"}
-              </Button>
-            </div>
-            <div className="flex items-center gap-2 justify-self-start">
-              <Button size="sm" variant="secondary" onClick={() => zoomBy(1.12)}>
-                +
-              </Button>
-              <Button size="sm" variant="secondary" onClick={() => zoomBy(0.9)}>
-                -
-              </Button>
-            </div>
+        <div className="mt-3 grid gap-3 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.9)] p-3 md:grid-cols-[1fr_auto]">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant={showEntityLinks ? "secondary" : "ghost"} size="sm" onClick={() => setShowEntityLinks((prev) => !prev)}>
+              {showEntityLinks ? "Hide co-occur" : "Show co-occur"}
+            </Button>
+            <Button variant={showLabels ? "secondary" : "ghost"} size="sm" onClick={() => setShowLabels((prev) => !prev)}>
+              {showLabels ? "Hide labels" : "Show labels"}
+            </Button>
           </div>
-        )}
+          <div className="flex items-center gap-2 justify-self-start">
+            <Button size="sm" variant="secondary" onClick={() => zoomBy(1.12)}>
+              +
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => zoomBy(0.9)}>
+              -
+            </Button>
+          </div>
+        </div>
       </Card>
 
       {isMapFullScreen && (
@@ -690,7 +725,7 @@ export function ClawgraphLive() {
                 aria-label="Clawgraph node relationship map"
               >
                 <g transform={`translate(${view.x.toFixed(2)} ${view.y.toFixed(2)}) scale(${view.scale.toFixed(3)})`}>
-                {filteredEdges.map((edge) => {
+                {edgesForRender.map((edge) => {
                   const source = positions.get(edge.source);
                   const target = positions.get(edge.target);
                   if (!source || !target) return null;
@@ -831,10 +866,8 @@ export function ClawgraphLive() {
                         className="w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2 text-left transition hover:border-[rgba(255,90,45,0.35)]"
                         onClick={() => router.push(row.href)}
                       >
-                        <div className="text-xs text-[rgb(var(--claw-text))]">{row.summary}</div>
-                        <div className="mt-1 text-[11px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
-                          {row.edge.type} · {row.edge.weight.toFixed(2)} · evidence {row.edge.evidence}
-                        </div>
+                        <div className="text-sm text-[rgb(var(--claw-text))]">{row.title}</div>
+                        <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{row.subtitle}</div>
                       </button>
                     ))}
                   </div>
@@ -870,7 +903,7 @@ export function ClawgraphLive() {
               <br />
               Visible nodes: <span className="text-[rgb(var(--claw-text))]">{displayNodes.length}</span>
               <br />
-              Visible edges: <span className="text-[rgb(var(--claw-text))]">{filteredEdges.length}</span>
+              Visible edges: <span className="text-[rgb(var(--claw-text))]">{edgesForRender.length}</span>
             </div>
             {connectedNodes.length > 0 && (
               <div className="mt-3">

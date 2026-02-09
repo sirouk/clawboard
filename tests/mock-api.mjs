@@ -14,6 +14,8 @@ const subscribers = new Set();
 const eventBuffer = [];
 const MAX_EVENTS = 200;
 let nextEventId = 0;
+const BOARD_TOPIC_SESSION_PREFIX = "clawboard:topic:";
+const BOARD_TASK_SESSION_PREFIX = "clawboard:task:";
 
 function nowIso() {
   return new Date().toISOString();
@@ -24,7 +26,7 @@ function sendJson(res, status, body) {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "*",
-    "Access-Control-Allow-Methods": "GET,POST,PATCH,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
   });
   res.end(JSON.stringify(body));
 }
@@ -44,6 +46,16 @@ function pushEvent(type, data) {
     res.write(`id: ${record.id}\n`);
     res.write(`data: ${JSON.stringify(record.payload)}\n\n`);
   }
+}
+
+function reorderByIds(ids, orderedIds) {
+  const orderIndex = new Map(orderedIds.map((id, idx) => [id, idx]));
+  return ids.slice().sort((a, b) => {
+    const ai = orderIndex.has(a) ? orderIndex.get(a) : Number.MAX_SAFE_INTEGER;
+    const bi = orderIndex.has(b) ? orderIndex.get(b) : Number.MAX_SAFE_INTEGER;
+    if (ai !== bi) return ai - bi;
+    return 0;
+  });
 }
 
 function parseBody(req) {
@@ -77,6 +89,24 @@ function normalizeLog(entry) {
     createdAt,
     updatedAt: entry.updatedAt || createdAt,
   };
+}
+
+function parseBoardSessionKey(sessionKey) {
+  const key = String(sessionKey || "").trim();
+  if (!key) return { topicId: null, taskId: null };
+  if (key.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
+    const topicId = key.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim();
+    return { topicId: topicId || null, taskId: null };
+  }
+  if (key.startsWith(BOARD_TASK_SESSION_PREFIX)) {
+    const rest = key.slice(BOARD_TASK_SESSION_PREFIX.length).trim();
+    const parts = rest.split(":");
+    if (parts.length < 2) return { topicId: null, taskId: null };
+    const topicId = parts[0].trim();
+    const taskId = parts.slice(1).join(":").trim();
+    return { topicId: topicId || null, taskId: taskId || null };
+  }
+  return { topicId: null, taskId: null };
 }
 
 function normalizeText(value) {
@@ -303,6 +333,36 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { ok: true, queued: true });
   }
 
+  if (url.pathname === "/api/openclaw/chat" && req.method === "POST") {
+    const payload = await parseBody(req);
+    const sessionKey = String(payload.sessionKey || "").trim();
+    const message = String(payload.message || "").trim();
+    const agentId = String(payload.agentId || "main").trim() || "main";
+    if (!sessionKey) return sendJson(res, 400, { detail: "sessionKey is required" });
+    if (!message) return sendJson(res, 400, { detail: "message is required" });
+    const requestId = `occhat-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+    const createdAt = nowIso();
+    const { topicId, taskId } = parseBoardSessionKey(sessionKey);
+    const entry = normalizeLog({
+      id: nextId("log", store.logs),
+      topicId,
+      taskId,
+      type: "conversation",
+      content: message,
+      summary: message.length > 72 ? `${message.slice(0, 71).trim()}…` : message,
+      raw: message,
+      createdAt,
+      updatedAt: createdAt,
+      classificationStatus: "pending",
+      agentId: "user",
+      agentLabel: "User",
+      source: { sessionKey, channel: "openclaw", requestId, agentId },
+    });
+    store.logs.push(entry);
+    pushEvent("log.appended", entry);
+    return sendJson(res, 200, { queued: true, requestId });
+  }
+
   if (url.pathname === "/api/search" && req.method === "GET") {
     const q = url.searchParams.get("q") || "";
     const topicId = url.searchParams.get("topicId");
@@ -406,6 +466,7 @@ const server = http.createServer(async (req, res) => {
           description: payload.description ?? "",
           priority: payload.priority ?? "medium",
           status: payload.status ?? "active",
+          snoozedUntil: payload.snoozedUntil ?? null,
           tags: payload.tags ?? [],
           parentId: payload.parentId ?? null,
           pinned: payload.pinned ?? false,
@@ -417,6 +478,49 @@ const server = http.createServer(async (req, res) => {
       pushEvent("topic.upserted", topic);
       return sendJson(res, 200, topic);
     }
+  }
+
+  if (url.pathname.startsWith("/api/topics/") && req.method === "DELETE") {
+    const topicId = url.pathname.split("/").pop();
+    if (!topicId) return sendJson(res, 400, { error: "topicId required" });
+    const idx = store.topics.findIndex((t) => t.id === topicId);
+    if (idx < 0) return sendJson(res, 200, { ok: true, deleted: false });
+    store.topics.splice(idx, 1);
+    const now = nowIso();
+    // Best-effort: detach tasks/logs like the real API does to preserve history.
+    for (const task of store.tasks) {
+      if (task.topicId !== topicId) continue;
+      task.topicId = null;
+      task.updatedAt = now;
+    }
+    for (const log of store.logs) {
+      if (log.topicId !== topicId) continue;
+      log.topicId = null;
+      log.updatedAt = now;
+    }
+    pushEvent("topic.deleted", { id: topicId, updatedAt: now });
+    return sendJson(res, 200, { ok: true, deleted: true });
+  }
+
+  if (url.pathname === "/api/topics/reorder" && req.method === "POST") {
+    const payload = await parseBody(req);
+    const orderedIds = Array.isArray(payload.orderedIds) ? payload.orderedIds.map((v) => String(v || "").trim()).filter(Boolean) : [];
+    const unique = [...new Set(orderedIds)];
+    const allIds = store.topics.map((t) => t.id);
+    const unknown = unique.filter((id) => !allIds.includes(id));
+    if (unknown.length) return sendJson(res, 400, { extra: unknown.slice(0, 50), message: "Unknown ids in orderedIds." });
+
+    const order = reorderByIds(allIds, unique);
+    const now = nowIso();
+    for (let i = 0; i < order.length; i += 1) {
+      const id = order[i];
+      const topic = store.topics.find((t) => t.id === id);
+      if (!topic) continue;
+      topic.sortIndex = i;
+      topic.updatedAt = now;
+      pushEvent("topic.upserted", topic);
+    }
+    return sendJson(res, 200, { ok: true, count: order.length, changed: unique.length });
   }
 
   if (url.pathname === "/api/tasks") {
@@ -443,6 +547,8 @@ const server = http.createServer(async (req, res) => {
           pinned: payload.pinned ?? false,
           priority: payload.priority ?? "medium",
           dueDate: payload.dueDate ?? null,
+          tags: payload.tags ?? [],
+          snoozedUntil: payload.snoozedUntil ?? null,
           createdAt: now,
           updatedAt: now,
         };

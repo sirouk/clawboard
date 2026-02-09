@@ -522,19 +522,19 @@ export type GraphLayoutPosition = {
 function desiredEdgeDistance(type: ClawgraphEdgeType) {
   switch (type) {
     case "has_task":
-      return 120;
+      return 150;
     case "mentions":
-      return 165;
-    case "agent_focus":
-      return 180;
-    case "co_occurs":
-      return 220;
-    case "related_task":
       return 205;
+    case "agent_focus":
+      return 225;
+    case "co_occurs":
+      return 280;
+    case "related_task":
+      return 255;
     case "related_topic":
-      return 240;
+      return 300;
     default:
-      return 190;
+      return 235;
   }
 }
 
@@ -551,10 +551,10 @@ export function layoutClawgraph(
   const centerY = safeHeight / 2;
 
   const ring = {
-    topic: Math.min(safeWidth, safeHeight) * 0.2,
-    task: Math.min(safeWidth, safeHeight) * 0.34,
-    entity: Math.min(safeWidth, safeHeight) * 0.48,
-    agent: Math.min(safeWidth, safeHeight) * 0.62,
+    topic: Math.min(safeWidth, safeHeight) * 0.24,
+    task: Math.min(safeWidth, safeHeight) * 0.42,
+    entity: Math.min(safeWidth, safeHeight) * 0.62,
+    agent: Math.min(safeWidth, safeHeight) * 0.82,
   };
 
   const groups: Record<ClawgraphNodeType, ClawgraphNode[]> = {
@@ -576,7 +576,7 @@ export function layoutClawgraph(
     const list = groups[type];
     list.forEach((node, position) => {
       const angle = (position / Math.max(1, list.length)) * Math.PI * 2;
-      const jitter = ((position % 7) - 3) * 2.4;
+      const jitter = ((position % 7) - 3) * 3.4;
       x[index] = centerX + Math.cos(angle) * ring[type] + jitter;
       y[index] = centerY + Math.sin(angle) * ring[type] + jitter;
       indexById.set(node.id, index);
@@ -593,9 +593,11 @@ export function layoutClawgraph(
     })
     .filter((item): item is { source: number; target: number; weight: number; type: ClawgraphEdgeType } => Boolean(item));
 
-  const kRepel = 1900;
+  const kRepel = 2600;
   const damping = 0.82;
-  const centering = 0.0026;
+  const centering = 0.0018;
+  const boundX = safeWidth * 0.35;
+  const boundY = safeHeight * 0.35;
 
   for (let iter = 0; iter < iterations; iter += 1) {
     for (let i = 0; i < nodes.length; i += 1) {
@@ -635,8 +637,9 @@ export function layoutClawgraph(
       vy[i] *= damping;
       x[i] += vx[i];
       y[i] += vy[i];
-      x[i] = Math.max(40, Math.min(safeWidth - 40, x[i]));
-      y[i] = Math.max(40, Math.min(safeHeight - 40, y[i]));
+      // Allow nodes to drift slightly out of view; users can pan/zoom back.
+      x[i] = Math.max(-boundX, Math.min(safeWidth + boundX, x[i]));
+      y[i] = Math.max(-boundY, Math.min(safeHeight + boundY, y[i]));
     }
   }
 

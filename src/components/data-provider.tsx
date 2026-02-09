@@ -10,6 +10,7 @@ type DataContextValue = {
   topics: Topic[];
   tasks: Task[];
   logs: LogEntry[];
+  openclawTyping: Record<string, { typing: boolean; requestId?: string; updatedAt: string }>;
   setTopics: React.Dispatch<React.SetStateAction<Topic[]>>;
   setTasks: React.Dispatch<React.SetStateAction<Task[]>>;
   setLogs: React.Dispatch<React.SetStateAction<LogEntry[]>>;
@@ -24,10 +25,13 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [topics, setTopics] = useState<Topic[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [openclawTyping, setOpenclawTyping] = useState<
+    Record<string, { typing: boolean; requestId?: string; updatedAt: string }>
+  >({});
 
   const upsertTopic = (topic: Topic) => setTopics((prev) => upsertById(prev, topic));
   const upsertTask = (task: Task) => setTasks((prev) => upsertById(prev, task));
-  const appendLog = (log: LogEntry) => setLogs((prev) => upsertById(prev, log));
+  const appendLog = (log: LogEntry) => setLogs((prev) => mergeLogs(prev, [log]));
 
   const reconcile = async (since?: string) => {
     const url = since ? `/api/changes?since=${encodeURIComponent(since)}` : "/api/changes";
@@ -78,6 +82,19 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         appendLog(event.data as LogEntry);
         return;
       }
+      if (event.type === "openclaw.typing" && event.data && typeof event.data === "object") {
+        const payload = event.data as { sessionKey?: unknown; typing?: unknown; requestId?: unknown };
+        const sessionKey = String(payload.sessionKey ?? "").trim();
+        if (!sessionKey) return;
+        const typing = Boolean(payload.typing);
+        const requestId = String(payload.requestId ?? "").trim();
+        const updatedAt = new Date().toISOString();
+        setOpenclawTyping((prev) => ({
+          ...prev,
+          [sessionKey]: { typing, requestId: requestId || undefined, updatedAt },
+        }));
+        return;
+      }
       if (event.type === "log.deleted" && event.data && typeof event.data === "object") {
         const id = (event.data as { id?: string }).id;
         if (id) setLogs((prev) => removeById(prev, id));
@@ -91,6 +108,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       topics,
       tasks,
       logs,
+      openclawTyping,
       setTopics,
       setTasks,
       setLogs,
@@ -98,7 +116,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       upsertTask,
       appendLog,
     }),
-    [topics, tasks, logs]
+    [topics, tasks, logs, openclawTyping]
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

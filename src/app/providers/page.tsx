@@ -33,21 +33,11 @@ export default function ProvidersPage() {
     }
   };
 
-  return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Providers</h1>
-          <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">
-            Add new inference providers to your OpenClaw instance with the fastest, safest path.
-          </p>
-        </div>
-        <Badge tone="accent2">Savings</Badge>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <div className="flex flex-wrap items-center justify-between gap-3">
+		return (
+		  <div className="space-y-6">
+	      <Card>
+	        <CardHeader>
+	          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-xl font-semibold">Chutes (Recommended)</h2>
               <p className="text-sm text-[rgb(var(--claw-muted))]">
@@ -81,12 +71,6 @@ export default function ProvidersPage() {
                   role="textbox"
                   aria-label="Manual setup command"
                   onClick={() => unlockOverflow("human-unix")}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      unlockOverflow("human-unix");
-                    }
-                  }}
                 >{HUMAN_UNIX_COMMAND}</pre>
               </div>
               <div>
@@ -102,12 +86,6 @@ export default function ProvidersPage() {
                   role="textbox"
                   aria-label="Windows setup command"
                   onClick={() => unlockOverflow("human-windows")}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      unlockOverflow("human-windows");
-                    }
-                  }}
                 >{HUMAN_WINDOWS_COMMAND}</pre>
               </div>
             </div>
@@ -134,12 +112,6 @@ export default function ProvidersPage() {
                 role="textbox"
                 aria-label="Agent prompt"
                 onClick={() => unlockOverflow("agent-prompt")}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    unlockOverflow("agent-prompt");
-                  }
-                }}
               >{AGENT_PROMPT}</pre>
             </div>
           </div>

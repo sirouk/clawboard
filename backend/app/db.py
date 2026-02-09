@@ -7,13 +7,28 @@ import re
 from pathlib import Path
 from sqlmodel import SQLModel, create_engine, Session, select
 
+# SQLite + Docker bind mounts can behave poorly with long-lived pooled connections
+# (sporadic "disk I/O error" under concurrent access). Using NullPool keeps each
+# request on a fresh connection and avoids reusing a bad file descriptor.
+try:  # pragma: no cover
+    from sqlalchemy.pool import NullPool
+except Exception:  # pragma: no cover
+    NullPool = None  # type: ignore
+
 DATABASE_URL = os.getenv("CLAWBOARD_DB_URL", "sqlite:///./data/clawboard.db")
+
+# SQLite busy timeout (seconds). Keep it low so ingest requests fail fast under write contention,
+# allowing upstream queues/retries (OpenClaw logger + classifier) to recover without stalling.
+SQLITE_TIMEOUT_SECONDS = float(os.getenv("CLAWBOARD_SQLITE_TIMEOUT_SECONDS", "3"))
 
 connect_args = {}
 if DATABASE_URL.startswith("sqlite"):
-    connect_args = {"check_same_thread": False}
+    connect_args = {"check_same_thread": False, "timeout": SQLITE_TIMEOUT_SECONDS}
 
-engine = create_engine(DATABASE_URL, echo=False, connect_args=connect_args)
+engine_kwargs = {"echo": False, "connect_args": connect_args}
+if DATABASE_URL.startswith("sqlite") and NullPool is not None:
+    engine_kwargs["poolclass"] = NullPool
+engine = create_engine(DATABASE_URL, **engine_kwargs)
 
 
 def _normalize_hex_color(value: str | None) -> str | None:
@@ -44,6 +59,8 @@ def init_db() -> None:
 
     # Lightweight migration for sqlite (create_all does not add columns).
     if DATABASE_URL.startswith("sqlite"):
+        # Use an explicit commit so ALTER TABLE / index creation reliably persists.
+        # (SQLAlchemy's Connection context manager rolls back on close unless committed.)
         with engine.connect() as conn:
             conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
             conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
@@ -77,16 +94,76 @@ def init_db() -> None:
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_logentry_idempotency_key "
                 'ON logentry("idempotencyKey") WHERE "idempotencyKey" IS NOT NULL;'
             )
+            # Speed up session-thread queries (UI thread view + classifier session bucketing).
+            # Expression index so we don't need to denormalize `source.sessionKey` into a dedicated column.
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_logentry_source_session_key "
+                "ON logentry(json_extract(source, '$.sessionKey'));"
+            )
+            # Core list queries (pending classifier work + timeline views) need to be fast even
+            # when the log table grows large. Without these, SQLite can do full scans + sorts and
+            # the classifier can time out while polling pending work.
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_logentry_status_type_created_at "
+                'ON logentry("classificationStatus", "type", "createdAt");'
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_logentry_topic_created_at "
+                'ON logentry("topicId", "createdAt");'
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_logentry_task_created_at "
+                'ON logentry("taskId", "createdAt");'
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_logentry_related_created_at "
+                'ON logentry("relatedLogId", "createdAt");'
+            )
 
             topic_cols = conn.exec_driver_sql("PRAGMA table_info(topic);").fetchall()
             topic_existing = {row[1] for row in topic_cols}
             if "color" not in topic_existing:
                 conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN color TEXT;")
+            if "sortIndex" not in topic_existing:
+                conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN sortIndex INTEGER NOT NULL DEFAULT 0;")
+                # Preserve current ordering (pinned first, most recently updated first) so upgrading instances
+                # do not suddenly reshuffle topics when the UI starts using sortIndex.
+                rows = conn.exec_driver_sql(
+                    'SELECT id FROM topic ORDER BY COALESCE(pinned, 0) DESC, "updatedAt" DESC, id ASC;'
+                ).fetchall()
+                for idx, row in enumerate(rows):
+                    conn.exec_driver_sql("UPDATE topic SET sortIndex = ? WHERE id = ?;", (idx, row[0]))
+            if "snoozedUntil" not in topic_existing:
+                conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN snoozedUntil TEXT;")
+            conn.exec_driver_sql("UPDATE topic SET tags = '[]' WHERE tags IS NULL;")
 
             task_cols = conn.exec_driver_sql("PRAGMA table_info(task);").fetchall()
             task_existing = {row[1] for row in task_cols}
             if "color" not in task_existing:
                 conn.exec_driver_sql("ALTER TABLE task ADD COLUMN color TEXT;")
+            if "sortIndex" not in task_existing:
+                conn.exec_driver_sql("ALTER TABLE task ADD COLUMN sortIndex INTEGER NOT NULL DEFAULT 0;")
+                # Preserve current ordering within each topic (pinned first, most recently updated first).
+                rows = conn.exec_driver_sql(
+                    'SELECT id, "topicId" FROM task '
+                    'ORDER BY COALESCE("topicId", \'\') ASC, COALESCE(pinned, 0) DESC, "updatedAt" DESC, id ASC;'
+                ).fetchall()
+                last_topic_id = object()
+                local_idx = 0
+                for row in rows:
+                    task_id, topic_id = row[0], row[1]
+                    if topic_id != last_topic_id:
+                        last_topic_id = topic_id
+                        local_idx = 0
+                    conn.exec_driver_sql("UPDATE task SET sortIndex = ? WHERE id = ?;", (local_idx, task_id))
+                    local_idx += 1
+            if "tags" not in task_existing:
+                conn.exec_driver_sql("ALTER TABLE task ADD COLUMN tags JSON;")
+            if "snoozedUntil" not in task_existing:
+                conn.exec_driver_sql("ALTER TABLE task ADD COLUMN snoozedUntil TEXT;")
+            conn.exec_driver_sql("UPDATE task SET tags = '[]' WHERE tags IS NULL;")
+
+            conn.commit()
 
     # Backfill missing topic/task colors once so existing instances get stable hues.
     try:

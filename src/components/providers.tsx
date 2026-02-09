@@ -4,6 +4,7 @@ import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { IntegrationLevel } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
 import { normalizeTokenInput } from "@/lib/token";
+import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 
 export type AppConfig = {
   instanceTitle: string;
@@ -22,30 +23,41 @@ type AppConfigContextValue = AppConfig & {
 
 const AppConfigContext = createContext<AppConfigContextValue | null>(null);
 
+function isIntegrationLevel(value: string): value is IntegrationLevel {
+  return value === "manual" || value === "write" || value === "full";
+}
+
 export function AppConfigProvider({ children }: { children: React.ReactNode }) {
-  const [instanceTitle, setInstanceTitleState] = useState(() => {
-    if (typeof window === "undefined") return "Clawboard";
-    return window.localStorage.getItem("clawboard.instanceTitle") ?? "Clawboard";
-  });
-  const [token, setTokenState] = useState(() => {
-    const defaultToken = normalizeTokenInput(process.env.NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN ?? "");
-    if (typeof window === "undefined") return defaultToken;
-    const storedToken = window.localStorage.getItem("clawboard.token");
-    if (storedToken !== null) {
-      return normalizeTokenInput(storedToken);
-    }
-    return defaultToken;
-  });
+  const defaultToken = normalizeTokenInput(process.env.NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN ?? "");
+  const storedTitle = useLocalStorageItem("clawboard.instanceTitle");
+  const storedTokenRaw = useLocalStorageItem("clawboard.token");
+  const storedLevelRaw = useLocalStorageItem("clawboard.integrationLevel");
+
+  const [serverInstanceTitle, setServerInstanceTitle] = useState("Clawboard");
   const [tokenRequired, setTokenRequired] = useState(true);
   const [tokenConfigured, setTokenConfigured] = useState(false);
   const [remoteReadLocked, setRemoteReadLocked] = useState(false);
-  const [integrationLevel, setIntegrationLevelState] = useState<IntegrationLevel>(() => {
-    if (typeof window === "undefined") return "write";
-    return (window.localStorage.getItem("clawboard.integrationLevel") as IntegrationLevel) ?? "write";
-  });
+  const [serverIntegrationLevel, setServerIntegrationLevel] = useState<IntegrationLevel>("write");
+
+  const instanceTitle = storedTitle && storedTitle.trim().length > 0 ? storedTitle : serverInstanceTitle;
+  const token = useMemo(() => {
+    if (storedTokenRaw === null) return defaultToken;
+    return normalizeTokenInput(storedTokenRaw);
+  }, [defaultToken, storedTokenRaw]);
+  const integrationLevel = useMemo(() => {
+    if (storedLevelRaw && isIntegrationLevel(storedLevelRaw)) return storedLevelRaw;
+    return serverIntegrationLevel;
+  }, [serverIntegrationLevel, storedLevelRaw]);
 
   useEffect(() => {
-    const storedTitle = window.localStorage.getItem("clawboard.instanceTitle");
+    if (storedTokenRaw === null) return;
+    const normalized = normalizeTokenInput(storedTokenRaw);
+    if (normalized !== storedTokenRaw) {
+      setLocalStorageItem("clawboard.token", normalized);
+    }
+  }, [storedTokenRaw]);
+
+  useEffect(() => {
     apiFetch("/api/config", { cache: "no-store" }, token)
       .then(async (res) => {
         if (!res.ok) {
@@ -58,11 +70,11 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
         const data = await res.json().catch(() => null);
         if (!data) return null;
         setRemoteReadLocked(false);
-        if (!storedTitle && data?.instance?.title) {
-          setInstanceTitleState(data.instance.title);
+        if (data?.instance?.title) {
+          setServerInstanceTitle(data.instance.title);
         }
         if (data?.instance?.integrationLevel) {
-          setIntegrationLevelState(data.instance.integrationLevel);
+          setServerIntegrationLevel(data.instance.integrationLevel);
         }
         if (typeof data?.tokenRequired === "boolean") {
           setTokenRequired(data.tokenRequired);
@@ -77,18 +89,15 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
 
   const setToken = (value: string) => {
     const normalized = normalizeTokenInput(value);
-    setTokenState(normalized);
-    window.localStorage.setItem("clawboard.token", normalized);
+    setLocalStorageItem("clawboard.token", normalized);
   };
 
   const setInstanceTitle = (value: string) => {
-    setInstanceTitleState(value);
-    window.localStorage.setItem("clawboard.instanceTitle", value);
+    setLocalStorageItem("clawboard.instanceTitle", value);
   };
 
   const setIntegrationLevel = (value: IntegrationLevel) => {
-    setIntegrationLevelState(value);
-    window.localStorage.setItem("clawboard.integrationLevel", value);
+    setLocalStorageItem("clawboard.integrationLevel", value);
   };
 
   const value = useMemo(

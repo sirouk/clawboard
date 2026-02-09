@@ -1,0 +1,18 @@
+# Keep Docker build contexts small and avoid baking secrets into images.
+
+.git
+.next
+node_modules
+test-results
+playwright-report
+coverage
+
+data
+.venv*
+
+.DS_Store
+*.log
+
+.env
+.env.*
+

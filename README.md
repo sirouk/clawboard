@@ -123,6 +123,10 @@ For install defaults, users interact through `web` and `api`; database services 
   - candidate topic/task retrieval
   - curated user notes (`type=note`) as weighted signals
   - optional OpenClaw memory snippets from sqlite (`OPENCLAW_MEMORY_DB_PATH` fallback support)
+- Policy:
+  - Topic is mandatory for conversation logs (high-level, human-meaningful naming).
+  - Task is optional and only selected/created for explicit execution intent.
+  - Topic names should reflect durable themes/entities, not prompt-leading filler text.
 - Patches logs to `classified` with resolved `topicId` / `taskId`.
 - Generates very short message summaries for chips (telegraphic style, no `SUMMARY:` prefix, transport metadata stripped).
 

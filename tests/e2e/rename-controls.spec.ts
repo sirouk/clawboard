@@ -171,3 +171,63 @@ test("rename pencils save topic/task names and queue reindex requests", async ({
   await taskReindex;
   await expect(page.locator(`[data-testid='${taskRenameId}']`)).toHaveAttribute("aria-label", new RegExp(newTaskName));
 });
+
+test("rename inputs accept spaces (no spacebar hotkeys)", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-space-${suffix}`;
+  const taskId = `task-space-${suffix}`;
+  const topicName = `Space Topic ${suffix}`;
+  const taskTitle = `Space Task ${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "todo", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem("clawboard.token", "test-token");
+  });
+
+  await page.route("**/api/config", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        instance: {
+          title: "Clawboard",
+          integrationLevel: "manual",
+          updatedAt: "2026-02-06T00:00:00.000Z",
+        },
+        tokenRequired: true,
+      }),
+    });
+  });
+
+  await page.goto(`/u/topic/${topicId}`);
+  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+
+  // Topic rename input should accept spaces via real key events.
+  await page.getByTestId(`rename-topic-${topicId}`).click();
+  const topicInput = page.getByTestId(`rename-topic-input-${topicId}`);
+  await expect(topicInput).toBeVisible();
+  await topicInput.fill("");
+  await topicInput.type("Topic With Space");
+  await expect(topicInput).toHaveValue("Topic With Space");
+
+  // Task rename input should accept spaces via real key events.
+  await page.getByTestId(`rename-task-${taskId}`).click();
+  const taskInput = page.getByTestId(`rename-task-input-${taskId}`);
+  await expect(taskInput).toBeVisible();
+  await taskInput.fill("");
+  await taskInput.type("Task With Space");
+  await expect(taskInput).toHaveValue("Task With Space");
+});

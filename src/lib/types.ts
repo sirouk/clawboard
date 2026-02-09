@@ -3,10 +3,12 @@ export type IntegrationLevel = "manual" | "write" | "full";
 export type Topic = {
   id: string;
   name: string;
+  sortIndex?: number;
   color?: string;
   description?: string;
   priority?: "low" | "medium" | "high";
   status?: "active" | "paused" | "archived";
+  snoozedUntil?: string | null;
   tags?: string[];
   parentId?: string | null;
   pinned?: boolean;
@@ -20,11 +22,14 @@ export type Task = {
   id: string;
   topicId: string | null;
   title: string;
+  sortIndex?: number;
   color?: string;
   status: TaskStatus;
   pinned?: boolean;
   priority?: "low" | "medium" | "high";
   dueDate?: string | null;
+  snoozedUntil?: string | null;
+  tags?: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -52,6 +57,7 @@ export type LogEntry = {
   source?: {
     sessionKey?: string;
     messageId?: string;
+    requestId?: string;
     channel?: string;
   };
 };

@@ -116,8 +116,8 @@ ensure_onboarded() {
 configure_memory() {
   log_info "Configuring memory settings..."
   openclaw config set agents.defaults.compaction.memoryFlush.enabled --json 'true' >/dev/null 2>&1
-  openclaw config set agents.defaults.memorySearch.experimental.sessionMemory --json 'true' >/dev/null 2>&1
-  openclaw config set agents.defaults.memorySearch.sources --json '["memory","sessions"]' >/dev/null 2>&1
+  openclaw config set agents.defaults.memorySearch.experimental.sessionMemory --json 'false' >/dev/null 2>&1
+  openclaw config set agents.defaults.memorySearch.sources --json '["memory"]' >/dev/null 2>&1
   openclaw config set agents.defaults.memorySearch.enabled --json 'true' >/dev/null 2>&1
   log_success "Memory settings configured."
 }

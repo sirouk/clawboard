@@ -59,7 +59,7 @@ wait_for_http() {
   local n=1
 
   while (( n <= attempts )); do
-    code="$(curl -s -o /dev/null -w "%{http_code}" "$url" || true)"
+    code="$(curl -s -m 5 -o /dev/null -w "%{http_code}" "$url" || true)"
     if [[ "$code" == "$expected" ]]; then
       log "$label is ready ($code)"
       return 0
@@ -131,7 +131,9 @@ run_security_checks() {
 
 require_cmd docker
 require_cmd npm
+require_cmd node
 require_cmd curl
+require_cmd python3
 
 if [[ -f ".env" ]]; then
   set -a
@@ -143,18 +145,37 @@ fi
 [[ -n "${CLAWBOARD_TOKEN:-}" ]] || fail "CLAWBOARD_TOKEN is not set. Add it to .env."
 
 log "Building and starting docker services"
-docker compose up -d --build api web classifier
+WEB_SERVICE="web"
+# For tests, prefer the production `web` container (stable, no dev-server cache quirks).
+# If `web-dev` is running, stop it to avoid port conflicts on 3010.
+if docker compose ps --services --filter status=running | grep -qx "web-dev"; then
+  log "Stopping web-dev to run tests against production web"
+  docker compose stop web-dev >/dev/null 2>&1 || true
+fi
+
+# Tests should be deterministic and not depend on an external LLM being available/reliable.
+# Override the classifier to heuristic mode unless the caller explicitly set a mode.
+CLASSIFIER_LLM_MODE="${CLASSIFIER_LLM_MODE:-off}" docker compose up -d --build api web classifier
 
 wait_for_http "http://localhost:8010/api/health" "200" "API"
 wait_for_http "http://localhost:3010/u" "200" "Web UI"
 
 running_services="$(docker compose ps --services --filter status=running)"
-for service in api web classifier; do
+for service in api "$WEB_SERVICE" classifier; do
   echo "$running_services" | grep -qx "$service" || fail "Service is not running: $service"
 done
 log "Core services are running"
 
 run_security_checks
+
+log "Running classifier end-to-end checks"
+python3 scripts/classifier_e2e_check.py
+
+log "Running classifier heuristic unit tests"
+python3 -m unittest discover -s classifier/tests -p "test_*.py"
+
+log "Running clawboard-logger unit tests"
+node --test extensions/clawboard-logger/*.test.mjs
 
 log "Running backend unit tests"
 docker compose run --rm -T \

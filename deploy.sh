@@ -95,6 +95,15 @@ read_env_value() {
   printf "%s" "$line"
 }
 
+is_web_hot_reload_enabled() {
+  local v=""
+  v="$(read_env_value "CLAWBOARD_WEB_HOT_RELOAD" || true)"
+  case "$v" in
+    1|true|TRUE|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 mask_token() {
   local token="$1"
   local len="${#token}"
@@ -128,13 +137,14 @@ usage() {
 Usage: bash deploy.sh [command]
 
 Commands:
-  up [services...]                     Build and start services (idempotent)
+  up [services...]                     Start services without rebuilding
   rebuild [services...]                Rebuild and force-recreate services
   fresh                                Tear down + rebuild everything anew
   restart [services...]                Restart running services
   down                                 Stop services (keep data)
   nuke [--yes]                         Stop services + remove volumes
   reset-data [--yes]                   Stop services and wipe local data/*
+  start-fresh-replay [--yes]           One-time: clear topics/tasks, reset classifier, wipe vectors, restart
   status                               Show container status
   logs [service]                       Tail logs
   pull [service]                       Pull images (if using registry images)
@@ -160,20 +170,125 @@ USAGE
 }
 
 up() {
-  compose up -d --build "$@"
+  local args=("$@")
+  local services=()
+
+  if is_web_hot_reload_enabled; then
+    # Default services when none specified: swap prod web -> dev web.
+    if [ "${#args[@]}" -eq 0 ]; then
+      services=(api classifier qdrant web-dev)
+    else
+      for s in "${args[@]}"; do
+        if [ "$s" = "web" ]; then
+          services+=("web-dev")
+        else
+          services+=("$s")
+        fi
+      done
+    fi
+
+    # Avoid port conflicts when switching modes.
+    for s in "${services[@]}"; do
+      if [ "$s" = "web-dev" ]; then
+        compose stop web >/dev/null 2>&1 || true
+        compose rm -f web >/dev/null 2>&1 || true
+        break
+      fi
+    done
+
+    compose --profile dev up -d "${services[@]}"
+    return
+  fi
+
+  # Production-style web: map accidental web-dev arg back to web.
+  if [ "${#args[@]}" -gt 0 ]; then
+    for s in "${args[@]}"; do
+      if [ "$s" = "web-dev" ]; then
+        services+=("web")
+      else
+        services+=("$s")
+      fi
+    done
+    for s in "${services[@]}"; do
+      if [ "$s" = "web" ]; then
+        compose stop web-dev >/dev/null 2>&1 || true
+        compose rm -f web-dev >/dev/null 2>&1 || true
+        break
+      fi
+    done
+    compose up -d "${services[@]}"
+    return
+  fi
+
+  compose up -d
 }
 
 rebuild() {
-  compose up -d --build --force-recreate "$@"
+  local args=("$@")
+  local services=()
+
+  if is_web_hot_reload_enabled; then
+    if [ "${#args[@]}" -eq 0 ]; then
+      services=(api classifier qdrant web-dev)
+    else
+      for s in "${args[@]}"; do
+        if [ "$s" = "web" ]; then
+          services+=("web-dev")
+        else
+          services+=("$s")
+        fi
+      done
+    fi
+
+    for s in "${services[@]}"; do
+      if [ "$s" = "web-dev" ]; then
+        compose stop web >/dev/null 2>&1 || true
+        compose rm -f web >/dev/null 2>&1 || true
+        break
+      fi
+    done
+
+    # No build needed for web-dev (runs from node base image + bind mount), but --build
+    # is harmless and keeps api/classifier up to date when requested.
+    compose --profile dev up -d --build --force-recreate "${services[@]}"
+    return
+  fi
+
+  if [ "${#args[@]}" -gt 0 ]; then
+    for s in "${args[@]}"; do
+      if [ "$s" = "web-dev" ]; then
+        services+=("web")
+      else
+        services+=("$s")
+      fi
+    done
+    for s in "${services[@]}"; do
+      if [ "$s" = "web" ]; then
+        compose stop web-dev >/dev/null 2>&1 || true
+        compose rm -f web-dev >/dev/null 2>&1 || true
+        break
+      fi
+    done
+    compose up -d --build --force-recreate "${services[@]}"
+    return
+  fi
+
+  compose up -d --build --force-recreate
 }
 
 fresh() {
-  compose down --remove-orphans
+  down
+  if is_web_hot_reload_enabled; then
+    compose --profile dev up -d --build --force-recreate api classifier qdrant web-dev
+    return
+  fi
   compose up -d --build --force-recreate
 }
 
 down() {
-  compose down
+  # Ensure dev-profile services (web-dev) are torn down too.
+  compose --profile dev down --remove-orphans >/dev/null 2>&1 || true
+  compose down --remove-orphans
 }
 
 nuke() {
@@ -182,11 +297,25 @@ nuke() {
     force=true
   fi
   confirm_or_abort "This will remove containers and volumes. Continue?" "$force"
+  compose --profile dev down -v --remove-orphans >/dev/null 2>&1 || true
   compose down -v --remove-orphans
 }
 
 restart() {
   if [ "$#" -gt 0 ]; then
+    if is_web_hot_reload_enabled; then
+      local args=("$@")
+      local services=()
+      for s in "${args[@]}"; do
+        if [ "$s" = "web" ]; then
+          services+=("web-dev")
+        else
+          services+=("$s")
+        fi
+      done
+      compose --profile dev restart "${services[@]}"
+      return
+    fi
     compose restart "$@"
     return
   fi
@@ -199,13 +328,22 @@ reset_data() {
     force=true
   fi
   confirm_or_abort "This will delete local Clawboard data under data/. Continue?" "$force"
-  compose down --remove-orphans
+  down
 
   rm -f "$DATA_DIR/clawboard.db" "$DATA_DIR/clawboard.db-shm" "$DATA_DIR/clawboard.db-wal"
   rm -f "$DATA_DIR/classifier_embeddings.db" "$DATA_DIR/classifier.lock" "$DATA_DIR/reindex-queue.jsonl"
   rm -rf "$DATA_DIR/qdrant" "$DATA_DIR/postgres"
   mkdir -p "$DATA_DIR/qdrant" "$DATA_DIR/postgres"
   echo "Local data reset complete."
+}
+
+start_fresh_replay() {
+  local force=false
+  if [ "${1:-}" = "--yes" ]; then
+    force=true
+  fi
+  confirm_or_abort "This will clear topics/tasks and reset classifier state (logs remain). Continue?" "$force"
+  python3 "$ROOT_DIR/scripts/one_time_start_fresh_replay.py" --yes --integration-level full
 }
 
 status() {
@@ -355,7 +493,7 @@ vector_cleanup() {
 
 run_interactive() {
   echo "Clawboard deploy menu"
-  echo "1) Up (build + start)"
+  echo "1) Up (start only, no build)"
   echo "2) Rebuild (force recreate)"
   echo "3) Fresh (tear down + rebuild all)"
   echo "4) Down (stop)"
@@ -395,6 +533,7 @@ case "$cmd" in
   down) down ;;
   nuke) shift; nuke "$@" ;;
   reset-data) shift; reset_data "$@" ;;
+  start-fresh-replay|start_fresh_replay) shift; start_fresh_replay "$@" ;;
   status) status ;;
   logs) shift; logs "$@" ;;
   pull) shift; pull "$@" ;;

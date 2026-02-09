@@ -25,6 +25,10 @@ class InstanceConfig(SQLModel, table=True):
 class Topic(SQLModel, table=True):
     id: str = Field(primary_key=True, description="Topic ID.")
     name: str = Field(description="Topic name.")
+    sortIndex: int = Field(
+        default=0,
+        description="Manual ordering index (lower comes first).",
+    )
     color: Optional[str] = Field(
         default=None,
         description="Topic display color in #RRGGBB format.",
@@ -39,7 +43,11 @@ class Topic(SQLModel, table=True):
     )
     status: Optional[str] = Field(
         default="active",
-        description="Status (active | archived).",
+        description="Status (active | paused | archived).",
+    )
+    snoozedUntil: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp when a snoozed topic should re-activate (nullable).",
     )
     tags: List[str] = Field(
         default_factory=list,
@@ -70,12 +78,25 @@ class Task(SQLModel, table=True):
         description="Parent topic ID (nullable).",
     )
     title: str = Field(description="Task title.")
+    sortIndex: int = Field(
+        default=0,
+        description="Manual ordering index within the topic (lower comes first).",
+    )
     color: Optional[str] = Field(
         default=None,
         description="Task display color in #RRGGBB format.",
     )
     status: str = Field(
         description="Task status (todo | doing | blocked | done).",
+    )
+    tags: List[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON),
+        description="Freeform tags.",
+    )
+    snoozedUntil: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp when a snoozed task should re-activate (nullable).",
     )
     pinned: Optional[bool] = Field(
         default=False,

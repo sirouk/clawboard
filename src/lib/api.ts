@@ -1,5 +1,12 @@
 import { normalizeTokenInput } from "@/lib/token";
 
+const LOCAL_STORAGE_EVENT = "clawboard:local-storage";
+
+function emitLocalStorageChange() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(LOCAL_STORAGE_EVENT));
+}
+
 export function getApiBase() {
   if (typeof window !== "undefined") {
     const runtimeBase =
@@ -19,9 +26,11 @@ export function setApiBase(value: string) {
   const trimmed = value.trim().replace(/\/$/, "");
   if (!trimmed) {
     window.localStorage.removeItem("clawboard.apiBase");
+    emitLocalStorageChange();
     return;
   }
   window.localStorage.setItem("clawboard.apiBase", trimmed);
+  emitLocalStorageChange();
 }
 
 export function apiUrl(path: string) {
@@ -39,6 +48,7 @@ export function getApiToken() {
   const normalized = normalizeTokenInput(value);
   if (normalized !== value) {
     window.localStorage.setItem(TOKEN_STORAGE_KEY, normalized);
+    emitLocalStorageChange();
   }
   return normalized;
 }
