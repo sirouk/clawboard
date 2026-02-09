@@ -610,6 +610,9 @@ BOARD_TASK_SESSION_PREFIX = "clawboard:task:"
 
 def _parse_board_session_key(session_key: str) -> tuple[str | None, str | None]:
     key = (session_key or "").strip()
+    # OpenClaw may attach a thread suffix (`|thread:...`) for some providers; strip it
+    # so board routing remains stable.
+    key = (key.split("|", 1)[0] or "").strip()
     if key.startswith(BOARD_TOPIC_SESSION_PREFIX):
         topic_id = key[len(BOARD_TOPIC_SESSION_PREFIX) :].strip()
         return (topic_id or None, None)

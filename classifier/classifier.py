@@ -2667,7 +2667,8 @@ def classify_session(session_key: str):
     scope_logs = ctx_logs[scope_start_pos:scope_end_pos]
 
     board_topic_id, board_task_id = _parse_board_session_key(session_key)
-    if board_topic_id:
+    forced_topic_id = board_topic_id or None
+    if board_topic_id and board_task_id:
         # Clawboard UI explicitly selects Topic/Task scope via `clawboard:topic:*` / `clawboard:task:*`.
         # Do not let the classifier re-route those logs into other topics/tasks (it can make the
         # user's message "disappear" from the chat pane they sent it from).
@@ -2785,7 +2786,7 @@ def classify_session(session_key: str):
     # Small-talk fast path: skip the LLM and attach to a stable "Small Talk" topic.
     # This avoids topic bloat (every small chat turn becoming a new topic) and keeps
     # the classifier loop fast under casual chatter.
-    if _is_small_talk_bundle(bundle, text):
+    if not forced_topic_id and _is_small_talk_bundle(bundle, text):
         try:
             all_topics = list_topics()
             match, score = _best_name_match("Small Talk", all_topics, "name")
@@ -2817,40 +2818,89 @@ def classify_session(session_key: str):
         return
     memory_hits = memory_snippets(text)
 
-    ensure_topic_index_seeded()
-    topic_cands = topic_candidates(text)
-    # "Small Talk" is a reserved topic handled by the fast path above. Excluding it
-    # here prevents the LLM from using it as a generic bucket for unrelated bundles.
-    topic_cands = [
-        t for t in topic_cands if str(t.get("name") or "").strip().lower() != "small talk"
-    ]
-
-    # If we have a strong top topic, also propose task candidates for it.
-    task_cands = []
-    if topic_cands and topic_cands[0]["score"] >= TOPIC_SIM_THRESHOLD:
-        task_cands = task_candidates(topic_cands[0]["id"], text)
-
+    topic_cands: list[dict] = []
+    task_cands: list[dict] = []
     topic_contexts: dict[str, list[dict]] = {}
-    # Context hydration is expensive (API round-trips). Only fetch "recent" context
-    # for candidates that are plausibly relevant.
-    topic_ctx_min_score = max(0.42, TOPIC_SIM_THRESHOLD - 0.32)
-    topic_ctx_cands = [t for t in topic_cands if float(t.get("score") or 0.0) >= topic_ctx_min_score][:3]
-    for t in topic_ctx_cands:
-        tid = t.get("id")
-        if not tid:
-            continue
-        logs = list_logs_by_topic(tid, limit=10, offset=0)
-        topic_notes = build_notes_index(logs)
-        topic_contexts[tid] = summarize_logs(logs, topic_notes, limit=6)
-
     task_contexts: dict[str, list[dict]] = {}
-    for t in task_cands:
-        tid = t.get("id")
-        if not tid:
-            continue
-        logs = list_logs_by_task(tid, limit=10, offset=0)
-        task_notes = build_notes_index(logs)
-        task_contexts[tid] = summarize_logs(logs, task_notes, limit=6)
+
+    if forced_topic_id:
+        forced_topic_name = None
+        try:
+            # Best-effort: include the board-selected topic as the only candidate so the
+            # LLM can focus on whether a task should be inferred/created within it.
+            all_topics = list_topics()
+            match = next((t for t in all_topics if t.get("id") == forced_topic_id), None)
+            if match and match.get("name"):
+                forced_topic_name = str(match.get("name") or "").strip()
+        except Exception:
+            forced_topic_name = None
+        if not forced_topic_name:
+            forced_topic_name = "General"
+
+        topic_cands = [
+            {
+                "id": forced_topic_id,
+                "name": forced_topic_name,
+                "score": 1.0,
+                "vectorScore": 1.0,
+                "bm25Score": 1.0,
+                "bm25Norm": 1.0,
+                "coverageScore": 1.0,
+                "phraseScore": 1.0,
+                "lexicalScore": 1.0,
+            }
+        ]
+
+        try:
+            logs = list_logs_by_topic(forced_topic_id, limit=10, offset=0)
+            topic_notes = build_notes_index(logs)
+            topic_contexts[forced_topic_id] = summarize_logs(logs, topic_notes, limit=6)
+        except Exception:
+            pass
+
+        task_cands = task_candidates(forced_topic_id, text)
+        for t in task_cands:
+            tid = t.get("id")
+            if not tid:
+                continue
+            try:
+                logs = list_logs_by_task(tid, limit=10, offset=0)
+                task_notes = build_notes_index(logs)
+                task_contexts[tid] = summarize_logs(logs, task_notes, limit=6)
+            except Exception:
+                continue
+    else:
+        ensure_topic_index_seeded()
+        topic_cands = topic_candidates(text)
+        # "Small Talk" is a reserved topic handled by the fast path above. Excluding it
+        # here prevents the LLM from using it as a generic bucket for unrelated bundles.
+        topic_cands = [
+            t for t in topic_cands if str(t.get("name") or "").strip().lower() != "small talk"
+        ]
+
+        # If we have a strong top topic, also propose task candidates for it.
+        if topic_cands and topic_cands[0]["score"] >= TOPIC_SIM_THRESHOLD:
+            task_cands = task_candidates(topic_cands[0]["id"], text)
+
+        # Context hydration is expensive (API round-trips). Only fetch "recent" context
+        # for candidates that are plausibly relevant.
+        topic_ctx_min_score = max(0.42, TOPIC_SIM_THRESHOLD - 0.32)
+        topic_ctx_cands = [t for t in topic_cands if float(t.get("score") or 0.0) >= topic_ctx_min_score][:3]
+        for t in topic_ctx_cands:
+            tid = t.get("id")
+            if not tid:
+                continue
+            logs = list_logs_by_topic(tid, limit=10, offset=0)
+            topic_notes = build_notes_index(logs)
+            topic_contexts[tid] = summarize_logs(logs, topic_notes, limit=6)
+
+        for t in task_cands:
+            tid = t.get("id")
+            if not tid:
+                continue
+            logs = list_logs_by_task(tid, limit=10, offset=0)
+            task_notes = build_notes_index(logs)
+            task_contexts[tid] = summarize_logs(logs, task_notes, limit=6)
 
     fallback_error: str | None = None
     if _llm_enabled():
@@ -2877,8 +2927,67 @@ def classify_session(session_key: str):
         try:
             bundle_has_assistant = any(_conversation_agent(e) == "assistant" for e in bundle)
             prefer_continuity = not bundle_has_assistant
-            result = classify_without_llm(llm_window, ctx_logs, topic_cands, text, prefer_continuity=prefer_continuity)
+            if forced_topic_id:
+                task_id = None
+                task_title = _derive_task_title(llm_window)
+                task_intent = _window_has_task_intent(llm_window, text)
+                task_cands2 = task_candidates(forced_topic_id, text, k=8)
+                if task_intent and task_cands2 and float(task_cands2[0].get("score") or 0.0) >= 0.56:
+                    task_id = task_cands2[0]["id"]
+                elif task_intent and task_title:
+                    existing_tasks = list_tasks(forced_topic_id)
+                    match, score = _best_name_match(task_title, existing_tasks, "title")
+                    if match and score >= 0.78:
+                        task_id = match.get("id")
+                    elif _task_creation_allowed(llm_window, task_title, task_cands2):
+                        task = upsert_task(None, forced_topic_id, task_title)
+                        task_id = task["id"]
+                if task_intent and not task_id:
+                    continuity_task = _latest_classified_task_for_topic(ctx_logs, forced_topic_id)
+                    if continuity_task:
+                        task_id = continuity_task
+
+                summaries = []
+                for entry in llm_window:
+                    lid = entry.get("id")
+                    if not lid:
+                        continue
+                    raw = (entry.get("summary") or entry.get("content") or entry.get("raw") or "").strip()
+                    summary = _concise_summary(raw)
+                    if summary:
+                        summaries.append({"id": lid, "summary": summary})
+
+                forced_topic_name = str((topic_cands[0].get("name") if topic_cands else "") or "").strip() or "General"
+                result = {
+                    "topic": {"id": forced_topic_id, "name": forced_topic_name, "create": False},
+                    "task": {"id": task_id, "title": task_title, "create": False} if task_id else None,
+                    "summaries": summaries,
+                }
+            else:
+                result = classify_without_llm(llm_window, ctx_logs, topic_cands, text, prefer_continuity=prefer_continuity)
         except Exception:
+            if forced_topic_id:
+                # Keep the UI deterministic even under classifier failures: attach to the
+                # board-selected topic without attempting topic creation or re-routing.
+                for entry in scope_logs:
+                    if (entry.get("classificationStatus") or "pending") != "pending":
+                        continue
+                    attempts = int(entry.get("classificationAttempts") or 0)
+                    if attempts >= MAX_ATTEMPTS:
+                        continue
+                    payload = {
+                        "topicId": forced_topic_id,
+                        "taskId": None,
+                        "classificationStatus": "classified",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": f"fallback:{fallback_error}",
+                    }
+                    if entry.get("type") == "conversation":
+                        summary = _concise_summary((entry.get("content") or entry.get("summary") or "").strip())
+                        if summary:
+                            payload["summary"] = summary
+                    patch_log(entry["id"], payload)
+                return
             # Last-resort: keep the system moving even if both LLM and heuristic modes fail.
             # This avoids leaving logs stuck in "pending" forever (which breaks UI + E2E).
             continuity_topic_id = None
@@ -2930,107 +3039,117 @@ def classify_session(session_key: str):
                 patch_log(entry["id"], payload)
             return
 
-    chosen_topic_id = (result.get("topic") or {}).get("id")
-    chosen_topic_name = (result.get("topic") or {}).get("name")
-    create_topic = bool((result.get("topic") or {}).get("create"))
-
-    # Enforce schema invariants from the prompt: a missing topic id means we are
-    # creating a new topic; a create=true topic must not specify an id.
-    if create_topic:
-        chosen_topic_id = None
-    if not chosen_topic_id:
-        create_topic = True
-
-    # If the LLM selected an existing topic but our retrieval says "no clear match",
-    # prefer creating a new topic. This prevents generic buckets (e.g., "Docker") from
-    # absorbing unrelated, clearly-scoped conversations.
-    #
-    # We only do this when the bundle shows topic intent; low-signal follow-ups should
-    # keep continuity instead of spawning new topics.
-    top_topic_score = float(topic_cands[0].get("score") or 0.0) if topic_cands else 0.0
-    if (
-        chosen_topic_id
-        and not create_topic
-        and top_topic_score < max(0.52, TOPIC_SIM_THRESHOLD - 0.2)
-        and _has_topic_intent(llm_window, text)
-    ):
-        chosen_topic_id = None
-        create_topic = True
-        derived = _derive_topic_name(llm_window)
-        if derived:
-            chosen_topic_name = derived
-
-    # Guardrail: prevent obvious duplicate topics when the LLM proposes a new topic but
-    # the current-bundle search is already a very strong match to an existing one.
-    #
-    # Keep this conservative: dense/vector similarity alone can be too broad (e.g., many
-    # infra questions matching a generic "Docker" topic). Require a lexical anchor too.
-    if (
-        create_topic
-        and not chosen_topic_id
-        and topic_cands
-        and float(topic_cands[0].get("score") or 0.0) >= TOPIC_SIM_THRESHOLD
-        and float(topic_cands[0].get("lexicalScore") or 0.0) >= 0.18
-    ):
-        chosen_topic_id = topic_cands[0].get("id")
-        create_topic = False
-        if not chosen_topic_name:
-            chosen_topic_name = topic_cands[0].get("name")
-
-    if not chosen_topic_name:
-        chosen_topic_name = "General"
-
-    if not chosen_topic_id:
-        chosen_topic_name = _refine_topic_name(chosen_topic_name, llm_window, topic_cands, memory_hits)
+    if forced_topic_id:
+        # Board Topic Chat pins the topic scope; classifier may still infer/create a task within it.
+        topic_id = forced_topic_id
     else:
-        chosen_topic_name = _humanize_topic_name(chosen_topic_name or "") or chosen_topic_name or "General"
+        chosen_topic_id = (result.get("topic") or {}).get("id")
+        chosen_topic_name = (result.get("topic") or {}).get("name")
+        create_topic = bool((result.get("topic") or {}).get("create"))
 
-    all_topics = list_topics()
-    topic_name_match, topic_name_score = _best_name_match(chosen_topic_name, all_topics, "name")
-    if topic_name_match and topic_name_score >= TOPIC_NAME_SIM_THRESHOLD:
-        chosen_topic_id = topic_name_match["id"]
-        chosen_topic_name = topic_name_match.get("name") or chosen_topic_name
-        create_topic = False
+        # Enforce schema invariants from the prompt: a missing topic id means we are
+        # creating a new topic; a create=true topic must not specify an id.
+        if create_topic:
+            chosen_topic_id = None
+        if not chosen_topic_id:
+            create_topic = True
 
-    if create_topic and not _topic_creation_allowed(llm_window, chosen_topic_name, topic_cands, text, all_topics):
-        create_topic = False
+        # If the LLM selected an existing topic but our retrieval says "no clear match",
+        # prefer creating a new topic. This prevents generic buckets (e.g., "Docker") from
+        # absorbing unrelated, clearly-scoped conversations.
+        #
+        # We only do this when the bundle shows topic intent; low-signal follow-ups should
+        # keep continuity instead of spawning new topics.
+        top_topic_score = float(topic_cands[0].get("score") or 0.0) if topic_cands else 0.0
+        if (
+            chosen_topic_id
+            and not create_topic
+            and top_topic_score < max(0.52, TOPIC_SIM_THRESHOLD - 0.2)
+            and _has_topic_intent(llm_window, text)
+        ):
+            chosen_topic_id = None
+            create_topic = True
+            derived = _derive_topic_name(llm_window)
+            if derived:
+                chosen_topic_name = derived
 
-    if create_topic:
-        try:
-            gate = call_creation_gate(llm_window, topic_cands, task_cands, chosen_topic_name, None)
-            allowed = bool(gate.get("createTopic"))
-            _record_creation_gate("topic", "allow" if allowed else "block", chosen_topic_name, gate.get("topicId"))
-            if not allowed:
-                create_topic = False
-                gate_topic_id = gate.get("topicId")
-                if isinstance(gate_topic_id, str) and gate_topic_id:
-                    chosen_topic_id = gate_topic_id
-                    match = next((t for t in topic_cands if t.get("id") == gate_topic_id), None)
-                    if match and match.get("name"):
-                        chosen_topic_name = match.get("name")
-        except Exception:
-            _record_creation_gate("topic", "block", chosen_topic_name, None)
+        # Guardrail: prevent obvious duplicate topics when the LLM proposes a new topic but
+        # the current-bundle search is already a very strong match to an existing one.
+        #
+        # Keep this conservative: dense/vector similarity alone can be too broad (e.g., many
+        # infra questions matching a generic "Docker" topic). Require a lexical anchor too.
+        if (
+            create_topic
+            and not chosen_topic_id
+            and topic_cands
+            and float(topic_cands[0].get("score") or 0.0) >= TOPIC_SIM_THRESHOLD
+            and float(topic_cands[0].get("lexicalScore") or 0.0) >= 0.18
+        ):
+            chosen_topic_id = topic_cands[0].get("id")
+            create_topic = False
+            if not chosen_topic_name:
+                chosen_topic_name = topic_cands[0].get("name")
+
+        if not chosen_topic_name:
+            chosen_topic_name = "General"
+
+        if not chosen_topic_id:
+            chosen_topic_name = _refine_topic_name(chosen_topic_name, llm_window, topic_cands, memory_hits)
+        else:
+            chosen_topic_name = _humanize_topic_name(chosen_topic_name or "") or chosen_topic_name or "General"
+
+        all_topics = list_topics()
+        topic_name_match, topic_name_score = _best_name_match(chosen_topic_name, all_topics, "name")
+        if topic_name_match and topic_name_score >= TOPIC_NAME_SIM_THRESHOLD:
+            chosen_topic_id = topic_name_match["id"]
+            chosen_topic_name = topic_name_match.get("name") or chosen_topic_name
             create_topic = False
 
-    if not create_topic and not chosen_topic_id:
-        if topic_cands:
-            chosen_topic_id = topic_cands[0].get("id")
-            chosen_topic_name = topic_cands[0].get("name") or chosen_topic_name
-        elif all_topics:
-            chosen_topic_id = all_topics[0].get("id")
-            chosen_topic_name = all_topics[0].get("name") or chosen_topic_name
+        if create_topic and not _topic_creation_allowed(llm_window, chosen_topic_name, topic_cands, text, all_topics):
+            create_topic = False
 
-    if not chosen_topic_id and not all_topics:
-        create_topic = True
+        if create_topic:
+            try:
+                gate = call_creation_gate(llm_window, topic_cands, task_cands, chosen_topic_name, None)
+                allowed = bool(gate.get("createTopic"))
+                _record_creation_gate("topic", "allow" if allowed else "block", chosen_topic_name, gate.get("topicId"))
+                if not allowed:
+                    create_topic = False
+                    gate_topic_id = gate.get("topicId")
+                    if isinstance(gate_topic_id, str) and gate_topic_id:
+                        chosen_topic_id = gate_topic_id
+                        match = next((t for t in topic_cands if t.get("id") == gate_topic_id), None)
+                        if match and match.get("name"):
+                            chosen_topic_name = match.get("name")
+            except Exception:
+                _record_creation_gate("topic", "block", chosen_topic_name, None)
+                create_topic = False
 
-    topic = upsert_topic(chosen_topic_id if not create_topic else None, chosen_topic_name)
-    topic_id = topic["id"]
+        if not create_topic and not chosen_topic_id:
+            if topic_cands:
+                chosen_topic_id = topic_cands[0].get("id")
+                chosen_topic_name = topic_cands[0].get("name") or chosen_topic_name
+            elif all_topics:
+                chosen_topic_id = all_topics[0].get("id")
+                chosen_topic_name = all_topics[0].get("name") or chosen_topic_name
+
+        if not chosen_topic_id and not all_topics:
+            create_topic = True
+
+        topic = upsert_topic(chosen_topic_id if not create_topic else None, chosen_topic_name)
+        topic_id = topic["id"]
 
     # Task selection/creation (within topic)
     task_id = None
     task_cands2 = task_candidates(topic_id, text)
     task_result = result.get("task")
     task_intent = _window_has_task_intent(llm_window, text)
+    existing_tasks: list[dict] = []
+    try:
+        existing_tasks = list_tasks(topic_id)
+    except Exception:
+        existing_tasks = []
+    valid_task_ids: set[str] = {str(t.get("id") or "").strip() for t in existing_tasks if t.get("id")}
     if isinstance(task_result, dict):
         task_title = task_result.get("title")
         create_task = bool(task_result.get("create"))
@@ -3049,7 +3168,7 @@ def classify_session(session_key: str):
                     _record_creation_gate("task", "allow" if allowed else "block", task_title, gate.get("taskId"))
                     if not allowed:
                         gate_task_id = gate.get("taskId")
-                        if isinstance(gate_task_id, str) and gate_task_id:
+                        if isinstance(gate_task_id, str) and gate_task_id and gate_task_id in valid_task_ids:
                             create_task = False
                             task_id = gate_task_id
                         elif task_intent and _task_creation_allowed(llm_window, task_title, task_cands2):
@@ -3065,9 +3184,10 @@ def classify_session(session_key: str):
                         _record_creation_gate("task", "block", task_title, None)
                         create_task = False
             if proposed_task_id and not create_task:
-                task_id = proposed_task_id
+                # Guardrail: ensure the chosen task belongs to the selected topic.
+                if isinstance(proposed_task_id, str) and proposed_task_id in valid_task_ids:
+                    task_id = proposed_task_id
             elif create_task and task_title:
-                existing_tasks = list_tasks(topic_id)
                 task_name_match, task_name_score = _best_name_match(task_title, existing_tasks, "title")
                 if task_name_match and task_name_score >= TASK_NAME_SIM_THRESHOLD:
                     task_id = task_name_match["id"]
@@ -3089,7 +3209,6 @@ def classify_session(session_key: str):
             task_id = continuity_task
 
     if task_intent and not task_id and _looks_actionable(text):
-        existing_tasks = list_tasks(topic_id)
         open_tasks = [task for task in existing_tasks if (task.get("status") or "todo") != "done"]
         if len(open_tasks) == 1:
             task_id = open_tasks[0].get("id")
@@ -3107,7 +3226,8 @@ def classify_session(session_key: str):
                         if not allowed:
                             gate_task_id = gate.get("taskId")
                             if isinstance(gate_task_id, str) and gate_task_id:
-                                task_id = gate_task_id
+                                if gate_task_id in valid_task_ids:
+                                    task_id = gate_task_id
                             else:
                                 _record_creation_gate("task", "allow_fallback", task_title, None)
                                 task = upsert_task(None, topic_id, task_title)
