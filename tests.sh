@@ -175,7 +175,10 @@ log "Running classifier heuristic unit tests"
 python3 -m unittest discover -s classifier/tests -p "test_*.py"
 
 log "Running clawboard-logger unit tests"
-node --test extensions/clawboard-logger/*.test.mjs
+npm -s run test:logger
+
+log "Running bash script tests"
+npm -s run test:scripts
 
 log "Running backend unit tests"
 docker compose run --rm -T \

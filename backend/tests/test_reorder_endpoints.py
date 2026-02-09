@@ -125,7 +125,22 @@ class ReorderEndpointTests(unittest.TestCase):
             json={"orderedIds": ["topic-1", "topic-2"]},
             headers=self.auth_headers,
         )
-        self.assertEqual(res_missing.status_code, 400, res_missing.text)
+        # Topic reorders may be partial: UI often only reorders the visible subset
+        # and the backend keeps the remaining topics in their persisted slots.
+        self.assertEqual(res_missing.status_code, 200, res_missing.text)
+
+        with get_session() as session:
+            t1 = session.get(Topic, "topic-1")
+            t2 = session.get(Topic, "topic-2")
+            t3 = session.get(Topic, "topic-3")
+            self.assertIsNotNone(t1)
+            self.assertIsNotNone(t2)
+            self.assertIsNotNone(t3)
+            # Given the persisted order [topic-2, topic-3, topic-1] and orderedIds ["topic-1","topic-2"],
+            # the missing topic stays in-place and the provided ids fill the remaining slots.
+            self.assertEqual(int(getattr(t1, "sortIndex", -1)), 0)
+            self.assertEqual(int(getattr(t3, "sortIndex", -1)), 1)
+            self.assertEqual(int(getattr(t2, "sortIndex", -1)), 2)
 
     def test_tasks_reorder_updates_sort_index_in_scope(self):
         ts = now_iso()
@@ -218,4 +233,3 @@ class ReorderEndpointTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
