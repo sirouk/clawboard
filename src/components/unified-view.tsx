@@ -1125,11 +1125,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return map;
   }, [pagedTopics, tasksByTopic]);
 
-  const writeHeaders = {
-    "Content-Type": "application/json",
-  };
+  const writeHeaders = useMemo(() => ({ "Content-Type": "application/json" }), []);
 
-  const setRenameError = (key: string, message?: string) => {
+  const setRenameError = useCallback((key: string, message?: string) => {
     setRenameErrors((prev) => {
       const next = { ...prev };
       if (message) {
@@ -1139,7 +1137,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       }
       return next;
     });
-  };
+  }, []);
 
   const requestEmbeddingRefresh = async (payload: { kind: "topic" | "task"; id: string; text: string; topicId?: string | null }) => {
     try {
@@ -1189,7 +1187,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     );
   };
 
-  const persistTopicOrder = async (orderedIds: string[]) => {
+  const persistTopicOrder = useCallback(async (orderedIds: string[]) => {
     if (readOnly) return;
     const snapshot = topics;
     const indexById = new Map(orderedIds.map((id, idx) => [id, idx]));
@@ -1218,7 +1216,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       setTopics(snapshot);
       console.error(err);
     }
-  };
+  }, [readOnly, setTopics, token, topics, writeHeaders]);
 
   const beginPointerTopicReorder = useCallback(
     (event: React.PointerEvent, topic: Topic) => {
@@ -1371,17 +1369,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     [moveInArray, setTasks, tasks]
   );
 
-  const endPointerTaskReorder = useCallback(() => {
-    const state = taskPointerReorder.current;
-    taskPointerReorder.current = null;
-    if (!state) return;
-    setDraggingTaskId(null);
-    setDraggingTaskTopicId(null);
-    setTaskDropTargetId(null);
-    void persistTaskOrder(state.scopeTopicId, state.orderedIds);
-  }, [persistTaskOrder]);
-
-  async function persistTaskOrder(scopeTopicId: string | null, orderedIds: string[]) {
+  const persistTaskOrder = useCallback(async (scopeTopicId: string | null, orderedIds: string[]) => {
     if (readOnly) return;
     const snapshot = tasks;
     const indexById = new Map(orderedIds.map((id, idx) => [id, idx]));
@@ -1412,7 +1400,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       setTasks(snapshot);
       console.error(err);
     }
-  }
+  }, [readOnly, setTasks, tasks, token, writeHeaders]);
+
+  const endPointerTaskReorder = useCallback(() => {
+    const state = taskPointerReorder.current;
+    taskPointerReorder.current = null;
+    if (!state) return;
+    setDraggingTaskId(null);
+    setDraggingTaskTopicId(null);
+    setTaskDropTargetId(null);
+    void persistTaskOrder(state.scopeTopicId, state.orderedIds);
+  }, [persistTaskOrder]);
 
   const saveTopicRename = async (topic: Topic) => {
     const renameKey = `topic:${topic.id}`;
