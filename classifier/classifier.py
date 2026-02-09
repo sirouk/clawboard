@@ -54,6 +54,9 @@ OPENCLAW_INTERNAL_SESSION_PREFIX = os.environ.get(
     "internal:clawboard-classifier:",
 ).strip()
 
+BOARD_TOPIC_SESSION_PREFIX = "clawboard:topic:"
+BOARD_TASK_SESSION_PREFIX = "clawboard:task:"
+
 INTERVAL = int(os.environ.get("CLASSIFIER_INTERVAL_SECONDS", "10"))
 MAX_ATTEMPTS = int(os.environ.get("CLASSIFIER_MAX_ATTEMPTS", "3"))
 MAX_SESSIONS_PER_CYCLE = int(os.environ.get("CLASSIFIER_MAX_SESSIONS_PER_CYCLE", "8"))
@@ -92,6 +95,36 @@ def _run_with_timeout(seconds: float, fn, *args, **kwargs):
             signal.signal(signal.SIGALRM, previous)
         except Exception:
             pass
+
+
+def _parse_board_session_key(session_key: str) -> tuple[str | None, str | None]:
+    key = str(session_key or "").strip()
+    if not key:
+        return (None, None)
+
+    # OpenClaw may attach thread suffixes (`|thread:...`). Strip those for routing.
+    base = (key.split("|", 1)[0] or "").strip()
+    if not base:
+        return (None, None)
+
+    if base.startswith(BOARD_TOPIC_SESSION_PREFIX):
+        topic_id = base[len(BOARD_TOPIC_SESSION_PREFIX) :].strip()
+        return (topic_id or None, None)
+
+    if base.startswith(BOARD_TASK_SESSION_PREFIX):
+        rest = base[len(BOARD_TASK_SESSION_PREFIX) :].strip()
+        if not rest:
+            return (None, None)
+        parts = rest.split(":", 1)
+        if len(parts) != 2:
+            return (None, None)
+        topic_id = (parts[0] or "").strip()
+        task_id = (parts[1] or "").strip()
+        if not topic_id or not task_id:
+            return (None, None)
+        return (topic_id, task_id)
+
+    return (None, None)
 
 WINDOW_SIZE = int(os.environ.get("CLASSIFIER_WINDOW_SIZE", "24"))
 LOOKBACK_LOGS = int(os.environ.get("CLASSIFIER_LOOKBACK_LOGS", "80"))
@@ -2632,6 +2665,84 @@ def classify_session(session_key: str):
     if scope_end_pos < scope_start_pos:
         scope_end_pos = len(ctx_logs)
     scope_logs = ctx_logs[scope_start_pos:scope_end_pos]
+
+    board_topic_id, board_task_id = _parse_board_session_key(session_key)
+    if board_topic_id:
+        # Clawboard UI explicitly selects Topic/Task scope via `clawboard:topic:*` / `clawboard:task:*`.
+        # Do not let the classifier re-route those logs into other topics/tasks (it can make the
+        # user's message "disappear" from the chat pane they sent it from).
+        for e in scope_logs:
+            if (e.get("classificationStatus") or "pending") != "pending":
+                continue
+            attempts = int(e.get("classificationAttempts") or 0)
+            if attempts >= MAX_ATTEMPTS:
+                continue
+
+            if _is_command_conversation(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": board_topic_id,
+                        "taskId": board_task_id,
+                        "classificationStatus": "classified",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_command",
+                    },
+                )
+                continue
+            if _is_noise_conversation(e):
+                noise_text = _log_text(e)
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": board_topic_id,
+                        "taskId": board_task_id,
+                        "classificationStatus": "failed",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": _noise_error_code(noise_text),
+                    },
+                )
+                continue
+            log_type = str(e.get("type") or "")
+            if log_type in ("system", "import"):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": board_topic_id,
+                        "taskId": board_task_id,
+                        "classificationStatus": "classified",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_non_semantic",
+                    },
+                )
+                continue
+            if _is_memory_action(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": board_topic_id,
+                        "taskId": board_task_id,
+                        "classificationStatus": "classified",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_memory_action",
+                    },
+                )
+                continue
+
+            patch_payload = {
+                "topicId": board_topic_id,
+                "taskId": board_task_id,
+                "classificationStatus": "classified",
+                "classificationAttempts": attempts + 1,
+                "classificationError": None,
+            }
+            if e.get("type") == "conversation":
+                summary = _concise_summary((e.get("content") or e.get("summary") or e.get("raw") or "").strip())
+                if summary:
+                    patch_payload["summary"] = summary
+            patch_log(e["id"], patch_payload)
+
+        return
 
     def mark_window_failure(error_code: str):
         for e in scope_logs:

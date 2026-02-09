@@ -27,6 +27,22 @@ test("computeEffectiveSessionKey does not duplicate thread id if already present
   assert.equal(computeEffectiveSessionKey(meta, ctx), "channel:discord-123|thread:999");
 });
 
+test("computeEffectiveSessionKey prefers board sessionKey over conversationId", () => {
+  const meta = {};
+  const ctx = {
+    channelId: "discord",
+    conversationId: "channel:discord-123",
+    sessionKey: "clawboard:topic:topic-123",
+  };
+  assert.equal(computeEffectiveSessionKey(meta, ctx), "clawboard:topic:topic-123");
+});
+
+test("computeEffectiveSessionKey does not append thread suffix to board sessionKey", () => {
+  const meta = { threadId: "999" };
+  const ctx = { sessionKey: "clawboard:task:topic-123:task-456" };
+  assert.equal(computeEffectiveSessionKey(meta, ctx), "clawboard:task:topic-123:task-456");
+});
+
 test("parseBoardSessionKey parses topic scope", () => {
   assert.deepEqual(parseBoardSessionKey("clawboard:topic:topic-123"), { kind: "topic", topicId: "topic-123" });
 });

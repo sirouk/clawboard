@@ -1235,7 +1235,7 @@ export default function register(api: OpenClawPluginApi) {
 	    const meta = (event.metadata as Record<string, unknown> | undefined) ?? undefined;
 	    const effectiveSessionKey = resolveSessionKey(meta as { sessionKey?: string } | undefined, ctx);
 	    if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
-	    if (parseBoardSessionKey(effectiveSessionKey ?? ctx?.sessionKey) && !ctx.channelId) {
+	    if (parseBoardSessionKey(effectiveSessionKey ?? ctx?.sessionKey)) {
 	      // Clawboard UI messages (board sessions) are already persisted immediately by the backend
 	      // (`/api/openclaw/chat`). Avoid double-logging if OpenClaw emits message_received for them.
 	      return;

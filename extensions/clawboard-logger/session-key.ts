@@ -59,9 +59,20 @@ export function computeEffectiveSessionKey(
       ? String((meta as { threadId?: unknown }).threadId).trim()
       : "";
 
-  // Prefer the conversation identifier provided by OpenClaw. `channelId` is the
-  // provider/plugin id (e.g. "discord"), and is too broad to be a session bucket.
-  let base = conversationId || ctxSession || metaSession;
+  const isBoard = (value: string) => Boolean(parseBoardSessionKey(value));
+
+  // Board sessions are explicitly chosen by Clawboard (Topic/Task chat). When present, they must
+  // win even if OpenClaw supplies an unrelated conversationId, otherwise logs get mis-attributed
+  // (and Clawboard can double-log user input).
+  let base =
+    (metaSession && isBoard(metaSession) ? metaSession : "") ||
+    (ctxSession && isBoard(ctxSession) ? ctxSession : "") ||
+    (conversationId && isBoard(conversationId) ? conversationId : "") ||
+    // Prefer the conversation identifier provided by OpenClaw. `channelId` is the
+    // provider/plugin id (e.g. "discord"), and is too broad to be a session bucket.
+    conversationId ||
+    ctxSession ||
+    metaSession;
 
   // Guard: some upstreams may pass `channel:${channelId}` which is still too broad.
   if (base && channelId && base === `channel:${channelId}` && conversationId) {
@@ -74,7 +85,7 @@ export function computeEffectiveSessionKey(
 
   // Threading: if we have a distinct thread id, include it in the key so thread
   // conversations don't collide with the parent channel.
-  if (threadId && !base.includes(threadId)) {
+  if (threadId && !isBoard(base) && !base.includes(threadId)) {
     base = `${base}|thread:${threadId}`;
   }
 

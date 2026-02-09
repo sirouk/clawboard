@@ -975,7 +975,7 @@ export default function register(api) {
     const effectiveSessionKey = resolveSessionKey(meta, ctx);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
       return;
-    if (parseBoardSessionKey(effectiveSessionKey ?? ctx?.sessionKey) && !ctx.channelId)
+    if (parseBoardSessionKey(effectiveSessionKey ?? ctx?.sessionKey))
       return;
     lastChannelId = ctx.channelId;
     lastEffectiveSessionKey = effectiveSessionKey;
