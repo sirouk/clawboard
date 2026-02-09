@@ -168,6 +168,38 @@ def _append_action(
     return log_id
 
 
+def _append_log(
+    log_type: str,
+    session_key: str,
+    agent_id: str,
+    agent_label: str,
+    content: str,
+    *,
+    message_id: str | None = None,
+    created_at: str | None = None,
+) -> str:
+    msg_id = message_id or f"classifier-e2e-{uuid.uuid4().hex[:12]}"
+    payload = {
+        "type": log_type,
+        "content": content,
+        "summary": content,
+        "raw": "",
+        "agentId": agent_id,
+        "agentLabel": agent_label,
+        **({"createdAt": created_at} if created_at else {}),
+        "source": {
+            "sessionKey": session_key,
+            "channel": "classifier-e2e",
+            "messageId": msg_id,
+        },
+    }
+    row = _api_request("POST", "/api/log", payload)
+    log_id = str((row or {}).get("id") or "")
+    if not log_id:
+        fail(f"append_log missing id for session={session_key}")
+    return log_id
+
+
 def _create_topic(name: str) -> str:
     payload = {"name": name, "tags": ["classifier-e2e"]}
     row = _api_request("POST", "/api/topics", payload)
@@ -175,6 +207,15 @@ def _create_topic(name: str) -> str:
     if not topic_id:
         fail(f"create_topic missing id for name={name!r}")
     return topic_id
+
+
+def _create_task(topic_id: str, title: str) -> str:
+    payload = {"topicId": topic_id, "title": title, "status": "todo", "tags": ["classifier-e2e"]}
+    row = _api_request("POST", "/api/tasks", payload)
+    task_id = str((row or {}).get("id") or "")
+    if not task_id:
+        fail(f"create_task missing id for title={title!r}")
+    return task_id
 
 
 def _wait_for_classification(session_key: str, expected_ids: set[str]) -> dict[str, dict[str, Any]]:
@@ -293,6 +334,34 @@ def _validate_rows(
     return task_ids
 
 
+def _assert_log_state(
+    row: dict[str, Any],
+    *,
+    label: str,
+    expected_status: str,
+    expected_error: str | None = None,
+    expect_topic: bool | None = None,
+) -> None:
+    rid = str((row or {}).get("id") or "")
+    status = str((row or {}).get("classificationStatus") or "pending")
+    if status != expected_status:
+        fail(f"{label}: log {rid} status={status}, expected {expected_status}")
+
+    if expected_error is not None:
+        got = (row or {}).get("classificationError")
+        if str(got or "") != str(expected_error or ""):
+            fail(f"{label}: log {rid} classificationError={got!r}, expected {expected_error!r}")
+
+    if expect_topic is True:
+        topic_id = str((row or {}).get("topicId") or "")
+        if not topic_id:
+            fail(f"{label}: log {rid} expected topicId to be set")
+    if expect_topic is False:
+        topic_id = str((row or {}).get("topicId") or "")
+        if topic_id:
+            fail(f"{label}: log {rid} expected no topicId, got {topic_id}")
+
+
 def _load_fixture_window(name: str) -> list[dict[str, Any]]:
     path = FIXTURES_DIR / name
     if not path.exists():
@@ -350,6 +419,22 @@ def main() -> int:
             "label": "multi-bundle",
             "mode": "multi-bundle",
         },
+        {
+            "label": "board-topic-promote-task",
+            "mode": "board-topic-promote-task",
+        },
+        {
+            "label": "board-topic-smalltalk",
+            "mode": "board-topic-smalltalk",
+        },
+        {
+            "label": "board-task-fixed-scope",
+            "mode": "board-task-fixed-scope",
+        },
+        {
+            "label": "filtering-mixed",
+            "mode": "filtering-mixed",
+        },
     ]
 
     scenario_results: list[dict[str, Any]] = []
@@ -359,6 +444,302 @@ def main() -> int:
         for scenario_idx, scenario in enumerate(scenarios):
             label = str(scenario["label"])
             session_key = f"channel:classifier-e2e:{label}:{run_token.lower()}"
+
+            if str(scenario.get("mode") or "") == "board-topic-promote-task":
+                # Board Topic Chat pins the topic scope, but classifier may infer/create a task within it.
+                topic_name = f"Board Topic Promote Z{run_token}"
+                topic_id = _create_topic(topic_name)
+                explicit_topic_ids.add(topic_id)
+                session_key = f"clawboard:topic:{topic_id}"
+
+                steps: list[tuple[str, str, str, str]] = [
+                    ("conversation", "user", "User", f"Fix OAuth redirect Z{run_token} in the portal login flow."),
+                    ("action", "assistant", "Assistant", "Tool call: web.search oauth redirect loop"),
+                    ("conversation", "assistant", "Assistant", "Ok. I will inspect the callback handler and patch it."),
+                ]
+
+                expected_ids: set[str] = set()
+                ids_in_order: list[str] = []
+                for idx, (kind, agent_id, agent_label, content) in enumerate(steps):
+                    message_id = f"classifier-e2e:{label}:{idx}:{run_token.lower()}"
+                    created_at = f"{CREATED_AT_BASE}:{scenario_idx:02d}:{idx:02d}.000Z"
+                    if kind == "conversation":
+                        log_id = _append_conversation(
+                            session_key,
+                            agent_id,
+                            agent_label,
+                            content,
+                            message_id=message_id,
+                            created_at=created_at,
+                        )
+                    else:
+                        log_id = _append_action(
+                            session_key,
+                            agent_id,
+                            agent_label,
+                            content,
+                            message_id=message_id,
+                            created_at=created_at,
+                        )
+                    created_log_ids.append(log_id)
+                    expected_ids.add(log_id)
+                    ids_in_order.append(log_id)
+
+                print(f"classifier e2e: waiting {label} session {session_key}")
+                rows = _wait_for_classification(session_key, expected_ids)
+
+                task_ids = _validate_rows(rows, label=label, require_task=True, forbid_task=False)
+                if len(task_ids) != 1:
+                    fail(f"{label}: expected exactly one inferred task, got {sorted(task_ids)}")
+                inferred_task_id = next(iter(task_ids))
+
+                for rid in ids_in_order:
+                    row = rows.get(rid) or {}
+                    if str(row.get("topicId") or "") != topic_id:
+                        fail(f"{label}: log {rid} expected topic {topic_id}, got {row.get('topicId')}")
+                    if str(row.get("type") or "") == "action":
+                        if str(row.get("taskId") or "") != inferred_task_id:
+                            fail(
+                                f"{label}: action log {rid} expected task {inferred_task_id}, got {row.get('taskId')}"
+                            )
+
+                explicit_task_ids.add(inferred_task_id)
+                extra_sessions.append(session_key)
+                continue
+
+            if str(scenario.get("mode") or "") == "board-topic-smalltalk":
+                # Board Topic Chat pins the topic scope; even small-talk should not be rerouted into "Small Talk".
+                topic_id = _create_topic(f"Board Topic Smalltalk Z{run_token}")
+                explicit_topic_ids.add(topic_id)
+                session_key = f"clawboard:topic:{topic_id}"
+
+                steps: list[tuple[str, str, str]] = [
+                    ("user", "User", "Hey there."),
+                    ("assistant", "Assistant", "Hey! What's up?"),
+                ]
+
+                expected_ids: set[str] = set()
+                for idx, (agent_id, agent_label, content) in enumerate(steps):
+                    message_id = f"classifier-e2e:{label}:{idx}:{run_token.lower()}"
+                    created_at = f"{CREATED_AT_BASE}:{scenario_idx:02d}:{idx:02d}.000Z"
+                    log_id = _append_conversation(
+                        session_key,
+                        agent_id,
+                        agent_label,
+                        content,
+                        message_id=message_id,
+                        created_at=created_at,
+                    )
+                    created_log_ids.append(log_id)
+                    expected_ids.add(log_id)
+
+                print(f"classifier e2e: waiting {label} session {session_key}")
+                rows = _wait_for_classification(session_key, expected_ids)
+                _validate_rows(rows, label=label, require_task=False, forbid_task=True)
+                for rid, row in rows.items():
+                    if str((row or {}).get("topicId") or "") != topic_id:
+                        fail(f"{label}: log {rid} expected topic {topic_id}, got {(row or {}).get('topicId')}")
+                    if str((row or {}).get("taskId") or ""):
+                        fail(f"{label}: log {rid} expected no taskId, got {(row or {}).get('taskId')}")
+
+                extra_sessions.append(session_key)
+                continue
+
+            if str(scenario.get("mode") or "") == "board-task-fixed-scope":
+                # Board Task Chat pins both topic + task; classifier must not reroute.
+                topic_id = _create_topic(f"Board Task Fixed Z{run_token}")
+                task_id = _create_task(topic_id, f"Ship portal hotfix Z{run_token}")
+                explicit_topic_ids.add(topic_id)
+                explicit_task_ids.add(task_id)
+                session_key = f"clawboard:task:{topic_id}:{task_id}"
+
+                steps: list[tuple[str, str, str, str]] = [
+                    ("conversation", "user", "User", "Update: also fix the copy on the login form."),
+                    ("conversation", "user", "User", "/new"),
+                    ("action", "assistant", "Assistant", "Tool call: memory_search login copy"),
+                    ("system", "system", "System", "System: heartbeat"),
+                ]
+
+                expected_ids: set[str] = set()
+                ids_by_step: list[tuple[str, str]] = []
+                for idx, (kind, agent_id, agent_label, content) in enumerate(steps):
+                    message_id = f"classifier-e2e:{label}:{idx}:{run_token.lower()}"
+                    created_at = f"{CREATED_AT_BASE}:{scenario_idx:02d}:{idx:02d}.000Z"
+                    if kind == "conversation":
+                        log_id = _append_conversation(
+                            session_key,
+                            agent_id,
+                            agent_label,
+                            content,
+                            message_id=message_id,
+                            created_at=created_at,
+                        )
+                    elif kind == "action":
+                        log_id = _append_action(
+                            session_key,
+                            agent_id,
+                            agent_label,
+                            content,
+                            message_id=message_id,
+                            created_at=created_at,
+                        )
+                    else:
+                        log_id = _append_log(
+                            kind,
+                            session_key,
+                            agent_id,
+                            agent_label,
+                            content,
+                            message_id=message_id,
+                            created_at=created_at,
+                        )
+                    created_log_ids.append(log_id)
+                    expected_ids.add(log_id)
+                    ids_by_step.append((kind, log_id))
+
+                print(f"classifier e2e: waiting {label} session {session_key}")
+                rows = _wait_for_classification(session_key, expected_ids)
+
+                for rid, row in rows.items():
+                    if str(row.get("topicId") or "") != topic_id:
+                        fail(f"{label}: log {rid} expected topic {topic_id}, got {row.get('topicId')}")
+                    if str(row.get("taskId") or "") != task_id:
+                        fail(f"{label}: log {rid} expected task {task_id}, got {row.get('taskId')}")
+
+                for kind, rid in ids_by_step:
+                    row = rows.get(rid) or {}
+                    if kind == "action":
+                        _assert_log_state(
+                            row,
+                            label=f"{label}:memory-action",
+                            expected_status="classified",
+                            expected_error="filtered_memory_action",
+                            expect_topic=True,
+                        )
+                    elif kind == "system":
+                        _assert_log_state(
+                            row,
+                            label=f"{label}:system",
+                            expected_status="classified",
+                            expected_error="filtered_non_semantic",
+                            expect_topic=True,
+                        )
+                    else:
+                        _assert_log_state(
+                            row,
+                            label=f"{label}:{kind}",
+                            expected_status="classified",
+                            expect_topic=True,
+                        )
+
+                extra_sessions.append(session_key)
+                continue
+
+            if str(scenario.get("mode") or "") == "filtering-mixed":
+                # Mixed logs in one scope should not strand anything in pending.
+                steps: list[tuple[str, str, str, str]] = [
+                    ("conversation", "user", "User", f"Filtering Mixed Z{run_token}: explain idempotency keys for message ingestion."),
+                    ("conversation", "assistant", "Assistant", "Use X-Idempotency-Key, and fall back to source.messageId per channel."),
+                    ("conversation", "user", "User", "/new"),
+                    ("conversation", "assistant", "Assistant", "{\"window\":[],\"topic\":null,\"task\":null}"),
+                    ("conversation", "assistant", "Assistant", "[clawboard_context_begin]x[clawboard_context_end]"),
+                    ("action", "assistant", "Assistant", "Tool call: memory_search idempotency"),
+                    ("import", "system", "System", "Import: seeded initial fixtures"),
+                ]
+
+                expected_ids: set[str] = set()
+                ids: dict[str, list[str]] = {"command": [], "noise": [], "memory": [], "import": [], "semantic": []}
+                for idx, (kind, agent_id, agent_label, content) in enumerate(steps):
+                    message_id = f"classifier-e2e:{label}:{idx}:{run_token.lower()}"
+                    created_at = f"{CREATED_AT_BASE}:{scenario_idx:02d}:{idx:02d}.000Z"
+                    if kind == "conversation":
+                        log_id = _append_conversation(
+                            session_key,
+                            agent_id,
+                            agent_label,
+                            content,
+                            message_id=message_id,
+                            created_at=created_at,
+                        )
+                        if content.strip() == "/new":
+                            ids["command"].append(log_id)
+                        elif content.strip().startswith("{") or "clawboard_context_begin" in content:
+                            ids["noise"].append(log_id)
+                        else:
+                            ids["semantic"].append(log_id)
+                    elif kind == "action":
+                        log_id = _append_action(
+                            session_key,
+                            agent_id,
+                            agent_label,
+                            content,
+                            message_id=message_id,
+                            created_at=created_at,
+                        )
+                        ids["memory"].append(log_id)
+                    else:
+                        log_id = _append_log(
+                            kind,
+                            session_key,
+                            agent_id,
+                            agent_label,
+                            content,
+                            message_id=message_id,
+                            created_at=created_at,
+                        )
+                        if kind == "import":
+                            ids["import"].append(log_id)
+                    created_log_ids.append(log_id)
+                    expected_ids.add(log_id)
+
+                print(f"classifier e2e: waiting {label} session {session_key}")
+                rows = _wait_for_classification(session_key, expected_ids)
+
+                for rid in ids["semantic"]:
+                    row = rows.get(rid) or {}
+                    _assert_log_state(row, label=f"{label}:semantic", expected_status="classified", expect_topic=True)
+                    summary = str((row or {}).get("summary") or "").strip()
+                    if not summary:
+                        fail(f"{label}: semantic log {rid} missing summary")
+                    if len(summary) > 56:
+                        fail(f"{label}: semantic log {rid} summary too long ({len(summary)} > 56)")
+
+                for rid in ids["command"]:
+                    _assert_log_state(
+                        rows.get(rid) or {},
+                        label=f"{label}:command",
+                        expected_status="classified",
+                        expected_error="filtered_command",
+                        expect_topic=False,
+                    )
+
+                for rid in ids["noise"]:
+                    row = rows.get(rid) or {}
+                    err = str((row or {}).get("classificationError") or "")
+                    if err not in {"classifier_payload_noise", "context_injection_noise"}:
+                        fail(f"{label}: noise log {rid} expected noise error, got {err!r}")
+                    _assert_log_state(row, label=f"{label}:noise", expected_status="failed", expect_topic=False)
+
+                for rid in ids["memory"]:
+                    _assert_log_state(
+                        rows.get(rid) or {},
+                        label=f"{label}:memory",
+                        expected_status="classified",
+                        expected_error="filtered_memory_action",
+                        expect_topic=False,
+                    )
+
+                for rid in ids["import"]:
+                    _assert_log_state(
+                        rows.get(rid) or {},
+                        label=f"{label}:import",
+                        expected_status="classified",
+                        expected_error="filtered_non_semantic",
+                        expect_topic=False,
+                    )
+
+                extra_sessions.append(session_key)
+                continue
 
             if str(scenario.get("mode") or "") == "assistant-contamination":
                 # Regression test: topic selection should anchor on user intent, not assistant
@@ -554,7 +935,7 @@ def main() -> int:
         for result in scenario_results:
             print(f"{result['label']}_session={result['sessionKey']}")
         for session_key in extra_sessions:
-            print(f"multi_bundle_session={session_key}")
+            print(f"extra_session={session_key}")
         return 0
     finally:
         if cleanup_enabled:
@@ -578,11 +959,37 @@ def main() -> int:
                 except Exception:
                     pass
 
-            for topic_id in sorted(explicit_topic_ids):
-                try:
-                    _api_request("DELETE", f"/api/topics/{topic_id}")
-                except Exception:
-                    pass
+            # Best-effort cleanup for any topics/tasks created during this run that include the run token.
+            # This prevents long-lived test data from accumulating in a dev DB.
+            try:
+                token_marker = f"Z{run_token}"
+                topics = _api_request("GET", "/api/topics") or []
+                tasks = _api_request("GET", "/api/tasks") or []
+
+                token_task_ids = [
+                    str((t or {}).get("id") or "")
+                    for t in tasks
+                    if token_marker in str((t or {}).get("title") or "")
+                ]
+                token_topic_ids = [
+                    str((t or {}).get("id") or "")
+                    for t in topics
+                    if token_marker in str((t or {}).get("name") or "")
+                ]
+
+                for task_id in sorted({tid for tid in token_task_ids if tid}):
+                    try:
+                        _api_request("DELETE", f"/api/tasks/{task_id}")
+                    except Exception:
+                        pass
+
+                for topic_id in sorted({tid for tid in token_topic_ids if tid}):
+                    try:
+                        _api_request("DELETE", f"/api/topics/{topic_id}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
