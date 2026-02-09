@@ -182,6 +182,16 @@ Set these in `.env`:
 - `CLASSIFIER_MAX_ATTEMPTS`: max classify retries before failed state (default `3`).
 - `CLAWBOARD_TRUST_PROXY`: set `1` only when behind a trusted reverse proxy and you want `X-Forwarded-For` / `X-Real-IP` honored.
 
+Advanced (optional) knobs (see `.env.example` for comments/defaults):
+
+- `CLAWBOARD_SQLITE_TIMEOUT_SECONDS`: sqlite busy timeout under write contention.
+- `CLAWBOARD_EVENT_BUFFER` / `CLAWBOARD_EVENT_SUBSCRIBER_QUEUE`: SSE replay buffer + per-subscriber queue depth.
+- `CLAWBOARD_INGEST_MODE` / `CLAWBOARD_QUEUE_*`: async ingest queue mode.
+- `CLAWBOARD_REINDEX_QUEUE_PATH`: reindex queue jsonl path (non-docker/local dev).
+- `CLAWBOARD_DISABLE_SNOOZE_WORKER` / `CLAWBOARD_SNOOZE_POLL_SECONDS`: snooze reactivation worker.
+- `CLAWBOARD_VECTOR_MODEL`: keep in sync with `CLASSIFIER_EMBED_MODEL` if you override embedding models.
+- `CLAWBOARD_WEB_WATCHPACK_POLLING*`: web-dev Docker file watching.
+
 Note: `CLAWBOARD_INTEGRATION_LEVEL` is used by `scripts/bootstrap_openclaw.sh` (installer), not as a standalone API server env default.
 Security: remote/tailnet/domain API reads require token. Setup stores token in browser local storage (masked input) and sends it on all API reads/writes.
 Docker security: compose does not publish DB/vector/cache ports; use API endpoints as the supported read/write/delete path.
