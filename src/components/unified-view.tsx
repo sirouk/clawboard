@@ -847,6 +847,29 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     });
   }, []);
 
+  // Keep ref callbacks stable per key. Inline `ref={(node) => ...}` creates a new function each render,
+  // which makes React call the previous ref with null and the next ref with the node every time,
+  // and that can cascade into infinite update loops if the ref handler sets state.
+  const chatScrollerRefCallbacks = useRef<Map<string, (node: HTMLElement | null) => void>>(new Map());
+  const getChatScrollerRef = useCallback(
+    (key: string) => {
+      const existing = chatScrollerRefCallbacks.current.get(key);
+      if (existing) return existing;
+      const cb = (node: HTMLElement | null) => {
+        setChatScroller(key, node);
+        if (node && typeof window !== "undefined") {
+          window.requestAnimationFrame(() => {
+            const showTop = node.scrollTop > 2;
+            setChatTopFade((prev) => (prev[key] === showTop ? prev : { ...prev, [key]: showTop }));
+          });
+        }
+      };
+      chatScrollerRefCallbacks.current.set(key, cb);
+      return cb;
+    },
+    [setChatScroller]
+  );
+
   const updateActiveChatAtBottom = useCallback(() => {
     const key = activeChatKeyRef.current;
     if (!key) {
@@ -4176,23 +4199,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                                      Jump to latest ↓
 	                                    </button>
 	                                  ) : null}
-	                                  <div
-	                                    ref={(node) => {
-	                                      const key = `task:${task.id}`;
-	                                      setChatScroller(key, node);
-	                                      if (node && typeof window !== "undefined") {
-	                                        window.requestAnimationFrame(() => {
-	                                          const showTop = node.scrollTop > 2;
-	                                          setChatTopFade((prev) =>
-	                                            prev[key] === showTop ? prev : { ...prev, [key]: showTop }
-	                                          );
-	                                        });
-	                                      }
-	                                    }}
-	                                    onScroll={(event) => {
-	                                      const key = `task:${task.id}`;
-	                                      const node = event.currentTarget;
-	                                      const showTop = node.scrollTop > 2;
+		                                  <div
+		                                    ref={getChatScrollerRef(`task:${task.id}`)}
+		                                    onScroll={(event) => {
+		                                      const key = `task:${task.id}`;
+		                                      const node = event.currentTarget;
+		                                      const showTop = node.scrollTop > 2;
 	                                      const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
 	                                      const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
 	                                      chatAtBottomRef.current.set(key, atBottom);
@@ -4490,23 +4502,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                Jump to latest ↓
 			                              </button>
 			                            ) : null}
-			                            <div
-			                              ref={(node) => {
-			                                const key = `topic:${topicId}`;
-			                                setChatScroller(key, node);
-			                                if (node && typeof window !== "undefined") {
-			                                  window.requestAnimationFrame(() => {
-			                                    const showTop = node.scrollTop > 2;
-			                                    setChatTopFade((prev) =>
-			                                      prev[key] === showTop ? prev : { ...prev, [key]: showTop }
-			                                    );
-			                                  });
-			                                }
-			                              }}
-			                              onScroll={(event) => {
-			                                const key = `topic:${topicId}`;
-			                                const node = event.currentTarget;
-			                                const showTop = node.scrollTop > 2;
+				                            <div
+				                              ref={getChatScrollerRef(`topic:${topicId}`)}
+				                              onScroll={(event) => {
+				                                const key = `topic:${topicId}`;
+				                                const node = event.currentTarget;
+				                                const showTop = node.scrollTop > 2;
 			                                const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
 			                                const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
 			                                chatAtBottomRef.current.set(key, atBottom);
