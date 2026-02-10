@@ -20,6 +20,7 @@ import { Markdown } from "@/components/markdown";
 import { AttachmentStrip, type AttachmentLike } from "@/components/attachments";
 import { queueDraftUpsert, readBestDraftValue, usePersistentDraft } from "@/lib/drafts";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
+import { SnoozeModal } from "@/components/snooze-modal";
 
 const STATUS_TONE: Record<string, "muted" | "accent" | "accent2" | "warning" | "success"> = {
   todo: "muted",
@@ -40,6 +41,15 @@ type TaskStatusFilter = (typeof TASK_STATUS_FILTERS)[number];
 
 const isTaskStatusFilter = (value: string): value is TaskStatusFilter =>
   TASK_STATUS_FILTERS.includes(value as TaskStatusFilter);
+
+const TOPIC_VIEW_KEY = "clawboard.unified.topicView";
+const SHOW_SNOOZED_TASKS_KEY = "clawboard.unified.showSnoozedTasks";
+const UNSNOOZED_TOPICS_KEY = "clawboard.unified.unsnoozedTopics";
+const UNSNOOZED_TASKS_KEY = "clawboard.unified.unsnoozedTasks";
+
+const TOPIC_VIEWS = ["active", "snoozed", "archived", "all"] as const;
+type TopicView = (typeof TOPIC_VIEWS)[number];
+const isTopicView = (value: string): value is TopicView => TOPIC_VIEWS.includes(value as TopicView);
 
 function GripIcon({ className }: { className?: string }) {
   return (
@@ -83,6 +93,17 @@ const TOPIC_ACTION_REVEAL_PX = 248;
 // Keep that priority for a long window so "something else happening" displaces it,
 // instead of the item unexpectedly dropping due to time passing mid-session.
 const NEW_ITEM_BUMP_MS = 24 * 60 * 60 * 1000;
+
+const DEFAULT_UNIFIED_TOPICS_PAGE_SIZE = 50;
+const UNIFIED_TOPICS_PAGE_SIZE = (() => {
+  const raw = String(process.env.NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE ?? "").trim();
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_UNIFIED_TOPICS_PAGE_SIZE;
+  const value = Math.floor(parsed);
+  if (value <= 0) return DEFAULT_UNIFIED_TOPICS_PAGE_SIZE;
+  // Keep a hard cap so accidental env values don't DoS the UI.
+  return Math.min(value, 200);
+})();
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -495,6 +516,49 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const restoreScrollOnNextSyncRef = useRef(false);
   const [initialUrlState] = useState(() => getInitialUrlState(basePath));
   const twoColumn = useLocalStorageItem("clawboard.unified.twoColumn") === "true";
+  const storedTopicView = (useLocalStorageItem(TOPIC_VIEW_KEY) ?? "").trim().toLowerCase();
+  const topicView: TopicView = isTopicView(storedTopicView) ? storedTopicView : "active";
+  const showSnoozedTasks = useLocalStorageItem(SHOW_SNOOZED_TASKS_KEY) === "true";
+  const unsnoozedTopicsRaw = useLocalStorageItem(UNSNOOZED_TOPICS_KEY) ?? "{}";
+  const unsnoozedTasksRaw = useLocalStorageItem(UNSNOOZED_TASKS_KEY) ?? "{}";
+  const [mdUp, setMdUp] = useState(false);
+  const showTwoColumns = twoColumn && mdUp;
+  const unsnoozedTopicBadges = useMemo<Record<string, number>>(() => {
+    try {
+      const parsed = JSON.parse(String(unsnoozedTopicsRaw || "{}")) as unknown;
+      if (!parsed || typeof parsed !== "object") return {};
+      const raw = parsed as Record<string, unknown>;
+      const next: Record<string, number> = {};
+      for (const [key, value] of Object.entries(raw)) {
+        const id = String(key || "").trim();
+        if (!id) continue;
+        const ts = typeof value === "number" ? value : Number(value);
+        if (!Number.isFinite(ts) || ts <= 0) continue;
+        next[id] = ts;
+      }
+      return next;
+    } catch {
+      return {};
+    }
+  }, [unsnoozedTopicsRaw]);
+  const unsnoozedTaskBadges = useMemo<Record<string, number>>(() => {
+    try {
+      const parsed = JSON.parse(String(unsnoozedTasksRaw || "{}")) as unknown;
+      if (!parsed || typeof parsed !== "object") return {};
+      const raw = parsed as Record<string, unknown>;
+      const next: Record<string, number> = {};
+      for (const [key, value] of Object.entries(raw)) {
+        const id = String(key || "").trim();
+        if (!id) continue;
+        const ts = typeof value === "number" ? value : Number(value);
+        if (!Number.isFinite(ts) || ts <= 0) continue;
+        next[id] = ts;
+      }
+      return next;
+    } catch {
+      return {};
+    }
+  }, [unsnoozedTasksRaw]);
   const [expandedTopics, setExpandedTopics] = useState<Set<string>>(new Set(initialUrlState.topics));
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set(initialUrlState.tasks));
   // Topic chat should feel "always there"; default to expanded for any expanded topic.
@@ -507,9 +571,28 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     isTaskStatusFilter(initialUrlState.status) ? initialUrlState.status : "all"
   );
   const [showViewOptions, setShowViewOptions] = useState(false);
+  const [snoozeTarget, setSnoozeTarget] = useState<
+    | { kind: "topic"; topicId: string; label: string }
+    | { kind: "task"; topicId: string; taskId: string; label: string }
+    | null
+  >(null);
   const toggleTwoColumn = () => {
     setLocalStorageItem("clawboard.unified.twoColumn", twoColumn ? "false" : "true");
   };
+
+  useEffect(() => {
+    const mql = window.matchMedia("(min-width: 768px)");
+    const sync = () => setMdUp(mql.matches);
+    sync();
+    try {
+      mql.addEventListener("change", sync);
+      return () => mql.removeEventListener("change", sync);
+    } catch {
+      mql.addListener(sync);
+      return () => mql.removeListener(sync);
+    }
+  }, []);
+
   // Per-chat "oldest visible index" into that chat's log list.
   // Keyed by chat scroller keys (e.g. `topic:${topicId}`, `task:${taskId}`).
   const [chatHistoryStarts, setChatHistoryStarts] = useState<Record<string, number>>({});
@@ -579,7 +662,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const composerHandlesRef = useRef<Map<string, BoardChatComposerHandle>>(new Map());
   const prevPendingAttachmentsRef = useRef<Map<string, AttachmentLike[]>>(new Map());
   const [chatTopFade, setChatTopFade] = useState<Record<string, boolean>>({});
-  const [chatBottomFade, setChatBottomFade] = useState<Record<string, boolean>>({});
 
   const CHAT_AUTO_SCROLL_THRESHOLD_PX = 160;
   const topicAutosaveTimerRef = useRef<number | null>(null);
@@ -852,6 +934,86 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       bumpTimers.current.set(key, timer);
     },
     []
+  );
+
+  const prevTopicStatusRef = useRef<Map<string, { status: string; snoozedUntil: string | null }>>(new Map());
+  const prevTaskSnoozeRef = useRef<Map<string, string | null>>(new Map());
+
+  useEffect(() => {
+    const prev = prevTopicStatusRef.current;
+    const next = new Map<string, { status: string; snoozedUntil: string | null }>();
+    const additions: string[] = [];
+    for (const topic of topics) {
+      let status = String(topic.status ?? "active").trim().toLowerCase();
+      if (status === "paused") status = "snoozed";
+      const snoozedUntil = (topic.snoozedUntil ?? null) ? String(topic.snoozedUntil) : null;
+      next.set(topic.id, { status, snoozedUntil });
+      const before = prev.get(topic.id);
+      if (!before) continue;
+      if (before.status === "snoozed" && status === "active") {
+        additions.push(topic.id);
+      }
+    }
+    prevTopicStatusRef.current = next;
+
+    if (additions.length === 0) return;
+    const stamp = Date.now();
+    const updated: Record<string, number> = { ...unsnoozedTopicBadges };
+    for (const id of additions) {
+      updated[id] = stamp;
+      markBumped("topic", id);
+    }
+    setLocalStorageItem(UNSNOOZED_TOPICS_KEY, JSON.stringify(updated));
+  }, [markBumped, topics, unsnoozedTopicBadges]);
+
+  useEffect(() => {
+    const prev = prevTaskSnoozeRef.current;
+    const next = new Map<string, string | null>();
+    const additions: string[] = [];
+    for (const task of tasks) {
+      const snoozedUntil = (task.snoozedUntil ?? null) ? String(task.snoozedUntil) : null;
+      next.set(task.id, snoozedUntil);
+      const before = prev.get(task.id);
+      if (!before) continue;
+      if (before && !snoozedUntil) {
+        // Snoozed -> unsnoozed (worker or activity).
+        additions.push(task.id);
+      }
+    }
+    prevTaskSnoozeRef.current = next;
+
+    if (additions.length === 0) return;
+    const stamp = Date.now();
+    const updated: Record<string, number> = { ...unsnoozedTaskBadges };
+    for (const id of additions) {
+      updated[id] = stamp;
+      markBumped("task", id);
+    }
+    setLocalStorageItem(UNSNOOZED_TASKS_KEY, JSON.stringify(updated));
+  }, [markBumped, tasks, unsnoozedTaskBadges]);
+
+  const dismissUnsnoozedTopicBadge = useCallback(
+    (topicId: string) => {
+      const id = String(topicId || "").trim();
+      if (!id) return;
+      if (!Object.prototype.hasOwnProperty.call(unsnoozedTopicBadges, id)) return;
+      const updated: Record<string, number> = { ...unsnoozedTopicBadges };
+      delete updated[id];
+      setLocalStorageItem(UNSNOOZED_TOPICS_KEY, JSON.stringify(updated));
+    },
+    [unsnoozedTopicBadges]
+  );
+
+  const dismissUnsnoozedTaskBadge = useCallback(
+    (taskId: string) => {
+      const id = String(taskId || "").trim();
+      if (!id) return;
+      if (!Object.prototype.hasOwnProperty.call(unsnoozedTaskBadges, id)) return;
+      const updated: Record<string, number> = { ...unsnoozedTaskBadges };
+      delete updated[id];
+      setLocalStorageItem(UNSNOOZED_TASKS_KEY, JSON.stringify(updated));
+    },
+    [unsnoozedTaskBadges]
   );
 
 	  const expandedTopicsSafe = useMemo(() => {
@@ -1250,7 +1412,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const matchesStatusFilter = useCallback(
     (task: Task) => {
-      if (!normalizedSearch) {
+      if (!normalizedSearch && !showSnoozedTasks) {
         const until = (task.snoozedUntil ?? "").trim();
         if (until) {
           const stamp = Date.parse(until);
@@ -1261,7 +1423,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (!showDone && task.status === "done") return false;
       return true;
     },
-    [normalizedSearch, showDone, statusFilter]
+    [normalizedSearch, showDone, showSnoozedTasks, statusFilter]
   );
 
   const orderedTopics = useMemo(() => {
@@ -1293,7 +1455,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       });
 
     const filtered = base.filter((topic) => {
-      if (!normalizedSearch && (topic.status ?? "active") === "paused") return false;
+      const effectiveView: TopicView = normalizedSearch ? "all" : topicView;
+      let topicStatus = String(topic.status ?? "active").trim().toLowerCase();
+      if (topicStatus === "paused") topicStatus = "snoozed";
+      if (effectiveView === "active") {
+        if (topicStatus !== "active") return false;
+      } else if (effectiveView === "snoozed") {
+        if (topicStatus !== "snoozed") return false;
+      } else if (effectiveView === "archived") {
+        if (topicStatus !== "archived") return false;
+      }
       const taskList = tasksByTopic.get(topic.id) ?? [];
       if (statusFilter !== "all") {
         return taskList.some((task) => matchesStatusFilter(task) && matchesTaskSearch(task));
@@ -1313,6 +1484,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     });
 
     if (tasksByTopic.has("unassigned")) {
+      const effectiveView: TopicView = normalizedSearch ? "all" : topicView;
+      if (effectiveView !== "snoozed" && effectiveView !== "archived") {
       filtered.push({
         id: "unassigned",
         name: "Unassigned",
@@ -1326,6 +1499,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         tags: [],
         parentId: null,
       });
+      }
     }
 
     return filtered;
@@ -1342,10 +1516,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     semanticTopicIds,
     semanticTopicScores,
     statusFilter,
+    topicView,
     tasksByTopic,
   ]);
 
-  const pageSize = 10;
+  const pageSize = UNIFIED_TOPICS_PAGE_SIZE;
   const pageCount = Math.ceil(orderedTopics.length / pageSize);
   const safePage = pageCount <= 1 ? 1 : Math.min(page, pageCount);
   const pagedTopics = pageCount > 1 ? orderedTopics.slice((safePage - 1) * pageSize, safePage * pageSize) : orderedTopics;
@@ -2724,34 +2899,58 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             {twoColumn ? "1 column" : "2 column"}
           </Button>
         </div>
-        {showViewOptions && (
-          <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.92)] p-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <Select
-                value={statusFilter}
-                onChange={(event) => updateStatusFilter(event.target.value)}
-                className="max-w-[190px]"
-              >
+	        {showViewOptions && (
+	          <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.92)] p-3">
+	            <div className="flex flex-wrap items-center gap-2">
+	              <Select
+	                value={topicView}
+	                onChange={(event) => {
+	                  setLocalStorageItem(TOPIC_VIEW_KEY, event.target.value);
+	                  setPage(1);
+	                  pushUrl({ page: "1" }, "replace");
+	                }}
+	                className="max-w-[190px]"
+	              >
+	                <option value="active">Active topics</option>
+	                <option value="snoozed">Snoozed topics</option>
+	                <option value="archived">Archived topics</option>
+	                <option value="all">All topics</option>
+	              </Select>
+	              <Select
+	                value={statusFilter}
+	                onChange={(event) => updateStatusFilter(event.target.value)}
+	                className="max-w-[190px]"
+	              >
                 <option value="all">All statuses</option>
                 <option value="todo">To Do</option>
                 <option value="doing">Doing</option>
                 <option value="blocked">Blocked</option>
                 <option value="done">Done</option>
               </Select>
-              <Button
-                variant="secondary"
-                size="sm"
-                className={cn(showDone ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                onClick={toggleDoneVisibility}
-              >
-                {showDone ? "Hide done" : "Show done"}
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                className={cn(showRaw ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                onClick={toggleRawVisibility}
-              >
+	              <Button
+	                variant="secondary"
+	                size="sm"
+	                className={cn(showDone ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+	                onClick={toggleDoneVisibility}
+	              >
+	                {showDone ? "Hide done" : "Show done"}
+	              </Button>
+	              <Button
+	                variant="secondary"
+	                size="sm"
+	                className={cn(showSnoozedTasks ? "border-[rgba(77,171,158,0.55)]" : "opacity-85")}
+	                onClick={() => {
+	                  setLocalStorageItem(SHOW_SNOOZED_TASKS_KEY, showSnoozedTasks ? "false" : "true");
+	                }}
+	              >
+	                {showSnoozedTasks ? "Hide snoozed tasks" : "Show snoozed tasks"}
+	              </Button>
+	              <Button
+	                variant="secondary"
+	                size="sm"
+	                className={cn(showRaw ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+	                onClick={toggleRawVisibility}
+	              >
                 {showRaw ? "Hide full messages" : "Show full messages"}
               </Button>
               <Button
@@ -2898,19 +3097,20 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             {newTopicError ? <p className="mt-2 text-xs text-[rgb(var(--claw-warning))]">{newTopicError}</p> : null}
           </div>
         )}
-        <div className={cn(twoColumn ? "grid gap-4 md:grid-cols-2" : "space-y-4")}>
-        {pagedTopics.map((topic, topicIndex) => {
+        {(() => {
+          const topicCards = pagedTopics.map((topic, topicIndex) => {
           const topicId = topic.id;
           const isUnassigned = topicId === "unassigned";
           const deleteKey = `topic:${topic.id}`;
           const taskList = tasksByTopic.get(topicId) ?? [];
           const openCount = taskList.filter((task) => task.status !== "done").length;
           const doingCount = taskList.filter((task) => task.status === "doing").length;
-          const blockedCount = taskList.filter((task) => task.status === "blocked").length;
-          const lastActivity = logsByTopic.get(topicId)?.[0]?.createdAt ?? topic.updatedAt;
-          const topicLogsAll = logsByTopicAll.get(topicId) ?? [];
-          const topicChatAllLogs = topicLogsAll.filter((entry) => !entry.taskId && matchesLogSearchChat(entry));
-          const topicChatBlurb = deriveChatHeaderBlurb(topicChatAllLogs);
+	          const blockedCount = taskList.filter((task) => task.status === "blocked").length;
+	          const lastActivity = logsByTopic.get(topicId)?.[0]?.createdAt ?? topic.updatedAt;
+	          const hasUnsnoozedBadge = Object.prototype.hasOwnProperty.call(unsnoozedTopicBadges, topicId);
+	          const topicLogsAll = logsByTopicAll.get(topicId) ?? [];
+	          const topicChatAllLogs = topicLogsAll.filter((entry) => !entry.taskId && matchesLogSearchChat(entry));
+	          const topicChatBlurb = deriveChatHeaderBlurb(topicChatAllLogs);
           const showTasks = true;
           const isExpanded = expandedTopicsSafe.has(topicId);
           const topicChatExpanded = expandedTopicChatsSafe.has(topicId);
@@ -2925,31 +3125,35 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             normalizeHexColor(topic.color) ??
             colorFromSeed(`topic:${topic.id}:${topic.name}`, TOPIC_FALLBACK_COLORS);
 
-          const swipeActions = isUnassigned ? null : (
-            <>
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  if (readOnly) return;
-                  setTopicSwipeOpenId(null);
-                  const isPaused = (topic.status ?? "active") === "paused";
-                  if (isPaused) {
-                    void patchTopic(topicId, { status: "active", snoozedUntil: null });
-                    return;
-                  }
-                  const until = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
-                  void patchTopic(topicId, { status: "paused", snoozedUntil: until });
-                }}
-                disabled={readOnly}
-                className={cn(
-                  "min-w-[72px] rounded-[var(--radius-sm)] border px-3 text-xs font-semibold transition",
-                  "border-[rgba(77,171,158,0.55)] text-[rgb(var(--claw-accent-2))] hover:bg-[rgba(77,171,158,0.14)]",
+	          const swipeActions = isUnassigned ? null : (
+	            <>
+	              <button
+	                type="button"
+	                onClick={(event) => {
+	                  event.stopPropagation();
+		                  if (readOnly) return;
+		                  setTopicSwipeOpenId(null);
+		                  const normalizedStatus = String(topic.status ?? "active").trim().toLowerCase();
+		                  const isSnoozed = normalizedStatus === "snoozed" || normalizedStatus === "paused";
+		                  if (isSnoozed) {
+		                    void patchTopic(topicId, { status: "active", snoozedUntil: null });
+		                    return;
+		                  }
+		                  setSnoozeTarget({ kind: "topic", topicId, label: topic.name });
+		                }}
+	                disabled={readOnly}
+	                className={cn(
+	                  "min-w-[72px] rounded-[var(--radius-sm)] border px-3 text-xs font-semibold transition",
+	                  "border-[rgba(77,171,158,0.55)] text-[rgb(var(--claw-accent-2))] hover:bg-[rgba(77,171,158,0.14)]",
                   readOnly ? "opacity-60" : ""
                 )}
               >
-                {(topic.status ?? "active") === "paused" ? "UNSNOOZE" : "SNOOZE"}
-              </button>
+	                {(() => {
+	                  const normalizedStatus = String(topic.status ?? "active").trim().toLowerCase();
+	                  const isSnoozed = normalizedStatus === "snoozed" || normalizedStatus === "paused";
+	                  return isSnoozed ? "UNSNOOZE" : "SNOOZE";
+	                })()}
+	              </button>
               <button
                 type="button"
                 onClick={(event) => {
@@ -3281,14 +3485,28 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     <p className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`topic:${topic.id}`]}</p>
                   )}
                   {isExpanded && <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topic.description}</p>}
-                  <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-[rgb(var(--claw-muted))]">
-                    <span>{taskList.length} tasks</span>
-                    <span>{openCount} open</span>
-                    {isExpanded && <span>{doingCount} doing</span>}
-                    {isExpanded && <span>{blockedCount} blocked</span>}
-                    <span>Last activity {formatRelativeTime(lastActivity)}</span>
-                  </div>
-                </div>
+	                  <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-[rgb(var(--claw-muted))]">
+	                    <span>{taskList.length} tasks</span>
+	                    <span>{openCount} open</span>
+	                    {isExpanded && <span>{doingCount} doing</span>}
+	                    {isExpanded && <span>{blockedCount} blocked</span>}
+	                    {hasUnsnoozedBadge ? (
+	                      <button
+	                        type="button"
+	                        onClick={(event) => {
+	                          event.stopPropagation();
+	                          dismissUnsnoozedTopicBadge(topicId);
+	                        }}
+	                        title="Dismiss UNSNOOZED"
+	                        className="inline-flex items-center gap-2 rounded-full border border-[rgba(77,171,158,0.55)] bg-[rgba(77,171,158,0.12)] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[rgb(var(--claw-accent-2))] transition hover:bg-[rgba(77,171,158,0.18)]"
+	                      >
+	                        UNSNOOZED
+	                      </button>
+	                    ) : (
+	                      <span>Last activity {formatRelativeTime(lastActivity)}</span>
+	                    )}
+	                  </div>
+	                </div>
 	                <button
 	                  type="button"
 	                  aria-label={isExpanded ? `Collapse topic ${topic.name}` : `Expand topic ${topic.name}`}
@@ -3363,28 +3581,28 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         taskDisplayColors.get(task.id) ??
                         normalizeHexColor(task.color) ??
                         colorFromSeed(`task:${task.id}:${task.title}`, TASK_FALLBACK_COLORS);
-                      const taskSnoozedUntil = (task.snoozedUntil ?? "").trim();
-                      const taskSnoozedStamp = taskSnoozedUntil ? Date.parse(taskSnoozedUntil) : Number.NaN;
-                      const taskIsSnoozed = Number.isFinite(taskSnoozedStamp) && taskSnoozedStamp > Date.now();
-                      const taskSwipeActions = (
-                        <>
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              if (readOnly) return;
-                              setTaskSwipeOpenId(null);
-                              if (taskIsSnoozed) {
-                                void updateTask(task.id, { snoozedUntil: null });
-                                return;
-                              }
-                              const until = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
-                              void updateTask(task.id, { snoozedUntil: until });
-                            }}
-                            disabled={readOnly}
-                            className={cn(
-                              "min-w-[72px] rounded-[var(--radius-sm)] border px-3 text-xs font-semibold transition",
-                              "border-[rgba(77,171,158,0.55)] text-[rgb(var(--claw-accent-2))] hover:bg-[rgba(77,171,158,0.14)]",
+	                      const taskSnoozedUntil = (task.snoozedUntil ?? "").trim();
+	                      const taskSnoozedStamp = taskSnoozedUntil ? Date.parse(taskSnoozedUntil) : Number.NaN;
+	                      const taskIsSnoozed = Number.isFinite(taskSnoozedStamp) && taskSnoozedStamp > Date.now();
+	                      const hasUnsnoozedTaskBadge = Object.prototype.hasOwnProperty.call(unsnoozedTaskBadges, task.id);
+	                      const taskSwipeActions = (
+	                        <>
+	                          <button
+	                            type="button"
+	                            onClick={(event) => {
+	                              event.stopPropagation();
+	                              if (readOnly) return;
+	                              setTaskSwipeOpenId(null);
+	                              if (taskIsSnoozed) {
+	                                void updateTask(task.id, { snoozedUntil: null });
+	                                return;
+	                              }
+	                              setSnoozeTarget({ kind: "task", topicId, taskId: task.id, label: task.title });
+	                            }}
+	                            disabled={readOnly}
+	                            className={cn(
+	                              "min-w-[72px] rounded-[var(--radius-sm)] border px-3 text-xs font-semibold transition",
+	                              "border-[rgba(77,171,158,0.55)] text-[rgb(var(--claw-accent-2))] hover:bg-[rgba(77,171,158,0.14)]",
                               readOnly ? "opacity-60" : ""
                             )}
                           >
@@ -3786,13 +4004,29 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                 }
                               />
                             </div>
-                            {renameErrors[`task:${task.id}`] && (
-                              <div className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`task:${task.id}`]}</div>
-                            )}
-                            <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
-                              {taskExpanded ? "Updated" : "Last touch"} {formatRelativeTime(task.updatedAt)}
-                            </div>
-                          </div>
+	                            {renameErrors[`task:${task.id}`] && (
+	                              <div className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`task:${task.id}`]}</div>
+	                            )}
+	                            <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
+	                              {hasUnsnoozedTaskBadge ? (
+	                                <button
+	                                  type="button"
+	                                  onClick={(event) => {
+	                                    event.stopPropagation();
+	                                    dismissUnsnoozedTaskBadge(task.id);
+	                                  }}
+	                                  title="Dismiss UNSNOOZED"
+	                                  className="inline-flex items-center gap-2 rounded-full border border-[rgba(77,171,158,0.55)] bg-[rgba(77,171,158,0.12)] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[rgb(var(--claw-accent-2))] transition hover:bg-[rgba(77,171,158,0.18)]"
+	                                >
+	                                  UNSNOOZED
+	                                </button>
+	                              ) : (
+	                                <>
+	                                  {taskExpanded ? "Updated" : "Last touch"} {formatRelativeTime(task.updatedAt)}
+	                                </>
+	                              )}
+	                            </div>
+	                          </div>
 	                          <div className="flex items-center gap-2">
 	                            <StatusPill tone={STATUS_TONE[task.status]} label={STATUS_LABELS[task.status] ?? task.status} />
 	                            {isSessionResponding(taskSessionKey(topicId, task.id)) ? (
@@ -3854,57 +4088,44 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                  <span className="text-xs text-[rgb(var(--claw-muted))]">{taskChatAllLogs.length} entries</span>
 			                                </div>
 			                              </div>
-		                              {taskChatAllLogs.length === 0 ? (
+		                              {taskChatAllLogs.length === 0 &&
+                              !pendingMessages.some((pending) => pending.sessionKey === taskSessionKey(topicId, task.id)) &&
+                              !isSessionResponding(taskSessionKey(topicId, task.id)) ? (
 		                                <p className="mb-3 text-sm text-[rgb(var(--claw-muted))]">No messages yet.</p>
 		                              ) : null}
-                                <div className="relative">
-                                  <div
-                                    className={cn(
-                                      "pointer-events-none absolute left-0 right-0 top-0 z-10 h-8 bg-[linear-gradient(to_bottom,rgb(var(--claw-panel)/0.55),rgb(var(--claw-panel)/0.16)_55%,rgb(var(--claw-panel)/0.0))] backdrop-blur-[1px] transition-opacity duration-200 ease-out",
-                                      chatTopFade[`task:${task.id}`] ? "opacity-100" : "opacity-0"
-                                    )}
-                                  />
-                                  <div
-                                    className={cn(
-                                      "pointer-events-none absolute left-0 right-0 bottom-0 z-10 h-10 bg-[linear-gradient(to_top,rgb(var(--claw-panel)/0.42),rgb(var(--claw-panel)/0.12)_55%,rgb(var(--claw-panel)/0.0))] backdrop-blur-[1px] transition-opacity duration-200 ease-out",
-                                      chatBottomFade[`task:${task.id}`] ? "opacity-100" : "opacity-0"
-                                    )}
-                                  />
-                                  <div
-                                    ref={(node) => {
-                                      const key = `task:${task.id}`;
-                                      setChatScroller(key, node);
-                                      if (node && typeof window !== "undefined") {
-                                        window.requestAnimationFrame(() => {
-                                          const showTop = node.scrollTop > 2;
-                                          const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
-                                          const showBottom = remaining > 2;
-                                          setChatTopFade((prev) =>
-                                            prev[key] === showTop ? prev : { ...prev, [key]: showTop }
-                                          );
-                                          setChatBottomFade((prev) =>
-                                            prev[key] === showBottom ? prev : { ...prev, [key]: showBottom }
-                                          );
-                                        });
-                                      }
-                                    }}
-                                    onScroll={(event) => {
-                                      const key = `task:${task.id}`;
-                                      const node = event.currentTarget;
-                                      const showTop = node.scrollTop > 2;
-                                      const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
-                                      const showBottom = remaining > 2;
-                                      chatAtBottomRef.current.set(key, remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX);
-                                      setChatTopFade((prev) =>
-                                        prev[key] === showTop ? prev : { ...prev, [key]: showTop }
-                                      );
-                                      setChatBottomFade((prev) =>
-                                        prev[key] === showBottom ? prev : { ...prev, [key]: showBottom }
-                                      );
-                                      if (!normalizedSearch && truncated && node.scrollTop <= 28) {
-                                        const now = Date.now();
-                                        const last = chatLoadOlderCooldownRef.current.get(key) ?? 0;
-                                        if (now - last > 350) {
+	                                <div className="relative">
+	                                  <div
+	                                    className={cn(
+	                                      "pointer-events-none absolute left-0 right-0 top-0 z-10 h-8 bg-[linear-gradient(to_bottom,rgb(var(--claw-panel)/0.78),rgb(var(--claw-panel)/0.38)_52%,rgb(var(--claw-panel)/0.0))] shadow-[0_14px_18px_rgba(0,0,0,0.22)] transition-opacity duration-200 ease-out",
+	                                      chatTopFade[`task:${task.id}`] ? "opacity-100" : "opacity-0"
+	                                    )}
+	                                  />
+	                                  <div
+	                                    ref={(node) => {
+	                                      const key = `task:${task.id}`;
+	                                      setChatScroller(key, node);
+	                                      if (node && typeof window !== "undefined") {
+	                                        window.requestAnimationFrame(() => {
+	                                          const showTop = node.scrollTop > 2;
+	                                          setChatTopFade((prev) =>
+	                                            prev[key] === showTop ? prev : { ...prev, [key]: showTop }
+	                                          );
+	                                        });
+	                                      }
+	                                    }}
+	                                    onScroll={(event) => {
+	                                      const key = `task:${task.id}`;
+	                                      const node = event.currentTarget;
+	                                      const showTop = node.scrollTop > 2;
+	                                      const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
+	                                      chatAtBottomRef.current.set(key, remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX);
+	                                      setChatTopFade((prev) =>
+	                                        prev[key] === showTop ? prev : { ...prev, [key]: showTop }
+	                                      );
+	                                      if (!normalizedSearch && truncated && node.scrollTop <= 28) {
+	                                        const now = Date.now();
+	                                        const last = chatLoadOlderCooldownRef.current.get(key) ?? 0;
+	                                        if (now - last > 350) {
                                           chatLoadOlderCooldownRef.current.set(key, now);
                                           loadOlderChat(key, TASK_TIMELINE_LIMIT, taskChatAllLogs.length, TASK_TIMELINE_LIMIT);
                                         }
@@ -3929,63 +4150,79 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       showRawAll={showRaw}
                                       messageDensity={messageDensity}
                                       allowNotes
-                                      variant="chat"
-                                      enableNavigation={false}
-                                    />
-                                  </div>
-                                </div>
-				                              {/* Load more moved into the chat header (top-right). */}
-				                              {!isUnassigned && (
-				                                <>
-				                                  {pendingMessages
-				                                    .filter((pending) => pending.sessionKey === taskSessionKey(topicId, task.id))
-				                                    .map((pending) => (
-				                                      <div key={pending.localId} className="py-1">
-				                                        <div className="flex justify-end">
-				                                          <div className="w-full max-w-[78%]">
-				                                            <div
-				                                              className={cn(
-				                                                "rounded-[20px] border px-4 py-3 text-sm leading-relaxed",
-				                                                pending.status === "failed" ? "opacity-90" : "",
-				                                                "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
-				                                              )}
-				                                            >
-                                              {pending.attachments && pending.attachments.length > 0 ? (
-                                                <AttachmentStrip attachments={pending.attachments} className="mt-0 mb-3" />
-                                              ) : null}
-                                              <Markdown>{pending.message}</Markdown>
-				                                            </div>
-				                                            <div className="mt-1 text-right text-[10px] text-[rgba(148,163,184,0.9)]">
-				                                              {pending.status === "sending"
-				                                                ? "Sending…"
-				                                                : pending.status === "sent"
-				                                                  ? "Sent"
-				                                                  : pending.error
-				                                                    ? pending.error
-				                                                    : "Failed to send."}
-				                                            </div>
-				                                          </div>
-				                                        </div>
-				                                      </div>
-				                                    ))}
-				                                  {isSessionResponding(taskSessionKey(topicId, task.id)) ? (
-				                                    <div className="py-1">
-				                                      <div className="flex justify-start">
-				                                        <div className="w-full max-w-[78%]">
-				                                          <div className="rounded-[20px] border border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] px-4 py-3 text-sm text-[rgb(var(--claw-text))]">
-				                                            <div className="flex items-center gap-2">
-				                                              <span className="text-xs text-[rgba(148,163,184,0.9)]">OpenClaw</span>
-				                                              <TypingDots />
-				                                            </div>
-				                                          </div>
-				                                        </div>
-				                                      </div>
-				                                    </div>
-				                                  ) : null}
-				                                <BoardChatComposer
-                                      ref={(node) => {
-                                        const key = taskSessionKey(topicId, task.id);
-                                        if (node) composerHandlesRef.current.set(key, node);
+	                                      variant="chat"
+	                                      enableNavigation={false}
+	                                    />
+                                      {!isUnassigned
+                                        ? pendingMessages
+                                            .filter((pending) => pending.sessionKey === taskSessionKey(topicId, task.id))
+                                            .map((pending) => (
+                                              <div key={pending.localId} className="py-1">
+                                                <div className="flex justify-end">
+                                                  <div className="w-full max-w-[78%]">
+                                                    <div
+                                                      className={cn(
+                                                        "rounded-[20px] border px-4 py-3 text-sm leading-relaxed",
+                                                        pending.status === "failed" ? "opacity-90" : "",
+                                                        "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
+                                                      )}
+                                                    >
+                                                      {pending.attachments && pending.attachments.length > 0 ? (
+                                                        <AttachmentStrip attachments={pending.attachments} className="mt-0 mb-3" />
+                                                      ) : null}
+                                                      <Markdown>{pending.message}</Markdown>
+                                                    </div>
+                                                    <div className="mt-1 flex items-center justify-end gap-2 text-[10px] text-[rgba(148,163,184,0.9)]">
+                                                      <button
+                                                        type="button"
+                                                        className="rounded-full border border-[rgba(255,255,255,0.10)] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)] transition hover:border-[rgba(255,90,45,0.35)] hover:text-[rgb(var(--claw-text))]"
+                                                        onClick={(event) => {
+                                                          event.preventDefault();
+                                                          event.stopPropagation();
+                                                          void navigator.clipboard?.writeText?.(pending.message ?? "");
+                                                        }}
+                                                        title="Copy message"
+                                                      >
+                                                        Copy
+                                                      </button>
+                                                      <span>
+                                                        {pending.status === "sending"
+                                                          ? "Sending…"
+                                                          : pending.status === "sent"
+                                                            ? "Sent"
+                                                            : pending.error
+                                                              ? pending.error
+                                                              : "Failed to send."}
+                                                      </span>
+                                                    </div>
+                                                  </div>
+                                                </div>
+                                              </div>
+                                            ))
+                                        : null}
+                                      {!isUnassigned && isSessionResponding(taskSessionKey(topicId, task.id)) ? (
+                                        <div className="py-1">
+                                          <div className="flex justify-start">
+                                            <div className="w-full max-w-[78%]">
+                                              <div className="rounded-[20px] border border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] px-4 py-3 text-sm text-[rgb(var(--claw-text))]">
+                                                <div className="flex items-center gap-2">
+                                                  <span className="text-xs text-[rgba(148,163,184,0.9)]">OpenClaw</span>
+                                                  <TypingDots />
+                                                </div>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      ) : null}
+	                                  </div>
+	                                </div>
+					                              {/* Load more moved into the chat header (top-right). */}
+					                              {!isUnassigned && (
+					                                <>
+					                                <BoardChatComposer
+	                                      ref={(node) => {
+	                                        const key = taskSessionKey(topicId, task.id);
+	                                        if (node) composerHandlesRef.current.set(key, node);
                                         else composerHandlesRef.current.delete(key);
                                       }}
 			                                  sessionKey={taskSessionKey(topicId, task.id)}
@@ -4139,58 +4376,45 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 				                          ) : null}
 				                          <span className="text-xs text-[rgb(var(--claw-muted))]">{topicChatAllLogs.length} entries</span>
 				                        </div>
-		                          {topicChatAllLogs.length === 0 ? (
-		                            <p className="mb-3 text-sm text-[rgb(var(--claw-muted))]">No messages yet.</p>
-		                          ) : null}
-		                          <div className="relative">
-		                            <div
-		                              className={cn(
-		                                // Subtle iMessage-style fade when there is scroll content above/below.
-		                                "pointer-events-none absolute left-0 right-0 top-0 z-10 h-8 bg-[linear-gradient(to_bottom,rgb(var(--claw-panel)/0.55),rgb(var(--claw-panel)/0.16)_55%,rgb(var(--claw-panel)/0.0))] backdrop-blur-[1px] transition-opacity duration-200 ease-out",
-		                                chatTopFade[`topic:${topicId}`] ? "opacity-100" : "opacity-0"
-		                              )}
-		                            />
-                                <div
-                                  className={cn(
-                                    "pointer-events-none absolute left-0 right-0 bottom-0 z-10 h-10 bg-[linear-gradient(to_top,rgb(var(--claw-panel)/0.42),rgb(var(--claw-panel)/0.12)_55%,rgb(var(--claw-panel)/0.0))] backdrop-blur-[1px] transition-opacity duration-200 ease-out",
-                                    chatBottomFade[`topic:${topicId}`] ? "opacity-100" : "opacity-0"
-                                  )}
-                                />
-		                            <div
-		                              ref={(node) => {
-		                                const key = `topic:${topicId}`;
-		                                setChatScroller(key, node);
-		                                if (node && typeof window !== "undefined") {
-		                                  window.requestAnimationFrame(() => {
-		                                    const showTop = node.scrollTop > 2;
-		                                    const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
-		                                    const showBottom = remaining > 2;
-		                                    setChatTopFade((prev) =>
-		                                      prev[key] === showTop ? prev : { ...prev, [key]: showTop }
-		                                    );
-		                                    setChatBottomFade((prev) =>
-		                                      prev[key] === showBottom ? prev : { ...prev, [key]: showBottom }
-		                                    );
-		                                  });
-		                                }
-		                              }}
-		                              onScroll={(event) => {
-		                                const key = `topic:${topicId}`;
-		                                const node = event.currentTarget;
-		                                const showTop = node.scrollTop > 2;
-		                                const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
-		                                const showBottom = remaining > 2;
-		                                chatAtBottomRef.current.set(key, remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX);
-		                                setChatTopFade((prev) =>
-		                                  prev[key] === showTop ? prev : { ...prev, [key]: showTop }
-		                                );
-		                                setChatBottomFade((prev) =>
-		                                  prev[key] === showBottom ? prev : { ...prev, [key]: showBottom }
-		                                );
-		                                if (!normalizedSearch && topicChatTruncated && node.scrollTop <= 28) {
-		                                  const now = Date.now();
-		                                  const last = chatLoadOlderCooldownRef.current.get(key) ?? 0;
-		                                  if (now - last > 350) {
+			                          {topicChatAllLogs.length === 0 &&
+                              !pendingMessages.some((pending) => pending.sessionKey === topicSessionKey(topicId)) &&
+                              !isSessionResponding(topicSessionKey(topicId)) ? (
+			                            <p className="mb-3 text-sm text-[rgb(var(--claw-muted))]">No messages yet.</p>
+			                          ) : null}
+			                          <div className="relative">
+			                            <div
+			                              className={cn(
+			                                // Subtle iMessage-style fade when there is scroll content above/below.
+			                                "pointer-events-none absolute left-0 right-0 top-0 z-10 h-8 bg-[linear-gradient(to_bottom,rgb(var(--claw-panel)/0.78),rgb(var(--claw-panel)/0.38)_52%,rgb(var(--claw-panel)/0.0))] shadow-[0_14px_18px_rgba(0,0,0,0.22)] transition-opacity duration-200 ease-out",
+			                                chatTopFade[`topic:${topicId}`] ? "opacity-100" : "opacity-0"
+			                              )}
+			                            />
+			                            <div
+			                              ref={(node) => {
+			                                const key = `topic:${topicId}`;
+			                                setChatScroller(key, node);
+			                                if (node && typeof window !== "undefined") {
+			                                  window.requestAnimationFrame(() => {
+			                                    const showTop = node.scrollTop > 2;
+			                                    setChatTopFade((prev) =>
+			                                      prev[key] === showTop ? prev : { ...prev, [key]: showTop }
+			                                    );
+			                                  });
+			                                }
+			                              }}
+			                              onScroll={(event) => {
+			                                const key = `topic:${topicId}`;
+			                                const node = event.currentTarget;
+			                                const showTop = node.scrollTop > 2;
+			                                const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
+			                                chatAtBottomRef.current.set(key, remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX);
+			                                setChatTopFade((prev) =>
+			                                  prev[key] === showTop ? prev : { ...prev, [key]: showTop }
+			                                );
+			                                if (!normalizedSearch && topicChatTruncated && node.scrollTop <= 28) {
+			                                  const now = Date.now();
+			                                  const last = chatLoadOlderCooldownRef.current.get(key) ?? 0;
+			                                  if (now - last > 350) {
 		                                    chatLoadOlderCooldownRef.current.set(key, now);
 		                                    loadOlderChat(key, TOPIC_TIMELINE_LIMIT, topicChatAllLogs.length, TOPIC_TIMELINE_LIMIT);
 		                                  }
@@ -4212,62 +4436,76 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                                showRawToggle={false}
 		                                showDensityToggle={false}
 		                                showRawAll={showRaw}
-		                                messageDensity={messageDensity}
-		                                allowNotes
-		                                variant="chat"
-		                                enableNavigation={false}
-		                              />
-		                            </div>
-		                          </div>
-		                          {/* Load more moved into the chat header (top-right). */}
-		                          {pendingMessages
-		                            .filter((pending) => pending.sessionKey === topicSessionKey(topicId))
-		                            .map((pending) => (
-		                              <div key={pending.localId} className="py-1">
-		                                <div className="flex justify-end">
-		                                  <div className="w-full max-w-[78%]">
-		                                    <div
-		                                      className={cn(
-		                                        "rounded-[20px] border px-4 py-3 text-sm leading-relaxed",
-		                                        pending.status === "failed" ? "opacity-90" : "",
-		                                        "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
-		                                      )}
-		                                    >
-                                          {pending.attachments && pending.attachments.length > 0 ? (
-                                            <AttachmentStrip attachments={pending.attachments} className="mt-0 mb-3" />
-                                          ) : null}
-                                          <Markdown>{pending.message}</Markdown>
-		                                    </div>
-		                                    <div className="mt-1 text-right text-[10px] text-[rgba(148,163,184,0.9)]">
-		                                      {pending.status === "sending"
-		                                        ? "Sending…"
-		                                        : pending.status === "sent"
-		                                          ? "Sent"
-		                                          : pending.error
-		                                            ? pending.error
-		                                            : "Failed to send."}
-		                                    </div>
-		                                  </div>
-		                                </div>
-		                              </div>
-		                            ))}
-		                          {isSessionResponding(topicSessionKey(topicId)) ? (
-		                            <div className="py-1">
-		                              <div className="flex justify-start">
-		                                <div className="w-full max-w-[78%]">
-		                                  <div className="rounded-[20px] border border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] px-4 py-3 text-sm text-[rgb(var(--claw-text))]">
-		                                    <div className="flex items-center gap-2">
-		                                      <span className="text-xs text-[rgba(148,163,184,0.9)]">OpenClaw</span>
-		                                      <TypingDots />
-		                                    </div>
-		                                  </div>
-		                                </div>
-		                              </div>
-		                            </div>
-		                          ) : null}
-		                          <BoardChatComposer
-                                ref={(node) => {
-                                  const key = topicSessionKey(topicId);
+			                                messageDensity={messageDensity}
+			                                allowNotes
+			                                variant="chat"
+			                                enableNavigation={false}
+			                              />
+                                      {pendingMessages
+                                        .filter((pending) => pending.sessionKey === topicSessionKey(topicId))
+                                        .map((pending) => (
+                                          <div key={pending.localId} className="py-1">
+                                            <div className="flex justify-end">
+                                              <div className="w-full max-w-[78%]">
+                                                <div
+                                                  className={cn(
+                                                    "rounded-[20px] border px-4 py-3 text-sm leading-relaxed",
+                                                    pending.status === "failed" ? "opacity-90" : "",
+                                                    "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
+                                                  )}
+                                                >
+                                                  {pending.attachments && pending.attachments.length > 0 ? (
+                                                    <AttachmentStrip attachments={pending.attachments} className="mt-0 mb-3" />
+                                                  ) : null}
+                                                  <Markdown>{pending.message}</Markdown>
+                                                </div>
+                                                <div className="mt-1 flex items-center justify-end gap-2 text-[10px] text-[rgba(148,163,184,0.9)]">
+                                                  <button
+                                                    type="button"
+                                                    className="rounded-full border border-[rgba(255,255,255,0.10)] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)] transition hover:border-[rgba(255,90,45,0.35)] hover:text-[rgb(var(--claw-text))]"
+                                                    onClick={(event) => {
+                                                      event.preventDefault();
+                                                      event.stopPropagation();
+                                                      void navigator.clipboard?.writeText?.(pending.message ?? "");
+                                                    }}
+                                                    title="Copy message"
+                                                  >
+                                                    Copy
+                                                  </button>
+                                                  <span>
+                                                    {pending.status === "sending"
+                                                      ? "Sending…"
+                                                      : pending.status === "sent"
+                                                        ? "Sent"
+                                                        : pending.error
+                                                          ? pending.error
+                                                          : "Failed to send."}
+                                                  </span>
+                                                </div>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        ))}
+                                      {isSessionResponding(topicSessionKey(topicId)) ? (
+                                        <div className="py-1">
+                                          <div className="flex justify-start">
+                                            <div className="w-full max-w-[78%]">
+                                              <div className="rounded-[20px] border border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] px-4 py-3 text-sm text-[rgb(var(--claw-text))]">
+                                                <div className="flex items-center gap-2">
+                                                  <span className="text-xs text-[rgba(148,163,184,0.9)]">OpenClaw</span>
+                                                  <TypingDots />
+                                                </div>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      ) : null}
+			                            </div>
+			                          </div>
+			                          {/* Load more moved into the chat header (top-right). */}
+			                          <BoardChatComposer
+			                                ref={(node) => {
+			                                  const key = topicSessionKey(topicId);
                                   if (node) composerHandlesRef.current.set(key, node);
                                   else composerHandlesRef.current.delete(key);
                                 }}
@@ -4363,8 +4601,25 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               {card}
             </SwipeRevealRow>
           );
-	        })}
-        </div>
+	        });
+
+          if (!showTwoColumns) {
+            return <div className="space-y-4">{topicCards}</div>;
+          }
+
+          const leftColumn: ReactNode[] = [];
+          const rightColumn: ReactNode[] = [];
+          topicCards.forEach((node, idx) => {
+            (idx % 2 === 0 ? leftColumn : rightColumn).push(node);
+          });
+
+          return (
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-4">{leftColumn}</div>
+              <div className="space-y-4">{rightColumn}</div>
+            </div>
+          );
+        })()}
       </div>
 
       {pageCount > 1 && (
@@ -4400,6 +4655,23 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           </div>
         </div>
       )}
+
+      <SnoozeModal
+        open={Boolean(snoozeTarget)}
+        title={snoozeTarget?.kind === "task" ? "Snooze task" : "Snooze topic"}
+        subtitle="Hide it until the chosen time. Any new activity will bring it back early."
+        entityLabel={snoozeTarget?.label ?? null}
+        onClose={() => setSnoozeTarget(null)}
+        onSnooze={async (untilIso) => {
+          const target = snoozeTarget;
+          if (!target) return;
+          if (target.kind === "topic") {
+            await patchTopic(target.topicId, { status: "snoozed", snoozedUntil: untilIso });
+            return;
+          }
+          await updateTask(target.taskId, { snoozedUntil: untilIso });
+        }}
+      />
     </div>
   );
 }

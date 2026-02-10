@@ -147,7 +147,7 @@ Vector storage notes:
 ### Main Agent Context Extension
 
 - The same logger plugin also augments response-time context using `before_agent_start`.
-- It retrieves continuity context via `/api/search` + recent session logs + related topic/task logs + curated notes, then prepends a compact `CLAWBOARD_CONTEXT` block.
+- It prefers retrieving continuity context via `GET /api/context` (layered working set + routing memory + timeline + optional recall), and falls back to legacy multi-call retrieval when needed.
 - This retrieval is additive to OpenClaw native memory (turn history, markdown/context, memory search), not a replacement.
 
 ## Local Dev (Without Docker)
@@ -195,6 +195,19 @@ Advanced (optional) knobs (see `.env.example` for comments/defaults):
 Note: `CLAWBOARD_INTEGRATION_LEVEL` is used by `scripts/bootstrap_openclaw.sh` (installer), not as a standalone API server env default.
 Security: remote/tailnet/domain API reads require token. Setup stores token in browser local storage (masked input) and sends it on all API reads/writes.
 Docker security: compose does not publish DB/vector/cache ports; use API endpoints as the supported read/write/delete path.
+
+## Guided backup: OpenClaw continuity → private GitHub repo
+Clawboard includes a guided setup to back up an OpenClaw agent’s *curated continuity* (workspace root `*.md` + `memory/*.md`, and optionally `~/.openclaw/openclaw.json*` + `~/.openclaw/skills/`) into a dedicated **private** GitHub repo.
+
+Run:
+```bash
+bash ~/.openclaw/skills/clawboard/scripts/setup-openclaw-memory-backup.sh
+```
+
+Notes:
+- Prefers a GitHub **Deploy Key (SSH)** and prints the public key.
+- When adding the deploy key in GitHub, **check “Allow write access”** or pushes will fail.
+- Can install an OpenClaw cron job (every 15m) to keep the repo updated.
 
 ## OpenClaw Integration
 
@@ -271,7 +284,9 @@ Plugin config example:
 }
 ```
 
-The logger plugin writes events and augments `before_agent_start` with Clawboard retrieval context (`/api/search`) including weighted curated notes.
+The logger plugin writes events and augments `before_agent_start` with Clawboard retrieval context (`/api/context`, fallback `/api/search`) including weighted curated notes.
+
+If the OpenClaw plugin SDK supports tool registration, it also registers explicit agent tools (`clawboard.search`, `clawboard.context`, `clawboard.get_*`, `clawboard.create_note`, `clawboard.update_task`). See `CONTEXT.md` and `CONTEXT_SPEC.md`.
 
 ### Agentic install prompt
 

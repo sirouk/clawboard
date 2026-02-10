@@ -55,6 +55,8 @@ services:
     volumes:
       - ./data:/data
       - ${HOME}/.openclaw/memory:/data/openclaw-memory:ro
+      # Persist HF/fastembed caches across container recreations (stabilizes classifier startup + E2E).
+      - clawboard_classifier_cache:/root/.cache
     restart: unless-stopped
     networks:
       - edge
@@ -70,10 +72,12 @@ services:
         NEXT_PUBLIC_CLAWBOARD_API_BASE: ${CLAWBOARD_PUBLIC_API_BASE:-http://localhost:8010}
         # Optional default UI token, also baked into browser bundle.
         NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN: ${NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN:-}
+        NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE: ${NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE:-50}
     environment:
       # IMPORTANT: this is used client-side; must be reachable from the browser.
       NEXT_PUBLIC_CLAWBOARD_API_BASE: ${CLAWBOARD_PUBLIC_API_BASE:-http://localhost:8010}
       NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN: ${NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN:-}
+      NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE: ${NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE:-50}
     depends_on:
       - api
     ports:
@@ -90,6 +94,7 @@ services:
       # IMPORTANT: this is used client-side; must be reachable from the browser.
       NEXT_PUBLIC_CLAWBOARD_API_BASE: ${CLAWBOARD_PUBLIC_API_BASE:-http://localhost:8010}
       NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN: ${NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN:-}
+      NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE: ${NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE:-50}
       # Docker Desktop file watching can be flaky; polling is slower but reliable.
       WATCHPACK_POLLING: ${CLAWBOARD_WEB_WATCHPACK_POLLING:-true}
       WATCHPACK_POLLING_INTERVAL: ${CLAWBOARD_WEB_WATCHPACK_POLLING_INTERVAL:-1000}
@@ -160,3 +165,4 @@ volumes:
   clawboard_api_db:
   clawboard_web_node_modules:
   clawboard_web_next_cache:
+  clawboard_classifier_cache:

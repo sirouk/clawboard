@@ -149,6 +149,10 @@ def init_db() -> None:
                 conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN snoozedUntil TEXT;")
             if "createdBy" not in topic_existing:
                 conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN createdBy TEXT NOT NULL DEFAULT 'user';")
+            if "digest" not in topic_existing:
+                conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN digest TEXT;")
+            if "digestUpdatedAt" not in topic_existing:
+                conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN digestUpdatedAt TEXT;")
             conn.exec_driver_sql("UPDATE topic SET tags = '[]' WHERE tags IS NULL;")
 
             task_cols = conn.exec_driver_sql("PRAGMA table_info(task);").fetchall()
@@ -175,6 +179,10 @@ def init_db() -> None:
                 conn.exec_driver_sql("ALTER TABLE task ADD COLUMN tags JSON;")
             if "snoozedUntil" not in task_existing:
                 conn.exec_driver_sql("ALTER TABLE task ADD COLUMN snoozedUntil TEXT;")
+            if "digest" not in task_existing:
+                conn.exec_driver_sql("ALTER TABLE task ADD COLUMN digest TEXT;")
+            if "digestUpdatedAt" not in task_existing:
+                conn.exec_driver_sql("ALTER TABLE task ADD COLUMN digestUpdatedAt TEXT;")
             conn.exec_driver_sql("UPDATE task SET tags = '[]' WHERE tags IS NULL;")
 
             conn.commit()
@@ -187,6 +195,12 @@ def init_db() -> None:
             topics = session.exec(select(Topic)).all()
             topic_updates = 0
             for topic in topics:
+                # Legacy normalization: older versions used "paused" for snoozed topics.
+                status = str(getattr(topic, "status", "") or "").strip().lower()
+                if status == "paused":
+                    topic.status = "snoozed"
+                    topic_updates += 1
+
                 normalized = _normalize_hex_color(getattr(topic, "color", None))
                 if normalized:
                     if topic.color != normalized:

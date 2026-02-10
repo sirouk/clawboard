@@ -21,7 +21,7 @@ from fastapi import FastAPI, Depends, Query, Body, HTTPException, Header, Backgr
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from typing import List, Any
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, text
+from sqlalchemy import func, text, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import defer
@@ -38,15 +38,18 @@ from .schemas import (
     TopicUpsert,
     TopicOut,
     TopicReorderRequest,
+    TopicPatch,
     TaskUpsert,
     TaskOut,
     TaskReorderRequest,
+    TaskPatch,
     LogAppend,
     LogOut,
     LogOutLite,
     LogPatch,
     ChangesResponse,
     ClawgraphResponse,
+    ContextResponse,
     OpenClawChatRequest,
     OpenClawChatQueuedResponse,
     ReindexRequest,
@@ -55,6 +58,8 @@ from .schemas import (
     DraftOut,
     SessionRoutingMemoryOut,
     SessionRoutingAppend,
+    ClassifierReplayRequest,
+    ClassifierReplayResponse,
 )
 from .events import event_hub
 from .clawgraph import build_clawgraph
@@ -128,6 +133,26 @@ def normalize_iso(value: str | None) -> str | None:
         return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     except Exception:
         return None
+
+
+def normalize_topic_status(value: str | None) -> str | None:
+    """Normalize topic status values.
+
+    Canonical values are: active | snoozed | archived.
+    Legacy alias: paused -> snoozed.
+    """
+
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered == "paused":
+        return "snoozed"
+    if lowered in {"active", "snoozed", "archived"}:
+        return lowered
+    return raw
 
 
 def create_id(prefix: str) -> str:
@@ -601,7 +626,8 @@ def _snooze_worker() -> None:
 
                 for topic in due_topics:
                     topic.snoozedUntil = None
-                    if (topic.status or "active") == "paused":
+                    status = str(topic.status or "active").strip().lower()
+                    if status in {"snoozed", "paused"}:
                         topic.status = "active"
                     topic.updatedAt = now
                     session.add(topic)
@@ -741,15 +767,17 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             task_id = None
             task_row = None
 
-    if topic_id:
-        exists = session.get(Topic, topic_id)
-        if not exists:
-            topic_id = None
-
     # Enforce valid topic/task combinations at ingest time: a task implies its topic.
     # This prevents "impossible" UI states where a log references a task from a different topic.
     if task_row:
         topic_id = task_row.topicId
+
+    topic_row = None
+    if topic_id:
+        topic_row = session.get(Topic, topic_id)
+        if not topic_row:
+            topic_id = None
+            topic_row = None
 
     attachments = None
     if payload.attachments:
@@ -831,6 +859,73 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             entry = persisted
         else:
             raise
+
+    # Gmail-style behavior: new conversation activity should revive snoozed items.
+    # This ensures a topic/task doesn't stay hidden if new messages arrive while snoozed.
+    revived_topic: Topic | None = None
+    revived_task: Task | None = None
+    if str(payload.type or "").strip().lower() == "conversation":
+        now = entry.updatedAt
+        try:
+            if task_id:
+                row = task_row or session.get(Task, task_id)
+                if row and row.snoozedUntil:
+                    row.snoozedUntil = None
+                    row.updatedAt = now
+                    session.add(row)
+                    revived_task = row
+
+            if topic_id:
+                row = topic_row or session.get(Topic, topic_id)
+                if row and (
+                    row.snoozedUntil
+                    or str(row.status or "active").strip().lower() in {"snoozed", "paused", "archived"}
+                ):
+                    row.snoozedUntil = None
+                    row.status = "active"
+                    row.updatedAt = now
+                    session.add(row)
+                    revived_topic = row
+
+            if revived_topic or revived_task:
+                try:
+                    session.commit()
+                except OperationalError as exc:
+                    if not DATABASE_URL.startswith("sqlite") or "database is locked" not in str(exc).lower():
+                        session.rollback()
+                        revived_topic = None
+                        revived_task = None
+                    else:
+                        session.rollback()
+                        last_exc: OperationalError | None = exc
+                        for attempt in range(6):
+                            try:
+                                time.sleep(min(0.75, 0.05 * (2**attempt)))
+                                session.commit()
+                                last_exc = None
+                                break
+                            except OperationalError as retry_exc:
+                                if "database is locked" not in str(retry_exc).lower():
+                                    raise
+                                session.rollback()
+                                last_exc = retry_exc
+                        if last_exc is not None:
+                            revived_topic = None
+                            revived_task = None
+        except Exception:
+            # Best-effort only: never break log ingestion for snooze revival.
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            revived_topic = None
+            revived_task = None
+
+    if revived_topic:
+        event_hub.publish({"type": "topic.upserted", "data": revived_topic.model_dump(), "eventTs": revived_topic.updatedAt})
+    if revived_task:
+        event_hub.publish({"type": "task.upserted", "data": revived_task.model_dump(), "eventTs": revived_task.updatedAt})
+
     # raw payloads can be large; keep log events lightweight for SSE + in-memory buffer safety.
     event_hub.publish({"type": "log.appended", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
     _enqueue_log_reindex(entry)
@@ -1570,6 +1665,139 @@ def list_topics():
         return topics
 
 
+@app.get("/api/topics/{topic_id}", response_model=TopicOut, tags=["topics"])
+def get_topic(topic_id: str):
+    """Fetch one topic by id."""
+    with get_session() as session:
+        topic = session.get(Topic, topic_id)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        return topic
+
+
+@app.patch("/api/topics/{topic_id}", dependencies=[Depends(require_token)], response_model=TopicOut, tags=["topics"])
+def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
+    """Patch an existing topic (partial update)."""
+    with get_session() as session:
+        topic = session.get(Topic, topic_id)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+
+        fields = payload.model_fields_set
+        stamp = now_iso()
+        touched = False
+        reindex_needed = False
+
+        if "name" in fields:
+            name = (payload.name or "").strip()
+            if not name:
+                raise HTTPException(status_code=400, detail="name cannot be empty")
+            if name != topic.name:
+                reindex_needed = True
+            topic.name = name
+            touched = True
+
+        if "color" in fields:
+            if payload.color is None:
+                topic.color = None
+                touched = True
+            else:
+                normalized = _normalize_hex_color(payload.color)
+                if not normalized:
+                    raise HTTPException(status_code=400, detail="Invalid color (expected #RRGGBB)")
+                topic.color = normalized
+                touched = True
+
+        if "description" in fields:
+            desc = payload.description
+            desc_clean = desc.strip() if isinstance(desc, str) else None
+            if desc_clean == "":
+                desc_clean = None
+            if desc_clean != (topic.description or None):
+                reindex_needed = True
+            topic.description = desc_clean
+            touched = True
+
+        if "priority" in fields:
+            topic.priority = payload.priority
+            touched = True
+
+        if "status" in fields:
+            topic.status = normalize_topic_status(payload.status)
+            touched = True
+
+        if "snoozedUntil" in fields:
+            topic.snoozedUntil = payload.snoozedUntil
+            touched = True
+
+        # Normalize snooze invariants.
+        if "status" in fields or "snoozedUntil" in fields:
+            normalized_status = normalize_topic_status(topic.status) or "active"
+
+            # If the caller cleared snoozedUntil without explicitly setting status,
+            # treat that as an unsnooze request.
+            if "snoozedUntil" in fields and payload.snoozedUntil is None and "status" not in fields:
+                if normalized_status in {"snoozed", "paused"}:
+                    topic.status = "active"
+                    normalized_status = "active"
+                    touched = True
+
+            # Active/archived topics should not carry a snooze timer.
+            if normalized_status in {"active", "archived"}:
+                if topic.snoozedUntil is not None:
+                    topic.snoozedUntil = None
+                    touched = True
+            # A snooze timer implies snoozed status.
+            elif topic.snoozedUntil is not None and normalized_status != "snoozed":
+                topic.status = "snoozed"
+                touched = True
+
+        if "tags" in fields:
+            topic.tags = payload.tags or []
+            reindex_needed = True
+            touched = True
+
+        if "parentId" in fields:
+            topic.parentId = payload.parentId
+            touched = True
+
+        if "pinned" in fields:
+            topic.pinned = payload.pinned
+            touched = True
+
+        # Digest fields are system-managed and should not reorder topics by activity.
+        if "digest" in fields:
+            topic.digest = payload.digest
+        if "digestUpdatedAt" in fields:
+            topic.digestUpdatedAt = payload.digestUpdatedAt
+
+        if touched:
+            topic.updatedAt = stamp
+
+        session.add(topic)
+        session.commit()
+        session.refresh(topic)
+        event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
+
+        if reindex_needed:
+            topic_text = " ".join(
+                [
+                    str(topic.name or "").strip(),
+                    str(topic.description or "").strip(),
+                    " ".join(
+                        [
+                            str(t).strip()
+                            for t in (topic.tags or [])
+                            if str(t).strip() and not str(t).strip().lower().startswith("system:")
+                        ]
+                    ),
+                ]
+            ).strip()
+            enqueue_reindex_request({"op": "upsert", "kind": "topic", "id": topic.id, "text": topic_text})
+
+        return topic
+
+
 @app.post("/api/topics/reorder", dependencies=[Depends(require_token)], tags=["topics"])
 def reorder_topics(payload: TopicReorderRequest):
     """Persist a manual topic order by assigning sortIndex sequentially."""
@@ -1680,36 +1908,55 @@ def upsert_topic(
     with get_session() as session:
         topic = session.get(Topic, payload.id) if payload.id else None
         timestamp = now_iso()
+        fields = payload.model_fields_set
         if topic:
             topic.name = payload.name or topic.name
-            if payload.color is not None:
-                normalized_color = _normalize_hex_color(payload.color)
-                if normalized_color:
-                    topic.color = normalized_color
-            if payload.description is not None:
+            if "color" in fields:
+                if payload.color is None:
+                    topic.color = None
+                else:
+                    normalized_color = _normalize_hex_color(payload.color)
+                    if normalized_color:
+                        topic.color = normalized_color
+            if "description" in fields:
                 topic.description = payload.description
-            if payload.priority is not None:
+            if "priority" in fields:
                 topic.priority = payload.priority
-            if payload.status is not None:
-                topic.status = payload.status
-            if payload.snoozedUntil is not None:
+            if "status" in fields:
+                topic.status = normalize_topic_status(payload.status)
+            if "snoozedUntil" in fields:
                 topic.snoozedUntil = payload.snoozedUntil
-            if payload.tags is not None:
-                topic.tags = payload.tags
-            if payload.parentId is not None:
+            if "tags" in fields:
+                topic.tags = payload.tags or []
+            if "parentId" in fields:
                 topic.parentId = payload.parentId
-            if payload.pinned is not None:
+            if "pinned" in fields:
                 topic.pinned = payload.pinned
+
+            normalized_status = normalize_topic_status(topic.status) or "active"
+            if "snoozedUntil" in fields and payload.snoozedUntil is None and "status" not in fields:
+                if normalized_status in {"snoozed", "paused"}:
+                    topic.status = "active"
+                    normalized_status = "active"
+            if normalized_status in {"active", "archived"}:
+                topic.status = normalized_status
+                topic.snoozedUntil = None
+            elif topic.snoozedUntil is not None and normalized_status != "snoozed":
+                topic.status = "snoozed"
+
             topic.updatedAt = timestamp
         else:
             actor = str(x_clawboard_actor or "").strip().lower()
             created_by = "classifier" if actor == "classifier" else "user"
             duplicate = _find_similar_topic(session, payload.name)
             if duplicate:
-                if payload.color is not None:
-                    normalized_color = _normalize_hex_color(payload.color)
-                    if normalized_color:
-                        duplicate.color = normalized_color
+                if "color" in fields:
+                    if payload.color is None:
+                        duplicate.color = None
+                    else:
+                        normalized_color = _normalize_hex_color(payload.color)
+                        if normalized_color:
+                            duplicate.color = normalized_color
                 elif not _normalize_hex_color(getattr(duplicate, "color", None)):
                     used_colors = {
                         _normalize_hex_color(getattr(item, "color", None))
@@ -1717,19 +1964,31 @@ def upsert_topic(
                         if _normalize_hex_color(getattr(item, "color", None))
                     }
                     duplicate.color = _auto_pick_color(f"topic:{duplicate.id}:{duplicate.name}", used_colors, 0.0)
-                if payload.description is not None and not duplicate.description:
+                if "description" in fields and payload.description is not None and not duplicate.description:
                     duplicate.description = payload.description
-                if payload.tags:
+                if "tags" in fields and payload.tags:
                     merged = list(dict.fromkeys([*(duplicate.tags or []), *payload.tags]))
                     duplicate.tags = merged
-                if payload.priority is not None:
+                if "priority" in fields and payload.priority is not None:
                     duplicate.priority = payload.priority
-                if payload.status is not None:
-                    duplicate.status = payload.status
-                if payload.snoozedUntil is not None:
+                if "status" in fields:
+                    duplicate.status = normalize_topic_status(payload.status)
+                if "snoozedUntil" in fields:
                     duplicate.snoozedUntil = payload.snoozedUntil
-                if payload.pinned is not None:
+                if "pinned" in fields:
                     duplicate.pinned = payload.pinned
+
+                normalized_status = normalize_topic_status(duplicate.status) or "active"
+                if "snoozedUntil" in fields and payload.snoozedUntil is None and "status" not in fields:
+                    if normalized_status in {"snoozed", "paused"}:
+                        duplicate.status = "active"
+                        normalized_status = "active"
+                if normalized_status in {"active", "archived"}:
+                    duplicate.status = normalized_status
+                    duplicate.snoozedUntil = None
+                elif duplicate.snoozedUntil is not None and normalized_status != "snoozed":
+                    duplicate.status = "snoozed"
+
                 duplicate.updatedAt = timestamp
                 session.add(duplicate)
                 session.commit()
@@ -1759,6 +2018,12 @@ def upsert_topic(
             if not resolved_color:
                 resolved_color = _auto_pick_color(f"topic:{payload.id or ''}:{payload.name}", used_colors, 0.0)
             sort_index = _next_sort_index_for_new_topic(session, bool(payload.pinned or False))
+            resolved_status = normalize_topic_status(payload.status) or "active"
+            resolved_snoozed_until = payload.snoozedUntil
+            if resolved_status in {"active", "archived"}:
+                resolved_snoozed_until = None
+            elif resolved_snoozed_until is not None and resolved_status != "snoozed":
+                resolved_status = "snoozed"
             topic = Topic(
                 id=payload.id or create_id("topic"),
                 name=payload.name,
@@ -1767,8 +2032,8 @@ def upsert_topic(
                 color=resolved_color,
                 description=payload.description,
                 priority=payload.priority or "medium",
-                status=payload.status or "active",
-                snoozedUntil=payload.snoozedUntil,
+                status=resolved_status,
+                snoozedUntil=resolved_snoozed_until,
                 tags=payload.tags or [],
                 parentId=payload.parentId,
                 pinned=payload.pinned or False,
@@ -1871,6 +2136,127 @@ def list_tasks(
         return tasks
 
 
+@app.get("/api/tasks/{task_id}", response_model=TaskOut, tags=["tasks"])
+def get_task(task_id: str):
+    """Fetch one task by id."""
+    with get_session() as session:
+        task = session.get(Task, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task
+
+
+@app.patch("/api/tasks/{task_id}", dependencies=[Depends(require_token)], response_model=TaskOut, tags=["tasks"])
+def patch_task(task_id: str, payload: TaskPatch = Body(...)):
+    """Patch an existing task (partial update)."""
+    with get_session() as session:
+        task = session.get(Task, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        fields = payload.model_fields_set
+        stamp = now_iso()
+        touched = False
+        reindex_needed = False
+
+        if "title" in fields:
+            title = (payload.title or "").strip()
+            if not title:
+                raise HTTPException(status_code=400, detail="title cannot be empty")
+            if title != task.title:
+                reindex_needed = True
+            task.title = title
+            touched = True
+
+        if "color" in fields:
+            if payload.color is None:
+                task.color = None
+                touched = True
+            else:
+                normalized = _normalize_hex_color(payload.color)
+                if not normalized:
+                    raise HTTPException(status_code=400, detail="Invalid color (expected #RRGGBB)")
+                task.color = normalized
+                touched = True
+
+        if "topicId" in fields:
+            if payload.topicId:
+                parent = session.get(Topic, payload.topicId)
+                if not parent:
+                    raise HTTPException(status_code=400, detail="topicId not found")
+                task.topicId = payload.topicId
+            else:
+                task.topicId = None
+            touched = True
+            reindex_needed = True
+
+        if "status" in fields:
+            task.status = payload.status or task.status
+            touched = True
+            reindex_needed = True
+
+        if "priority" in fields:
+            task.priority = payload.priority
+            touched = True
+
+        if "dueDate" in fields:
+            task.dueDate = payload.dueDate
+            touched = True
+
+        if "snoozedUntil" in fields:
+            task.snoozedUntil = payload.snoozedUntil
+            touched = True
+
+        if "pinned" in fields:
+            task.pinned = payload.pinned
+            touched = True
+
+        if "tags" in fields:
+            task.tags = payload.tags or []
+            touched = True
+            reindex_needed = True
+
+        # Digest fields are system-managed and should not reorder tasks by activity.
+        if "digest" in fields:
+            task.digest = payload.digest
+        if "digestUpdatedAt" in fields:
+            task.digestUpdatedAt = payload.digestUpdatedAt
+
+        if touched:
+            task.updatedAt = stamp
+
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+        event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
+
+        if reindex_needed:
+            task_text = " ".join(
+                [
+                    str(task.title or "").strip(),
+                    str(task.status or "").strip(),
+                    " ".join(
+                        [
+                            str(t).strip()
+                            for t in (task.tags or [])
+                            if str(t).strip() and not str(t).strip().lower().startswith("system:")
+                        ]
+                    ),
+                ]
+            ).strip()
+            enqueue_reindex_request(
+                {
+                    "op": "upsert",
+                    "kind": "task",
+                    "id": task.id,
+                    "topicId": task.topicId,
+                    "text": task_text,
+                }
+            )
+
+        return task
+
+
 @app.post("/api/tasks/reorder", dependencies=[Depends(require_token)], tags=["tasks"])
 def reorder_tasks(payload: TaskReorderRequest):
     """Persist a manual task order within a topic by assigning sortIndex sequentially."""
@@ -1936,34 +2322,41 @@ def upsert_task(
     with get_session() as session:
         task = session.get(Task, payload.id) if payload.id else None
         timestamp = now_iso()
+        fields = payload.model_fields_set
         if task:
             task.title = payload.title or task.title
-            if payload.color is not None:
-                normalized_color = _normalize_hex_color(payload.color)
-                if normalized_color:
-                    task.color = normalized_color
-            if payload.topicId is not None:
+            if "color" in fields:
+                if payload.color is None:
+                    task.color = None
+                else:
+                    normalized_color = _normalize_hex_color(payload.color)
+                    if normalized_color:
+                        task.color = normalized_color
+            if "topicId" in fields:
                 task.topicId = payload.topicId
-            if payload.status is not None:
+            if "status" in fields and payload.status is not None:
                 task.status = payload.status
-            if payload.priority is not None:
+            if "priority" in fields:
                 task.priority = payload.priority
-            if payload.dueDate is not None:
+            if "dueDate" in fields:
                 task.dueDate = payload.dueDate
-            if payload.pinned is not None:
+            if "pinned" in fields:
                 task.pinned = payload.pinned
-            if payload.tags is not None:
-                task.tags = payload.tags
-            if payload.snoozedUntil is not None:
+            if "tags" in fields:
+                task.tags = payload.tags or []
+            if "snoozedUntil" in fields:
                 task.snoozedUntil = payload.snoozedUntil
             task.updatedAt = timestamp
         else:
             duplicate = _find_similar_task(session, payload.topicId, payload.title)
             if duplicate:
-                if payload.color is not None:
-                    normalized_color = _normalize_hex_color(payload.color)
-                    if normalized_color:
-                        duplicate.color = normalized_color
+                if "color" in fields:
+                    if payload.color is None:
+                        duplicate.color = None
+                    else:
+                        normalized_color = _normalize_hex_color(payload.color)
+                        if normalized_color:
+                            duplicate.color = normalized_color
                 elif not _normalize_hex_color(getattr(duplicate, "color", None)):
                     used_colors = {
                         _normalize_hex_color(getattr(item, "color", None))
@@ -1971,17 +2364,17 @@ def upsert_task(
                         if _normalize_hex_color(getattr(item, "color", None))
                     }
                     duplicate.color = _auto_pick_color(f"task:{duplicate.id}:{duplicate.title}", used_colors, 21.0)
-                if payload.status is not None:
+                if "status" in fields and payload.status is not None:
                     duplicate.status = payload.status
-                if payload.priority is not None:
+                if "priority" in fields:
                     duplicate.priority = payload.priority
-                if payload.dueDate is not None:
+                if "dueDate" in fields:
                     duplicate.dueDate = payload.dueDate
-                if payload.pinned is not None:
+                if "pinned" in fields:
                     duplicate.pinned = payload.pinned
-                if payload.tags is not None:
-                    duplicate.tags = payload.tags
-                if payload.snoozedUntil is not None:
+                if "tags" in fields:
+                    duplicate.tags = payload.tags or []
+                if "snoozedUntil" in fields:
                     duplicate.snoozedUntil = payload.snoozedUntil
                 duplicate.updatedAt = timestamp
                 session.add(duplicate)
@@ -2189,6 +2582,238 @@ def append_session_routing_memory(payload: SessionRoutingAppend):
         return row
 
 
+@app.post(
+    "/api/classifier/replay",
+    response_model=ClassifierReplayResponse,
+    dependencies=[Depends(require_token)],
+    tags=["classifier"],
+)
+def replay_classifier_bundle(payload: ClassifierReplayRequest):
+    """Mark a request/response bundle as pending so the classifier re-runs routing/summaries.
+
+    This is a user-triggered escape hatch when a Topic Chat thread should be re-checked for
+    task allocation (or other classifier updates) starting from an anchor user message.
+    """
+
+    anchor_log_id = (payload.anchorLogId or "").strip()
+    if not anchor_log_id:
+        raise HTTPException(status_code=400, detail="anchorLogId is required")
+
+    # Mirror classifier.py's bundle segmentation enough for predictable UX.
+    AFFIRMATIONS = {
+        "yes",
+        "y",
+        "yep",
+        "yeah",
+        "ok",
+        "okay",
+        "sounds good",
+        "do it",
+        "please do",
+        "go ahead",
+        "ship it",
+        "works for me",
+    }
+
+    def _strip_slash_command(text: str) -> str:
+        cleaned = (text or "").strip()
+        if not cleaned.startswith("/"):
+            return cleaned
+        parts = cleaned.split(None, 1)
+        command = parts[0].lower()
+        if command in SLASH_COMMANDS:
+            return parts[1].strip() if len(parts) > 1 else ""
+        return ""
+
+    def _is_affirmation(text: str) -> bool:
+        cleaned = _sanitize_log_text(text)
+        cleaned = re.sub(r"[^a-zA-Z0-9\\s]+", " ", cleaned)
+        cleaned = re.sub(r"\\s+", " ", cleaned).strip().lower()
+        if not cleaned:
+            return False
+        if len(cleaned) > 24:
+            return False
+        if cleaned in AFFIRMATIONS:
+            return True
+        if cleaned.startswith("yes "):
+            return cleaned[4:].strip() in AFFIRMATIONS
+        if cleaned.startswith("ok "):
+            return cleaned[3:].strip() in AFFIRMATIONS
+        if cleaned.startswith("okay "):
+            return cleaned[5:].strip() in AFFIRMATIONS
+        return False
+
+    def _conversation_agent(entry: LogEntry) -> str:
+        return str(getattr(entry, "agentId", "") or "").strip().lower()
+
+    def _conversation_text(entry: LogEntry) -> str:
+        return _sanitize_log_text(str(getattr(entry, "content", None) or getattr(entry, "summary", None) or getattr(entry, "raw", None) or ""))
+
+    def _bundle_range(conversations: list[LogEntry], anchor_idx: int) -> tuple[int, int]:
+        """Return (start_idx, end_idx) for one coherent request/response bundle."""
+        if not conversations:
+            return 0, 0
+        anchor_idx = max(0, min(anchor_idx, len(conversations) - 1))
+
+        start_idx = anchor_idx
+        anchor = conversations[anchor_idx]
+        if _conversation_agent(anchor) != "user":
+            for j in range(anchor_idx, -1, -1):
+                if _conversation_agent(conversations[j]) == "user":
+                    start_idx = j
+                    break
+        else:
+            anchor_text = _strip_slash_command(_conversation_text(anchor))
+            if anchor_text and _is_affirmation(anchor_text):
+                for j in range(anchor_idx - 1, -1, -1):
+                    if _conversation_agent(conversations[j]) != "user":
+                        continue
+                    prev_text = _strip_slash_command(_conversation_text(conversations[j]))
+                    if prev_text and not _is_affirmation(prev_text):
+                        start_idx = j
+                        break
+
+        seen_assistant = False
+        end_idx = start_idx
+        for i in range(start_idx, len(conversations)):
+            entry = conversations[i]
+            end_idx = i + 1
+            agent = _conversation_agent(entry)
+            if agent != "user":
+                seen_assistant = True
+                continue
+            if i == start_idx:
+                continue
+            user_text = _strip_slash_command(_conversation_text(entry))
+            if seen_assistant and user_text and not _is_affirmation(user_text):
+                end_idx = i
+                break
+
+        return start_idx, max(start_idx + 1, end_idx)
+
+    with get_session() as session:
+        anchor = session.get(LogEntry, anchor_log_id)
+        if not anchor:
+            raise HTTPException(status_code=404, detail="Anchor log not found")
+        if str(getattr(anchor, "type", "") or "") != "conversation":
+            raise HTTPException(status_code=400, detail="Anchor log must be a conversation")
+        if (str(getattr(anchor, "agentId", "") or "").strip().lower() or "") != "user":
+            raise HTTPException(status_code=400, detail="Anchor log must be a user message")
+
+        source = anchor.source if isinstance(anchor.source, dict) else None
+        session_key = str(source.get("sessionKey") or "").strip() if source else ""
+        if not session_key:
+            raise HTTPException(status_code=400, detail="Anchor log is missing source.sessionKey")
+
+        base_session_key = (session_key.split("|", 1)[0] or "").strip()
+        if not base_session_key:
+            raise HTTPException(status_code=400, detail="Anchor log sessionKey is invalid")
+
+        topic_id, task_id = _parse_board_session_key(base_session_key)
+        if not topic_id or task_id:
+            raise HTTPException(status_code=400, detail="Replay is only supported for Topic Chat sessions")
+
+        query = select(LogEntry)
+        if DATABASE_URL.startswith("sqlite"):
+            # Match the base sessionKey plus any OpenClaw thread suffixes (`|thread:...`) so
+            # a replay includes assistant/tool logs even when providers decorate sessionKey.
+            query = query.where(
+                text(
+                    "(json_extract(source, '$.sessionKey') = :base_key OR json_extract(source, '$.sessionKey') LIKE :like_key)"
+                )
+            ).params(base_key=base_session_key, like_key=f"{base_session_key}|%")
+        else:
+            expr = LogEntry.source["sessionKey"].as_string()
+            query = query.where(or_(expr == base_session_key, expr.like(f"{base_session_key}|%")))
+        query = query.order_by(
+            LogEntry.createdAt.asc(),
+            (text("rowid ASC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.asc()),
+        )
+        all_logs = session.exec(query).all()
+        if not all_logs:
+            return {
+                "ok": True,
+                "anchorLogId": anchor_log_id,
+                "sessionKey": base_session_key,
+                "topicId": topic_id,
+                "logCount": 0,
+                "logIds": [],
+            }
+
+        conversations = [row for row in all_logs if (getattr(row, "type", None) == "conversation")]
+        anchor_idx = next((idx for idx, row in enumerate(conversations) if row.id == anchor_log_id), -1)
+        if anchor_idx < 0:
+            raise HTTPException(status_code=400, detail="Anchor log is not part of the session conversation thread")
+
+        bundle_start_idx, bundle_end_idx = _bundle_range(conversations, anchor_idx)
+        if payload.mode == "from_here":
+            bundle_end_idx = len(conversations)
+
+        start_id = conversations[bundle_start_idx].id if bundle_start_idx < len(conversations) else anchor_log_id
+        boundary_id = conversations[bundle_end_idx].id if bundle_end_idx < len(conversations) else ""
+
+        pos_by_id: dict[str, int] = {str(row.id): idx for idx, row in enumerate(all_logs) if getattr(row, "id", None)}
+        scope_start_pos = pos_by_id.get(str(start_id), 0)
+        scope_end_pos = pos_by_id.get(str(boundary_id)) if boundary_id else len(all_logs)
+        if scope_end_pos is None:
+            scope_end_pos = len(all_logs)
+        if scope_end_pos < scope_start_pos:
+            scope_end_pos = len(all_logs)
+
+        scope_logs = all_logs[scope_start_pos:scope_end_pos]
+        stamp = now_iso()
+        updated_ids: list[str] = []
+        for entry in scope_logs:
+            entry.taskId = None
+            entry.classificationStatus = "pending"
+            entry.classificationAttempts = 0
+            entry.classificationError = None
+            entry.updatedAt = stamp
+            session.add(entry)
+            updated_ids.append(entry.id)
+
+        try:
+            session.commit()
+        except OperationalError as exc:
+            if not DATABASE_URL.startswith("sqlite") or "database is locked" not in str(exc).lower():
+                raise
+            session.rollback()
+            last_exc: OperationalError | None = exc
+            for attempt in range(6):
+                try:
+                    for entry in scope_logs:
+                        entry.taskId = None
+                        entry.classificationStatus = "pending"
+                        entry.classificationAttempts = 0
+                        entry.classificationError = None
+                        entry.updatedAt = stamp
+                        session.add(entry)
+                    time.sleep(min(0.75, 0.05 * (2**attempt)))
+                    session.commit()
+                    last_exc = None
+                    break
+                except OperationalError as retry_exc:
+                    if "database is locked" not in str(retry_exc).lower():
+                        raise
+                    session.rollback()
+                    last_exc = retry_exc
+            if last_exc is not None:
+                raise last_exc
+
+        for entry in scope_logs:
+            event_hub.publish({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
+            _enqueue_log_reindex(entry)
+
+        return {
+            "ok": True,
+            "anchorLogId": anchor_log_id,
+            "sessionKey": base_session_key,
+            "topicId": topic_id,
+            "logCount": len(updated_ids),
+            "logIds": updated_ids,
+        }
+
+
 @app.get("/api/log", response_model=List[LogOut], tags=["logs"])
 def list_logs(
     topicId: str | None = Query(default=None, description="Filter logs by topic ID.", example="topic-1"),
@@ -2382,7 +3007,38 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
             if not task or task.topicId != entry.topicId:
                 entry.taskId = None
 
-        entry.updatedAt = now_iso()
+        stamp = now_iso()
+
+        # Best-effort: if a conversation is routed into a snoozed/archived topic or task,
+        # revive it so it surfaces again in the Unified view.
+        revived_topic: Topic | None = None
+        revived_task: Task | None = None
+        if str(getattr(entry, "type", "") or "").strip().lower() == "conversation":
+            try:
+                if entry.taskId:
+                    task = session.get(Task, entry.taskId)
+                    if task and task.snoozedUntil:
+                        task.snoozedUntil = None
+                        task.updatedAt = stamp
+                        session.add(task)
+                        revived_task = task
+
+                if entry.topicId:
+                    topic = session.get(Topic, entry.topicId)
+                    if topic and (
+                        topic.snoozedUntil
+                        or str(topic.status or "active").strip().lower() in {"snoozed", "paused", "archived"}
+                    ):
+                        topic.snoozedUntil = None
+                        topic.status = "active"
+                        topic.updatedAt = stamp
+                        session.add(topic)
+                        revived_topic = topic
+            except Exception:
+                revived_topic = None
+                revived_task = None
+
+        entry.updatedAt = stamp
 
         session.add(entry)
         try:
@@ -2408,6 +3064,10 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
         session.refresh(entry)
         event_hub.publish({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
         _enqueue_log_reindex(entry)
+        if revived_topic:
+            event_hub.publish({"type": "topic.upserted", "data": revived_topic.model_dump(), "eventTs": revived_topic.updatedAt})
+        if revived_task:
+            event_hub.publish({"type": "task.upserted", "data": revived_task.model_dump(), "eventTs": revived_task.updatedAt})
         return entry
 
 
@@ -2580,6 +3240,646 @@ def clawgraph(
         return graph
 
 
+def _search_impl(
+    session: Any,
+    query: str,
+    *,
+    topic_id: str | None,
+    session_key: str | None,
+    include_pending: bool,
+    limit_topics: int,
+    limit_tasks: int,
+    limit_logs: int,
+) -> dict:
+    topics = session.exec(select(Topic)).all()
+    tasks = session.exec(select(Task)).all()
+    # Never load the entire log table into memory for search.
+    # This endpoint is used from the UI and must remain safe for large instances.
+    window_logs = max(2000, min(20000, limit_logs * 8))
+    # Raw payloads can be very large; exclude from bulk search window.
+    # Content can also be huge (tool output, long transcripts). For search ranking we can
+    # rely on summary text and avoid pulling full content into memory.
+    log_query = select(LogEntry).options(defer(LogEntry.raw), defer(LogEntry.content))
+    if topic_id:
+        log_query = log_query.where(LogEntry.topicId == topic_id)
+    if not include_pending:
+        log_query = log_query.where(LogEntry.classificationStatus == "classified")
+    log_query = log_query.order_by(
+        LogEntry.createdAt.desc(),
+        LogEntry.updatedAt.desc(),
+        (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
+    ).limit(window_logs)
+    logs = session.exec(log_query).all()
+
+    if topic_id:
+        tasks = [task for task in tasks if task.topicId == topic_id]
+
+    topic_map: dict[str, Topic] = {item.id: item for item in topics}
+    task_map: dict[str, Task] = {item.id: item for item in tasks}
+    log_map: dict[str, LogEntry] = {item.id: item for item in logs}
+
+    notes = [entry for entry in logs if entry.type == "note" and entry.relatedLogId]
+    note_count_by_log: dict[str, int] = {}
+    note_items_by_log: dict[str, list[LogEntry]] = {}
+    for note in notes:
+        related_id = str(note.relatedLogId or "")
+        if not related_id:
+            continue
+        note_count_by_log[related_id] = (note_count_by_log.get(related_id) or 0) + 1
+        note_items_by_log.setdefault(related_id, []).append(note)
+
+    note_weight_by_topic: dict[str, float] = {}
+    note_weight_by_task: dict[str, float] = {}
+    for related_id, count in note_count_by_log.items():
+        related = log_map.get(related_id)
+        if not related:
+            continue
+        weight = min(0.24, 0.07 * count)
+        if related.topicId:
+            note_weight_by_topic[related.topicId] = (note_weight_by_topic.get(related.topicId) or 0.0) + weight
+        if related.taskId:
+            note_weight_by_task[related.taskId] = (note_weight_by_task.get(related.taskId) or 0.0) + weight
+
+    session_topic_ids: set[str] = set()
+    session_task_ids: set[str] = set()
+    session_log_ids: set[str] = set()
+    if session_key:
+        for entry in logs:
+            if not _log_matches_session(entry, session_key):
+                continue
+            session_log_ids.add(entry.id)
+            if entry.topicId:
+                session_topic_ids.add(entry.topicId)
+            if entry.taskId:
+                session_task_ids.add(entry.taskId)
+
+    # Build a lightweight log payload for semantic_search without touching deferred columns.
+    # If we access entry.content here, SQLAlchemy will lazy-load it and defeat the point.
+    log_payloads: list[dict[str, Any]] = []
+    for entry in logs:
+        summary_text = str(entry.summary or "").strip()
+        log_payloads.append(
+            {
+                "id": entry.id,
+                "topicId": entry.topicId,
+                "taskId": entry.taskId,
+                "relatedLogId": entry.relatedLogId,
+                "idempotencyKey": entry.idempotencyKey,
+                "type": entry.type,
+                "summary": summary_text,
+                "content": summary_text,
+                "raw": "",
+                "createdAt": entry.createdAt,
+                "updatedAt": entry.updatedAt,
+                "agentId": entry.agentId,
+                "agentLabel": entry.agentLabel,
+                "source": entry.source,
+            }
+        )
+
+    search_result = semantic_search(
+        query,
+        [item.model_dump() for item in topics],
+        [item.model_dump() for item in tasks],
+        log_payloads,
+        topic_limit=limit_topics,
+        task_limit=limit_tasks,
+        log_limit=limit_logs,
+    )
+
+    topic_base_score: dict[str, float] = {
+        str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("topics", [])
+    }
+    topic_search_rows: dict[str, dict[str, Any]] = {
+        str(item.get("id") or ""): item for item in search_result.get("topics", []) if item.get("id")
+    }
+    task_base_score: dict[str, float] = {
+        str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("tasks", [])
+    }
+    task_search_rows: dict[str, dict[str, Any]] = {
+        str(item.get("id") or ""): item for item in search_result.get("tasks", []) if item.get("id")
+    }
+    log_base_score: dict[str, float] = {
+        str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("logs", [])
+    }
+    log_search_rows: dict[str, dict[str, Any]] = {
+        str(item.get("id") or ""): item for item in search_result.get("logs", []) if item.get("id")
+    }
+
+    # Parent propagation from matched logs.
+    for log_id, score in log_base_score.items():
+        entry = log_map.get(log_id)
+        if not entry:
+            continue
+        if entry.topicId:
+            boosted = topic_base_score.get(entry.topicId, 0.0) + min(0.18, score * 0.22)
+            topic_base_score[entry.topicId] = boosted
+        if entry.taskId:
+            boosted = task_base_score.get(entry.taskId, 0.0) + min(0.2, score * 0.25)
+            task_base_score[entry.taskId] = boosted
+
+    topic_rows: list[dict[str, Any]] = []
+    for topic_id2, base_score in topic_base_score.items():
+        topic = topic_map.get(topic_id2)
+        if not topic:
+            continue
+        score = base_score
+        score += min(0.26, note_weight_by_topic.get(topic_id2, 0.0))
+        if topic_id2 in session_topic_ids:
+            score += 0.12
+        topic_rows.append(
+            {
+                "id": topic.id,
+                "name": topic.name,
+                "description": topic.description,
+                "score": round(score, 6),
+                "vectorScore": float((topic_search_rows.get(topic_id2) or {}).get("vectorScore") or 0.0),
+                "bm25Score": float((topic_search_rows.get(topic_id2) or {}).get("bm25Score") or 0.0),
+                "lexicalScore": float((topic_search_rows.get(topic_id2) or {}).get("lexicalScore") or 0.0),
+                "rrfScore": float((topic_search_rows.get(topic_id2) or {}).get("rrfScore") or 0.0),
+                "rerankScore": float((topic_search_rows.get(topic_id2) or {}).get("rerankScore") or 0.0),
+                "bestChunk": (topic_search_rows.get(topic_id2) or {}).get("bestChunk"),
+                "noteWeight": round(min(0.26, note_weight_by_topic.get(topic_id2, 0.0)), 6),
+                "sessionBoosted": topic_id2 in session_topic_ids,
+            }
+        )
+    topic_rows.sort(key=lambda item: float(item["score"]), reverse=True)
+    topic_rows = topic_rows[:limit_topics]
+
+    task_rows: list[dict[str, Any]] = []
+    for task_id2, base_score in task_base_score.items():
+        task = task_map.get(task_id2)
+        if not task:
+            continue
+        score = base_score
+        score += min(0.26, note_weight_by_task.get(task_id2, 0.0))
+        if task_id2 in session_task_ids:
+            score += 0.1
+        task_rows.append(
+            {
+                "id": task.id,
+                "topicId": task.topicId,
+                "title": task.title,
+                "status": task.status,
+                "score": round(score, 6),
+                "vectorScore": float((task_search_rows.get(task_id2) or {}).get("vectorScore") or 0.0),
+                "bm25Score": float((task_search_rows.get(task_id2) or {}).get("bm25Score") or 0.0),
+                "lexicalScore": float((task_search_rows.get(task_id2) or {}).get("lexicalScore") or 0.0),
+                "rrfScore": float((task_search_rows.get(task_id2) or {}).get("rrfScore") or 0.0),
+                "rerankScore": float((task_search_rows.get(task_id2) or {}).get("rerankScore") or 0.0),
+                "bestChunk": (task_search_rows.get(task_id2) or {}).get("bestChunk"),
+                "noteWeight": round(min(0.26, note_weight_by_task.get(task_id2, 0.0)), 6),
+                "sessionBoosted": task_id2 in session_task_ids,
+            }
+        )
+    task_rows.sort(key=lambda item: float(item["score"]), reverse=True)
+    task_rows = task_rows[:limit_tasks]
+
+    log_rows: list[dict[str, Any]] = []
+    for log_id2, base_score in log_base_score.items():
+        entry = log_map.get(log_id2)
+        if not entry:
+            continue
+        score = base_score
+        note_count = int(note_count_by_log.get(log_id2) or 0)
+        note_weight = min(0.24, 0.06 * note_count)
+        score += note_weight
+        if log_id2 in session_log_ids:
+            score += 0.08
+        log_rows.append(
+            {
+                "id": entry.id,
+                "topicId": entry.topicId,
+                "taskId": entry.taskId,
+                "type": entry.type,
+                "agentId": entry.agentId,
+                "agentLabel": entry.agentLabel,
+                "summary": _clip(_sanitize_log_text(entry.summary or ""), 140),
+                "content": _clip(_sanitize_log_text(entry.summary or ""), 320),
+                "createdAt": entry.createdAt,
+                "score": round(score, 6),
+                "vectorScore": float((log_search_rows.get(log_id2) or {}).get("vectorScore") or 0.0),
+                "bm25Score": float((log_search_rows.get(log_id2) or {}).get("bm25Score") or 0.0),
+                "lexicalScore": float((log_search_rows.get(log_id2) or {}).get("lexicalScore") or 0.0),
+                "rrfScore": float((log_search_rows.get(log_id2) or {}).get("rrfScore") or 0.0),
+                "rerankScore": float((log_search_rows.get(log_id2) or {}).get("rerankScore") or 0.0),
+                "bestChunk": (log_search_rows.get(log_id2) or {}).get("bestChunk"),
+                "noteCount": note_count,
+                "noteWeight": round(note_weight, 6),
+                "sessionBoosted": log_id2 in session_log_ids,
+            }
+        )
+    log_rows.sort(
+        key=lambda item: (
+            float(item["score"]),
+            item.get("createdAt") or "",
+        ),
+        reverse=True,
+    )
+    log_rows = log_rows[:limit_logs]
+
+    note_rows: list[dict[str, Any]] = []
+    emitted_note_ids: set[str] = set()
+    for item in log_rows:
+        log_id3 = str(item.get("id") or "")
+        for note in note_items_by_log.get(log_id3, [])[:3]:
+            if note.id in emitted_note_ids:
+                continue
+            emitted_note_ids.add(note.id)
+            note_rows.append(
+                {
+                    "id": note.id,
+                    "relatedLogId": note.relatedLogId,
+                    "topicId": note.topicId,
+                    "taskId": note.taskId,
+                    "summary": _clip(_sanitize_log_text(note.summary or ""), 140),
+                    "content": _clip(_sanitize_log_text(note.summary or ""), 280),
+                    "createdAt": note.createdAt,
+                }
+            )
+        if len(note_rows) >= 160:
+            break
+
+    return {
+        "query": query,
+        "mode": search_result.get("mode") or "lexical",
+        "topics": topic_rows,
+        "tasks": task_rows,
+        "logs": log_rows,
+        "notes": note_rows,
+        "matchedTopicIds": [item["id"] for item in topic_rows],
+        "matchedTaskIds": [item["id"] for item in task_rows],
+        "matchedLogIds": [item["id"] for item in log_rows],
+    }
+
+
+_CONTEXT_AFFIRMATIONS = {
+    "yes",
+    "y",
+    "yep",
+    "yeah",
+    "ok",
+    "okay",
+    "sounds good",
+    "do it",
+    "please do",
+    "go ahead",
+    "ship it",
+    "works for me",
+}
+
+
+def _normalize_for_signal(text: str) -> str:
+    cleaned = _sanitize_log_text(text)
+    cleaned = re.sub(r"[^a-zA-Z0-9\s]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
+    return cleaned
+
+
+def _is_affirmation(text: str) -> bool:
+    cleaned = _normalize_for_signal(text)
+    if not cleaned:
+        return False
+    if len(cleaned) > 24:
+        return False
+    if cleaned in _CONTEXT_AFFIRMATIONS:
+        return True
+    if cleaned.startswith("yes "):
+        return cleaned[4:].strip() in _CONTEXT_AFFIRMATIONS
+    if cleaned.startswith("ok "):
+        return cleaned[3:].strip() in _CONTEXT_AFFIRMATIONS
+    if cleaned.startswith("okay "):
+        return cleaned[5:].strip() in _CONTEXT_AFFIRMATIONS
+    return False
+
+
+def _query_has_signal(text: str) -> bool:
+    cleaned = _normalize_for_signal(text)
+    if not cleaned:
+        return False
+    if len(cleaned) >= 6:
+        return True
+    tokens = cleaned.split(" ")
+    if len(tokens) >= 2:
+        return True
+    return any(len(tok) >= 4 for tok in tokens)
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    normalized = normalize_iso(value)
+    if not normalized:
+        return None
+    raw = normalized[:-1] + "+00:00" if normalized.endswith("Z") else normalized
+    try:
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _is_snoozed(snoozed_until: str | None, now: datetime) -> bool:
+    dt = _parse_dt(snoozed_until)
+    if not dt:
+        return False
+    return dt > now
+
+
+def _topic_visible(topic: Topic, now: datetime) -> bool:
+    status = str(getattr(topic, "status", "active") or "active").strip().lower()
+    if status == "archived":
+        return False
+    if _is_snoozed(getattr(topic, "snoozedUntil", None), now):
+        return False
+    return True
+
+
+def _task_visible(task: Task, topic_by_id: dict[str, Topic], now: datetime) -> bool:
+    if _is_snoozed(getattr(task, "snoozedUntil", None), now):
+        return False
+    topic_id = str(getattr(task, "topicId", None) or "").strip()
+    if topic_id:
+        parent = topic_by_id.get(topic_id)
+        if parent and not _topic_visible(parent, now):
+            return False
+    return True
+
+
+def _task_rank(task: Task, now: datetime) -> tuple:
+    pinned = 0 if bool(getattr(task, "pinned", False)) else 1
+    status = str(getattr(task, "status", "") or "").strip().lower()
+    status_bucket = {"blocked": 0, "doing": 1, "todo": 2, "done": 4}.get(status, 3)
+    priority = str(getattr(task, "priority", "medium") or "medium").strip().lower()
+    priority_bucket = {"high": 0, "medium": 1, "low": 2}.get(priority, 1)
+    due_dt = _parse_dt(getattr(task, "dueDate", None))
+    overdue_bucket = 1
+    due_bucket = 2
+    if due_dt:
+        if due_dt < now:
+            overdue_bucket = 0
+            due_bucket = 0
+        elif due_dt < (now + timedelta(days=7)):
+            due_bucket = 1
+    updated = str(getattr(task, "updatedAt", "") or "")
+    return (pinned, status_bucket, overdue_bucket, due_bucket, priority_bucket, updated)
+
+
+@app.get("/api/context", response_model=ContextResponse, tags=["context"])
+def context(
+    q: str | None = Query(default=None, description="Current user input/query."),
+    sessionKey: str | None = Query(default=None, description="Session key for continuity (source.sessionKey)."),
+    mode: str = Query(default="auto", description="auto|cheap|full"),
+    includePending: bool = Query(default=True, description="Include pending logs in recall."),
+    maxChars: int = Query(default=2200, ge=400, le=12000, description="Hard cap for returned block size."),
+    workingSetLimit: int = Query(default=6, ge=0, le=40, description="Max tasks/topics in working set sections."),
+    timelineLimit: int = Query(default=6, ge=0, le=40, description="Max session timeline lines."),
+):
+    """Return a prompt-ready, layered context block for agent runs (Layer A always; Layer B optional)."""
+    raw_query = _sanitize_log_text(q or "")
+    normalized_query = _clip(raw_query, 500)
+    requested_mode = (mode or "auto").strip().lower()
+    effective_mode = requested_mode if requested_mode in {"auto", "cheap", "full"} else "auto"
+
+    low_signal = _is_affirmation(normalized_query) or normalized_query.strip().startswith("/")
+    if effective_mode == "full":
+        run_semantic = True
+    elif effective_mode == "cheap":
+        run_semantic = False
+    else:
+        run_semantic = (not low_signal) and _query_has_signal(normalized_query)
+
+    now_dt = datetime.now(timezone.utc)
+    data: dict[str, Any] = {}
+    layers: list[str] = []
+    lines: list[str] = []
+
+    lines.append("Clawboard context (layered):")
+    if normalized_query:
+        lines.append(f"Current user intent: {_clip(normalized_query, 180)}")
+    if effective_mode != "auto":
+        lines.append(f"Mode: {effective_mode}")
+
+    with get_session() as session:
+        routing_items: list[dict[str, Any]] = []
+        if sessionKey:
+            row = session.get(SessionRoutingMemory, sessionKey)
+            if not row and "|" in sessionKey:
+                row = session.get(SessionRoutingMemory, sessionKey.split("|", 1)[0])
+            if row and isinstance(getattr(row, "items", None), list):
+                routing_items = list(row.items or [])[-6:]
+                data["routingMemory"] = row.model_dump()
+                layers.append("A:routing_memory")
+
+        timeline: list[dict[str, Any]] = []
+        if sessionKey and timelineLimit > 0:
+            base_key = (sessionKey.split("|", 1)[0] or "").strip()
+            if base_key:
+                query_logs = select(LogEntry).options(defer(LogEntry.raw))
+                if DATABASE_URL.startswith("sqlite"):
+                    query_logs = query_logs.where(
+                        text(
+                            "(json_extract(source, '$.sessionKey') = :base_key OR json_extract(source, '$.sessionKey') LIKE :like_key)"
+                        )
+                    ).params(base_key=base_key, like_key=f"{base_key}|%")
+                else:
+                    expr = LogEntry.source["sessionKey"].as_string()
+                    query_logs = query_logs.where(or_(expr == base_key, expr.like(f"{base_key}|%")))
+                query_logs = query_logs.where(LogEntry.type == "conversation").order_by(
+                    LogEntry.createdAt.desc(),
+                    (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
+                ).limit(max(20, timelineLimit * 5))
+                rows = session.exec(query_logs).all()
+                for entry in rows:
+                    if _is_command_log(entry):
+                        continue
+                    summary = _sanitize_log_text(entry.summary or "") or _clip(_sanitize_log_text(entry.content or ""), 220)
+                    who = (
+                        "User"
+                        if str(entry.agentId or "").strip().lower() == "user"
+                        else (entry.agentLabel or entry.agentId or "Agent")
+                    )
+                    timeline.append(
+                        {
+                            "id": entry.id,
+                            "topicId": entry.topicId,
+                            "taskId": entry.taskId,
+                            "agentId": entry.agentId,
+                            "agentLabel": entry.agentLabel,
+                            "createdAt": entry.createdAt,
+                            "text": _clip(f"{who}: {summary}", 160),
+                        }
+                    )
+                    if len(timeline) >= timelineLimit:
+                        break
+                if timeline:
+                    data["timeline"] = timeline
+                    layers.append("A:timeline")
+
+        topics = session.exec(select(Topic)).all()
+        topic_by_id = {t.id: t for t in topics}
+        tasks = session.exec(select(Task)).all()
+
+        visible_topics = [t for t in topics if _topic_visible(t, now_dt)]
+        pinned_topics = [t for t in visible_topics if bool(getattr(t, "pinned", False))]
+        pinned_topics.sort(key=lambda t: getattr(t, "sortIndex", 0))
+        pinned_topics.sort(key=lambda t: t.updatedAt, reverse=True)
+
+        visible_tasks = [t for t in tasks if _task_visible(t, topic_by_id, now_dt)]
+        ranked_tasks = [
+            t
+            for t in visible_tasks
+            if str(getattr(t, "status", "") or "").strip().lower() != "done" or bool(getattr(t, "pinned", False))
+        ]
+        ranked_tasks.sort(key=lambda t: _task_rank(t, now_dt))
+
+        working_topics = pinned_topics[: max(0, min(12, workingSetLimit))]
+        working_tasks = ranked_tasks[: max(0, min(18, workingSetLimit * 3))]
+
+        continuity_topic_ids: list[str] = []
+        continuity_task_ids: list[str] = []
+        for item in routing_items[-4:]:
+            tid = str(item.get("topicId") or "").strip()
+            if tid:
+                continuity_topic_ids.append(tid)
+            kid = str(item.get("taskId") or "").strip()
+            if kid:
+                continuity_task_ids.append(kid)
+        for item in timeline[: max(0, min(12, timelineLimit * 2))]:
+            tid = str(item.get("topicId") or "").strip()
+            if tid:
+                continuity_topic_ids.append(tid)
+            kid = str(item.get("taskId") or "").strip()
+            if kid:
+                continuity_task_ids.append(kid)
+
+        seen_topic_ids = {t.id for t in working_topics}
+        for tid in continuity_topic_ids:
+            if len(working_topics) >= max(0, min(12, workingSetLimit)):
+                break
+            t = topic_by_id.get(tid)
+            if t and _topic_visible(t, now_dt) and tid not in seen_topic_ids:
+                working_topics.append(t)
+                seen_topic_ids.add(tid)
+
+        tasks_by_id = {t.id: t for t in tasks}
+        seen_task_ids = {t.id for t in working_tasks}
+        for kid in continuity_task_ids:
+            if len(working_tasks) >= max(0, min(18, workingSetLimit * 3)):
+                break
+            t = tasks_by_id.get(kid)
+            if t and _task_visible(t, topic_by_id, now_dt) and kid not in seen_task_ids:
+                working_tasks.append(t)
+                seen_task_ids.add(kid)
+
+        data["workingSet"] = {
+            "topics": [t.model_dump() for t in working_topics[:workingSetLimit]],
+            "tasks": [t.model_dump() for t in working_tasks[:workingSetLimit]],
+        }
+        layers.append("A:working_set")
+
+        if working_topics:
+            lines.append("Working set topics:")
+            for t in working_topics[:workingSetLimit]:
+                digest = _sanitize_log_text(getattr(t, "digest", None))
+                suffix = f" | digest: {_clip(digest, 140)}" if digest else ""
+                lines.append(f"- {t.name}{suffix}")
+
+        if working_tasks:
+            lines.append("Working set tasks:")
+            for t in working_tasks[:workingSetLimit]:
+                status = str(getattr(t, "status", "") or "").strip()
+                suffix = f" [{status}]" if status else ""
+                extra: list[str] = []
+                if getattr(t, "dueDate", None):
+                    extra.append(f"due {str(getattr(t, 'dueDate'))}")
+                digest = _sanitize_log_text(getattr(t, "digest", None))
+                if digest:
+                    extra.append(f"digest: {_clip(digest, 120)}")
+                tail = f" ({'; '.join(extra)})" if extra else ""
+                lines.append(f"- {t.title}{suffix}{tail}")
+
+        if routing_items:
+            lines.append("Session routing memory (newest last):")
+            for item in routing_items[-4:]:
+                topic_name = str(item.get("topicName") or item.get("topicId") or "").strip()
+                task_title = str(item.get("taskTitle") or item.get("taskId") or "").strip()
+                anchor = str(item.get("anchor") or "").strip()
+                head = topic_name
+                if task_title:
+                    head = f"{head} -> {task_title}"
+                if anchor:
+                    lines.append(f"- {head} | anchor: {_clip(_sanitize_log_text(anchor), 120)}")
+                else:
+                    lines.append(f"- {head}")
+
+        if timeline:
+            lines.append("Recent session timeline:")
+            for item in timeline[:timelineLimit]:
+                lines.append(f"- {item['text']}")
+
+        semantic = None
+        if run_semantic and normalized_query:
+            semantic = _search_impl(
+                session,
+                normalized_query,
+                topic_id=None,
+                session_key=sessionKey,
+                include_pending=includePending,
+                limit_topics=8,
+                limit_tasks=12,
+                limit_logs=max(24, timelineLimit * 6),
+            )
+            data["semantic"] = semantic
+            layers.append("B:semantic")
+
+        if semantic:
+            topics_hit = list(semantic.get("topics") or [])[:3]
+            tasks_hit = list(semantic.get("tasks") or [])[:4]
+            logs_hit = list(semantic.get("logs") or [])[:6]
+            notes_hit = list(semantic.get("notes") or [])[:6]
+
+            if topics_hit:
+                lines.append("Semantic recall topics:")
+                for item in topics_hit:
+                    name = str(item.get("name") or item.get("id") or "").strip()
+                    score = item.get("score")
+                    lines.append(f"- {name} (score {score})")
+            if tasks_hit:
+                lines.append("Semantic recall tasks:")
+                for item in tasks_hit:
+                    title = str(item.get("title") or item.get("id") or "").strip()
+                    status = str(item.get("status") or "").strip()
+                    suffix = f" [{status}]" if status else ""
+                    lines.append(f"- {title}{suffix}")
+            if logs_hit:
+                lines.append("Semantic recall logs:")
+                for item in logs_hit:
+                    who = (
+                        "User"
+                        if str(item.get("agentId") or "").strip().lower() == "user"
+                        else (item.get("agentLabel") or item.get("agentId") or "Agent")
+                    )
+                    text2 = _sanitize_log_text(str(item.get("summary") or item.get("content") or ""))
+                    lines.append(f"- {who}: {_clip(text2, 140)}")
+            if notes_hit:
+                lines.append("Curated notes:")
+                for item in notes_hit:
+                    note_text = _sanitize_log_text(str(item.get("summary") or item.get("content") or ""))
+                    lines.append(f"- {_clip(note_text, 160)}")
+
+    block = _clip("\n".join(lines).strip(), maxChars)
+    return {
+        "ok": True,
+        "sessionKey": sessionKey,
+        "q": normalized_query,
+        "mode": effective_mode,
+        "layers": layers,
+        "block": block,
+        "data": data,
+    }
+
+
 @app.get("/api/search", tags=["search"])
 def search(
     q: str = Query(..., min_length=1, description="Natural language query."),
@@ -2606,268 +3906,16 @@ def search(
         }
 
     with get_session() as session:
-        topics = session.exec(select(Topic)).all()
-        tasks = session.exec(select(Task)).all()
-        # Never load the entire log table into memory for search.
-        # This endpoint is used from the UI and must remain safe for large instances.
-        window_logs = max(2000, min(20000, limitLogs * 8))
-        # Raw payloads can be very large; exclude from bulk search window.
-        # Content can also be huge (tool output, long transcripts). For search ranking we can
-        # rely on summary text and avoid pulling full content into memory.
-        log_query = select(LogEntry).options(defer(LogEntry.raw), defer(LogEntry.content))
-        if topicId:
-            log_query = log_query.where(LogEntry.topicId == topicId)
-        if not includePending:
-            log_query = log_query.where(LogEntry.classificationStatus == "classified")
-        log_query = log_query.order_by(
-            LogEntry.createdAt.desc(),
-            LogEntry.updatedAt.desc(),
-            (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
-        ).limit(window_logs)
-        logs = session.exec(log_query).all()
-
-        if topicId:
-            tasks = [task for task in tasks if task.topicId == topicId]
-
-        # Preserve query ordering for logs (it may include SQLite rowid tiebreaks).
-
-        topic_map: dict[str, Topic] = {item.id: item for item in topics}
-        task_map: dict[str, Task] = {item.id: item for item in tasks}
-        log_map: dict[str, LogEntry] = {item.id: item for item in logs}
-
-        notes = [entry for entry in logs if entry.type == "note" and entry.relatedLogId]
-        note_count_by_log: dict[str, int] = {}
-        note_items_by_log: dict[str, list[LogEntry]] = {}
-        for note in notes:
-            related_id = str(note.relatedLogId or "")
-            if not related_id:
-                continue
-            note_count_by_log[related_id] = (note_count_by_log.get(related_id) or 0) + 1
-            note_items_by_log.setdefault(related_id, []).append(note)
-
-        note_weight_by_topic: dict[str, float] = {}
-        note_weight_by_task: dict[str, float] = {}
-        for related_id, count in note_count_by_log.items():
-            related = log_map.get(related_id)
-            if not related:
-                continue
-            weight = min(0.24, 0.07 * count)
-            if related.topicId:
-                note_weight_by_topic[related.topicId] = (note_weight_by_topic.get(related.topicId) or 0.0) + weight
-            if related.taskId:
-                note_weight_by_task[related.taskId] = (note_weight_by_task.get(related.taskId) or 0.0) + weight
-
-        session_topic_ids: set[str] = set()
-        session_task_ids: set[str] = set()
-        session_log_ids: set[str] = set()
-        if sessionKey:
-            for entry in logs:
-                if not _log_matches_session(entry, sessionKey):
-                    continue
-                session_log_ids.add(entry.id)
-                if entry.topicId:
-                    session_topic_ids.add(entry.topicId)
-                if entry.taskId:
-                    session_task_ids.add(entry.taskId)
-
-        # Build a lightweight log payload for semantic_search without touching deferred columns.
-        # If we access entry.content here, SQLAlchemy will lazy-load it and defeat the point.
-        log_payloads: list[dict[str, Any]] = []
-        for entry in logs:
-            summary_text = str(entry.summary or "").strip()
-            log_payloads.append(
-                {
-                    "id": entry.id,
-                    "topicId": entry.topicId,
-                    "taskId": entry.taskId,
-                    "relatedLogId": entry.relatedLogId,
-                    "idempotencyKey": entry.idempotencyKey,
-                    "type": entry.type,
-                    "summary": summary_text,
-                    "content": summary_text,
-                    "raw": "",
-                    "createdAt": entry.createdAt,
-                    "updatedAt": entry.updatedAt,
-                    "agentId": entry.agentId,
-                    "agentLabel": entry.agentLabel,
-                    "source": entry.source,
-                }
-            )
-
-        search_result = semantic_search(
+        return _search_impl(
+            session,
             query,
-            [item.model_dump() for item in topics],
-            [item.model_dump() for item in tasks],
-            log_payloads,
-            topic_limit=limitTopics,
-            task_limit=limitTasks,
-            log_limit=limitLogs,
+            topic_id=topicId,
+            session_key=sessionKey,
+            include_pending=includePending,
+            limit_topics=limitTopics,
+            limit_tasks=limitTasks,
+            limit_logs=limitLogs,
         )
-
-        topic_base_score: dict[str, float] = {
-            str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("topics", [])
-        }
-        topic_search_rows: dict[str, dict[str, Any]] = {
-            str(item.get("id") or ""): item for item in search_result.get("topics", []) if item.get("id")
-        }
-        task_base_score: dict[str, float] = {
-            str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("tasks", [])
-        }
-        task_search_rows: dict[str, dict[str, Any]] = {
-            str(item.get("id") or ""): item for item in search_result.get("tasks", []) if item.get("id")
-        }
-        log_base_score: dict[str, float] = {
-            str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("logs", [])
-        }
-        log_search_rows: dict[str, dict[str, Any]] = {
-            str(item.get("id") or ""): item for item in search_result.get("logs", []) if item.get("id")
-        }
-
-        # Parent propagation from matched logs.
-        for log_id, score in log_base_score.items():
-            entry = log_map.get(log_id)
-            if not entry:
-                continue
-            if entry.topicId:
-                boosted = topic_base_score.get(entry.topicId, 0.0) + min(0.18, score * 0.22)
-                topic_base_score[entry.topicId] = boosted
-            if entry.taskId:
-                boosted = task_base_score.get(entry.taskId, 0.0) + min(0.2, score * 0.25)
-                task_base_score[entry.taskId] = boosted
-
-        topic_rows: list[dict[str, Any]] = []
-        for topic_id, base_score in topic_base_score.items():
-            topic = topic_map.get(topic_id)
-            if not topic:
-                continue
-            score = base_score
-            score += min(0.26, note_weight_by_topic.get(topic_id, 0.0))
-            if topic_id in session_topic_ids:
-                score += 0.12
-            topic_rows.append(
-                {
-                    "id": topic.id,
-                    "name": topic.name,
-                    "description": topic.description,
-                    "score": round(score, 6),
-                    "vectorScore": float((topic_search_rows.get(topic_id) or {}).get("vectorScore") or 0.0),
-                    "bm25Score": float((topic_search_rows.get(topic_id) or {}).get("bm25Score") or 0.0),
-                    "lexicalScore": float((topic_search_rows.get(topic_id) or {}).get("lexicalScore") or 0.0),
-                    "rrfScore": float((topic_search_rows.get(topic_id) or {}).get("rrfScore") or 0.0),
-                    "rerankScore": float((topic_search_rows.get(topic_id) or {}).get("rerankScore") or 0.0),
-                    "bestChunk": (topic_search_rows.get(topic_id) or {}).get("bestChunk"),
-                    "noteWeight": round(min(0.26, note_weight_by_topic.get(topic_id, 0.0)), 6),
-                    "sessionBoosted": topic_id in session_topic_ids,
-                }
-            )
-        topic_rows.sort(key=lambda item: float(item["score"]), reverse=True)
-        topic_rows = topic_rows[:limitTopics]
-
-        task_rows: list[dict[str, Any]] = []
-        for task_id, base_score in task_base_score.items():
-            task = task_map.get(task_id)
-            if not task:
-                continue
-            score = base_score
-            score += min(0.26, note_weight_by_task.get(task_id, 0.0))
-            if task_id in session_task_ids:
-                score += 0.1
-            task_rows.append(
-                {
-                    "id": task.id,
-                    "topicId": task.topicId,
-                    "title": task.title,
-                    "status": task.status,
-                    "score": round(score, 6),
-                    "vectorScore": float((task_search_rows.get(task_id) or {}).get("vectorScore") or 0.0),
-                    "bm25Score": float((task_search_rows.get(task_id) or {}).get("bm25Score") or 0.0),
-                    "lexicalScore": float((task_search_rows.get(task_id) or {}).get("lexicalScore") or 0.0),
-                    "rrfScore": float((task_search_rows.get(task_id) or {}).get("rrfScore") or 0.0),
-                    "rerankScore": float((task_search_rows.get(task_id) or {}).get("rerankScore") or 0.0),
-                    "bestChunk": (task_search_rows.get(task_id) or {}).get("bestChunk"),
-                    "noteWeight": round(min(0.26, note_weight_by_task.get(task_id, 0.0)), 6),
-                    "sessionBoosted": task_id in session_task_ids,
-                }
-            )
-        task_rows.sort(key=lambda item: float(item["score"]), reverse=True)
-        task_rows = task_rows[:limitTasks]
-
-        log_rows: list[dict[str, Any]] = []
-        for log_id, base_score in log_base_score.items():
-            entry = log_map.get(log_id)
-            if not entry:
-                continue
-            score = base_score
-            note_count = int(note_count_by_log.get(log_id) or 0)
-            note_weight = min(0.24, 0.06 * note_count)
-            score += note_weight
-            if log_id in session_log_ids:
-                score += 0.08
-            log_rows.append(
-                {
-                    "id": entry.id,
-                    "topicId": entry.topicId,
-                    "taskId": entry.taskId,
-                    "type": entry.type,
-                    "agentId": entry.agentId,
-                    "agentLabel": entry.agentLabel,
-                    "summary": _clip(_sanitize_log_text(entry.summary or ""), 140),
-                    "content": _clip(_sanitize_log_text(entry.summary or ""), 320),
-                    "createdAt": entry.createdAt,
-                    "score": round(score, 6),
-                    "vectorScore": float((log_search_rows.get(log_id) or {}).get("vectorScore") or 0.0),
-                    "bm25Score": float((log_search_rows.get(log_id) or {}).get("bm25Score") or 0.0),
-                    "lexicalScore": float((log_search_rows.get(log_id) or {}).get("lexicalScore") or 0.0),
-                    "rrfScore": float((log_search_rows.get(log_id) or {}).get("rrfScore") or 0.0),
-                    "rerankScore": float((log_search_rows.get(log_id) or {}).get("rerankScore") or 0.0),
-                    "bestChunk": (log_search_rows.get(log_id) or {}).get("bestChunk"),
-                    "noteCount": note_count,
-                    "noteWeight": round(note_weight, 6),
-                    "sessionBoosted": log_id in session_log_ids,
-                }
-            )
-        log_rows.sort(
-            key=lambda item: (
-                float(item["score"]),
-                item.get("createdAt") or "",
-            ),
-            reverse=True,
-        )
-        log_rows = log_rows[:limitLogs]
-
-        note_rows: list[dict[str, Any]] = []
-        emitted_note_ids: set[str] = set()
-        for item in log_rows:
-            log_id = str(item.get("id") or "")
-            for note in note_items_by_log.get(log_id, [])[:3]:
-                if note.id in emitted_note_ids:
-                    continue
-                emitted_note_ids.add(note.id)
-                note_rows.append(
-                    {
-                        "id": note.id,
-                        "relatedLogId": note.relatedLogId,
-                        "topicId": note.topicId,
-                        "taskId": note.taskId,
-                        "summary": _clip(_sanitize_log_text(note.summary or ""), 140),
-                        "content": _clip(_sanitize_log_text(note.summary or ""), 280),
-                        "createdAt": note.createdAt,
-                    }
-                )
-            if len(note_rows) >= 160:
-                break
-
-        return {
-            "query": query,
-            "mode": search_result.get("mode") or "lexical",
-            "topics": topic_rows,
-            "tasks": task_rows,
-            "logs": log_rows,
-            "notes": note_rows,
-            "matchedTopicIds": [item["id"] for item in topic_rows],
-            "matchedTaskIds": [item["id"] for item in task_rows],
-            "matchedLogIds": [item["id"] for item in log_rows],
-        }
 
 
 @app.post("/api/reindex", dependencies=[Depends(require_token)], tags=["classifier"])

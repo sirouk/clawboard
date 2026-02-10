@@ -112,12 +112,15 @@ test("unified view uses task=2 and topic=4 load increments", async ({ page, requ
   await taskButton.click();
 
   await expect(page.locator(`[data-log-id="${hiddenTaskLogId}"]`)).toHaveCount(0);
-  await page.getByRole("button", { name: "Load 2 more" }).first().click();
+  const taskCard = page.locator(`[data-task-card-id="${taskId}"]`).first();
+  await taskCard.getByRole("button", { name: "Load older" }).first().click();
   await expect(page.locator(`[data-log-id="${hiddenTaskLogId}"]`)).toBeVisible();
 
+  // Avoid ambiguous "Load older" buttons by collapsing the task before testing topic chat.
+  await taskButton.click();
+
   await expect(page.locator(`[data-log-id="${hiddenTopicLogId}"]`)).toHaveCount(0);
-  await page.getByTestId(`toggle-topic-chat-${topicId}`).click();
-  await page.getByRole("button", { name: "Load 4 more" }).first().waitFor();
-  await page.getByRole("button", { name: "Load 4 more" }).first().click();
+  const topicCard = page.locator(`[data-topic-card-id="${topicId}"]`).first();
+  await topicCard.getByRole("button", { name: "Load older" }).first().click();
   await expect(page.getByText(hiddenTopicLogContent, { exact: true })).toBeVisible();
 });

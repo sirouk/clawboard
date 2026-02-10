@@ -158,6 +158,19 @@ OPENCLAW_MEMORY_DB_PATH = os.environ.get("OPENCLAW_MEMORY_DB_PATH")
 OPENCLAW_MEMORY_DB_FALLBACK = os.environ.get("OPENCLAW_MEMORY_DB_FALLBACK", "/data/openclaw-memory/main.sqlite")
 OPENCLAW_MEMORY_MAX_HITS = int(os.environ.get("OPENCLAW_MEMORY_MAX_HITS", "6"))
 
+# Topic/task digests (durable summaries) - optional but recommended.
+CLASSIFIER_DIGEST_ENABLED = (os.environ.get("CLASSIFIER_DIGEST_ENABLED", "1") or "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CLASSIFIER_DIGEST_MIN_SECONDS = float(os.environ.get("CLASSIFIER_DIGEST_MIN_SECONDS", "900"))
+CLASSIFIER_DIGEST_MAX_PER_CYCLE = int(os.environ.get("CLASSIFIER_DIGEST_MAX_PER_CYCLE", "2"))
+CLASSIFIER_DIGEST_TOPIC_LOOKBACK_LOGS = int(os.environ.get("CLASSIFIER_DIGEST_TOPIC_LOOKBACK_LOGS", "120"))
+CLASSIFIER_DIGEST_TASK_LOOKBACK_LOGS = int(os.environ.get("CLASSIFIER_DIGEST_TASK_LOOKBACK_LOGS", "90"))
+CLASSIFIER_DIGEST_MAX_CHARS = int(os.environ.get("CLASSIFIER_DIGEST_MAX_CHARS", "1800"))
+
 _embedder = None
 _embed_failed = False
 _embed_cache: dict[str, np.ndarray] = {}
@@ -1932,6 +1945,368 @@ def patch_log(log_id: str, patch: dict):
     return r.json()
 
 
+def patch_topic(topic_id: str, patch: dict):
+    r = requests.patch(
+        f"{CLAWBOARD_API_BASE}/api/topics/{topic_id}",
+        headers=headers_clawboard(),
+        data=json.dumps(patch),
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def patch_task(task_id: str, patch: dict):
+    r = requests.patch(
+        f"{CLAWBOARD_API_BASE}/api/tasks/{task_id}",
+        headers=headers_clawboard(),
+        data=json.dumps(patch),
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _now_iso_ms() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _iso_ts(value: str | None) -> float | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        candidate = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        dt = datetime.fromisoformat(candidate)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return float(dt.timestamp())
+    except Exception:
+        return None
+
+
+def _is_future_iso(value: str | None, now_ts: float) -> bool:
+    ts = _iso_ts(value)
+    if ts is None:
+        return False
+    return ts > now_ts
+
+
+def _digest_stale(updated_at: str | None, digest: str | None, digest_updated_at: str | None) -> bool:
+    if not digest or not str(digest).strip():
+        return True
+    u_ts = _iso_ts(updated_at)
+    d_ts = _iso_ts(digest_updated_at)
+    if u_ts is None or d_ts is None:
+        return True
+    if u_ts <= d_ts:
+        return False
+    # Throttle: only refresh if the digest itself is old enough.
+    return (time.time() - d_ts) >= max(60.0, CLASSIFIER_DIGEST_MIN_SECONDS)
+
+
+def _topic_digest_input(topic: dict, tasks: list[dict], logs: list[dict]) -> dict:
+    def compact_task(t: dict) -> dict:
+        return {
+            "id": t.get("id"),
+            "title": str(t.get("title") or "").strip(),
+            "status": str(t.get("status") or "").strip(),
+            "priority": str(t.get("priority") or "").strip(),
+            "dueDate": t.get("dueDate"),
+            "pinned": bool(t.get("pinned") or False),
+        }
+
+    def compact_log(e: dict) -> dict:
+        who = e.get("agentLabel") or e.get("agentId")
+        if str(e.get("agentId") or "").strip().lower() == "user":
+            who = "User"
+        text = _strip_transport_noise(e.get("summary") or e.get("content") or "")
+        return {"id": e.get("id"), "who": who, "text": text[:260], "createdAt": e.get("createdAt")}
+
+    active_tasks: list[dict] = []
+    for t in tasks:
+        status = str(t.get("status") or "").strip().lower()
+        if status in {"doing", "blocked"}:
+            active_tasks.append(t)
+    if not active_tasks:
+        active_tasks = tasks
+
+    convo = [e for e in logs if str(e.get("type") or "").strip().lower() == "conversation"]
+    notes = [e for e in logs if str(e.get("type") or "").strip().lower() == "note" and e.get("relatedLogId")]
+
+    payload = {
+        "topic": {
+            "id": topic.get("id"),
+            "name": str(topic.get("name") or "").strip(),
+            "description": str(topic.get("description") or "").strip(),
+            "priority": str(topic.get("priority") or "").strip(),
+        },
+        "activeTasks": [compact_task(t) for t in active_tasks[:10]],
+        "recentConversation": [compact_log(e) for e in convo[:18]],
+        "recentNotes": [
+            {
+                "id": n.get("id"),
+                "relatedLogId": n.get("relatedLogId"),
+                "text": _strip_transport_noise(n.get("content") or n.get("summary") or "")[:260],
+                "createdAt": n.get("createdAt"),
+            }
+            for n in notes[:18]
+        ],
+        "outputSpec": {
+            "format": "plain_text",
+            "maxLines": 12,
+            "style": "concise bullets, durable facts, include next steps and open questions when present",
+            "maxChars": CLASSIFIER_DIGEST_MAX_CHARS,
+        },
+    }
+    return payload
+
+
+def _task_digest_input(task: dict, logs: list[dict]) -> dict:
+    convo = [e for e in logs if str(e.get("type") or "").strip().lower() == "conversation"]
+    notes = [e for e in logs if str(e.get("type") or "").strip().lower() == "note" and e.get("relatedLogId")]
+
+    payload = {
+        "task": {
+            "id": task.get("id"),
+            "topicId": task.get("topicId"),
+            "title": str(task.get("title") or "").strip(),
+            "status": str(task.get("status") or "").strip(),
+            "priority": str(task.get("priority") or "").strip(),
+            "dueDate": task.get("dueDate"),
+        },
+        "recentConversation": [
+            {
+                "id": e.get("id"),
+                "who": ("User" if str(e.get("agentId") or "").strip().lower() == "user" else (e.get("agentLabel") or e.get("agentId"))),
+                "text": _strip_transport_noise(e.get("summary") or e.get("content") or "")[:260],
+                "createdAt": e.get("createdAt"),
+            }
+            for e in convo[:16]
+        ],
+        "recentNotes": [
+            {
+                "id": n.get("id"),
+                "relatedLogId": n.get("relatedLogId"),
+                "text": _strip_transport_noise(n.get("content") or n.get("summary") or "")[:260],
+                "createdAt": n.get("createdAt"),
+            }
+            for n in notes[:16]
+        ],
+        "outputSpec": {
+            "format": "plain_text",
+            "maxLines": 10,
+            "style": "concise bullets, current state, decisions, next actions, blockers",
+            "maxChars": CLASSIFIER_DIGEST_MAX_CHARS,
+        },
+    }
+    return payload
+
+
+def call_digest(kind: str, payload: dict) -> str | None:
+    """Best-effort digest generation. Uses LLM when enabled, else returns None."""
+    if not _llm_enabled():
+        return None
+    try:
+        body = {
+            "model": OPENCLAW_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You write durable, high-signal digests for an ops board. "
+                        "Return plain text only (no markdown code fences). "
+                        "Use bullet points. Be concise and specific. "
+                        "Prefer stable facts, decisions, and next actions. "
+                        "Do not hallucinate."
+                    ),
+                },
+                {"role": "user", "content": json.dumps(payload)},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 420,
+        }
+        r = requests.post(
+            f"{OPENCLAW_BASE_URL}/v1/chat/completions",
+            headers=oc_headers_with_session(_openclaw_internal_session_key(f"digest-{kind}")),
+            data=json.dumps(body),
+            timeout=22,
+        )
+        r.raise_for_status()
+        text = r.json()["choices"][0]["message"]["content"]
+        cleaned = _strip_transport_noise(text or "").strip()
+        # Strip accidental fences.
+        cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", cleaned).strip()
+        cleaned = re.sub(r"```\s*$", "", cleaned).strip()
+        if not cleaned:
+            return None
+        return cleaned[: max(200, CLASSIFIER_DIGEST_MAX_CHARS)].rstrip()
+    except Exception:
+        return None
+
+
+def heuristic_digest(kind: str, payload: dict) -> str | None:
+    """Cheap digest fallback (no LLM)."""
+    try:
+        lines: list[str] = []
+        if kind == "topic":
+            topic = payload.get("topic") or {}
+            name = str(topic.get("name") or "").strip()
+            if name:
+                lines.append(f"Topic: {name}")
+            tasks = payload.get("activeTasks") or []
+            if tasks:
+                lines.append("Active tasks:")
+                for t in tasks[:8]:
+                    title = str((t or {}).get("title") or "").strip()
+                    status = str((t or {}).get("status") or "").strip()
+                    if title:
+                        lines.append(f"- {title}{(' [' + status + ']') if status else ''}")
+            recent = payload.get("recentConversation") or []
+            if recent:
+                lines.append("Recent:")
+                for e in recent[:8]:
+                    who = str((e or {}).get("who") or "").strip() or "Agent"
+                    text = str((e or {}).get("text") or "").strip()
+                    if text:
+                        lines.append(f"- {who}: {text[:140]}")
+        else:
+            task = payload.get("task") or {}
+            title = str(task.get("title") or "").strip()
+            status = str(task.get("status") or "").strip()
+            if title:
+                lines.append(f"Task: {title}{(' [' + status + ']') if status else ''}")
+            recent = payload.get("recentConversation") or []
+            if recent:
+                lines.append("Recent:")
+                for e in recent[:8]:
+                    who = str((e or {}).get("who") or "").strip() or "Agent"
+                    text = str((e or {}).get("text") or "").strip()
+                    if text:
+                        lines.append(f"- {who}: {text[:140]}")
+        out = "\n".join(lines).strip()
+        if not out:
+            return None
+        return out[: max(200, CLASSIFIER_DIGEST_MAX_CHARS)].rstrip()
+    except Exception:
+        return None
+
+
+def process_digest_updates():
+    """Best-effort topic/task digest maintenance (bounded)."""
+    if not CLASSIFIER_DIGEST_ENABLED:
+        return
+    if not requests or not CLAWBOARD_TOKEN:
+        return
+    if CLASSIFIER_DIGEST_MAX_PER_CYCLE <= 0:
+        return
+
+    now_ts = time.time()
+    now_iso = _now_iso_ms()
+
+    updated = 0
+    try:
+        topics = list_topics()
+    except Exception:
+        return
+
+    # Prefer active topics with recent activity.
+    candidates: list[dict] = []
+    for t in topics:
+        status = str(t.get("status") or "active").strip().lower()
+        if status == "archived":
+            continue
+        if _is_future_iso(t.get("snoozedUntil"), now_ts):
+            continue
+        if not _digest_stale(t.get("updatedAt"), t.get("digest"), t.get("digestUpdatedAt")):
+            continue
+        if not str(t.get("id") or "").strip():
+            continue
+        candidates.append(t)
+
+    candidates.sort(
+        key=lambda t: (
+            0 if bool(t.get("pinned") or False) else 1,
+            0 if str(t.get("priority") or "medium").strip().lower() == "high" else 1,
+            -(float(_iso_ts(t.get("updatedAt")) or 0.0)),
+        )
+    )
+
+    for topic in candidates:
+        if updated >= CLASSIFIER_DIGEST_MAX_PER_CYCLE:
+            break
+        topic_id = str(topic.get("id") or "").strip()
+        if not topic_id:
+            continue
+        try:
+            tasks = list_tasks(topic_id)
+        except Exception:
+            tasks = []
+        try:
+            logs = list_logs_by_topic(topic_id, limit=max(40, CLASSIFIER_DIGEST_TOPIC_LOOKBACK_LOGS), offset=0)
+        except Exception:
+            logs = []
+        payload = _topic_digest_input(topic, tasks, logs)
+        digest = call_digest("topic", payload) or heuristic_digest("topic", payload)
+        if not digest:
+            continue
+        prior = str(topic.get("digest") or "").strip()
+        if prior and prior.strip() == digest.strip():
+            # Still record freshness so we don't re-run constantly.
+            try:
+                patch_topic(topic_id, {"digestUpdatedAt": now_iso})
+            except Exception:
+                pass
+            continue
+        try:
+            patch_topic(topic_id, {"digest": digest, "digestUpdatedAt": now_iso})
+            updated += 1
+        except Exception:
+            continue
+
+        # If we have budget, update one important task digest inside this topic.
+        if updated >= CLASSIFIER_DIGEST_MAX_PER_CYCLE:
+            break
+        task_candidates: list[dict] = []
+        for task in tasks:
+            status = str(task.get("status") or "").strip().lower()
+            if status == "done" and not bool(task.get("pinned") or False):
+                continue
+            if _is_future_iso(task.get("snoozedUntil"), now_ts):
+                continue
+            if not _digest_stale(task.get("updatedAt"), task.get("digest"), task.get("digestUpdatedAt")):
+                continue
+            if str(task.get("topicId") or "").strip() != topic_id:
+                continue
+            task_candidates.append(task)
+        task_candidates.sort(
+            key=lambda task: (
+                0 if bool(task.get("pinned") or False) else 1,
+                0 if str(task.get("status") or "").strip().lower() in {"blocked", "doing"} else 1,
+                0 if str(task.get("priority") or "medium").strip().lower() == "high" else 1,
+                -(float(_iso_ts(task.get("updatedAt")) or 0.0)),
+            )
+        )
+        if task_candidates:
+            task = task_candidates[0]
+            task_id = str(task.get("id") or "").strip()
+            if task_id:
+                try:
+                    tlogs = list_logs_by_task(task_id, limit=max(30, CLASSIFIER_DIGEST_TASK_LOOKBACK_LOGS), offset=0)
+                except Exception:
+                    tlogs = []
+                tpayload = _task_digest_input(task, tlogs)
+                tdigest = call_digest("task", tpayload) or heuristic_digest("task", tpayload)
+                if tdigest:
+                    try:
+                        patch_task(task_id, {"digest": tdigest, "digestUpdatedAt": now_iso})
+                        updated += 1
+                    except Exception:
+                        pass
+
+
 def ensure_topic_index_seeded():
     """Populate embeddings index for existing topics (best-effort)."""
     global _topic_index_seeded_at
@@ -2045,7 +2420,7 @@ def topic_candidates(query_text: str, k: int = 6):
         normalized_status = str(status or "").strip().lower()
         if normalized_status == "archived":
             score = max(0.0, score - 0.22)
-        elif normalized_status == "paused":
+        elif normalized_status in {"snoozed", "paused"}:
             score = max(0.0, score - 0.08)
         out.append(
             {
@@ -2318,24 +2693,26 @@ def call_classifier(
             "continuity": continuity,
             "pendingIds": pending_ids,
             "outputTemplate": output_template,
-		            "instructions": (
-		                "Return STRICT JSON only (no markdown, no code fences, no leading/trailing text). "
-		                "Output MUST be a single JSON object that matches outputTemplate EXACTLY: "
-		                "same keys, same nesting, no extra keys. Replace placeholder values with real values. "
-		                "Context: pendingIds correspond to ONE coherent request/response bundle. "
-		                "Anchor on the earliest meaningful user intent within that bundle; "
-		                "if the earliest user turn is only an affirmation ('yes', 'ok', 'do it'), "
-		                "anchor on the immediately preceding assistant plan in window. "
-		                "Rules: (1) Topic is MANDATORY. Always return a meaningful topic name, never generic placeholders. "
-		                "(2) Prefer an existing topic ONLY when it clearly matches the bundle's anchor intent + recent context. "
-		                "Candidates may include profileScore (0..1) which measures similarity between this bundle and the candidate's recent context; "
-		                "treat a very low profileScore as evidence AGAINST reusing that candidate. "
-		                "If continuity.isAmbiguousBundle is true, strongly prefer continuity.suggested unless the user clearly introduces a new intent. "
-		                "Do NOT pick an existing topic just because it exists or is the only candidate. "
-		                "(3) If no existing topic clearly fits, set topic.id=null and topic.create=true and propose a durable topic.name. "
-		                "(4) Topic names must be 1-5 words, noun-centric, human-readable; "
-		                "avoid generic names and avoid copying the first words of the user prompt. "
-		                "(5) Task is OPTIONAL. Only return/create a task when execution intent is explicit "
+            "instructions": (
+                "Return STRICT JSON only (no markdown, no code fences, no leading/trailing text). "
+                "Output MUST be a single JSON object that matches outputTemplate EXACTLY: "
+                "same keys, same nesting, no extra keys. Replace placeholder values with real values. "
+                "Context: pendingIds correspond to ONE coherent request/response bundle. "
+                "Anchor on the earliest meaningful user intent within that bundle; "
+                "if the earliest user turn is only an affirmation ('yes', 'ok', 'do it'), "
+                "anchor on the immediately preceding assistant plan in window. "
+                "Rules: (1) Topic is MANDATORY. Always return a meaningful topic name, never generic placeholders. "
+                "(2) Prefer an existing topic ONLY when it clearly matches the bundle's anchor intent + recent context. "
+                "Candidates may include profileScore (0..1) which measures similarity between this bundle and the candidate's recent context; "
+                "treat a very low profileScore as evidence AGAINST reusing that candidate. "
+                "Continuity: continuity.suggested is the last known routing for this session. "
+                "If continuity.isAmbiguousBundle is true, treat continuity.suggested as the default unless the user clearly starts a new thread. "
+                "Even when continuity.isAmbiguousBundle is false, prefer continuity.suggested when the bundle is a follow-up/elaboration on the same subject. "
+                "Do NOT pick an existing topic just because it exists or is the only candidate. "
+                "(3) If no existing topic clearly fits, set topic.id=null and topic.create=true and propose a durable topic.name. "
+                "(4) Topic names must be 1-5 words, noun-centric, human-readable; "
+                "avoid generic names and avoid copying the first words of the user prompt. "
+                "(5) Task is OPTIONAL. Only return/create a task when execution intent is explicit "
                 "(build/fix/implement/ship/next step) or the user confirms an assistant action plan. "
                 "(6) For recall/explanation/brainstorming/status chat, set task=null. "
                 "(7) If task intent exists, prefer an existing matching task before creating. "
@@ -3158,7 +3535,40 @@ def classify_session(session_key: str):
     if _is_affirmation(latest_user_text) or (not has_non_affirm_user):
         has_new_intent = False
 
-    if low_signal_followup and not has_new_intent:
+    ambiguous_bundle = bool(low_signal_followup and not has_new_intent)
+    explicit_new_thread = False
+    if latest_user_norm and any(
+        cue in latest_user_norm
+        for cue in (
+            "new thread",
+            "new topic",
+            "different topic",
+            "different question",
+            "unrelated",
+            "switching gears",
+            "separately",
+            "another topic",
+            "another thread",
+        )
+    ):
+        explicit_new_thread = True
+
+    # LLM mode sees intentionally small bundles to avoid contamination; without a continuity hint
+    # it can fragment follow-up questions into new topics. We fetch the server-side routing memory
+    # as a soft hint whenever we already have prior classifications in this session.
+    should_fetch_routing = False
+    if not forced_topic_id:
+        if ambiguous_bundle:
+            should_fetch_routing = True
+        elif _llm_enabled():
+            has_prior_classification = any(
+                ((it.get("classificationStatus") or "pending") == "classified") and bool(it.get("topicId"))
+                for it in (ctx_logs or [])
+                if isinstance(it, dict)
+            )
+            should_fetch_routing = bool(has_prior_classification)
+
+    if should_fetch_routing:
         session_routing = get_session_routing_memory(session_key)
         if session_routing and isinstance(session_routing.get("items"), list):
             items = [it for it in session_routing.get("items") if isinstance(it, dict)]
@@ -3192,7 +3602,7 @@ def classify_session(session_key: str):
                         }
                     )
                 continuity_prompt = {
-                    "isAmbiguousBundle": True,
+                    "isAmbiguousBundle": bool(ambiguous_bundle),
                     "suggested": {
                         "topicId": continuity_topic_id,
                         "topicName": continuity_topic_name,
@@ -3203,18 +3613,38 @@ def classify_session(session_key: str):
                     "recent": prompt_items,
                 }
 
+        # Hard continuity: low-signal follow-ups and high-similarity follow-ups should stick to the
+        # previously routed topic to avoid creating near-duplicate topics.
         if (not forced_topic_id) and continuity_topic_id:
-            try:
-                topics = list_topics()
-                if any(str(t.get("id") or "").strip() == continuity_topic_id for t in (topics or [])):
-                    forced_topic_id = continuity_topic_id
-                    forced_by_continuity = True
-            except Exception:
-                forced_by_continuity = False
+            should_force = False
+            if ambiguous_bundle:
+                should_force = True
+            elif _llm_enabled() and not explicit_new_thread and continuity_anchor and latest_user_text:
+                try:
+                    threshold = float(
+                        os.environ.get("CLASSIFIER_CONTINUITY_FORCE_THRESHOLD", "0.48") or "0.48"
+                    )
+                except Exception:
+                    threshold = 0.48
+                try:
+                    score = float(_late_interaction_score(latest_user_text, continuity_anchor))
+                except Exception:
+                    score = 0.0
+                if score >= threshold:
+                    should_force = True
+
+            if should_force:
+                try:
+                    topics = list_topics()
+                    if any(str(t.get("id") or "").strip() == continuity_topic_id for t in (topics or [])):
+                        forced_topic_id = continuity_topic_id
+                        forced_by_continuity = True
+                except Exception:
+                    forced_by_continuity = False
 
         # When a follow-up is low-signal, augment retrieval text with the last known anchor.
         # This improves task candidate selection in heuristic mode and gives the LLM a stable handle.
-        if continuity_anchor:
+        if ambiguous_bundle and continuity_anchor:
             text = (text + "\n\nPrior intent: " + continuity_anchor).strip()[-6000:]
 
     # Build a compact intent anchor to persist for future continuity decisions.
@@ -4086,6 +4516,15 @@ def main():
                     print(f"classifier: classify_session timeout for {sk} after {MAX_SESSION_SECONDS:.0f}s")
                 except Exception as e:
                     print(f"classifier: classify_session failed for {sk}: {e}")
+
+            # Digest maintenance is intentionally low priority. Only run when we have budget so
+            # topic/task routing stays responsive.
+            try:
+                remaining = max(0.0, CYCLE_BUDGET_SECONDS - (time.time() - cycle_start))
+                if remaining >= 8.0:
+                    process_digest_updates()
+            except Exception:
+                pass
 
         finally:
             release_lock()

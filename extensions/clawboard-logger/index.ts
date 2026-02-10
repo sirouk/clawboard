@@ -854,6 +854,338 @@ export default function register(api: OpenClawPluginApi) {
     return data as ApiSearchResponse;
   }
 
+  function toolJsonResult(payload: unknown) {
+    return {
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+      details: payload,
+    };
+  }
+
+  async function toolFetchJson(params: {
+    pathname: string;
+    method?: string;
+    query?: Record<string, string | number | boolean | undefined | null>;
+    body?: unknown;
+    timeoutMs?: number;
+  }) {
+    const method = (params.method || "GET").toUpperCase();
+    const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : 8000;
+    try {
+      const url = new URL(`${baseUrl}${params.pathname}`);
+      if (params.query) {
+        for (const [key, value] of Object.entries(params.query)) {
+          if (value === undefined || value === null || value === "") continue;
+          url.searchParams.set(key, String(value));
+        }
+      }
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), timeoutMs);
+      const res = await fetch(url.toString(), {
+        method,
+        headers: apiHeaders,
+        signal: controller.signal,
+        ...(method === "GET" || method === "HEAD" ? {} : { body: JSON.stringify(params.body ?? {}) }),
+      });
+      clearTimeout(t);
+      const text = await res.text();
+      let data: unknown = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text ? { raw: text } : null;
+      }
+      return { ok: res.ok, status: res.status, data };
+    } catch (err) {
+      return { ok: false, status: 0, data: { error: String(err) } };
+    }
+  }
+
+  function coerceBool(value: unknown, fallback = false) {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+      const v = value.trim().toLowerCase();
+      if (v === "true" || v === "1" || v === "yes" || v === "on") return true;
+      if (v === "false" || v === "0" || v === "no" || v === "off") return false;
+    }
+    return fallback;
+  }
+
+  function coerceInt(value: unknown, fallback: number, min: number, max: number) {
+    let n: number | undefined;
+    if (typeof value === "number" && Number.isFinite(value)) n = Math.floor(value);
+    if (typeof value === "string" && value.trim()) {
+      const parsed = Number.parseInt(value.trim(), 10);
+      if (Number.isFinite(parsed)) n = parsed;
+    }
+    if (n === undefined) return fallback;
+    return Math.max(min, Math.min(max, n));
+  }
+
+  function registerAgentTools() {
+    const api2 = api as unknown as { registerTool?: (tool: unknown, opts?: { names?: string[]; optional?: boolean }) => void };
+    if (typeof api2.registerTool !== "function") return;
+
+    api2.registerTool(
+      (ctxTool: unknown) => {
+        const ctxObj = (ctxTool ?? {}) as { sessionKey?: unknown; agentId?: unknown };
+        const defaultSessionKey = typeof ctxObj.sessionKey === "string" ? ctxObj.sessionKey : undefined;
+        const agentId = typeof ctxObj.agentId === "string" ? ctxObj.agentId : undefined;
+
+        const tools: unknown[] = [];
+
+        tools.push({
+          name: "clawboard.search",
+          label: "Clawboard Search",
+          description: "Search Clawboard topics, tasks, logs, and curated notes (hybrid semantic + lexical).",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              q: { type: "string", description: "Search query." },
+              sessionKey: { type: "string", description: "Optional continuity session key override." },
+              topicId: { type: "string", description: "Optional topic scope restriction." },
+              includePending: { type: "boolean", description: "Include pending (unclassified) logs." },
+              limitTopics: { type: "integer", description: "Max topic matches." },
+              limitTasks: { type: "integer", description: "Max task matches." },
+              limitLogs: { type: "integer", description: "Max log matches." },
+            },
+            required: ["q"],
+          },
+          async execute(_toolCallId: string, params: Record<string, unknown>) {
+            const q = typeof params.q === "string" ? params.q.trim() : "";
+            if (!q) return toolJsonResult({ ok: false, error: "q required" });
+            const sk =
+              typeof params.sessionKey === "string" && params.sessionKey.trim()
+                ? params.sessionKey.trim()
+                : defaultSessionKey;
+            const includePending = coerceBool(params.includePending, true);
+            const topicId = typeof params.topicId === "string" ? params.topicId.trim() : "";
+            const limitTopics = coerceInt(params.limitTopics, 24, 1, 2000);
+            const limitTasks = coerceInt(params.limitTasks, 48, 1, 5000);
+            const limitLogs = coerceInt(params.limitLogs, 360, 10, 5000);
+            const res = await toolFetchJson({
+              pathname: "/api/search",
+              query: {
+                q,
+                sessionKey: sk,
+                topicId: topicId || undefined,
+                includePending,
+                limitTopics,
+                limitTasks,
+                limitLogs,
+              },
+            });
+            return toolJsonResult(res);
+          },
+        });
+
+        tools.push({
+          name: "clawboard.context",
+          label: "Clawboard Context",
+          description: "Get a prompt-ready layered context block from Clawboard (working set + continuity + optional recall).",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              q: { type: "string", description: "Current user query or retrieval hint (optional)." },
+              sessionKey: { type: "string", description: "Optional continuity session key override." },
+              mode: { type: "string", description: "auto|cheap|full (default auto)." },
+              maxChars: { type: "integer", description: "Max chars for returned block." },
+              workingSetLimit: { type: "integer", description: "Working set item limit." },
+              timelineLimit: { type: "integer", description: "Timeline line limit." },
+            },
+          },
+          async execute(_toolCallId: string, params: Record<string, unknown>) {
+            const q = typeof params.q === "string" ? params.q.trim() : "";
+            const sk =
+              typeof params.sessionKey === "string" && params.sessionKey.trim()
+                ? params.sessionKey.trim()
+                : defaultSessionKey;
+            const mode =
+              typeof params.mode === "string" && params.mode.trim()
+                ? params.mode.trim()
+                : "auto";
+            const maxChars = coerceInt(params.maxChars, 6000, 400, 12000);
+            const workingSetLimit = coerceInt(params.workingSetLimit, 8, 0, 40);
+            const timelineLimit = coerceInt(params.timelineLimit, 8, 0, 40);
+            const res = await toolFetchJson({
+              pathname: "/api/context",
+              query: {
+                q: q || "current conversation continuity, active topics, active tasks, and curated notes",
+                sessionKey: sk,
+                mode,
+                maxChars,
+                workingSetLimit,
+                timelineLimit,
+              },
+            });
+            return toolJsonResult(res);
+          },
+        });
+
+        tools.push({
+          name: "clawboard.get_topic",
+          label: "Get Clawboard Topic",
+          description: "Fetch a Clawboard topic by id.",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: { id: { type: "string", description: "Topic id." } },
+            required: ["id"],
+          },
+          async execute(_toolCallId: string, params: Record<string, unknown>) {
+            const id = typeof params.id === "string" ? params.id.trim() : "";
+            if (!id) return toolJsonResult({ ok: false, error: "id required" });
+            const res = await toolFetchJson({ pathname: `/api/topics/${encodeURIComponent(id)}` });
+            return toolJsonResult(res);
+          },
+        });
+
+        tools.push({
+          name: "clawboard.get_task",
+          label: "Get Clawboard Task",
+          description: "Fetch a Clawboard task by id.",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: { id: { type: "string", description: "Task id." } },
+            required: ["id"],
+          },
+          async execute(_toolCallId: string, params: Record<string, unknown>) {
+            const id = typeof params.id === "string" ? params.id.trim() : "";
+            if (!id) return toolJsonResult({ ok: false, error: "id required" });
+            const res = await toolFetchJson({ pathname: `/api/tasks/${encodeURIComponent(id)}` });
+            return toolJsonResult(res);
+          },
+        });
+
+        tools.push({
+          name: "clawboard.get_log",
+          label: "Get Clawboard Log",
+          description: "Fetch a Clawboard log entry by id (optionally including raw payload).",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              id: { type: "string", description: "Log id." },
+              includeRaw: { type: "boolean", description: "Include raw payload (can be large)." },
+            },
+            required: ["id"],
+          },
+          async execute(_toolCallId: string, params: Record<string, unknown>) {
+            const id = typeof params.id === "string" ? params.id.trim() : "";
+            if (!id) return toolJsonResult({ ok: false, error: "id required" });
+            const includeRaw = coerceBool(params.includeRaw, false);
+            const res = await toolFetchJson({
+              pathname: `/api/log/${encodeURIComponent(id)}`,
+              query: { includeRaw },
+            });
+            return toolJsonResult(res);
+          },
+        });
+
+        tools.push({
+          name: "clawboard.create_note",
+          label: "Create Clawboard Note",
+          description: "Create a curated note attached to an existing log entry (high-weight retrieval signal).",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              relatedLogId: { type: "string", description: "Log id this note attaches to." },
+              text: { type: "string", description: "Note text (concise, durable, factual)." },
+              topicId: { type: "string", description: "Optional explicit topic id." },
+              taskId: { type: "string", description: "Optional explicit task id." },
+            },
+            required: ["relatedLogId", "text"],
+          },
+          async execute(_toolCallId: string, params: Record<string, unknown>) {
+            const relatedLogId = typeof params.relatedLogId === "string" ? params.relatedLogId.trim() : "";
+            const text = typeof params.text === "string" ? sanitizeMessageContent(params.text).trim() : "";
+            if (!relatedLogId) return toolJsonResult({ ok: false, error: "relatedLogId required" });
+            if (!text) return toolJsonResult({ ok: false, error: "text required" });
+            const clipped = clip(text, 1600);
+            const topicId = typeof params.topicId === "string" ? params.topicId.trim() : "";
+            const taskId = typeof params.taskId === "string" ? params.taskId.trim() : "";
+            const payload = {
+              type: "note",
+              relatedLogId,
+              topicId: topicId || undefined,
+              taskId: taskId || undefined,
+              content: clipped,
+              summary: summarize(clipped),
+              createdAt: new Date().toISOString(),
+              agentId: agentId || "assistant",
+              agentLabel: "OpenClaw",
+              source: {
+                sessionKey: defaultSessionKey,
+              },
+            };
+            const res = await toolFetchJson({
+              pathname: "/api/log",
+              method: "POST",
+              body: payload,
+            });
+            return toolJsonResult(res);
+          },
+        });
+
+        tools.push({
+          name: "clawboard.update_task",
+          label: "Update Clawboard Task",
+          description: "Patch a task (status/priority/due/pin/snooze/tags) without needing the full task payload.",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              id: { type: "string", description: "Task id." },
+              status: { type: "string", description: "todo|doing|blocked|done" },
+              priority: { type: "string", description: "low|medium|high" },
+              dueDate: { type: "string", description: "ISO due date" },
+              pinned: { type: "boolean", description: "Pin/unpin task" },
+              snoozedUntil: { type: "string", description: "ISO snooze-until timestamp (nullable string to clear)" },
+              tags: { type: "array", items: { type: "string" }, description: "Tags list" },
+            },
+            required: ["id"],
+          },
+          async execute(_toolCallId: string, params: Record<string, unknown>) {
+            const id = typeof params.id === "string" ? params.id.trim() : "";
+            if (!id) return toolJsonResult({ ok: false, error: "id required" });
+            const patch: Record<string, unknown> = {};
+            if (typeof params.status === "string" && params.status.trim()) patch.status = params.status.trim();
+            if (typeof params.priority === "string" && params.priority.trim()) patch.priority = params.priority.trim();
+            if (typeof params.dueDate === "string" && params.dueDate.trim()) patch.dueDate = params.dueDate.trim();
+            if (typeof params.pinned === "boolean") patch.pinned = params.pinned;
+            if (typeof params.snoozedUntil === "string") patch.snoozedUntil = params.snoozedUntil.trim() || null;
+            if (Array.isArray(params.tags)) patch.tags = params.tags.filter((t) => typeof t === "string").map((t) => t.trim()).filter(Boolean);
+            if (Object.keys(patch).length === 0) return toolJsonResult({ ok: false, error: "no patch fields provided" });
+            const res = await toolFetchJson({
+              pathname: `/api/tasks/${encodeURIComponent(id)}`,
+              method: "PATCH",
+              body: patch,
+            });
+            return toolJsonResult(res);
+          },
+        });
+
+        return tools;
+      },
+      {
+        names: [
+          "clawboard.search",
+          "clawboard.context",
+          "clawboard.get_topic",
+          "clawboard.get_task",
+          "clawboard.get_log",
+          "clawboard.create_note",
+          "clawboard.update_task",
+        ],
+      },
+    );
+  }
+
+  registerAgentTools();
+
   function extractUpstreamMemorySignals(prompt: string | undefined, messages: unknown[] | undefined) {
     const memoryLines: string[] = [];
     const turnLines: string[] = [];
@@ -1032,6 +1364,30 @@ export default function register(api: OpenClawPluginApi) {
     return clip(block, contextMaxChars);
   }
 
+  async function retrieveContextViaContextApi(
+    query: string,
+    sessionKey: string | undefined,
+  ) {
+    const normalizedQuery = clip(normalizeWhitespace(sanitizeMessageContent(query)), 500);
+    if (!normalizedQuery) return undefined;
+    const payload = await getJson("/api/context", {
+      q: normalizedQuery,
+      sessionKey,
+      mode: "auto",
+      includePending: 1,
+      maxChars: contextMaxChars,
+      // Working set should be a bit larger than semantic shortlist.
+      workingSetLimit: Math.max(6, contextTaskLimit),
+      timelineLimit: contextLogLimit,
+    });
+    if (!payload || typeof payload !== "object") return undefined;
+    const block = (payload as { block?: unknown }).block;
+    if (typeof block === "string" && block.trim().length > 0) {
+      return block.trim();
+    }
+    return undefined;
+  }
+
   async function retrieveContext(
     query: string,
     sessionKey: string | undefined,
@@ -1196,10 +1552,18 @@ export default function register(api: OpenClawPluginApi) {
         ? clip(cleanInput, 320)
         : "current conversation continuity, active topics, active tasks, and curated notes";
     const upstream = extractUpstreamMemorySignals(event.prompt, event.messages);
-    const context = await Promise.race([
-      retrieveContext(retrievalQuery, effectiveSessionKey ?? ctx?.sessionKey, upstream),
-      sleep(CONTEXT_TOTAL_BUDGET_MS).then(() => undefined),
-    ]);
+    const startedAt = nowMs();
+    let context = await retrieveContextViaContextApi(retrievalQuery, effectiveSessionKey ?? ctx?.sessionKey);
+    if (!context) {
+      const remaining = Math.max(0, CONTEXT_TOTAL_BUDGET_MS - (nowMs() - startedAt));
+      // Back-compat: older servers won't have /api/context yet.
+      if (remaining > 250) {
+        context = await Promise.race([
+          retrieveContext(retrievalQuery, effectiveSessionKey ?? ctx?.sessionKey, upstream),
+          sleep(remaining).then(() => undefined),
+        ]);
+      }
+    }
     if (!context) return;
     const prependContext = [
       CLAWBOARD_CONTEXT_BEGIN,

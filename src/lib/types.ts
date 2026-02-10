@@ -8,7 +8,8 @@ export type Topic = {
   color?: string;
   description?: string;
   priority?: "low" | "medium" | "high";
-  status?: "active" | "paused" | "archived";
+  // "paused" is a legacy alias retained for backward compatibility.
+  status?: "active" | "snoozed" | "archived" | "paused";
   snoozedUntil?: string | null;
   tags?: string[];
   parentId?: string | null;

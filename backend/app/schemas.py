@@ -97,7 +97,7 @@ class TopicOut(ModelBase):
     color: Optional[str] = Field(description="Topic color #RRGGBB.", examples=["#FF8A4A"])
     description: Optional[str] = Field(description="Topic description.", examples=["Product and platform work."])
     priority: Optional[str] = Field(description="Priority (low | medium | high).", examples=["high"])
-    status: Optional[str] = Field(description="Status (active | paused | archived).", examples=["active"])
+    status: Optional[str] = Field(description="Status (active | snoozed | archived).", examples=["active"])
     snoozedUntil: Optional[str] = Field(
         description="ISO timestamp when a snoozed topic should re-activate (nullable).",
         examples=["2026-02-09T18:00:00.000Z"],
@@ -105,6 +105,16 @@ class TopicOut(ModelBase):
     tags: List[str] = Field(description="Freeform tags.", examples=[["product", "platform"]])
     parentId: Optional[str] = Field(description="Parent topic ID (for subtopics).", examples=["topic-1"])
     pinned: Optional[bool] = Field(description="Pinned topics sort to the top.", examples=[True])
+    digest: Optional[str] = Field(
+        default=None,
+        description="Durable topic digest (system-managed summary; optional).",
+        examples=["Focus: ship attachments + SSE watchdog; Next: roll out /api/context."],
+    )
+    digestUpdatedAt: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp when digest was last updated (nullable).",
+        examples=["2026-02-10T18:00:00.000Z"],
+    )
     createdAt: str = Field(description="ISO timestamp when the topic was created.", examples=["2026-02-01T14:00:00.000Z"])
     updatedAt: str = Field(description="ISO timestamp of last activity/update.", examples=["2026-02-03T20:05:00.000Z"])
 
@@ -119,6 +129,16 @@ class TaskOut(ModelBase):
     pinned: Optional[bool] = Field(description="Pinned tasks sort to the top.", examples=[True])
     priority: Optional[str] = Field(description="Priority (low | medium | high).", examples=["high"])
     dueDate: Optional[str] = Field(description="Optional due date (ISO).", examples=["2026-02-05T00:00:00.000Z"])
+    digest: Optional[str] = Field(
+        default=None,
+        description="Durable task digest (system-managed summary; optional).",
+        examples=["Goal: make /api/context single-call; Progress: endpoint + plugin update merged."],
+    )
+    digestUpdatedAt: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp when digest was last updated (nullable).",
+        examples=["2026-02-10T18:00:00.000Z"],
+    )
     snoozedUntil: Optional[str] = Field(
         description="ISO timestamp when a snoozed task should re-activate (nullable).",
         examples=["2026-02-09T18:00:00.000Z"],
@@ -207,7 +227,7 @@ class TopicUpsert(BaseModel):
     color: Optional[str] = Field(default=None, description="Optional topic color #RRGGBB.", examples=["#FF8A4A"])
     description: Optional[str] = Field(default=None, description="Topic description.", examples=["Product work."])
     priority: Optional[str] = Field(default=None, description="Priority (low | medium | high).", examples=["high"])
-    status: Optional[str] = Field(default=None, description="Status (active | paused | archived).", examples=["active"])
+    status: Optional[str] = Field(default=None, description="Status (active | snoozed | archived).", examples=["active"])
     snoozedUntil: Optional[str] = Field(
         default=None,
         description="ISO timestamp when a snoozed topic should re-activate (nullable).",
@@ -351,6 +371,50 @@ class LogPatch(BaseModel):
     classificationStatus: Optional[str] = Field(default=None, description="pending|classified|failed")
     classificationAttempts: Optional[int] = Field(default=None, description="Attempt count")
     classificationError: Optional[str] = Field(default=None, description="Last error")
+
+
+class TopicPatch(BaseModel):
+    """Patch fields on an existing topic (partial update)."""
+
+    name: Optional[str] = Field(default=None, description="Topic name.")
+    color: Optional[str] = Field(default=None, description="Optional topic color #RRGGBB.")
+    description: Optional[str] = Field(default=None, description="Topic description.")
+    priority: Optional[str] = Field(default=None, description="Priority (low | medium | high).")
+    status: Optional[str] = Field(default=None, description="Status (active | snoozed | archived).")
+    snoozedUntil: Optional[str] = Field(default=None, description="ISO timestamp when snoozed topic re-activates.")
+    tags: Optional[List[str]] = Field(default=None, description="Freeform tags.")
+    parentId: Optional[str] = Field(default=None, description="Parent topic id.")
+    pinned: Optional[bool] = Field(default=None, description="Pinned topic.")
+    digest: Optional[str] = Field(default=None, description="Durable digest text (system-managed).")
+    digestUpdatedAt: Optional[str] = Field(default=None, description="Digest updated timestamp (ISO).")
+
+
+class TaskPatch(BaseModel):
+    """Patch fields on an existing task (partial update)."""
+
+    title: Optional[str] = Field(default=None, description="Task title.")
+    color: Optional[str] = Field(default=None, description="Optional task color #RRGGBB.")
+    status: Optional[str] = Field(default=None, description="Task status (todo | doing | blocked | done).")
+    priority: Optional[str] = Field(default=None, description="Priority (low | medium | high).")
+    dueDate: Optional[str] = Field(default=None, description="Optional due date (ISO).")
+    snoozedUntil: Optional[str] = Field(default=None, description="ISO timestamp when snoozed task re-activates.")
+    pinned: Optional[bool] = Field(default=None, description="Pinned task.")
+    tags: Optional[List[str]] = Field(default=None, description="Freeform tags.")
+    topicId: Optional[str] = Field(default=None, description="Parent topic id (nullable).")
+    digest: Optional[str] = Field(default=None, description="Durable digest text (system-managed).")
+    digestUpdatedAt: Optional[str] = Field(default=None, description="Digest updated timestamp (ISO).")
+
+
+class ContextResponse(BaseModel):
+    """Prompt-ready layered context for an agent turn (plus structured data)."""
+
+    ok: bool = Field(default=True, description="Whether context generation succeeded.")
+    sessionKey: Optional[str] = Field(default=None, description="Session key used for continuity.")
+    q: str = Field(default="", description="Normalized query used for retrieval.")
+    mode: str = Field(default="auto", description="Context mode (auto|cheap|full).")
+    layers: List[str] = Field(default_factory=list, description="Emitted context layers/sections.")
+    block: str = Field(default="", description="Prompt-ready context block (clipped to maxChars).")
+    data: Dict[str, Any] = Field(default_factory=dict, description="Structured context payload.")
 
 
 class DraftUpsert(BaseModel):
@@ -527,3 +591,28 @@ class SessionRoutingAppend(BaseModel):
     taskTitle: Optional[str] = Field(default=None, description="Chosen task title (best-effort).", max_length=200)
     anchor: Optional[str] = Field(default=None, description="Compact anchor text.", max_length=800)
     ts: Optional[str] = Field(default=None, description="Optional explicit timestamp (ISO).")
+
+
+class ClassifierReplayRequest(BaseModel):
+    """User-triggered classifier replay for an existing session thread."""
+
+    anchorLogId: str = Field(
+        description="Anchor log id (usually a user message) that starts the replay window.",
+        min_length=1,
+        max_length=128,
+        examples=["log-123"],
+    )
+    mode: Literal["bundle", "from_here"] = Field(
+        default="bundle",
+        description="Replay scope: 'bundle' replays one request/response bundle; 'from_here' replays until end of session.",
+        examples=["bundle"],
+    )
+
+
+class ClassifierReplayResponse(BaseModel):
+    ok: bool = Field(default=True, description="Whether the replay request was accepted.", examples=[True])
+    anchorLogId: str = Field(description="Anchor log id that started the replay.", examples=["log-123"])
+    sessionKey: str = Field(description="Session key being replayed (source.sessionKey).", examples=["clawboard:topic:topic-1"])
+    topicId: Optional[str] = Field(description="Resolved topic id for the session (if board-scoped).", examples=["topic-1"])
+    logCount: int = Field(description="Number of logs marked pending for replay.", examples=[6])
+    logIds: List[str] = Field(default_factory=list, description="IDs of logs marked pending for replay.")

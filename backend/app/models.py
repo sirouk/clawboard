@@ -47,7 +47,7 @@ class Topic(SQLModel, table=True):
     )
     status: Optional[str] = Field(
         default="active",
-        description="Status (active | paused | archived).",
+        description="Status (active | snoozed | archived).",
     )
     snoozedUntil: Optional[str] = Field(
         default=None,
@@ -65,6 +65,14 @@ class Topic(SQLModel, table=True):
     pinned: Optional[bool] = Field(
         default=False,
         description="Pinned topics sort to the top.",
+    )
+    digest: Optional[str] = Field(
+        default=None,
+        description="Durable topic digest (system-managed summary; optional).",
+    )
+    digestUpdatedAt: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp when digest was last updated (nullable).",
     )
     createdAt: str = Field(
         description="ISO timestamp when the topic was created.",
@@ -113,6 +121,14 @@ class Task(SQLModel, table=True):
     dueDate: Optional[str] = Field(
         default=None,
         description="Optional due date (ISO).",
+    )
+    digest: Optional[str] = Field(
+        default=None,
+        description="Durable task digest (system-managed summary; optional).",
+    )
+    digestUpdatedAt: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp when digest was last updated (nullable).",
     )
     createdAt: str = Field(
         description="ISO timestamp when the task was created.",

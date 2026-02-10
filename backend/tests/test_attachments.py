@@ -68,7 +68,7 @@ class AttachmentApiTests(unittest.TestCase):
         self.assertEqual(att.get("sizeBytes"), len(content))
 
         att_id = att["id"]
-        download = self.client.get(f"/api/attachments/{att_id}")
+        download = self.client.get(f"/api/attachments/{att_id}", headers=self.auth_headers)
         self.assertEqual(download.status_code, 200, download.text)
         self.assertEqual(download.content, content)
         self.assertTrue((download.headers.get("content-type") or "").startswith("text/plain"))
@@ -108,7 +108,7 @@ class AttachmentApiTests(unittest.TestCase):
         self.assertEqual(chat.status_code, 200, chat.text)
         self.assertTrue(chat.json().get("queued"))
 
-        logs = self.client.get(f"/api/log?sessionKey={session_key}&limit=20")
+        logs = self.client.get(f"/api/log?sessionKey={session_key}&limit=20", headers=self.auth_headers)
         self.assertEqual(logs.status_code, 200, logs.text)
         rows = logs.json()
         user_rows = [row for row in rows if (row.get("agentId") or "").lower() == "user" and row.get("content") == msg]

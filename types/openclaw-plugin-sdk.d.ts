@@ -60,6 +60,7 @@ declare module "openclaw/plugin-sdk" {
     logger: {
       warn: (message: string) => void;
     };
+    registerTool: (tool: unknown, opts?: { name?: string; names?: string[]; optional?: boolean }) => void;
     on(
       event: "message_received",
       handler: (event: PluginHookMessageReceivedEvent, ctx: PluginHookMessageContext) => void | Promise<void>

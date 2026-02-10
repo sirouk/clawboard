@@ -75,20 +75,22 @@ test("topic swipe actions (snooze/archive/delete) and reorder work in unified vi
   // Swipe left on Topic A to reveal actions.
   await swipeLeft(`[data-topic-card-id="${t1.id}"]`);
 
-  // Snooze should POST /api/topics with status paused and snoozedUntil.
+  // Snooze should open a modal and then POST /api/topics with status snoozed and snoozedUntil.
   const snoozeReq = page.waitForRequest((req) => {
     if (!req.url().includes("/api/topics") || req.method() !== "POST") return false;
     try {
       const body = req.postDataJSON() as Record<string, unknown>;
-      return body.id === t1.id && body.status === "paused" && typeof body.snoozedUntil === "string";
+      return body.id === t1.id && body.status === "snoozed" && typeof body.snoozedUntil === "string";
     } catch {
       return false;
     }
   });
-  await page.getByRole("button", { name: "SNOOZE" }).click();
+  await page.getByRole("button", { name: /^SNOOZE$/ }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.getByRole("button", { name: /Tomorrow/i }).click();
   await snoozeReq;
 
-  // When not searching, paused topics are hidden from the unified list.
+  // When not searching, snoozed topics are hidden from the unified list.
   await expect(page.locator(`[data-topic-card-id="${t1.id}"]`)).toHaveCount(0);
 
   // Make it visible via search, then swipe again and archive it.

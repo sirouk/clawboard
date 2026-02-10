@@ -81,6 +81,80 @@ async function fetchLogRaw(logId: string): Promise<string | null> {
   return promise;
 }
 
+async function writeClipboardText(text: string) {
+  const value = String(text ?? "");
+  if (!value) return;
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  if (typeof document === "undefined") return;
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "-1000px";
+  textarea.style.left = "0";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+}
+
+function CopyPill({ value, className }: { value: string; className?: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  return (
+    <button
+      type="button"
+      disabled={!value.trim()}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void (async () => {
+          try {
+            await writeClipboardText(value);
+            setState("copied");
+          } catch {
+            setState("failed");
+          } finally {
+            if (timerRef.current != null) window.clearTimeout(timerRef.current);
+            timerRef.current = window.setTimeout(() => setState("idle"), 1200);
+          }
+        })();
+      }}
+      aria-label={state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : "Copy message"}
+      title={state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : "Copy"}
+      className={`inline-flex items-center gap-1 rounded-full border border-[rgba(255,255,255,0.10)] bg-[rgba(10,12,16,0.35)] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)] transition hover:border-[rgba(255,90,45,0.35)] hover:text-[rgb(var(--claw-text))] disabled:cursor-not-allowed disabled:opacity-50 ${className ?? ""}`}
+    >
+      {state === "copied" ? (
+        <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" className="h-3.5 w-3.5">
+          <path
+            fillRule="evenodd"
+            d="M16.704 5.296a1 1 0 0 1 0 1.414l-7.25 7.25a1 1 0 0 1-1.414 0l-3.25-3.25a1 1 0 1 1 1.414-1.414l2.543 2.543 6.543-6.543a1 1 0 0 1 1.414 0Z"
+            clipRule="evenodd"
+          />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" className="h-3.5 w-3.5">
+          <path d="M6 2a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h1v-2H6V4h7v1h2V4a2 2 0 0 0-2-2H6Z" />
+          <path d="M9 7a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2H9Zm0 2h7v9H9V9Z" />
+        </svg>
+      )}
+      <span className="leading-none">{state === "copied" ? "Copied" : "Copy"}</span>
+    </button>
+  );
+}
+
 function normalizeInlineText(value: string | undefined | null) {
   return stripTransportNoise(value ?? "").replace(/\s+/g, " ").trim();
 }
@@ -302,6 +376,29 @@ export function LogList({
       });
     });
     return { ok: true, entry: updated };
+  };
+
+  const replayClassifierBundle = async (anchorLogId: string) => {
+    const id = String(anchorLogId ?? "").trim();
+    if (!id) return { ok: false, error: "Missing anchor log id." };
+    if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
+    const res = await apiFetch(
+      "/api/classifier/replay",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ anchorLogId: id, mode: "bundle" }),
+      },
+      token
+    );
+    if (!res.ok) {
+      const detail = await res.json().catch(() => null);
+      const msg = typeof detail?.detail === "string" ? detail.detail : "Failed to replay classifier.";
+      return { ok: false, error: msg };
+    }
+    const payload = (await res.json().catch(() => null)) as { logCount?: unknown } | null;
+    const logCount = typeof payload?.logCount === "number" ? payload.logCount : undefined;
+    return { ok: true, logCount };
   };
 
   const normalizedSearch = search.trim().toLowerCase();
@@ -634,6 +731,8 @@ export function LogList({
                   entry={entry}
                   topicLabel={topicsMap.get(entry.topicId ?? "") ?? "Off-topic"}
                   topics={topics}
+                  scopeTopicId={scopeTopicId}
+                  scopeTaskId={scopeTaskId}
                   showRawAll={showRawAll}
                   allowNotes={allowNotes}
                   allowDelete={allowDelete}
@@ -641,6 +740,7 @@ export function LogList({
                   onAddNote={addNote}
                   onDelete={deleteLogEntry}
                   onPatch={patchLogEntry}
+                  onReplayClassifier={replayClassifierBundle}
                   getTasksForTopic={getTasksForTopic}
                   ensureTasksForTopic={ensureTasksForTopic}
                   isTasksLoadingForTopic={isTasksLoadingForTopic}
@@ -677,6 +777,8 @@ function LogRow({
   entry,
   topicLabel,
   topics,
+  scopeTopicId,
+  scopeTaskId,
   showRawAll,
   allowNotes,
   allowDelete,
@@ -684,6 +786,7 @@ function LogRow({
   onAddNote,
   onDelete,
   onPatch,
+  onReplayClassifier,
   getTasksForTopic,
   ensureTasksForTopic,
   isTasksLoadingForTopic,
@@ -694,6 +797,8 @@ function LogRow({
   entry: LogEntry;
   topicLabel: string;
   topics: Topic[];
+  scopeTopicId?: string | null;
+  scopeTaskId?: string | null;
   showRawAll: boolean;
   allowNotes: boolean;
   allowDelete: boolean;
@@ -704,6 +809,7 @@ function LogRow({
     entry: LogEntry,
     patch: LogPatchPayload
   ) => Promise<{ ok: boolean; error?: string; entry?: LogEntry }>;
+  onReplayClassifier: (anchorLogId: string) => Promise<{ ok: boolean; error?: string; logCount?: number }>;
   getTasksForTopic: (topicId: string | null) => Task[];
   ensureTasksForTopic: (topicId: string | null) => Promise<void>;
   isTasksLoadingForTopic: (topicId: string | null) => boolean;
@@ -807,6 +913,20 @@ function LogRow({
     return logRawCache.has(entry.id) ? logRawCache.get(entry.id) ?? null : null;
   });
 
+  const baseCopyValue = useMemo(() => {
+    const content = String(entry.content ?? "").trim();
+    if (content) return content;
+    const raw = String(entry.raw ?? "").trim();
+    if (raw) return raw;
+    const summary = String(entry.summary ?? "").trim();
+    if (summary) return summary;
+    return "";
+  }, [entry.content, entry.raw, entry.summary]);
+  const copyValue = toolEvent && toolRaw ? toolRaw : baseCopyValue;
+
+  const [replayStatus, setReplayStatus] = useState<"idle" | "running" | "queued" | "failed">("idle");
+  const [replayError, setReplayError] = useState<string | null>(null);
+
   useEffect(() => {
     if (!toolEvent) return;
     if (!toolDetailsOpen) return;
@@ -829,6 +949,8 @@ function LogRow({
       return messageText || summary || "(empty)";
     })();
     const bubbleTitle = sourceMeta ? `${formatDateTime(entry.createdAt)}\n${sourceMeta}` : formatDateTime(entry.createdAt);
+    const showReplay =
+      isUser && isConversation && scopeTaskId === null && Boolean(scopeTopicId) && typeof onReplayClassifier === "function";
 
     return (
       <div
@@ -893,47 +1015,94 @@ function LogRow({
 	                )}
 	              </div>
 
-              {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen && (
-                <div className={`mt-2 flex flex-wrap items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
-                  {allowEdit && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={readOnly}
-                      title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
-                      onClick={() => {
-                        setEditOpen(true);
-                        setDeleteArmed(false);
-                        setDeleteStatus(null);
-                        setEditTopicId(entry.topicId ?? "");
-                        setEditTaskId(entry.taskId ?? "");
-                        setEditContent(entry.content ?? "");
-                        setEditSummary(entry.summary ?? "");
-                        setEditStatus(null);
-                        void ensureTasksForTopic(entry.topicId ?? null);
-                      }}
-                    >
-                      Edit
-                    </Button>
-                  )}
-                  {allowNotes && entry.type !== "note" && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        setNoteDraftKey(entry.id);
-                        setNoteOpen(true);
-                      }}
-                    >
-                      Add note
-                    </Button>
-                  )}
-                </div>
-              )}
+              <div className={`mt-2 flex flex-wrap items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
+                <CopyPill value={copyValue || messageSource || chatBubbleText} />
+                {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen ? (
+                  <>
+                    {showReplay && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={readOnly || replayStatus === "running"}
+                        title={
+                          readOnly
+                            ? "Read-only mode. Add token in Setup to replay classification."
+                            : replayStatus === "running"
+                              ? "Rechecking..."
+                              : "Re-run the classifier for this message bundle"
+                        }
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          if (readOnly) return;
+                          if (replayStatus === "running") return;
+                          setReplayStatus("running");
+                          setReplayError(null);
+                          void (async () => {
+                            try {
+                              const result = await onReplayClassifier(entry.id);
+                              if (!result.ok) {
+                                setReplayStatus("failed");
+                                setReplayError(result.error ?? "Failed to replay classifier.");
+                                return;
+                              }
+                              setReplayStatus("queued");
+                              window.setTimeout(() => setReplayStatus("idle"), 1400);
+                            } catch {
+                              setReplayStatus("failed");
+                              setReplayError("Failed to replay classifier.");
+                            }
+                          })();
+                        }}
+                      >
+                        {replayStatus === "running" ? "Rechecking..." : replayStatus === "queued" ? "Queued" : "Recheck tasks"}
+                      </Button>
+                    )}
+                    {allowEdit && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={readOnly}
+                        title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
+                        onClick={() => {
+                          setEditOpen(true);
+                          setDeleteArmed(false);
+                          setDeleteStatus(null);
+                          setEditTopicId(entry.topicId ?? "");
+                          setEditTaskId(entry.taskId ?? "");
+                          setEditContent(entry.content ?? "");
+                          setEditSummary(entry.summary ?? "");
+                          setEditStatus(null);
+                          void ensureTasksForTopic(entry.topicId ?? null);
+                        }}
+                      >
+                        Edit
+                      </Button>
+                    )}
+                    {allowNotes && entry.type !== "note" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          setNoteDraftKey(entry.id);
+                          setNoteOpen(true);
+                        }}
+                      >
+                        Add note
+                      </Button>
+                    )}
+                  </>
+                ) : null}
+              </div>
+              {showReplay && replayStatus === "failed" && replayError ? (
+                <p className={`mt-1 text-xs ${isUser ? "text-right" : "text-left"} text-[rgb(var(--claw-warning))]`}>
+                  {replayError}
+                </p>
+              ) : null}
 
-	              {allowNotes && entry.type !== "note" && noteOpen && (
-	                <div className="mt-2">
-	                  <div
+              {allowNotes && entry.type !== "note" && noteOpen && (
+                <div className="mt-2">
+                  <div
 	                    ref={notePanelRef}
 	                    className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3"
 	                  >
@@ -1158,7 +1327,7 @@ function LogRow({
                     {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}
                   </div>
                 </div>
-              )}
+	              )}
             </div>
           </div>
 	        ) : (
@@ -1216,43 +1385,46 @@ function LogRow({
 	              )}
 	            </div>
 
-            {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen && (
-              <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
-                {allowEdit && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={readOnly}
-                    title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
-                    onClick={() => {
-                      setEditOpen(true);
-                      setDeleteArmed(false);
-                      setDeleteStatus(null);
-                      setEditTopicId(entry.topicId ?? "");
-                      setEditTaskId(entry.taskId ?? "");
-                      setEditContent(entry.content ?? "");
-                      setEditSummary(entry.summary ?? "");
-                      setEditStatus(null);
-                      void ensureTasksForTopic(entry.topicId ?? null);
-                    }}
-                  >
-                    Edit
-                  </Button>
-                )}
-                {allowNotes && entry.type !== "note" && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      setNoteDraftKey(entry.id);
-                      setNoteOpen(true);
-                    }}
-                  >
-                    Add note
-                  </Button>
-                )}
-              </div>
-            )}
+            <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+              <CopyPill value={copyValue || messageSource || chatBubbleText} />
+              {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen ? (
+                <>
+                  {allowEdit && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={readOnly}
+                      title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
+                      onClick={() => {
+                        setEditOpen(true);
+                        setDeleteArmed(false);
+                        setDeleteStatus(null);
+                        setEditTopicId(entry.topicId ?? "");
+                        setEditTaskId(entry.taskId ?? "");
+                        setEditContent(entry.content ?? "");
+                        setEditSummary(entry.summary ?? "");
+                        setEditStatus(null);
+                        void ensureTasksForTopic(entry.topicId ?? null);
+                      }}
+                    >
+                      Edit
+                    </Button>
+                  )}
+                  {allowNotes && entry.type !== "note" && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setNoteDraftKey(entry.id);
+                        setNoteOpen(true);
+                      }}
+                    >
+                      Add note
+                    </Button>
+                  )}
+                </>
+              ) : null}
+            </div>
 
             {allowNotes && entry.type !== "note" && noteOpen && (
               <div className="mt-2 w-full max-w-[90%]">
