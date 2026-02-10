@@ -1,0 +1,98 @@
+import { NextRequest, NextResponse } from "next/server";
+import { deleteTopic, getData, patchTopic } from "../../../../../lib/db";
+import { requireToken } from "../../../../../lib/auth";
+import { z } from "zod";
+
+const PatchTopicSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    description: z.string().max(5000).optional().nullable(),
+    parentId: z.string().min(1).optional().nullable(),
+    tags: z.array(z.string().min(1).max(64)).max(50).optional()
+  })
+  .strict();
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const authError = requireToken(req);
+  if (authError) return authError;
+
+  const { id } = await params;
+  const data = await getData();
+  const topic = data.topics.find((t) => t.id === id);
+  if (!topic) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  return NextResponse.json({ topic });
+}
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const authError = requireToken(req);
+  if (authError) return authError;
+
+  const { id } = await params;
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const parsed = PatchTopicSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+  if (
+    parsed.data.name === undefined &&
+    parsed.data.description === undefined &&
+    parsed.data.parentId === undefined &&
+    parsed.data.tags === undefined
+  ) {
+    return NextResponse.json({ error: "No fields to update" }, { status: 400 });
+  }
+
+  let updated: any;
+  try {
+    updated = await patchTopic(id, {
+      name: parsed.data.name,
+      description: parsed.data.description ?? undefined,
+      parentId: parsed.data.parentId,
+      tags: parsed.data.tags
+    });
+  } catch (err: any) {
+    const code = err?.code;
+    if (code === "P2003") {
+      return NextResponse.json({ error: "Invalid parentId" }, { status: 400 });
+    }
+    return NextResponse.json({ error: "Failed to update topic" }, { status: 500 });
+  }
+  if (!updated) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  return NextResponse.json({ topic: updated });
+}
+
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const authError = requireToken(req);
+  if (authError) return authError;
+
+  const { id } = await params;
+  try {
+    await deleteTopic(id);
+    return NextResponse.json({ ok: true });
+  } catch (err: any) {
+    const code = err?.code;
+    if (code === "P2025") {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    return NextResponse.json({ error: "Failed to delete topic" }, { status: 500 });
+  }
+}

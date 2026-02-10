@@ -1,0 +1,76 @@
+import { NextRequest, NextResponse } from "next/server";
+import { deleteTask, patchTask } from "../../../../../lib/db";
+import { requireToken } from "../../../../../lib/auth";
+import { z } from "zod";
+
+const StatusSchema = z.enum(["todo", "doing", "blocked", "done"]);
+const PatchTaskSchema = z
+  .object({
+    title: z.string().min(1).max(500).optional(),
+    status: StatusSchema.optional(),
+    topicId: z.string().min(1).optional()
+  })
+  .strict();
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const authError = requireToken(req);
+  if (authError) return authError;
+
+  const { id } = await params;
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const parsed = PatchTaskSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+  if (
+    parsed.data.title === undefined &&
+    parsed.data.status === undefined &&
+    parsed.data.topicId === undefined
+  ) {
+    return NextResponse.json({ error: "No fields to update" }, { status: 400 });
+  }
+
+  let updated: any;
+  try {
+    updated = await patchTask(id, parsed.data);
+  } catch (err: any) {
+    const code = err?.code;
+    if (code === "P2003") {
+      return NextResponse.json({ error: "Invalid topicId" }, { status: 400 });
+    }
+    return NextResponse.json({ error: "Failed to update task" }, { status: 500 });
+  }
+  if (!updated) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  return NextResponse.json({ task: updated });
+}
+
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const authError = requireToken(req);
+  if (authError) return authError;
+
+  const { id } = await params;
+  try {
+    await deleteTask(id);
+    return NextResponse.json({ ok: true });
+  } catch (err: any) {
+    const code = err?.code;
+    if (code === "P2025") {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    return NextResponse.json({ error: "Failed to delete task" }, { status: 500 });
+  }
+}
