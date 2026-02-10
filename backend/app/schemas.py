@@ -411,7 +411,7 @@ class ContextResponse(BaseModel):
     ok: bool = Field(default=True, description="Whether context generation succeeded.")
     sessionKey: Optional[str] = Field(default=None, description="Session key used for continuity.")
     q: str = Field(default="", description="Normalized query used for retrieval.")
-    mode: str = Field(default="auto", description="Context mode (auto|cheap|full).")
+    mode: str = Field(default="auto", description="Context mode (auto|cheap|full|patient).")
     layers: List[str] = Field(default_factory=list, description="Emitted context layers/sections.")
     block: str = Field(default="", description="Prompt-ready context block (clipped to maxChars).")
     data: Dict[str, Any] = Field(default_factory=dict, description="Structured context payload.")

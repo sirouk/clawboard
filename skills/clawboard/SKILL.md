@@ -34,6 +34,25 @@ Get a user to a working Clawboard install where:
 3. Token flow is configured correctly (required for writes + non-localhost reads).
 4. OpenClaw gateway is restarted and logging into Clawboard.
 
+## Hard Rules (Repo vs Installed Skill)
+
+- **There are two separate copies of this skill**:
+  - Repo copy (version controlled): `$CLAWBOARD_DIR/skills/clawboard`
+  - Installed copy (what OpenClaw reads at runtime): `$HOME/.openclaw/skills/clawboard`
+- **Editing the repo copy does not update the installed copy.** After changing skill files (SKILL.md, `agents/`, `references/`, `scripts/`), sync it into OpenClaw:
+
+```bash
+cd "$CLAWBOARD_DIR"
+bash scripts/sync_openclaw_skill.sh --to-openclaw --apply --force
+```
+
+- **Editing the installed copy does not update your repo.** If you changed files under `~/.openclaw/skills/clawboard`, sync them back before committing:
+
+```bash
+cd "$CLAWBOARD_DIR"
+bash scripts/sync_openclaw_skill.sh --to-repo --apply
+```
+
 ## Install Modes
 
 ### 1) Quick Scripted Install (recommended)
@@ -46,7 +65,8 @@ curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/scripts/boots
 
 What the script does:
 
-- Clones/updates repo at `~/clawboard` (or `CLAWBOARD_DIR`).
+- Clones/updates repo by auto-detecting your OpenClaw workspace. If it finds a `projects/` (or `project/`) convention, it installs there; otherwise it falls back to `~/clawboard`.
+  - Override with `--dir <path>`, `CLAWBOARD_DIR=<path>`, or `CLAWBOARD_PARENT_DIR=<path>` (installs to `<parent>/clawboard`).
 - Generates a token if missing and writes `.env` with `CLAWBOARD_TOKEN`.
 - Detects browser access URLs (Tailscale if available, else localhost) and writes `.env` `CLAWBOARD_PUBLIC_API_BASE` and `CLAWBOARD_PUBLIC_WEB_URL`.
 - Builds and starts Docker services.
@@ -54,6 +74,7 @@ What the script does:
 - Installs skill to `$HOME/.openclaw/skills/clawboard`.
 - Installs/enables `clawboard-logger` plugin.
 - Writes plugin config (`baseUrl`, `token`, `enabled`) via `openclaw config set`.
+- Ensures OpenClaw OpenResponses endpoint is enabled (`POST /v1/responses`) for attachments.
 - Restarts OpenClaw gateway.
 - Sets `/api/config` title + integration level.
 
@@ -84,8 +105,11 @@ Steps:
 1. Clone repo:
 
 ```bash
-git clone https://github.com/sirouk/clawboard ~/clawboard
-cd ~/clawboard
+CLAWBOARD_PARENT_DIR="${CLAWBOARD_PARENT_DIR:-}"
+CLAWBOARD_DIR="${CLAWBOARD_DIR:-${CLAWBOARD_PARENT_DIR:+$CLAWBOARD_PARENT_DIR/clawboard}}"
+CLAWBOARD_DIR="${CLAWBOARD_DIR:-$HOME/clawboard}"
+git clone https://github.com/sirouk/clawboard "$CLAWBOARD_DIR"
+cd "$CLAWBOARD_DIR"
 ```
 
 2. Create token and env:
@@ -95,9 +119,9 @@ cp .env.example .env
 openssl rand -hex 32
 ```
 
-Set `CLAWBOARD_TOKEN=<value>` in `~/clawboard/.env`.
-Set `CLAWBOARD_PUBLIC_API_BASE=<browser-reachable-api-url>` in `~/clawboard/.env`.
-Optional: set `CLAWBOARD_PUBLIC_WEB_URL=<browser-reachable-ui-url>` in `~/clawboard/.env`.
+Set `CLAWBOARD_TOKEN=<value>` in `$CLAWBOARD_DIR/.env`.
+Set `CLAWBOARD_PUBLIC_API_BASE=<browser-reachable-api-url>` in `$CLAWBOARD_DIR/.env`.
+Optional: set `CLAWBOARD_PUBLIC_WEB_URL=<browser-reachable-ui-url>` in `$CLAWBOARD_DIR/.env`.
 Examples:
 
 - local: `http://localhost:8010`
@@ -114,7 +138,7 @@ docker compose up -d --build
 
 ```bash
 mkdir -p "$HOME/.openclaw/skills"
-cp -R ~/clawboard/skills/clawboard "$HOME/.openclaw/skills/clawboard"
+cp -R "$CLAWBOARD_DIR/skills/clawboard" "$HOME/.openclaw/skills/clawboard"
 ```
 
 If user keeps skills elsewhere, use that path instead of `$HOME/.openclaw/skills`.
@@ -122,18 +146,34 @@ If user keeps skills elsewhere, use that path instead of `$HOME/.openclaw/skills
 5. Install + enable logger plugin:
 
 ```bash
-openclaw plugins install -l ~/clawboard/extensions/clawboard-logger
+openclaw plugins install -l "$CLAWBOARD_DIR/extensions/clawboard-logger"
 openclaw plugins enable clawboard-logger
 ```
 
 6. Configure plugin (writes into OpenClaw config):
 
 ```bash
-openclaw config set plugins.entries.clawboard-logger.config --json '{"baseUrl":"http://localhost:8010","token":"YOUR_TOKEN","enabled":true}'
-openclaw config set plugins.entries.clawboard-logger.enabled true
+# contextMode options: auto | cheap | full | patient
+openclaw config set plugins.entries.clawboard-logger.config --json '{
+  "baseUrl":"http://localhost:8010",
+  "token":"YOUR_TOKEN",
+  "enabled":true,
+  "contextMode":"auto",
+  "contextFallbackMode":"cheap",
+  "contextFetchTimeoutMs":1200,
+  "contextTotalBudgetMs":2200,
+  "contextMaxChars":2200
+}'
+openclaw config set plugins.entries.clawboard-logger.enabled --json true
 ```
 
-7. Restart gateway:
+7. Enable OpenResponses (recommended for attachments):
+
+```bash
+openclaw config set gateway.http.endpoints.responses.enabled --json true
+```
+
+8. Restart gateway:
 
 ```bash
 openclaw gateway restart
@@ -155,10 +195,10 @@ Install Clawboard for me end-to-end. ClawHub is not available yet, so choose one
 - Run: curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/scripts/bootstrap_openclaw.sh | bash
 
 2) Manual install:
-- Clone repo to ~/clawboard
-- Create CLAWBOARD_TOKEN and write ~/clawboard/.env
-- Set CLAWBOARD_PUBLIC_API_BASE (local/Tailscale/custom domain) in ~/clawboard/.env
-- Set CLAWBOARD_PUBLIC_WEB_URL (local/Tailscale/custom domain) in ~/clawboard/.env
+- Clone repo to `$CLAWBOARD_DIR`
+- Create `CLAWBOARD_TOKEN` and write `$CLAWBOARD_DIR/.env`
+- Set `CLAWBOARD_PUBLIC_API_BASE` (local/Tailscale/custom domain) in `$CLAWBOARD_DIR/.env`
+- Set `CLAWBOARD_PUBLIC_WEB_URL` (local/Tailscale/custom domain) in `$CLAWBOARD_DIR/.env`
 - Start docker compose
 - Copy skill to $HOME/.openclaw/skills/clawboard
 - Install/enable clawboard-logger plugin
@@ -204,7 +244,14 @@ Expect:
 ## Optional Helpers
 
 - Local memory setup script:
-  - `~/clawboard/skills/clawboard/scripts/setup-openclaw-local-memory.sh`
+  - `$CLAWBOARD_DIR/skills/clawboard/scripts/setup-openclaw-local-memory.sh`
+- **Curated memory cloud backup (GitHub private repo):**
+  - Setup (interactive):
+    - `$CLAWBOARD_DIR/skills/clawboard/scripts/setup-openclaw-memory-backup.sh`
+  - Backup run (safe for automation; commits/pushes only when changed):
+    - `$CLAWBOARD_DIR/skills/clawboard/scripts/backup_openclaw_curated_memories.sh`
+  - Stores config at:
+    - `$HOME/.openclaw/credentials/clawboard-memory-backup.json` (chmod 600)
 - Chutes provider helper:
   - `curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash`
 

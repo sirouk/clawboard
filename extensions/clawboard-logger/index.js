@@ -218,6 +218,10 @@ export default function register(api) {
   // Stage-2 classifier will attach real topics asynchronously.
   const autoTopicBySession = rawConfig.autoTopicBySession === true;
   const contextAugment = rawConfig.contextAugment !== false;
+  const contextMode = typeof rawConfig.contextMode === "string" && ["auto", "cheap", "full", "patient"].includes(rawConfig.contextMode) ? rawConfig.contextMode : "auto";
+  const contextFallbackMode = typeof rawConfig.contextFallbackMode === "string" && ["auto", "cheap", "full", "patient"].includes(rawConfig.contextFallbackMode) ? rawConfig.contextFallbackMode : "cheap";
+  const contextFetchTimeoutMs = typeof rawConfig.contextFetchTimeoutMs === "number" && Number.isFinite(rawConfig.contextFetchTimeoutMs) ? Math.max(200, Math.min(2e4, Math.floor(rawConfig.contextFetchTimeoutMs))) : 1200;
+  const contextTotalBudgetMs = typeof rawConfig.contextTotalBudgetMs === "number" && Number.isFinite(rawConfig.contextTotalBudgetMs) ? Math.max(400, Math.min(45e3, Math.floor(rawConfig.contextTotalBudgetMs))) : 2200;
   const contextMaxChars = typeof rawConfig.contextMaxChars === "number" && Number.isFinite(rawConfig.contextMaxChars) ? Math.max(400, Math.min(12e3, Math.floor(rawConfig.contextMaxChars))) : DEFAULT_CONTEXT_MAX_CHARS;
   const contextTopicLimit = typeof rawConfig.contextTopicLimit === "number" && Number.isFinite(rawConfig.contextTopicLimit) ? Math.max(1, Math.min(8, Math.floor(rawConfig.contextTopicLimit))) : DEFAULT_CONTEXT_TOPIC_LIMIT;
   const contextTaskLimit = typeof rawConfig.contextTaskLimit === "number" && Number.isFinite(rawConfig.contextTaskLimit) ? Math.max(1, Math.min(12, Math.floor(rawConfig.contextTaskLimit))) : DEFAULT_CONTEXT_TASK_LIMIT;
@@ -575,7 +579,7 @@ export default function register(api) {
     content: "clawboard-logger startup: routing enabled",
     summary: "clawboard-logger startup",
     raw: JSON.stringify(
-      { autoTopicBySession, defaultTopicId, defaultTaskId, contextAugment, contextMaxChars },
+      { autoTopicBySession, defaultTopicId, defaultTaskId, contextAugment, contextMode, contextFallbackMode, contextFetchTimeoutMs, contextTotalBudgetMs, contextMaxChars },
       null,
       2
     ),
@@ -588,9 +592,6 @@ export default function register(api) {
     ...(token ? { "X-Clawboard-Token": token } : {})
   };
 
-  const CONTEXT_FETCH_TIMEOUT_MS = 1200;
-  const CONTEXT_TOTAL_BUDGET_MS = 2200;
-
   async function getJson(pathname, params) {
     try {
       const url = new URL(`${baseUrl}${pathname}`);
@@ -602,7 +603,7 @@ export default function register(api) {
         }
       }
       const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), CONTEXT_FETCH_TIMEOUT_MS);
+      const t = setTimeout(() => controller.abort(), contextFetchTimeoutMs);
       const res = await fetch(url.toString(), { headers: apiHeaders, signal: controller.signal });
       clearTimeout(t);
       if (!res.ok)
@@ -720,7 +721,7 @@ export default function register(api) {
         const agentId = typeof ctxTool?.agentId === "string" ? ctxTool.agentId : void 0;
         const tools = [];
         tools.push({
-          name: "clawboard.search",
+          name: "clawboard_search",
           label: "Clawboard Search",
           description: "Search Clawboard topics, tasks, logs, and curated notes (hybrid semantic + lexical).",
           parameters: {
@@ -763,7 +764,7 @@ export default function register(api) {
           }
         });
         tools.push({
-          name: "clawboard.context",
+          name: "clawboard_context",
           label: "Clawboard Context",
           description: "Get a prompt-ready layered context block from Clawboard (working set + continuity + optional recall).",
           parameters: {
@@ -772,7 +773,7 @@ export default function register(api) {
             properties: {
               q: { type: "string", description: "Current user query or retrieval hint (optional)." },
               sessionKey: { type: "string", description: "Optional continuity session key override." },
-              mode: { type: "string", description: "auto|cheap|full (default auto)." },
+              mode: { type: "string", description: "auto|cheap|full|patient (default auto)." },
               maxChars: { type: "integer", description: "Max chars for returned block." },
               workingSetLimit: { type: "integer", description: "Working set item limit." },
               timelineLimit: { type: "integer", description: "Timeline line limit." }
@@ -800,7 +801,7 @@ export default function register(api) {
           }
         });
         tools.push({
-          name: "clawboard.get_topic",
+          name: "clawboard_get_topic",
           label: "Get Clawboard Topic",
           description: "Fetch a Clawboard topic by id.",
           parameters: {
@@ -818,7 +819,7 @@ export default function register(api) {
           }
         });
         tools.push({
-          name: "clawboard.get_task",
+          name: "clawboard_get_task",
           label: "Get Clawboard Task",
           description: "Fetch a Clawboard task by id.",
           parameters: {
@@ -836,7 +837,7 @@ export default function register(api) {
           }
         });
         tools.push({
-          name: "clawboard.get_log",
+          name: "clawboard_get_log",
           label: "Get Clawboard Log",
           description: "Fetch a Clawboard log entry by id (optionally including raw payload).",
           parameters: {
@@ -861,7 +862,7 @@ export default function register(api) {
           }
         });
         tools.push({
-          name: "clawboard.create_note",
+          name: "clawboard_create_note",
           label: "Create Clawboard Note",
           description: "Create a curated note attached to an existing log entry (high-weight retrieval signal).",
           parameters: {
@@ -908,7 +909,7 @@ export default function register(api) {
           }
         });
         tools.push({
-          name: "clawboard.update_task",
+          name: "clawboard_update_task",
           label: "Update Clawboard Task",
           description: "Patch a task (status/priority/due/pin/snooze/tags) without needing the full task payload.",
           parameters: {
@@ -956,13 +957,13 @@ export default function register(api) {
       },
       {
         names: [
-          "clawboard.search",
-          "clawboard.context",
-          "clawboard.get_topic",
-          "clawboard.get_task",
-          "clawboard.get_log",
-          "clawboard.create_note",
-          "clawboard.update_task"
+          "clawboard_search",
+          "clawboard_context",
+          "clawboard_get_topic",
+          "clawboard_get_task",
+          "clawboard_get_log",
+          "clawboard_create_note",
+          "clawboard_update_task"
         ]
       }
     );
@@ -1129,14 +1130,14 @@ export default function register(api) {
     return clip(lines.join("\n"), contextMaxChars);
   }
 
-  async function retrieveContextViaContextApi(query, sessionKey) {
+  async function retrieveContextViaContextApi(query, sessionKey, mode = "auto") {
     const normalizedQuery = clip(normalizeWhitespace(sanitizeMessageContent(query)), 500);
     if (!normalizedQuery)
       return void 0;
     const payload = await getJson("/api/context", {
       q: normalizedQuery,
       sessionKey,
-      mode: "auto",
+      mode,
       includePending: 1,
       maxChars: contextMaxChars,
       workingSetLimit: Math.max(6, contextTaskLimit),
@@ -1284,12 +1285,20 @@ export default function register(api) {
     const retrievalQuery = cleanInput && cleanInput.trim().length > 0 ? clip(cleanInput, 320) : "current conversation continuity, active topics, active tasks, and curated notes";
     const upstream = extractUpstreamMemorySignals(event.prompt, event.messages);
     const startedAt = nowMs();
-    let context = await retrieveContextViaContextApi(retrievalQuery, effectiveSessionKey ?? ctx?.sessionKey);
+    const sessionKeyForContext = effectiveSessionKey ?? ctx?.sessionKey;
+    const primaryMode = contextMode;
+    let context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, primaryMode);
+    if (!context && contextFallbackMode !== primaryMode) {
+      const remaining = Math.max(0, contextTotalBudgetMs - (nowMs() - startedAt));
+      if (remaining > 150) {
+        context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, contextFallbackMode);
+      }
+    }
     if (!context) {
-      const remaining = Math.max(0, CONTEXT_TOTAL_BUDGET_MS - (nowMs() - startedAt));
+      const remaining = Math.max(0, contextTotalBudgetMs - (nowMs() - startedAt));
       if (remaining > 250) {
         context = await Promise.race([
-          retrieveContext(retrievalQuery, effectiveSessionKey ?? ctx?.sessionKey, upstream),
+          retrieveContext(retrievalQuery, sessionKeyForContext, upstream),
           sleep(remaining).then(() => void 0)
         ]);
       }

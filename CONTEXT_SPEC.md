@@ -52,6 +52,7 @@ Triggering rules (default):
 
 - `mode=cheap`: Layer A only
 - `mode=full`: Layer A + Layer B
+- `mode=patient`: Layer A + Layer B, but the server may use larger bounded recall limits (slower; best for planning)
 - `mode=auto`: Layer B only if the query has signal (not "ok/yes") or the server decides recall is helpful
 
 ## Server Endpoint: `GET /api/context`
@@ -64,7 +65,7 @@ Return a **prompt-ready**, size-bounded context block plus structured data for a
 
 - `sessionKey` (optional): continuity bucket
 - `q` (optional): retrieval hint; may be empty for cheap continuity
-- `mode` (optional): `auto|cheap|full` (default `auto`)
+- `mode` (optional): `auto|cheap|full|patient` (default `auto`)
 - `includePending` (optional): include unclassified logs when building context
 - `maxChars` (optional): hard cap for returned `block`
 - `workingSetLimit` (optional): bound Layer A working set
@@ -75,8 +76,8 @@ Return a **prompt-ready**, size-bounded context block plus structured data for a
 - `ok: boolean`
 - `sessionKey?: string`
 - `q?: string`
-- `mode: "auto"|"cheap"|"full"`
-- `layers: { cheap: boolean; semantic: boolean; ... }` (exact shape can evolve)
+- `mode: "auto"|"cheap"|"full"|"patient"`
+- `layers: string[]` (emitted sections; examples: `A:working_set`, `A:routing_memory`, `A:timeline`, `A:board_session`, `B:semantic`)
 - `block: string` (prompt-ready, clipped to `maxChars`)
 - `data: object` (structured result: working set items, timeline rows, recall shortlist)
 
@@ -90,13 +91,13 @@ Return a **prompt-ready**, size-bounded context block plus structured data for a
 
 Expose explicit, auditable tools so context is not a one-way street:
 
-- `clawboard.search(q, ...)` -> `/api/search`
-- `clawboard.context(q?, mode?, ...)` -> `/api/context`
-- `clawboard.get_topic(id)` -> `/api/topics/{id}`
-- `clawboard.get_task(id)` -> `/api/tasks/{id}`
-- `clawboard.get_log(id, includeRaw?)` -> `/api/log/{id}`
-- `clawboard.create_note(relatedLogId, text, topicId?, taskId?)` -> `POST /api/log` (type=`note`)
-- `clawboard.update_task(id, ...)` -> `PATCH /api/tasks/{id}`
+- `clawboard_search(q, ...)` -> `/api/search`
+- `clawboard_context(q?, mode?, ...)` -> `/api/context`
+- `clawboard_get_topic(id)` -> `/api/topics/{id}`
+- `clawboard_get_task(id)` -> `/api/tasks/{id}`
+- `clawboard_get_log(id, includeRaw?)` -> `/api/log/{id}`
+- `clawboard_create_note(relatedLogId, text, topicId?, taskId?)` -> `POST /api/log` (type=`note`)
+- `clawboard_update_task(id, ...)` -> `PATCH /api/tasks/{id}`
 
 Tool design constraints:
 
@@ -150,4 +151,3 @@ Each topic/task can hold a short **digest** that compresses long history into st
 
 9. Existing `/api/search` behavior remains stable; `/api/context` is additive.
 10. No feedback loop: injected prompt context is not re-logged or embedded as if it were user content.
-

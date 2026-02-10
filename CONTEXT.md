@@ -68,6 +68,24 @@ Important constraints:
 - Very short user input should not stampede expensive recall:
   - `/api/context?mode=auto` keeps this cheap server-side (Layer A continuity; no heavy recall by default).
   - the legacy fallback retriever still ignores very short input (`normalizedQuery.length < 6`) to avoid stampeding `/api/search`.
+- Context retrieval modes (passed to `GET /api/context?mode=...` and controlled by the OpenClaw plugin `clawboard-logger`):
+  - `auto` (default): Layer A always; semantic recall only when query has signal
+  - `cheap`: Layer A only (fastest)
+  - `full`: Layer A + semantic recall
+  - `patient`: like `full`, but the server may use larger bounded recall limits (slower; best for planning)
+
+Configuration knobs (OpenClaw plugin config):
+- `contextMode`, `contextFallbackMode`
+- `contextFetchTimeoutMs`, `contextTotalBudgetMs`
+- `contextMaxChars`
+
+If you installed via `scripts/bootstrap_openclaw.sh`, you can set these in Clawboard `.env` as:
+- `CLAWBOARD_LOGGER_CONTEXT_MODE`
+- `CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE`
+- `CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS`
+- `CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS`
+- `CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS`
+Then rerun bootstrap with `--skip-docker` to reconfigure the OpenClaw plugin.
 
 ---
 
@@ -166,13 +184,13 @@ Additional guardrail:
 ### Agent tools (bidirectional skills for the main agent)
 In addition to passive prompt injection, the plugin registers explicit agent tools (when the OpenClaw SDK supports `registerTool`) so the agent can read and update Clawboard intentionally:
 
-- `clawboard.search` (hybrid recall): calls `GET /api/search`
-- `clawboard.context` (layered bundle): calls `GET /api/context`
-- `clawboard.get_topic`: calls `GET /api/topics/{id}`
-- `clawboard.get_task`: calls `GET /api/tasks/{id}`
-- `clawboard.get_log`: calls `GET /api/log/{id}`
-- `clawboard.create_note`: creates a curated note (calls `POST /api/log` with `type=note`)
-- `clawboard.update_task`: updates task fields (calls `PATCH /api/tasks/{id}`)
+- `clawboard_search` (hybrid recall): calls `GET /api/search`
+- `clawboard_context` (layered bundle): calls `GET /api/context`
+- `clawboard_get_topic`: calls `GET /api/topics/{id}`
+- `clawboard_get_task`: calls `GET /api/tasks/{id}`
+- `clawboard_get_log`: calls `GET /api/log/{id}`
+- `clawboard_create_note`: creates a curated note (calls `POST /api/log` with `type=note`)
+- `clawboard_update_task`: updates task fields (calls `PATCH /api/tasks/{id}`)
 
 This is what turns "helpful retrieval context" into an expert system that continuously improves its own working memory while it works.
 

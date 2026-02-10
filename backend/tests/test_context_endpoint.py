@@ -119,6 +119,73 @@ class ContextEndpointTests(unittest.TestCase):
         self.assertIn("Working set tasks:", payload.get("block", ""))
         self.assertIn("Session routing memory", payload.get("block", ""))
 
+    def test_context_board_session_surfaces_active_task(self):
+        headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+
+        topic = self.client.post("/api/topics", json={"name": "BoardContext Topic", "pinned": True}, headers=headers).json()
+        other = self.client.post(
+            "/api/tasks",
+            json={
+                "topicId": topic["id"],
+                "title": "Other Task (pinned)",
+                "status": "doing",
+                "pinned": True,
+                "priority": "high",
+            },
+            headers=headers,
+        ).json()
+        board_task = self.client.post(
+            "/api/tasks",
+            json={
+                "topicId": topic["id"],
+                "title": "Board Task Context",
+                "status": "todo",
+                "pinned": False,
+                "priority": "low",
+            },
+            headers=headers,
+        ).json()
+
+        # Create one conversation log in this board task session so timeline has continuity.
+        board_session_key = f"clawboard:task:{topic['id']}:{board_task['id']}"
+        self.client.post(
+            "/api/log",
+            json={
+                "topicId": topic["id"],
+                "taskId": board_task["id"],
+                "type": "conversation",
+                "content": "BoardContext: prior message in this task chat.",
+                "summary": "BoardContext: prior message.",
+                "createdAt": now_iso(),
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {"sessionKey": board_session_key},
+            },
+            headers=headers,
+        )
+
+        res = self.client.get(
+            "/api/context",
+            params={
+                "q": "let's resume",
+                "sessionKey": board_session_key,
+                "mode": "cheap",
+                "workingSetLimit": 1,
+                "timelineLimit": 3,
+            },
+            headers={"Host": "localhost:8010"},
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertTrue(payload.get("ok"), payload)
+        block = payload.get("block") or ""
+        # Board location should be explicit so the agent knows "where" the user is speaking from.
+        self.assertIn("Active board location:", block)
+        self.assertIn("Task Chat:", block)
+        # With workingSetLimit=1, the active board task should still be surfaced (promoted above other ranks).
+        self.assertIn("Board Task Context", block)
+        self.assertNotIn("Other Task (pinned)", block)
+
     def test_context_full_includes_semantic(self):
         session_key = "channel:testcontext"
         res = self.client.get(
@@ -128,6 +195,19 @@ class ContextEndpointTests(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 200, res.text)
         payload = res.json()
+        self.assertIn("B:semantic", payload.get("layers", []))
+        self.assertIn("semantic", (payload.get("data") or {}))
+
+    def test_context_patient_includes_semantic(self):
+        session_key = "channel:testcontext"
+        res = self.client.get(
+            "/api/context",
+            params={"q": "ok", "sessionKey": session_key, "mode": "patient"},
+            headers={"Host": "localhost:8010"},
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertEqual(payload.get("mode"), "patient")
         self.assertIn("B:semantic", payload.get("layers", []))
         self.assertIn("semantic", (payload.get("data") or {}))
 
@@ -169,4 +249,3 @@ class ContextEndpointTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

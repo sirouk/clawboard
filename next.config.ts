@@ -1,6 +1,29 @@
 import type { NextConfig } from "next";
 
+const normalizeAllowedDevOrigin = (value: string): string => {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (trimmed.includes("*")) return trimmed;
+
+  // Next expects hostnames (not full origins). Accept either.
+  if (trimmed.includes("://")) {
+    try {
+      return new URL(trimmed).hostname;
+    } catch {
+      return "";
+    }
+  }
+
+  // Accept host:port but keep only the hostname.
+  return trimmed.split("/")[0].split(":")[0];
+};
+
 const nextConfig: NextConfig = {
+  // Turbopack can mis-infer the repo root when multiple lockfiles exist in parent
+  // directories, which then breaks Tailwind/config discovery.
+  turbopack: {
+    root: __dirname
+  },
   // Needed for Next dev server access via Tailscale / LAN hostnames.
   // Next expects *hostnames* (not full origins) that may hit the dev server.
   allowedDevOrigins: Array.from(
@@ -16,7 +39,7 @@ const nextConfig: NextConfig = {
         "100.*.*.*",
         ...(process.env.CLAWBOARD_ALLOWED_DEV_ORIGINS || "")
           .split(",")
-          .map((s) => s.trim())
+          .map(normalizeAllowedDevOrigin)
           .filter(Boolean),
       ].filter(Boolean),
     ),

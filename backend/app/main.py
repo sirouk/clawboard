@@ -4,6 +4,7 @@ import os
 import json
 import hashlib
 import base64
+import heapq
 from io import BytesIO
 import colorsys
 import asyncio
@@ -21,7 +22,7 @@ from fastapi import FastAPI, Depends, Query, Body, HTTPException, Header, Backgr
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from typing import List, Any
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, text, or_
+from sqlalchemy import func, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import defer
@@ -1156,6 +1157,7 @@ def _run_openclaw_chat(
     token: str,
     session_key: str,
     agent_id: str,
+    sent_at: str,
     message: str,
     attachments: list[dict[str, Any]] | None = None,
 ) -> None:
@@ -1275,6 +1277,7 @@ def _run_openclaw_chat(
         with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
             # We don't need the response body; OpenClaw logs the conversation via plugins.
             resp.read()
+        _schedule_openclaw_assistant_log_check(session_key=session_key, request_id=request_id, sent_at=sent_at)
     except urllib.error.HTTPError as exc:
         raw = ""
         try:
@@ -1303,13 +1306,17 @@ def _run_openclaw_chat(
             try:
                 with urllib.request.urlopen(fallback_req, timeout=timeout_seconds) as resp:
                     resp.read()
+                _schedule_openclaw_assistant_log_check(session_key=session_key, request_id=request_id, sent_at=sent_at)
                 return
             except Exception as fallback_exc:
+                raw = str(fallback_exc)
+                if not raw:
+                    raw = f"{type(fallback_exc).__name__}"
                 _log_openclaw_chat_error(
                     session_key=session_key,
                     request_id=request_id,
                     detail=f"OpenClaw chat failed (fallback). requestId={request_id}",
-                    raw=str(fallback_exc),
+                    raw=raw,
                 )
                 return
 
@@ -1333,11 +1340,28 @@ def _run_openclaw_chat(
             raw=raw,
         )
     except Exception as exc:
+        raw = str(exc)
+        if not raw:
+            raw = f"{type(exc).__name__}"
+        detail = f"OpenClaw chat failed. requestId={request_id}"
+        try:
+            if isinstance(exc, TimeoutError):
+                detail = f"OpenClaw chat failed: timed out contacting gateway at {base_url}. requestId={request_id}"
+            elif isinstance(exc, urllib.error.URLError):
+                reason = getattr(exc, "reason", None)
+                if reason:
+                    detail = (
+                        f"OpenClaw chat failed: unable to reach gateway at {base_url} ({reason}). requestId={request_id}"
+                    )
+                else:
+                    detail = f"OpenClaw chat failed: unable to reach gateway at {base_url}. requestId={request_id}"
+        except Exception:
+            pass
         _log_openclaw_chat_error(
             session_key=session_key,
             request_id=request_id,
-            detail=f"OpenClaw chat failed. requestId={request_id}",
-            raw=str(exc),
+            detail=detail,
+            raw=raw,
         )
     finally:
         try:
@@ -1350,6 +1374,139 @@ def _run_openclaw_chat(
             )
         except Exception:
             pass
+
+
+def _openclaw_chat_assistant_log_grace_seconds() -> float:
+    """Seconds after a successful OpenClaw gateway call to wait for plugin logs."""
+    raw = os.getenv("OPENCLAW_CHAT_ASSISTANT_LOG_GRACE_SECONDS", "30").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 30.0
+    if value <= 0:
+        return 0.0
+    return max(1.0, min(600.0, value))
+
+
+class _OpenClawAssistantLogWatchdog:
+    """Single watchdog thread that checks whether assistant logs arrive after a send.
+
+    This avoids spawning one thread per message and prevents premature warnings while
+    the gateway request is still in-flight.
+    """
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._heap: list[tuple[float, str, str, str]] = []
+        self._thread = threading.Thread(target=self._run, name="clawboard-openclaw-watchdog", daemon=True)
+        self._started = False
+
+    def start(self) -> None:
+        with self._cv:
+            if self._started:
+                return
+            self._started = True
+            self._thread.start()
+
+    def schedule(self, *, session_key: str, request_id: str, sent_at: str, delay_seconds: float) -> None:
+        base_key = (str(session_key or "").split("|", 1)[0] or "").strip()
+        if not base_key:
+            return
+        due = time.time() + max(0.0, float(delay_seconds))
+        with self._cv:
+            heapq.heappush(self._heap, (due, base_key, str(request_id or "").strip(), str(sent_at or "").strip()))
+            self._cv.notify()
+
+    def _run(self) -> None:
+        while True:
+            with self._cv:
+                while not self._heap:
+                    self._cv.wait()
+                due, base_key, request_id, sent_at = self._heap[0]
+                now = time.time()
+                if due > now:
+                    self._cv.wait(timeout=due - now)
+                    continue
+                heapq.heappop(self._heap)
+            try:
+                self._check(base_key=base_key, request_id=request_id, sent_at=sent_at)
+            except Exception:
+                # Never crash the watchdog thread.
+                pass
+
+    def _check(self, *, base_key: str, request_id: str, sent_at: str) -> None:
+        if not base_key or not request_id or not sent_at:
+            return
+
+        try:
+            with get_session() as session:
+                # If we already emitted a system terminal event for this requestId (error/warn), do nothing.
+                terminal_query = select(LogEntry.id)
+                if DATABASE_URL.startswith("sqlite"):
+                    terminal_query = terminal_query.where(
+                        text("json_extract(source, '$.requestId') = :rid AND lower(agentId) = 'system'")
+                    ).params(rid=request_id)
+                else:
+                    terminal_query = terminal_query.where(
+                        and_(
+                            LogEntry.source["requestId"].as_string() == request_id,
+                            func.lower(LogEntry.agentId) == "system",
+                        )
+                    )
+                terminal_query = terminal_query.limit(1)
+                if session.exec(terminal_query).first():
+                    return
+
+                # If any assistant log shows up for this session after the send, the logger plugin is working.
+                query = select(LogEntry.id)
+                if DATABASE_URL.startswith("sqlite"):
+                    query = query.where(
+                        text(
+                            "(json_extract(source, '$.sessionKey') = :base_key OR json_extract(source, '$.sessionKey') LIKE :like_key)"
+                        )
+                    ).params(base_key=base_key, like_key=f"{base_key}|%")
+                else:
+                    expr = LogEntry.source["sessionKey"].as_string()
+                    query = query.where(or_(expr == base_key, expr.like(f"{base_key}|%")))
+                query = (
+                    query.where(func.lower(LogEntry.agentId) == "assistant")
+                    .where(LogEntry.createdAt >= sent_at)
+                    .order_by(LogEntry.createdAt.desc())
+                    .limit(1)
+                )
+                if session.exec(query).first():
+                    return
+        except Exception:
+            return
+
+        _log_openclaw_chat_error(
+            session_key=base_key,
+            request_id=request_id,
+            detail=(
+                "OpenClaw gateway returned, but no assistant output was logged back to Clawboard yet. "
+                "Most common cause: clawboard-logger plugin is disabled or misconfigured (baseUrl/token). "
+                f"requestId={request_id}"
+            ),
+        )
+
+
+_OPENCLAW_ASSISTANT_LOG_WATCHDOG: _OpenClawAssistantLogWatchdog | None = None
+_OPENCLAW_ASSISTANT_LOG_WATCHDOG_LOCK = threading.Lock()
+
+
+def _schedule_openclaw_assistant_log_check(*, session_key: str, request_id: str, sent_at: str) -> None:
+    grace = _openclaw_chat_assistant_log_grace_seconds()
+    if grace <= 0:
+        return
+
+    global _OPENCLAW_ASSISTANT_LOG_WATCHDOG
+    with _OPENCLAW_ASSISTANT_LOG_WATCHDOG_LOCK:
+        if _OPENCLAW_ASSISTANT_LOG_WATCHDOG is None:
+            _OPENCLAW_ASSISTANT_LOG_WATCHDOG = _OpenClawAssistantLogWatchdog()
+            _OPENCLAW_ASSISTANT_LOG_WATCHDOG.start()
+        watchdog = _OPENCLAW_ASSISTANT_LOG_WATCHDOG
+
+    watchdog.schedule(session_key=session_key, request_id=request_id, sent_at=sent_at, delay_seconds=grace)
 
 
 @app.post(
@@ -1475,6 +1632,7 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
         token=gateway_token,
         session_key=session_key,
         agent_id=agent_id,
+        sent_at=created_at,
         message=message,
         attachments=attachments_task,
     )
@@ -3528,6 +3686,76 @@ _CONTEXT_AFFIRMATIONS = {
     "works for me",
 }
 
+_CONTEXT_META_TOKENS = {
+    # Very common "filler" / continuity prompts that should not trigger expensive recall in auto mode.
+    "a",
+    "about",
+    "again",
+    "and",
+    "any",
+    "anything",
+    "are",
+    "can",
+    "check",
+    "continue",
+    "could",
+    "do",
+    "feedback",
+    "go",
+    "hello",
+    "help",
+    "hey",
+    "hi",
+    "how",
+    "i",
+    "it",
+    "lets",
+    "let",
+    "look",
+    "me",
+    "next",
+    "no",
+    "now",
+    "of",
+    "off",
+    "ok",
+    "okay",
+    "on",
+    "opinion",
+    "or",
+    "please",
+    "pls",
+    "pick",
+    "resume",
+    "review",
+    "see",
+    "ship",
+    "should",
+    "something",
+    "sure",
+    "steps",
+    "tell",
+    "thanks",
+    "thx",
+    "the",
+    "then",
+    "think",
+    "this",
+    "thoughts",
+    "to",
+    "up",
+    "us",
+    "we",
+    "what",
+    "where",
+    "who",
+    "why",
+    "would",
+    "yes",
+    "you",
+    "your",
+}
+
 
 def _normalize_for_signal(text: str) -> str:
     cleaned = _sanitize_log_text(text)
@@ -3550,6 +3778,27 @@ def _is_affirmation(text: str) -> bool:
         return cleaned[3:].strip() in _CONTEXT_AFFIRMATIONS
     if cleaned.startswith("okay "):
         return cleaned[5:].strip() in _CONTEXT_AFFIRMATIONS
+    return False
+
+
+def _is_low_signal_context_query(text: str) -> bool:
+    """Detect short, meta continuity prompts that shouldn't trigger expensive deep recall in auto mode."""
+    cleaned = _normalize_for_signal(text)
+    if not cleaned:
+        return True
+    # If the user actually provided detail, don't treat it as low-signal.
+    if len(cleaned) >= 80:
+        return False
+    tokens = [tok for tok in cleaned.split(" ") if tok]
+    if not tokens:
+        return True
+    # Examples:
+    # - "do you think"
+    # - "let's resume this"
+    # - "continue"
+    # - "thoughts / feedback"
+    if len(tokens) <= 8 and all(tok in _CONTEXT_META_TOKENS for tok in tokens):
+        return True
     return False
 
 
@@ -3629,7 +3878,7 @@ def _task_rank(task: Task, now: datetime) -> tuple:
 def context(
     q: str | None = Query(default=None, description="Current user input/query."),
     sessionKey: str | None = Query(default=None, description="Session key for continuity (source.sessionKey)."),
-    mode: str = Query(default="auto", description="auto|cheap|full"),
+    mode: str = Query(default="auto", description="auto|cheap|full|patient"),
     includePending: bool = Query(default=True, description="Include pending logs in recall."),
     maxChars: int = Query(default=2200, ge=400, le=12000, description="Hard cap for returned block size."),
     workingSetLimit: int = Query(default=6, ge=0, le=40, description="Max tasks/topics in working set sections."),
@@ -3639,10 +3888,14 @@ def context(
     raw_query = _sanitize_log_text(q or "")
     normalized_query = _clip(raw_query, 500)
     requested_mode = (mode or "auto").strip().lower()
-    effective_mode = requested_mode if requested_mode in {"auto", "cheap", "full"} else "auto"
+    effective_mode = requested_mode if requested_mode in {"auto", "cheap", "full", "patient"} else "auto"
 
-    low_signal = _is_affirmation(normalized_query) or normalized_query.strip().startswith("/")
-    if effective_mode == "full":
+    low_signal = (
+        _is_affirmation(normalized_query)
+        or normalized_query.strip().startswith("/")
+        or _is_low_signal_context_query(normalized_query)
+    )
+    if effective_mode in {"full", "patient"}:
         run_semantic = True
     elif effective_mode == "cheap":
         run_semantic = False
@@ -3719,6 +3972,7 @@ def context(
         topics = session.exec(select(Topic)).all()
         topic_by_id = {t.id: t for t in topics}
         tasks = session.exec(select(Task)).all()
+        tasks_by_id = {t.id: t for t in tasks}
 
         visible_topics = [t for t in topics if _topic_visible(t, now_dt)]
         pinned_topics = [t for t in visible_topics if bool(getattr(t, "pinned", False))]
@@ -3735,6 +3989,40 @@ def context(
 
         working_topics = pinned_topics[: max(0, min(12, workingSetLimit))]
         working_tasks = ranked_tasks[: max(0, min(18, workingSetLimit * 3))]
+
+        # Board chat location: Clawboard Topic/Task chat sessions carry a stable sessionKey that
+        # identifies the active Topic/Task. Always surface that entity first so the model knows
+        # "where the user is speaking from" even on vague turns like "resume" or "thoughts?".
+        board_topic_id, board_task_id = _parse_board_session_key(sessionKey or "")
+        board_topic = topic_by_id.get(board_topic_id) if board_topic_id else None
+        board_task = tasks_by_id.get(board_task_id) if board_task_id else None
+        if board_task and board_task.topicId and not board_topic:
+            board_topic = topic_by_id.get(board_task.topicId)
+
+        if board_topic or board_task:
+            data["boardSession"] = {
+                "kind": "task" if board_task else "topic",
+                "topicId": board_topic.id if board_topic else board_topic_id or None,
+                "topicName": board_topic.name if board_topic else None,
+                "taskId": board_task.id if board_task else board_task_id or None,
+                "taskTitle": board_task.title if board_task else None,
+            }
+            layers.append("A:board_session")
+            if board_task:
+                status = str(getattr(board_task, "status", "") or "").strip()
+                suffix = f" [{status}]" if status else ""
+                topic_name = board_topic.name if board_topic else (board_topic_id or "Unknown topic")
+                lines.append("Active board location:")
+                lines.append(f"- Task Chat: {topic_name} -> {board_task.title}{suffix}")
+            elif board_topic:
+                lines.append("Active board location:")
+                lines.append(f"- Topic Chat: {board_topic.name}")
+
+            if board_topic:
+                # Promote the active board entity to the top even if it would normally rank lower.
+                working_topics = [board_topic, *[t for t in working_topics if t.id != board_topic.id]]
+            if board_task:
+                working_tasks = [board_task, *[t for t in working_tasks if t.id != board_task.id]]
 
         continuity_topic_ids: list[str] = []
         continuity_task_ids: list[str] = []
@@ -3762,7 +4050,6 @@ def context(
                 working_topics.append(t)
                 seen_topic_ids.add(tid)
 
-        tasks_by_id = {t.id: t for t in tasks}
         seen_task_ids = {t.id for t in working_tasks}
         for kid in continuity_task_ids:
             if len(working_tasks) >= max(0, min(18, workingSetLimit * 3)):
@@ -3820,24 +4107,41 @@ def context(
 
         semantic = None
         if run_semantic and normalized_query:
+            limit_topics = 8
+            limit_tasks = 12
+            limit_logs = max(24, timelineLimit * 6)
+            if effective_mode == "patient":
+                limit_topics = 12
+                limit_tasks = 18
+                limit_logs = max(60, timelineLimit * 10)
             semantic = _search_impl(
                 session,
                 normalized_query,
                 topic_id=None,
                 session_key=sessionKey,
                 include_pending=includePending,
-                limit_topics=8,
-                limit_tasks=12,
-                limit_logs=max(24, timelineLimit * 6),
+                limit_topics=limit_topics,
+                limit_tasks=limit_tasks,
+                limit_logs=limit_logs,
             )
             data["semantic"] = semantic
             layers.append("B:semantic")
 
         if semantic:
-            topics_hit = list(semantic.get("topics") or [])[:3]
-            tasks_hit = list(semantic.get("tasks") or [])[:4]
-            logs_hit = list(semantic.get("logs") or [])[:6]
-            notes_hit = list(semantic.get("notes") or [])[:6]
+            topics_hit_limit = 3
+            tasks_hit_limit = 4
+            logs_hit_limit = 6
+            notes_hit_limit = 6
+            if effective_mode == "patient":
+                topics_hit_limit = 5
+                tasks_hit_limit = 8
+                logs_hit_limit = 12
+                notes_hit_limit = 10
+
+            topics_hit = list(semantic.get("topics") or [])[:topics_hit_limit]
+            tasks_hit = list(semantic.get("tasks") or [])[:tasks_hit_limit]
+            logs_hit = list(semantic.get("logs") or [])[:logs_hit_limit]
+            notes_hit = list(semantic.get("notes") or [])[:notes_hit_limit]
 
             if topics_hit:
                 lines.append("Semantic recall topics:")

@@ -286,7 +286,7 @@ Plugin config example:
 
 The logger plugin writes events and augments `before_agent_start` with Clawboard retrieval context (`/api/context`, fallback `/api/search`) including weighted curated notes.
 
-If the OpenClaw plugin SDK supports tool registration, it also registers explicit agent tools (`clawboard.search`, `clawboard.context`, `clawboard.get_*`, `clawboard.create_note`, `clawboard.update_task`). See `CONTEXT.md` and `CONTEXT_SPEC.md`.
+If the OpenClaw plugin SDK supports tool registration, it also registers explicit agent tools (`clawboard_search`, `clawboard_context`, `clawboard_get_*`, `clawboard_create_note`, `clawboard_update_task`). See `CONTEXT.md` and `CONTEXT_SPEC.md`.
 
 ### Agentic install prompt
 

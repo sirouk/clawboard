@@ -32,7 +32,97 @@ log_warn() { echo -e "${YELLOW}warning:${NC} $1"; }
 log_error() { echo -e "${RED}error:${NC} $1"; exit 1; }
 
 REPO_URL="${CLAWBOARD_REPO_URL:-https://github.com/sirouk/clawboard}"
-INSTALL_DIR="${CLAWBOARD_DIR:-$HOME/clawboard}"
+
+# Where to clone Clawboard.
+#
+# Back-compat: if ~/clawboard already exists, we stick with it.
+# If the user has an OpenClaw workspace configured AND that workspace already uses a
+# `projects/` (or `project/`) convention, prefer placing the repo there so installs
+# live next to the user's agent workspace.
+#
+# Explicit overrides:
+# - `--dir <path>` / `CLAWBOARD_DIR=<path>`
+# - `CLAWBOARD_PARENT_DIR=<path>` (repo goes under `<path>/clawboard`)
+detect_openclaw_workspace_root() {
+  if [ -n "${OPENCLAW_WORKSPACE_DIR:-}" ]; then
+    printf "%s" "${OPENCLAW_WORKSPACE_DIR}"
+    return 0
+  fi
+  local cfg="$HOME/.openclaw/openclaw.json"
+  if [ -f "$cfg" ] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$cfg" <<'PY' 2>/dev/null || true
+import json, sys
+path = sys.argv[1]
+try:
+  with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+except Exception:
+  sys.exit(0)
+
+# Newer configs: agents.defaults.workspace
+ws = (((data.get("agents") or {}).get("defaults") or {}).get("workspace"))
+if isinstance(ws, str) and ws.strip():
+  print(ws.strip(), end="")
+  sys.exit(0)
+
+# Older configs: top-level workspace
+ws = data.get("workspace")
+if isinstance(ws, str) and ws.strip():
+  print(ws.strip(), end="")
+PY
+  fi
+}
+
+DIR_EXPLICIT=false
+if [ -n "${CLAWBOARD_DIR:-}" ]; then
+  DIR_EXPLICIT=true
+fi
+
+PARENT_DIR_SET=false
+if [ -n "${CLAWBOARD_PARENT_DIR:-}" ] && [ -z "${CLAWBOARD_DIR:-}" ]; then
+  PARENT_DIR_SET=true
+fi
+
+DEFAULT_INSTALL_DIR="$HOME/clawboard"
+DEFAULT_INSTALL_REASON="fallback"
+if [ -z "${CLAWBOARD_DIR:-}" ]; then
+  # If the legacy location already exists, stick with it.
+  if [ -d "$HOME/clawboard/.git" ]; then
+    DEFAULT_INSTALL_DIR="$HOME/clawboard"
+    DEFAULT_INSTALL_REASON="existing ~/clawboard"
+  elif [ -n "${CLAWBOARD_PARENT_DIR:-}" ]; then
+    parent="${CLAWBOARD_PARENT_DIR%/}"
+    if [ -n "$parent" ]; then
+      DEFAULT_INSTALL_DIR="$parent/clawboard"
+      DEFAULT_INSTALL_REASON="CLAWBOARD_PARENT_DIR"
+    fi
+  else
+    ws="$(detect_openclaw_workspace_root || true)"
+    ws="${ws//$'\r'/}"
+    if [ -n "$ws" ] && [ -d "$ws" ]; then
+      if [ -d "$ws/projects/clawboard/.git" ]; then
+        DEFAULT_INSTALL_DIR="$ws/projects/clawboard"
+        DEFAULT_INSTALL_REASON="existing workspace/projects/clawboard"
+      elif [ -d "$ws/project/clawboard/.git" ]; then
+        DEFAULT_INSTALL_DIR="$ws/project/clawboard"
+        DEFAULT_INSTALL_REASON="existing workspace/project/clawboard"
+      elif [ -d "$ws/projects" ]; then
+        DEFAULT_INSTALL_DIR="$ws/projects/clawboard"
+        DEFAULT_INSTALL_REASON="workspace/projects convention"
+      elif [ -d "$ws/project" ]; then
+        DEFAULT_INSTALL_DIR="$ws/project/clawboard"
+        DEFAULT_INSTALL_REASON="workspace/project convention"
+      fi
+    fi
+  fi
+fi
+
+INSTALL_DIR="${CLAWBOARD_DIR:-$DEFAULT_INSTALL_DIR}"
+if [ -n "${CLAWBOARD_DIR:-}" ]; then
+  INSTALL_DIR_REASON="CLAWBOARD_DIR"
+else
+  INSTALL_DIR_REASON="$DEFAULT_INSTALL_REASON"
+fi
 API_URL="${CLAWBOARD_API_URL:-http://localhost:8010}"
 WEB_URL="${CLAWBOARD_WEB_URL:-http://localhost:3010}"
 PUBLIC_API_BASE="${CLAWBOARD_PUBLIC_API_BASE:-}"
@@ -40,7 +130,18 @@ PUBLIC_WEB_URL="${CLAWBOARD_PUBLIC_WEB_URL:-}"
 TOKEN="${CLAWBOARD_TOKEN:-}"
 TITLE="${CLAWBOARD_TITLE:-Clawboard}"
 INTEGRATION_LEVEL="${CLAWBOARD_INTEGRATION_LEVEL:-write}"
+INTEGRATION_LEVEL_EXPLICIT=false
+if [ -n "${CLAWBOARD_INTEGRATION_LEVEL:-}" ]; then
+  INTEGRATION_LEVEL_EXPLICIT=true
+fi
 CHUTES_FAST_PATH_URL="${CHUTES_FAST_PATH_URL:-https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh}"
+WEB_HOT_RELOAD_OVERRIDE=""
+ALLOWED_DEV_ORIGINS_OVERRIDE=""
+CONTEXT_MODE_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_MODE:-}"
+CONTEXT_FALLBACK_MODE_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE:-}"
+CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS:-}"
+CONTEXT_TOTAL_BUDGET_MS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS:-}"
+CONTEXT_MAX_CHARS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS:-}"
 
 SKIP_DOCKER=false
 SKIP_OPENCLAW=false
@@ -56,14 +157,22 @@ ACCESS_WEB_URL=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dir) INSTALL_DIR="$2"; shift 2 ;;
+    --dir) INSTALL_DIR="$2"; INSTALL_DIR_REASON="--dir"; DIR_EXPLICIT=true; shift 2 ;;
     --api-url) API_URL="$2"; shift 2 ;;
     --web-url) WEB_URL="$2"; shift 2 ;;
     --public-api-base) PUBLIC_API_BASE="$2"; shift 2 ;;
     --public-web-url) PUBLIC_WEB_URL="$2"; shift 2 ;;
     --token) TOKEN="$2"; shift 2 ;;
     --title) TITLE="$2"; shift 2 ;;
-    --integration-level) INTEGRATION_LEVEL="$2"; shift 2 ;;
+    --integration-level) INTEGRATION_LEVEL="$2"; INTEGRATION_LEVEL_EXPLICIT=true; shift 2 ;;
+    --web-hot-reload) WEB_HOT_RELOAD_OVERRIDE="1"; shift ;;
+    --no-web-hot-reload) WEB_HOT_RELOAD_OVERRIDE="0"; shift ;;
+    --allowed-dev-origins) ALLOWED_DEV_ORIGINS_OVERRIDE="$2"; shift 2 ;;
+    --context-mode) CONTEXT_MODE_OVERRIDE="$2"; shift 2 ;;
+    --context-fallback-mode) CONTEXT_FALLBACK_MODE_OVERRIDE="$2"; shift 2 ;;
+    --context-fetch-timeout-ms) CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE="$2"; shift 2 ;;
+    --context-total-budget-ms) CONTEXT_TOTAL_BUDGET_MS_OVERRIDE="$2"; shift 2 ;;
+    --context-max-chars) CONTEXT_MAX_CHARS_OVERRIDE="$2"; shift 2 ;;
     --update) UPDATE_REPO=true; shift ;;
     --skip-docker) SKIP_DOCKER=true; shift ;;
     --skip-openclaw) SKIP_OPENCLAW=true; shift ;;
@@ -73,14 +182,17 @@ while [ $# -gt 0 ]; do
     --install-chutes-if-missing-openclaw) INSTALL_CHUTES_IF_MISSING_OPENCLAW=true; shift ;;
     --no-access-url-prompt) PROMPT_ACCESS_URL=false; shift ;;
     --no-access-url-detect) AUTO_DETECT_ACCESS_URL=false; shift ;;
-    --no-backfill) INTEGRATION_LEVEL="manual"; shift ;;
+    --no-backfill) INTEGRATION_LEVEL="manual"; INTEGRATION_LEVEL_EXPLICIT=true; shift ;;
     --no-color) shift ;;
     -h|--help)
       cat <<'USAGE'
 Usage: bash scripts/bootstrap_openclaw.sh [options]
 
 Options:
-  --dir <path>         Install directory (default: ~/clawboard)
+  --dir <path>         Install directory (default: auto; prefers OpenClaw workspace projects/, else ~/clawboard)
+Environment overrides:
+  CLAWBOARD_DIR=<path>        Install directory (overrides everything)
+  CLAWBOARD_PARENT_DIR=<path> Install parent directory (repo goes in <path>/clawboard)
   --api-url <url>      Clawboard API base (default: http://localhost:8010)
   --web-url <url>      Clawboard web URL (default: http://localhost:3010)
   --public-api-base <url>
@@ -91,6 +203,20 @@ Options:
   --title <title>      Instance display name (default: Clawboard)
   --integration-level <manual|write|full>
                        Integration level for /api/config (default: write)
+  --web-hot-reload     Enable dev web hot reload (sets CLAWBOARD_WEB_HOT_RELOAD=1)
+  --no-web-hot-reload  Disable dev web hot reload (sets CLAWBOARD_WEB_HOT_RELOAD=0)
+  --allowed-dev-origins <csv>
+                       Extra allowed dev origins/hosts for Next dev server (writes CLAWBOARD_ALLOWED_DEV_ORIGINS)
+  --context-mode <auto|cheap|full|patient>
+                       Context retrieval mode for the OpenClaw clawboard-logger plugin (writes CLAWBOARD_LOGGER_CONTEXT_MODE)
+  --context-fallback-mode <auto|cheap|full|patient>
+                       Fallback context mode for the OpenClaw clawboard-logger plugin (writes CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE)
+  --context-fetch-timeout-ms <ms>
+                       Per-request timeout for /api/context calls made by the OpenClaw plugin (writes CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS)
+  --context-total-budget-ms <ms>
+                       Total budget for before_agent_start context retrieval in the OpenClaw plugin (writes CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS)
+  --context-max-chars <n>
+                       Hard cap for injected context block size (writes CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS)
   --no-backfill        Shortcut for --integration-level manual
   --update             Pull latest repo if already present
   --skip-docker        Skip docker compose up
@@ -123,7 +249,7 @@ if ! is_valid_integration_level "$INTEGRATION_LEVEL"; then
   log_error "Invalid integration level: $INTEGRATION_LEVEL (expected manual|write|full)"
 fi
 
-if [ -z "${CLAWBOARD_INTEGRATION_LEVEL:-}" ] && [ -t 0 ]; then
+if [ "$INTEGRATION_LEVEL_EXPLICIT" = false ] && [ -t 0 ]; then
   echo ""
   echo "Choose integration level:"
   echo "  1) full   (backfill + live logging)"
@@ -203,6 +329,33 @@ read_env_value_from_file() {
   line="${line#\'}"
   [ -n "$line" ] || return 1
   printf "%s" "$line"
+}
+
+is_valid_context_mode() {
+  case "$1" in
+    auto|cheap|full|patient) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_positive_int() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+clamp_int() {
+  local value="${1:-}"
+  local min="${2:-0}"
+  local max="${3:-2147483647}"
+  if ! is_positive_int "$value"; then
+    return 1
+  fi
+  if [ "$value" -lt "$min" ]; then
+    echo "$min"
+  elif [ "$value" -gt "$max" ]; then
+    echo "$max"
+  else
+    echo "$value"
+  fi
 }
 
 extract_url_host() {
@@ -402,13 +555,31 @@ maybe_run_chutes_fast_path() {
   return 0
 }
 
-log_info "Preparing Clawboard checkout..."
+if [ "$PARENT_DIR_SET" = true ]; then
+  log_info "Install dir from CLAWBOARD_PARENT_DIR: $INSTALL_DIR"
+elif [ "$DIR_EXPLICIT" = false ] && [ -n "${INSTALL_DIR_REASON:-}" ]; then
+  log_info "Auto-selected install dir ($INSTALL_DIR_REASON): $INSTALL_DIR"
+fi
+
+log_info "Preparing Clawboard checkout in: $INSTALL_DIR"
 if [ -d "$INSTALL_DIR/.git" ]; then
   if [ "$UPDATE_REPO" = true ]; then
     git -C "$INSTALL_DIR" pull
   fi
 else
+  if [ -e "$INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
+    log_error "Install path exists and is not a directory: $INSTALL_DIR (use --dir to pick another path)"
+  fi
+  if [ -d "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null || true)" ]; then
+    log_error "Install directory exists but is not a git repo: $INSTALL_DIR (use --dir to pick an empty path)"
+  fi
   git clone "$REPO_URL" "$INSTALL_DIR"
+fi
+
+if [ -z "$TOKEN" ]; then
+  if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_TOKEN" >/dev/null 2>&1; then
+    TOKEN="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_TOKEN" || true)"
+  fi
 fi
 
 if [ -z "$TOKEN" ]; then
@@ -423,11 +594,153 @@ upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" "$ACCESS_API_UR
 log_info "Writing CLAWBOARD_PUBLIC_WEB_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_WEB_URL" "$ACCESS_WEB_URL"
 
-# Default to production-style web service unless the user opts in.
-if ! read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" >/dev/null 2>&1; then
-  log_info "Writing CLAWBOARD_WEB_HOT_RELOAD=0 in $INSTALL_DIR/.env..."
-  upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" "0"
+# Web hot reload (dev web service).
+WEB_HOT_RELOAD_VALUE=""
+if [ -n "$WEB_HOT_RELOAD_OVERRIDE" ]; then
+  WEB_HOT_RELOAD_VALUE="$WEB_HOT_RELOAD_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" >/dev/null 2>&1; then
+  WEB_HOT_RELOAD_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" || true)"
+else
+  if [ -t 0 ]; then
+    echo ""
+    echo "Enable Clawboard web hot reload (dev web service)?"
+    echo "  1) yes (recommended for local dev)"
+    echo "  2) no  (production-style web service)"
+    printf "Select [1-2] (default: 1): "
+    read -r WEB_HOT_RELOAD_CHOICE
+    case "$WEB_HOT_RELOAD_CHOICE" in
+      1|"") WEB_HOT_RELOAD_VALUE="1" ;;
+      2) WEB_HOT_RELOAD_VALUE="0" ;;
+      *) log_warn "Unrecognized choice. Using default: yes."; WEB_HOT_RELOAD_VALUE="1" ;;
+    esac
+  else
+    WEB_HOT_RELOAD_VALUE="1"
+  fi
 fi
+log_info "Writing CLAWBOARD_WEB_HOT_RELOAD=$WEB_HOT_RELOAD_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" "$WEB_HOT_RELOAD_VALUE"
+
+# Extra allowed dev origins/hosts for Next dev server.
+if [ -n "$ALLOWED_DEV_ORIGINS_OVERRIDE" ]; then
+  log_info "Writing CLAWBOARD_ALLOWED_DEV_ORIGINS in $INSTALL_DIR/.env..."
+  upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_ALLOWED_DEV_ORIGINS" "$ALLOWED_DEV_ORIGINS_OVERRIDE"
+elif ! read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_ALLOWED_DEV_ORIGINS" >/dev/null 2>&1 && [ -t 0 ]; then
+  echo ""
+  echo "Optional: add extra allowed dev origins/hosts for the Next dev server."
+  echo "Enter a comma-separated list (examples: https://my-host.ts.net:3010, my-mac-mini.local), or leave blank."
+  printf "CLAWBOARD_ALLOWED_DEV_ORIGINS: "
+  read -r ALLOWED_DEV_ORIGINS_INPUT
+  ALLOWED_DEV_ORIGINS_INPUT="$(printf "%s" "$ALLOWED_DEV_ORIGINS_INPUT" | tr -d '\r')"
+  if [ -n "$ALLOWED_DEV_ORIGINS_INPUT" ]; then
+    upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_ALLOWED_DEV_ORIGINS" "$ALLOWED_DEV_ORIGINS_INPUT"
+  fi
+fi
+
+# OpenClaw clawboard-logger context retrieval tuning (used for prompt augmentation).
+#
+# These values are stored in $INSTALL_DIR/.env for convenience, but are applied to OpenClaw
+# via plugin config (plugins.entries.clawboard-logger.config.*) during bootstrap.
+CONTEXT_MODE_VALUE=""
+if [ -n "$CONTEXT_MODE_OVERRIDE" ]; then
+  CONTEXT_MODE_VALUE="$CONTEXT_MODE_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_MODE" >/dev/null 2>&1; then
+  CONTEXT_MODE_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_MODE" || true)"
+else
+  if [ -t 0 ]; then
+    echo ""
+    echo "OpenClaw logger context mode (controls /api/context retrieval before each agent run):"
+    echo "  1) auto    (recommended; cheap by default, recalls when needed)"
+    echo "  2) cheap   (fastest; no semantic recall)"
+    echo "  3) full    (always semantic recall; can be slower)"
+    echo "  4) patient (deep recall; longer timeouts; best for planning)"
+    printf "Select [1-4] (default: 1): "
+    read -r CONTEXT_MODE_CHOICE
+    case "$CONTEXT_MODE_CHOICE" in
+      1|"") CONTEXT_MODE_VALUE="auto" ;;
+      2) CONTEXT_MODE_VALUE="cheap" ;;
+      3) CONTEXT_MODE_VALUE="full" ;;
+      4) CONTEXT_MODE_VALUE="patient" ;;
+      *) log_warn "Unrecognized choice. Using default: auto."; CONTEXT_MODE_VALUE="auto" ;;
+    esac
+  else
+    CONTEXT_MODE_VALUE="auto"
+  fi
+fi
+CONTEXT_MODE_VALUE="$(printf "%s" "$CONTEXT_MODE_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+if ! is_valid_context_mode "$CONTEXT_MODE_VALUE"; then
+  log_warn "Invalid CLAWBOARD_LOGGER_CONTEXT_MODE=$CONTEXT_MODE_VALUE. Using auto."
+  CONTEXT_MODE_VALUE="auto"
+fi
+log_info "Writing CLAWBOARD_LOGGER_CONTEXT_MODE=$CONTEXT_MODE_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_MODE" "$CONTEXT_MODE_VALUE"
+
+DEFAULT_CONTEXT_FETCH_TIMEOUT_MS="1200"
+DEFAULT_CONTEXT_TOTAL_BUDGET_MS="2200"
+DEFAULT_CONTEXT_MAX_CHARS="2200"
+case "$CONTEXT_MODE_VALUE" in
+  full)
+    DEFAULT_CONTEXT_FETCH_TIMEOUT_MS="2500"
+    DEFAULT_CONTEXT_TOTAL_BUDGET_MS="4500"
+    DEFAULT_CONTEXT_MAX_CHARS="3500"
+    ;;
+  patient)
+    DEFAULT_CONTEXT_FETCH_TIMEOUT_MS="8000"
+    DEFAULT_CONTEXT_TOTAL_BUDGET_MS="12000"
+    DEFAULT_CONTEXT_MAX_CHARS="6000"
+    ;;
+esac
+
+CONTEXT_FALLBACK_MODE_VALUE=""
+if [ -n "$CONTEXT_FALLBACK_MODE_OVERRIDE" ]; then
+  CONTEXT_FALLBACK_MODE_VALUE="$CONTEXT_FALLBACK_MODE_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE" >/dev/null 2>&1; then
+  CONTEXT_FALLBACK_MODE_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE" || true)"
+else
+  CONTEXT_FALLBACK_MODE_VALUE="cheap"
+fi
+CONTEXT_FALLBACK_MODE_VALUE="$(printf "%s" "$CONTEXT_FALLBACK_MODE_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+if ! is_valid_context_mode "$CONTEXT_FALLBACK_MODE_VALUE"; then
+  log_warn "Invalid CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE=$CONTEXT_FALLBACK_MODE_VALUE. Using cheap."
+  CONTEXT_FALLBACK_MODE_VALUE="cheap"
+fi
+log_info "Writing CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE=$CONTEXT_FALLBACK_MODE_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE" "$CONTEXT_FALLBACK_MODE_VALUE"
+
+CONTEXT_FETCH_TIMEOUT_MS_VALUE=""
+if [ -n "$CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE" ]; then
+  CONTEXT_FETCH_TIMEOUT_MS_VALUE="$CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS" >/dev/null 2>&1; then
+  CONTEXT_FETCH_TIMEOUT_MS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS" || true)"
+else
+  CONTEXT_FETCH_TIMEOUT_MS_VALUE="$DEFAULT_CONTEXT_FETCH_TIMEOUT_MS"
+fi
+CONTEXT_FETCH_TIMEOUT_MS_VALUE="$(clamp_int "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" 200 20000 || echo "$DEFAULT_CONTEXT_FETCH_TIMEOUT_MS")"
+log_info "Writing CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS=$CONTEXT_FETCH_TIMEOUT_MS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE"
+
+CONTEXT_TOTAL_BUDGET_MS_VALUE=""
+if [ -n "$CONTEXT_TOTAL_BUDGET_MS_OVERRIDE" ]; then
+  CONTEXT_TOTAL_BUDGET_MS_VALUE="$CONTEXT_TOTAL_BUDGET_MS_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS" >/dev/null 2>&1; then
+  CONTEXT_TOTAL_BUDGET_MS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS" || true)"
+else
+  CONTEXT_TOTAL_BUDGET_MS_VALUE="$DEFAULT_CONTEXT_TOTAL_BUDGET_MS"
+fi
+CONTEXT_TOTAL_BUDGET_MS_VALUE="$(clamp_int "$CONTEXT_TOTAL_BUDGET_MS_VALUE" 400 45000 || echo "$DEFAULT_CONTEXT_TOTAL_BUDGET_MS")"
+log_info "Writing CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS=$CONTEXT_TOTAL_BUDGET_MS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS" "$CONTEXT_TOTAL_BUDGET_MS_VALUE"
+
+CONTEXT_MAX_CHARS_VALUE=""
+if [ -n "$CONTEXT_MAX_CHARS_OVERRIDE" ]; then
+  CONTEXT_MAX_CHARS_VALUE="$CONTEXT_MAX_CHARS_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS" >/dev/null 2>&1; then
+  CONTEXT_MAX_CHARS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS" || true)"
+else
+  CONTEXT_MAX_CHARS_VALUE="$DEFAULT_CONTEXT_MAX_CHARS"
+fi
+CONTEXT_MAX_CHARS_VALUE="$(clamp_int "$CONTEXT_MAX_CHARS_VALUE" 400 12000 || echo "$DEFAULT_CONTEXT_MAX_CHARS")"
+log_info "Writing CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS=$CONTEXT_MAX_CHARS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS" "$CONTEXT_MAX_CHARS_VALUE"
 
 chmod 600 "$INSTALL_DIR/.env" || true
 
@@ -545,9 +858,9 @@ if [ "$SKIP_OPENCLAW" = false ]; then
 
       log_info "Configuring logger plugin..."
       if [ -n "$TOKEN" ]; then
-        CONFIG_JSON=$(printf '{"baseUrl":"%s","token":"%s","enabled":true}' "$API_URL" "$TOKEN")
+        CONFIG_JSON=$(printf '{"baseUrl":"%s","token":"%s","enabled":true,"contextMode":"%s","contextFallbackMode":"%s","contextFetchTimeoutMs":%s,"contextTotalBudgetMs":%s,"contextMaxChars":%s}' "$API_URL" "$TOKEN" "$CONTEXT_MODE_VALUE" "$CONTEXT_FALLBACK_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_TOTAL_BUDGET_MS_VALUE" "$CONTEXT_MAX_CHARS_VALUE")
       else
-        CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true}' "$API_URL")
+        CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true,"contextMode":"%s","contextFallbackMode":"%s","contextFetchTimeoutMs":%s,"contextTotalBudgetMs":%s,"contextMaxChars":%s}' "$API_URL" "$CONTEXT_MODE_VALUE" "$CONTEXT_FALLBACK_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_TOTAL_BUDGET_MS_VALUE" "$CONTEXT_MAX_CHARS_VALUE")
       fi
       openclaw config set plugins.entries.clawboard-logger.config --json "$CONFIG_JSON" >/dev/null 2>&1 || true
       openclaw config set plugins.entries.clawboard-logger.enabled --json true >/dev/null 2>&1 || true
@@ -573,7 +886,17 @@ log_success "Bootstrap complete."
 echo "Clawboard UI (access):   $ACCESS_WEB_URL"
 echo "Clawboard API (access):  ${ACCESS_API_URL%/}/docs"
 echo "Clawboard API (internal): $API_URL"
-echo "Token:         $TOKEN"
+MASKED_TOKEN="(not set)"
+if [ -n "${TOKEN:-}" ]; then
+  if [ "${#TOKEN}" -le 10 ]; then
+    MASKED_TOKEN="<set>"
+  else
+    first6="${TOKEN:0:6}"
+    last4="$(printf "%s" "$TOKEN" | tail -c 4 || true)"
+    MASKED_TOKEN="${first6}...${last4}"
+  fi
+fi
+echo "Token:         $MASKED_TOKEN"
 echo "Security note: CLAWBOARD_TOKEN is required for all writes and non-localhost reads."
 echo "               Localhost reads can run tokenless. Keep network ACLs strict (no Funnel/public exposure)."
 echo ""

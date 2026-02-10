@@ -115,24 +115,42 @@ Once I have those, I’ll validate /api/health and /api/config and start logging
     </svg>
   );
 
-  const skillInstallSnippet = `git clone https://github.com/sirouk/clawboard ~/clawboard
+  const skillInstallSnippet = `# Choose where to keep the repo (optional):
+# - export CLAWBOARD_DIR=/absolute/path/to/clawboard
+# - export CLAWBOARD_PARENT_DIR=/absolute/path/to/projects (installs to .../clawboard)
+CLAWBOARD_PARENT_DIR="${"$"}{CLAWBOARD_PARENT_DIR:-}"
+CLAWBOARD_DIR="${"$"}{CLAWBOARD_DIR:-${"$"}{CLAWBOARD_PARENT_DIR:+${"$"}CLAWBOARD_PARENT_DIR/clawboard}}"
+CLAWBOARD_DIR="${"$"}{CLAWBOARD_DIR:-${"$"}HOME/clawboard}"
+git clone https://github.com/sirouk/clawboard "${"$"}CLAWBOARD_DIR"
 mkdir -p ~/.openclaw/skills
-cp -R ~/clawboard/skills/clawboard ~/.openclaw/skills/clawboard`;
+cp -R "${"$"}CLAWBOARD_DIR/skills/clawboard" ~/.openclaw/skills/clawboard`;
 
-  const pluginInstallSnippet = `openclaw plugins install -l ~/clawboard/extensions/clawboard-logger
-openclaw plugins enable clawboard-logger`;
+  const pluginInstallSnippet = useMemo(() => {
+    const baseUrl = (localApiBase || "<clawboard-api-url>").trim() || "<clawboard-api-url>";
+    return `# Recommended: enable OpenResponses so attachments work (POST /v1/responses)
+openclaw config set gateway.http.endpoints.responses.enabled --json true
 
-  const pluginConfigSnippet = `"plugins": {
-  "entries": {
-    "clawboard-logger": {
-      "enabled": true,
-      "config": {
-        "baseUrl": "${localApiBase || "<clawboard-api-url>"}",
-        "token": "${token && token.trim().length > 0 ? token.trim() : "YOUR_TOKEN"}"
-      }
-    }
-  }
-}`;
+# Install + enable the Clawboard logger plugin
+openclaw plugins install -l "${"$"}CLAWBOARD_DIR/extensions/clawboard-logger"
+openclaw plugins enable clawboard-logger
+
+# Configure plugin (token should match server-side CLAWBOARD_TOKEN)
+# contextMode options: auto | cheap | full | patient
+openclaw config set plugins.entries.clawboard-logger.config --json '{
+  "baseUrl":"${baseUrl}",
+  "token":"<CLAWBOARD_TOKEN>",
+  "enabled":true,
+  "contextMode":"auto",
+  "contextFallbackMode":"cheap",
+  "contextFetchTimeoutMs":1200,
+  "contextTotalBudgetMs":2200,
+  "contextMaxChars":2200
+}'
+openclaw config set plugins.entries.clawboard-logger.enabled --json true
+
+# Restart gateway to apply config
+openclaw gateway restart`;
+  }, [localApiBase]);
 
   return (
     <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
@@ -315,7 +333,10 @@ openclaw plugins enable clawboard-logger`;
 {skillInstallSnippet}
                   </pre>
                   <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                    OpenClaw picks up new skills on the next turn.
+                    OpenClaw picks up new skills on the next turn. Important: the cloned repo and the installed skill
+                    are different folders. OpenClaw reads the installed skill at <code>~/.openclaw/skills/clawboard</code>.
+                    Editing <code>$CLAWBOARD_DIR/skills/clawboard</code> does not update the installed copy; re-copy the
+                    skill (or rerun bootstrap) after changes.
                   </p>
                 </div>
               )}
@@ -329,26 +350,18 @@ openclaw plugins enable clawboard-logger`;
                     </Button>
                   </div>
                   <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                    The plugin ensures every turn is logged even if the agent misses a tool call.
+                    Clawboard can queue messages even if OpenClaw is misconfigured, but without the plugin you will not
+                    see assistant output and tool traces reliably.
                   </p>
                   <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
 {pluginInstallSnippet}
                   </pre>
                   <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                    If you see <code>extracted package missing package.json</code>, update your repo: <code>cd ~/clawboard && git pull</code>.
+                    If you see <code>extracted package missing package.json</code>, update your repo: <code>cd ${"$"}CLAWBOARD_DIR && git pull</code>.
                   </p>
-                  <div className="mt-3 flex items-center justify-between">
-                    <div className="text-xs font-semibold uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Plugin config</div>
-                    <Button size="sm" variant="secondary" onClick={() => copyToClipboard(pluginConfigSnippet)} aria-label="Copy logger plugin config">
-                      <span className="h-4 w-4">{clipboardIcon}</span>
-                    </Button>
-                  </div>
-                  <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
-{pluginConfigSnippet}
-                  </pre>
                   <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                    Use the same token as your API server&apos;s <code>CLAWBOARD_TOKEN</code>. Keep this set for all write calls and
-                    non-localhost reads.
+                    Use the same token as your API server&apos;s <code>CLAWBOARD_TOKEN</code>. Keep it private: it grants write
+                    access and non-localhost reads.
                   </p>
                 </div>
               )}

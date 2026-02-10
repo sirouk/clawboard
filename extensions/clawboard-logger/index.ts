@@ -90,6 +90,20 @@ type ClawboardLoggerConfig = {
   autoTopicBySession?: boolean;
   /** When true (default), prepend retrieved Clawboard context before agent start. */
   contextAugment?: boolean;
+  /**
+   * Context retrieval mode (passed to Clawboard `/api/context`):
+   * - auto: Layer A always, Layer B conditional
+   * - cheap: Layer A only
+   * - full: Layer A + Layer B
+   * - patient: like full, but server may use larger bounded recall limits
+   */
+  contextMode?: "auto" | "cheap" | "full" | "patient";
+  /** Fallback mode to try if the primary mode times out/fails. */
+  contextFallbackMode?: "auto" | "cheap" | "full" | "patient";
+  /** Timeout (ms) for context GET calls (e.g. `/api/context`, `/api/search`) in before_agent_start. */
+  contextFetchTimeoutMs?: number;
+  /** Total budget (ms) for context retrieval work in before_agent_start (includes fallback attempts). */
+  contextTotalBudgetMs?: number;
   /** Hard cap for prepended context characters. */
   contextMaxChars?: number;
   /** Max topics to include in context block. */
@@ -304,6 +318,24 @@ export default function register(api: OpenClawPluginApi) {
   // Stage-2 classifier will attach real topics asynchronously.
   const autoTopicBySession = rawConfig.autoTopicBySession === true;
   const contextAugment = rawConfig.contextAugment !== false;
+  const contextMode: "auto" | "cheap" | "full" | "patient" = (
+    rawConfig.contextMode && ["auto", "cheap", "full", "patient"].includes(rawConfig.contextMode)
+      ? rawConfig.contextMode
+      : "auto"
+  );
+  const contextFallbackMode: "auto" | "cheap" | "full" | "patient" = (
+    rawConfig.contextFallbackMode && ["auto", "cheap", "full", "patient"].includes(rawConfig.contextFallbackMode)
+      ? rawConfig.contextFallbackMode
+      : "cheap"
+  );
+  const contextFetchTimeoutMs =
+    typeof rawConfig.contextFetchTimeoutMs === "number" && Number.isFinite(rawConfig.contextFetchTimeoutMs)
+      ? Math.max(200, Math.min(20_000, Math.floor(rawConfig.contextFetchTimeoutMs)))
+      : 1200;
+  const contextTotalBudgetMs =
+    typeof rawConfig.contextTotalBudgetMs === "number" && Number.isFinite(rawConfig.contextTotalBudgetMs)
+      ? Math.max(400, Math.min(45_000, Math.floor(rawConfig.contextTotalBudgetMs)))
+      : 2200;
   const contextMaxChars =
     typeof rawConfig.contextMaxChars === "number" && Number.isFinite(rawConfig.contextMaxChars)
       ? Math.max(400, Math.min(12000, Math.floor(rawConfig.contextMaxChars)))
@@ -791,9 +823,6 @@ export default function register(api: OpenClawPluginApi) {
     ...(token ? { "X-Clawboard-Token": token } : {}),
   };
 
-  const CONTEXT_FETCH_TIMEOUT_MS = 1200;
-  const CONTEXT_TOTAL_BUDGET_MS = 2200;
-
   async function getJson(pathname: string, params?: Record<string, string | number | undefined>) {
     try {
       const url = new URL(`${baseUrl}${pathname}`);
@@ -804,7 +833,7 @@ export default function register(api: OpenClawPluginApi) {
         }
       }
       const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), CONTEXT_FETCH_TIMEOUT_MS);
+      const t = setTimeout(() => controller.abort(), contextFetchTimeoutMs);
       const res = await fetch(url.toString(), { headers: apiHeaders, signal: controller.signal });
       clearTimeout(t);
       if (!res.ok) return null;
@@ -934,7 +963,7 @@ export default function register(api: OpenClawPluginApi) {
         const tools: unknown[] = [];
 
         tools.push({
-          name: "clawboard.search",
+          name: "clawboard_search",
           label: "Clawboard Search",
           description: "Search Clawboard topics, tasks, logs, and curated notes (hybrid semantic + lexical).",
           parameters: {
@@ -980,7 +1009,7 @@ export default function register(api: OpenClawPluginApi) {
         });
 
         tools.push({
-          name: "clawboard.context",
+          name: "clawboard_context",
           label: "Clawboard Context",
           description: "Get a prompt-ready layered context block from Clawboard (working set + continuity + optional recall).",
           parameters: {
@@ -989,7 +1018,7 @@ export default function register(api: OpenClawPluginApi) {
             properties: {
               q: { type: "string", description: "Current user query or retrieval hint (optional)." },
               sessionKey: { type: "string", description: "Optional continuity session key override." },
-              mode: { type: "string", description: "auto|cheap|full (default auto)." },
+              mode: { type: "string", description: "auto|cheap|full|patient (default auto)." },
               maxChars: { type: "integer", description: "Max chars for returned block." },
               workingSetLimit: { type: "integer", description: "Working set item limit." },
               timelineLimit: { type: "integer", description: "Timeline line limit." },
@@ -1024,7 +1053,7 @@ export default function register(api: OpenClawPluginApi) {
         });
 
         tools.push({
-          name: "clawboard.get_topic",
+          name: "clawboard_get_topic",
           label: "Get Clawboard Topic",
           description: "Fetch a Clawboard topic by id.",
           parameters: {
@@ -1042,7 +1071,7 @@ export default function register(api: OpenClawPluginApi) {
         });
 
         tools.push({
-          name: "clawboard.get_task",
+          name: "clawboard_get_task",
           label: "Get Clawboard Task",
           description: "Fetch a Clawboard task by id.",
           parameters: {
@@ -1060,7 +1089,7 @@ export default function register(api: OpenClawPluginApi) {
         });
 
         tools.push({
-          name: "clawboard.get_log",
+          name: "clawboard_get_log",
           label: "Get Clawboard Log",
           description: "Fetch a Clawboard log entry by id (optionally including raw payload).",
           parameters: {
@@ -1085,7 +1114,7 @@ export default function register(api: OpenClawPluginApi) {
         });
 
         tools.push({
-          name: "clawboard.create_note",
+          name: "clawboard_create_note",
           label: "Create Clawboard Note",
           description: "Create a curated note attached to an existing log entry (high-weight retrieval signal).",
           parameters: {
@@ -1131,7 +1160,7 @@ export default function register(api: OpenClawPluginApi) {
         });
 
         tools.push({
-          name: "clawboard.update_task",
+          name: "clawboard_update_task",
           label: "Update Clawboard Task",
           description: "Patch a task (status/priority/due/pin/snooze/tags) without needing the full task payload.",
           parameters: {
@@ -1172,13 +1201,13 @@ export default function register(api: OpenClawPluginApi) {
       },
       {
         names: [
-          "clawboard.search",
-          "clawboard.context",
-          "clawboard.get_topic",
-          "clawboard.get_task",
-          "clawboard.get_log",
-          "clawboard.create_note",
-          "clawboard.update_task",
+          "clawboard_search",
+          "clawboard_context",
+          "clawboard_get_topic",
+          "clawboard_get_task",
+          "clawboard_get_log",
+          "clawboard_create_note",
+          "clawboard_update_task",
         ],
       },
     );
@@ -1367,13 +1396,14 @@ export default function register(api: OpenClawPluginApi) {
   async function retrieveContextViaContextApi(
     query: string,
     sessionKey: string | undefined,
+    mode: "auto" | "cheap" | "full" | "patient" = "auto",
   ) {
     const normalizedQuery = clip(normalizeWhitespace(sanitizeMessageContent(query)), 500);
     if (!normalizedQuery) return undefined;
     const payload = await getJson("/api/context", {
       q: normalizedQuery,
       sessionKey,
-      mode: "auto",
+      mode,
       includePending: 1,
       maxChars: contextMaxChars,
       // Working set should be a bit larger than semantic shortlist.
@@ -1553,13 +1583,24 @@ export default function register(api: OpenClawPluginApi) {
         : "current conversation continuity, active topics, active tasks, and curated notes";
     const upstream = extractUpstreamMemorySignals(event.prompt, event.messages);
     const startedAt = nowMs();
-    let context = await retrieveContextViaContextApi(retrievalQuery, effectiveSessionKey ?? ctx?.sessionKey);
+    const sessionKeyForContext = effectiveSessionKey ?? ctx?.sessionKey;
+    const primaryMode = contextMode;
+
+    let context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, primaryMode);
+    if (!context && contextFallbackMode !== primaryMode) {
+      // Defensive fallback: /api/context in auto mode may run deep recall (semantic search) and exceed our
+      // fetch timeout/budget. Always try to at least get Layer A continuity.
+      const remaining = Math.max(0, contextTotalBudgetMs - (nowMs() - startedAt));
+      if (remaining > 150) {
+        context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, contextFallbackMode);
+      }
+    }
     if (!context) {
-      const remaining = Math.max(0, CONTEXT_TOTAL_BUDGET_MS - (nowMs() - startedAt));
+      const remaining = Math.max(0, contextTotalBudgetMs - (nowMs() - startedAt));
       // Back-compat: older servers won't have /api/context yet.
       if (remaining > 250) {
         context = await Promise.race([
-          retrieveContext(retrievalQuery, effectiveSessionKey ?? ctx?.sessionKey, upstream),
+          retrieveContext(retrievalQuery, sessionKeyForContext, upstream),
           sleep(remaining).then(() => undefined),
         ]);
       }

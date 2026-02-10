@@ -120,3 +120,166 @@ class UnsnoozeOnActivityTests(unittest.TestCase):
             task = session.get(Task, "task-1")
             self.assertIsNotNone(task)
             self.assertIsNone(task.snoozedUntil)
+
+    def test_patch_log_revives_snoozed_topic_and_task(self):
+        ts = now_iso()
+        future = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-1",
+                    name="Topic One",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="snoozed",
+                    snoozedUntil=future,
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.add(
+                Task(
+                    id="task-1",
+                    topicId="topic-1",
+                    title="Task One",
+                    color="#4EA1FF",
+                    status="todo",
+                    tags=[],
+                    snoozedUntil=future,
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        # Create a conversation log with no initial routing (simulates pre-classifier ingest).
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "topicId": None,
+                "taskId": None,
+                "content": "unrouted message",
+                "summary": "unrouted message",
+                "createdAt": ts,
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {"channel": "tests", "sessionKey": "channel:tests", "messageId": "m2"},
+                "classificationStatus": "pending",
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        log_id = (res.json() or {}).get("id")
+        self.assertTrue(log_id)
+
+        # Classifier patches routing after the fact -> should revive both.
+        pres = self.client.patch(
+            f"/api/log/{log_id}",
+            headers=self.auth_headers,
+            json={
+                "topicId": "topic-1",
+                "taskId": "task-1",
+                "classificationStatus": "classified",
+                "classificationAttempts": 1,
+                "classificationError": None,
+            },
+        )
+        self.assertEqual(pres.status_code, 200, pres.text)
+
+        with get_session() as session:
+            topic = session.get(Topic, "topic-1")
+            self.assertIsNotNone(topic)
+            self.assertEqual(topic.status, "active")
+            self.assertIsNone(topic.snoozedUntil)
+
+            task = session.get(Task, "task-1")
+            self.assertIsNotNone(task)
+            self.assertIsNone(task.snoozedUntil)
+
+    def test_patch_log_task_only_revives_snoozed_task_and_topic(self):
+        ts = now_iso()
+        future = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-1",
+                    name="Topic One",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="snoozed",
+                    snoozedUntil=future,
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.add(
+                Task(
+                    id="task-1",
+                    topicId="topic-1",
+                    title="Task One",
+                    color="#4EA1FF",
+                    status="todo",
+                    tags=[],
+                    snoozedUntil=future,
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "content": "unrouted message",
+                "summary": "unrouted message",
+                "createdAt": ts,
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {"channel": "tests", "sessionKey": "channel:tests", "messageId": "m3"},
+                "classificationStatus": "pending",
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        log_id = (res.json() or {}).get("id")
+        self.assertTrue(log_id)
+
+        pres = self.client.patch(
+            f"/api/log/{log_id}",
+            headers=self.auth_headers,
+            json={
+                # Important: omit topicId entirely so the API aligns it from the task.
+                "taskId": "task-1",
+                "classificationStatus": "classified",
+                "classificationAttempts": 1,
+            },
+        )
+        self.assertEqual(pres.status_code, 200, pres.text)
+
+        with get_session() as session:
+            topic = session.get(Topic, "topic-1")
+            self.assertIsNotNone(topic)
+            self.assertEqual(topic.status, "active")
+            self.assertIsNone(topic.snoozedUntil)
+
+            task = session.get(Task, "task-1")
+            self.assertIsNotNone(task)
+            self.assertIsNone(task.snoozedUntil)

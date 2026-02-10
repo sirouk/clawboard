@@ -1,7 +1,16 @@
 "use client";
 
 import { usePathname, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import type { LogEntry, Task, Topic } from "@/lib/types";
 import { Button, Input, Select, StatusPill } from "@/components/ui";
 import { LogList } from "@/components/log-list";
@@ -662,6 +671,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const composerHandlesRef = useRef<Map<string, BoardChatComposerHandle>>(new Map());
   const prevPendingAttachmentsRef = useRef<Map<string, AttachmentLike[]>>(new Map());
   const [chatTopFade, setChatTopFade] = useState<Record<string, boolean>>({});
+  const [chatJumpToBottom, setChatJumpToBottom] = useState<Record<string, boolean>>({});
 
   const CHAT_AUTO_SCROLL_THRESHOLD_PX = 160;
   const topicAutosaveTimerRef = useRef<number | null>(null);
@@ -822,11 +832,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (node) {
       chatScrollers.current.set(key, node);
       const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
-      chatAtBottomRef.current.set(key, remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX);
+      const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
+      chatAtBottomRef.current.set(key, atBottom);
+      setChatJumpToBottom((prev) => (prev[key] === !atBottom ? prev : { ...prev, [key]: !atBottom }));
       return;
     }
     chatScrollers.current.delete(key);
     chatAtBottomRef.current.delete(key);
+    setChatJumpToBottom((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, key)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   }, []);
 
   const updateActiveChatAtBottom = useCallback(() => {
@@ -1317,17 +1335,26 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     };
   }, [activeComposer]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (normalizedSearch) return;
+
     for (const [key, scroller] of chatScrollers.current.entries()) {
       const lastId = getChatLastLogId(key);
       if (!lastId) continue;
-      const prev = chatLastSeenRef.current.get(key) ?? "";
-      chatLastSeenRef.current.set(key, lastId);
-      if (!prev || prev === lastId) continue;
+
+      // Keep the chat pinned to the bottom while the user is at the bottom.
+      // This matters for streaming updates where the last log id stays the same
+      // but its rendered height keeps growing.
       const atBottom = chatAtBottomRef.current.get(key) ?? false;
+      const prevLastId = chatLastSeenRef.current.get(key) ?? "";
+      chatLastSeenRef.current.set(key, lastId);
+
       if (!atBottom) continue;
-      scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
+
+      scroller.scrollTo({
+        top: scroller.scrollHeight,
+        behavior: prevLastId && prevLastId !== lastId ? "smooth" : "auto",
+      });
       chatAtBottomRef.current.set(key, true);
     }
   }, [getChatLastLogId, logs, normalizedSearch]);
@@ -2889,19 +2916,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           >
             {showViewOptions ? "Hide options" : "View options"}
           </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            className={cn(twoColumn ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-            onClick={toggleTwoColumn}
-            title={twoColumn ? "Switch to single column" : "Switch to two columns"}
-          >
-            {twoColumn ? "1 column" : "2 column"}
-          </Button>
         </div>
-	        {showViewOptions && (
-	          <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.92)] p-3">
-	            <div className="flex flex-wrap items-center gap-2">
+        {showViewOptions && (
+          <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.92)] p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                className={cn(twoColumn ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+                onClick={toggleTwoColumn}
+                title={twoColumn ? "Switch to single column" : "Switch to two columns"}
+              >
+                {twoColumn ? "1 column" : "2 column"}
+              </Button>
 	              <Select
 	                value={topicView}
 	                onChange={(event) => {
@@ -3201,6 +3228,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               data-topic-card-id={topicId}
               className={cn(
                 "rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] p-5 transition-colors duration-300",
+                // Mobile UX: keep the topic header visible and scroll the expanded body when it would
+                // exceed the viewport.
+                //
+                // NOTE: Don't set overflow/max-height on the outer card; it can make the expanded
+                // state feel like a clipped "box". Constrain the scroll region instead.
+                isExpanded
+                  ? "max-md:sticky max-md:top-[calc(var(--claw-header-h,0px)+12px)] max-md:z-20 max-md:flex max-md:flex-col"
+                  : "",
                 draggingTopicId && topicDropTargetId === topicId ? "border-[rgba(255,90,45,0.55)]" : ""
               )}
               style={topicGlowStyle(topicColor, topicIndex, isExpanded)}
@@ -3208,11 +3243,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               <div
                 role="button"
                 tabIndex={0}
-	                className="flex flex-wrap items-start justify-between gap-4 text-left"
-	                onClick={(event) => {
-	                  if (!allowToggle(event.target as HTMLElement)) return;
-	                  toggleTopicExpanded(topicId);
-	                }}
+                className={cn(
+                  "flex flex-wrap items-start justify-between gap-4 text-left",
+                  isExpanded
+                    ? "max-md:sticky max-md:top-0 max-md:z-10 max-md:-mx-5 max-md:border-b max-md:border-[rgb(var(--claw-border))] max-md:bg-[rgba(12,14,18,0.92)] max-md:px-5 max-md:pb-3 max-md:pt-4 max-md:backdrop-blur"
+                    : ""
+                )}
+                onClick={(event) => {
+                  if (!allowToggle(event.target as HTMLElement)) return;
+                  toggleTopicExpanded(topicId);
+                }}
 			                onDragEnter={(event) => {
 			                  if (!topicReorderEnabled) return;
 			                  if (isUnassigned) return;
@@ -3525,7 +3565,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		              </div>
 	
 	              {isExpanded && showTasks && (
-		                <div className="mt-4 space-y-3">
+		                <div
+                      data-testid={`topic-expanded-body-${topicId}`}
+                      className={cn(
+                        "mt-4 space-y-3",
+                        // Scroll the expanded body on mobile while leaving the header visible.
+                        // The max-height keeps the scroll region within the viewport.
+                        "max-md:flex-1 max-md:min-h-0 max-md:overflow-y-auto max-md:max-h-[calc(100dvh-15rem)] max-md:pb-6"
+                      )}
+                    >
                       <div className="flex flex-wrap items-center gap-2">
                         <Input
                           value={newTaskDraftByTopicId[topicId === "unassigned" ? "unassigned" : topicId] ?? ""}
@@ -3675,11 +3723,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                           <div
                             role="button"
                             tabIndex={0}
-	                            className="flex flex-wrap items-center justify-between gap-3 text-left"
-	                            onClick={(event) => {
-	                              if (!allowToggle(event.target as HTMLElement)) return;
-	                              toggleTaskExpanded(task.id);
-	                            }}
+                            className={cn(
+                              "flex flex-wrap items-center justify-between gap-3 text-left",
+                              taskExpanded
+                                ? "max-md:sticky max-md:top-0 max-md:z-10 max-md:-mx-4 max-md:border-b max-md:border-[rgb(var(--claw-border))] max-md:bg-[rgba(14,17,22,0.92)] max-md:px-4 max-md:py-3 max-md:backdrop-blur"
+                                : ""
+                            )}
+                            onClick={(event) => {
+                              if (!allowToggle(event.target as HTMLElement)) return;
+                              toggleTaskExpanded(task.id);
+                            }}
 		                            onDragEnter={(event) => {
 		                              if (!taskReorderEnabled) return;
 		                              const dragged = draggingTaskId;
@@ -4100,6 +4153,29 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                                      chatTopFade[`task:${task.id}`] ? "opacity-100" : "opacity-0"
 	                                    )}
 	                                  />
+	                                  {chatJumpToBottom[`task:${task.id}`] ? (
+	                                    <button
+	                                      type="button"
+	                                      className={cn(
+	                                        "absolute bottom-2 left-1/2 z-20 -translate-x-1/2",
+	                                        "rounded-full border border-[rgba(255,255,255,0.14)] bg-[rgba(14,17,22,0.72)] px-3 py-1.5",
+	                                        "text-[11px] font-semibold uppercase tracking-[0.18em] text-[rgba(148,163,184,0.95)]",
+	                                        "shadow-[0_12px_26px_rgba(0,0,0,0.28)] backdrop-blur",
+	                                        "transition hover:border-[rgba(255,90,45,0.38)] hover:text-[rgb(var(--claw-text))]"
+	                                      )}
+	                                      onClick={(event) => {
+	                                        event.preventDefault();
+	                                        event.stopPropagation();
+	                                        const chatKey = `task:${task.id}`;
+	                                        activeChatAtBottomRef.current = true;
+	                                        scheduleScrollChatToBottom(chatKey);
+	                                      }}
+	                                      aria-label="Jump to latest messages"
+	                                      title="Jump to latest"
+	                                    >
+	                                      Jump to latest ↓
+	                                    </button>
+	                                  ) : null}
 	                                  <div
 	                                    ref={(node) => {
 	                                      const key = `task:${task.id}`;
@@ -4118,7 +4194,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                                      const node = event.currentTarget;
 	                                      const showTop = node.scrollTop > 2;
 	                                      const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
-	                                      chatAtBottomRef.current.set(key, remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX);
+	                                      const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
+	                                      chatAtBottomRef.current.set(key, atBottom);
+	                                      setChatJumpToBottom((prev) => (prev[key] === !atBottom ? prev : { ...prev, [key]: !atBottom }));
 	                                      setChatTopFade((prev) =>
 	                                        prev[key] === showTop ? prev : { ...prev, [key]: showTop }
 	                                      );
@@ -4389,6 +4467,29 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                chatTopFade[`topic:${topicId}`] ? "opacity-100" : "opacity-0"
 			                              )}
 			                            />
+			                            {chatJumpToBottom[`topic:${topicId}`] ? (
+			                              <button
+			                                type="button"
+			                                className={cn(
+			                                  "absolute bottom-2 left-1/2 z-20 -translate-x-1/2",
+			                                  "rounded-full border border-[rgba(255,255,255,0.14)] bg-[rgba(14,17,22,0.72)] px-3 py-1.5",
+			                                  "text-[11px] font-semibold uppercase tracking-[0.18em] text-[rgba(148,163,184,0.95)]",
+			                                  "shadow-[0_12px_26px_rgba(0,0,0,0.28)] backdrop-blur",
+			                                  "transition hover:border-[rgba(255,90,45,0.38)] hover:text-[rgb(var(--claw-text))]"
+			                                )}
+			                                onClick={(event) => {
+			                                  event.preventDefault();
+			                                  event.stopPropagation();
+			                                  const chatKey = `topic:${topicId}`;
+			                                  activeChatAtBottomRef.current = true;
+			                                  scheduleScrollChatToBottom(chatKey);
+			                                }}
+			                                aria-label="Jump to latest messages"
+			                                title="Jump to latest"
+			                              >
+			                                Jump to latest ↓
+			                              </button>
+			                            ) : null}
 			                            <div
 			                              ref={(node) => {
 			                                const key = `topic:${topicId}`;
@@ -4407,7 +4508,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                const node = event.currentTarget;
 			                                const showTop = node.scrollTop > 2;
 			                                const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
-			                                chatAtBottomRef.current.set(key, remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX);
+			                                const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
+			                                chatAtBottomRef.current.set(key, atBottom);
+			                                setChatJumpToBottom((prev) => (prev[key] === !atBottom ? prev : { ...prev, [key]: !atBottom }));
 			                                setChatTopFade((prev) =>
 			                                  prev[key] === showTop ? prev : { ...prev, [key]: showTop }
 			                                );
