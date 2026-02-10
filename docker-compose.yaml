@@ -100,8 +100,15 @@ services:
     working_dir: /app
     command: >
       sh -lc "
-        if [ ! -d node_modules/.bin ]; then
+        set -e
+        LOCK_HASH_FILE=node_modules/.clawboard-lockfile-sha256
+        LOCK_HASH=$$(sha256sum package-lock.json 2>/dev/null | awk '{print $$1}' || true)
+        INSTALLED_HASH=$$(cat \"$$LOCK_HASH_FILE\" 2>/dev/null || true)
+        if [ ! -d node_modules/.bin ] || [ -z \"$$LOCK_HASH\" ] || [ \"$$LOCK_HASH\" != \"$$INSTALLED_HASH\" ]; then
           npm ci
+          if [ -n \"$$LOCK_HASH\" ]; then
+            echo \"$$LOCK_HASH\" > \"$$LOCK_HASH_FILE\"
+          fi
         fi
         npm run dev -- -H 0.0.0.0 -p 3000
       "

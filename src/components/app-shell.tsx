@@ -13,7 +13,7 @@ import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { formatRelativeTime } from "@/lib/format";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { buildTaskUrl, buildTopicUrl } from "@/lib/url";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, getApiBase } from "@/lib/api";
 import type { Task, Topic } from "@/lib/types";
 
 const ICONS: Record<string, React.ReactElement> = {
@@ -95,6 +95,8 @@ const NAV_ITEMS = [
 const BOARD_TOPICS_EXPANDED_KEY = "clawboard.board.topics.navExpanded";
 const BOARD_TOPICS_SEARCH_KEY = "clawboard.board.topics.search";
 const HEADER_COMPACT_KEY = "clawboard.header.compact";
+const NAV_SEARCH_TASKS_LIMIT = 5;
+const NAV_SEARCH_TOPICS_LIMIT = 5;
 
 function TopicNavRow({
   topic,
@@ -182,11 +184,11 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const boardTopicsExpanded = useLocalStorageItem(BOARD_TOPICS_EXPANDED_KEY) === "true";
   const topicPanelSearch = useLocalStorageItem(BOARD_TOPICS_SEARCH_KEY) ?? "";
   const compactHeader = useLocalStorageItem(HEADER_COMPACT_KEY) === "true";
-  const storedApiBase = useLocalStorageItem("clawboard.apiBase");
+  useLocalStorageItem("clawboard.apiBase");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const headerRef = useRef<HTMLElement | null>(null);
 
-  const apiBase = (storedApiBase ?? "").trim().replace(/\/$/, "") || (process.env.NEXT_PUBLIC_CLAWBOARD_API_BASE ?? "").trim().replace(/\/$/, "");
+  const apiBase = getApiBase();
   const isBoardRoute =
     pathname === "/" || pathname === "/dashboard" || pathname === "/u" || pathname.startsWith("/u");
   const showBoardTopics = isBoardRoute && boardTopicsExpanded && !collapsed;
@@ -423,12 +425,16 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     return (topicSemanticForQuery.tasks ?? [])
       .map((match) => tasksById.get(match.id))
       .filter((t): t is Task => Boolean(t))
-      .slice(0, 18);
+      .slice(0, NAV_SEARCH_TASKS_LIMIT);
   }, [tasksById, topicSemanticForQuery]);
 
   const boardTopicReorderEnabled = showBoardTopics && !readOnly && normalizedTopicSearch.length === 0;
 
-  const boardTopicsForNav = boardTopicReorderEnabled ? filteredTopics : filteredTopics.slice(0, 70);
+  const boardTopicsForNav = useMemo(() => {
+    if (boardTopicReorderEnabled) return filteredTopics;
+    if (normalizedTopicSearch.length > 0) return filteredTopics.slice(0, NAV_SEARCH_TOPICS_LIMIT);
+    return filteredTopics.slice(0, 70);
+  }, [boardTopicReorderEnabled, filteredTopics, normalizedTopicSearch.length]);
 
   const [draggingBoardTopicId, setDraggingBoardTopicId] = useState<string | null>(null);
   const [boardTopicDropTargetId, setBoardTopicDropTargetId] = useState<string | null>(null);
@@ -784,7 +790,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 		                                const next = e.target.value;
 		                                setLocalStorageItem(BOARD_TOPICS_SEARCH_KEY, next);
 		                              }}
-	                              placeholder="Search topics…"
+	                              placeholder="Search tasks, topics…"
 	                              className="h-9 text-xs"
 	                            />
 	                          </div>
@@ -793,11 +799,44 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                              {normalizedTopicSearch.length > 0
 	                                ? topicSemanticSearch.loading
 	                                  ? "Searching…"
-	                                  : `${filteredTopics.length} topics`
+	                                  : `${topicSemanticForQuery?.tasks?.length ?? 0} tasks · ${filteredTopics.length} topics`
 	                                : `${filteredTopics.length} topics`}
 	                            </span>
 	                            {normalizedTopicSearch.length > 0 && topicSemanticSearch.error ? <span>Search failed</span> : null}
 	                          </div>
+
+	                          {normalizedTopicSearch.length > 0 && filteredTasksForSearch.length > 0 && (
+	                            <div className="mt-3 border-t border-[rgb(var(--claw-border))] pt-3">
+	                              <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))]">
+	                                Tasks
+	                              </div>
+	                              <div className="space-y-1">
+	                                {filteredTasksForSearch.map((task) => {
+	                                  const selected = task.id === activeBoardIds.taskId;
+	                                  const href = buildTaskUrl(task, topics);
+	                                  return (
+	                                    <button
+	                                      key={task.id}
+	                                      type="button"
+	                                      onClick={() => router.push(href)}
+	                                      className={cn(
+	                                        "w-full rounded-[var(--radius-sm)] border px-3 py-2 text-left text-xs transition",
+	                                        selected
+	                                          ? "border-[rgba(77,171,158,0.5)] bg-[rgba(77,171,158,0.16)] text-[rgb(var(--claw-text))]"
+	                                          : "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
+	                                      )}
+	                                    >
+	                                      <div className="flex items-center justify-between gap-2">
+	                                        <div className="truncate font-semibold">{task.title}</div>
+	                                        <div className="shrink-0 text-[10px]">{(task.status ?? "todo").toUpperCase()}</div>
+	                                      </div>
+	                                      <div className="mt-1 truncate font-mono text-[10px] text-[rgba(148,163,184,0.9)]">{task.id}</div>
+	                                    </button>
+	                                  );
+	                                })}
+	                              </div>
+	                            </div>
+	                          )}
 			                          <div className="mt-3 max-h-[52vh] space-y-1 overflow-y-auto overscroll-contain pr-1">
 		                            {filteredTopics.length === 0 ? (
 		                              <div className="rounded-[var(--radius-sm)] border border-[rgb(var(--claw-border))] px-3 py-2 text-xs text-[rgb(var(--claw-muted))]">
@@ -831,39 +870,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                              })
 			                            )}
 				                          </div>
-
-	                          {normalizedTopicSearch.length > 0 && filteredTasksForSearch.length > 0 && (
-	                            <div className="mt-4 border-t border-[rgb(var(--claw-border))] pt-3">
-	                              <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))]">
-	                                Tasks
-	                              </div>
-	                              <div className="space-y-1">
-	                                {filteredTasksForSearch.map((task) => {
-	                                  const selected = task.id === activeBoardIds.taskId;
-	                                  const href = buildTaskUrl(task, topics);
-	                                  return (
-	                                    <button
-	                                      key={task.id}
-	                                      type="button"
-	                                      onClick={() => router.push(href)}
-	                                      className={cn(
-	                                        "w-full rounded-[var(--radius-sm)] border px-3 py-2 text-left text-xs transition",
-	                                        selected
-	                                          ? "border-[rgba(77,171,158,0.5)] bg-[rgba(77,171,158,0.16)] text-[rgb(var(--claw-text))]"
-	                                          : "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
-	                                      )}
-	                                    >
-	                                      <div className="flex items-center justify-between gap-2">
-	                                        <div className="truncate font-semibold">{task.title}</div>
-	                                        <div className="shrink-0 text-[10px]">{(task.status ?? "todo").toUpperCase()}</div>
-	                                      </div>
-	                                      <div className="mt-1 truncate font-mono text-[10px] text-[rgba(148,163,184,0.9)]">{task.id}</div>
-	                                    </button>
-	                                  );
-	                                })}
-	                              </div>
-	                            </div>
-	                          )}
 	                        </div>
 	                      )}
 	                    </div>

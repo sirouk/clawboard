@@ -9,6 +9,26 @@ class ModelBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class AttachmentRef(BaseModel):
+    """Minimal attachment metadata embedded on a LogEntry."""
+
+    id: str = Field(description="Attachment ID.", examples=["att-123"])
+    fileName: str = Field(description="Original filename.", examples=["design-notes.pdf"])
+    mimeType: str = Field(description="MIME type.", examples=["application/pdf"])
+    sizeBytes: int = Field(description="Size in bytes.", examples=[12345])
+
+
+class AttachmentOut(ModelBase):
+    id: str = Field(description="Attachment ID.", examples=["att-123"])
+    logId: Optional[str] = Field(description="Owning log entry ID once attached.", examples=["log-1"])
+    fileName: str = Field(description="Original filename (sanitized).", examples=["design-notes.pdf"])
+    mimeType: str = Field(description="MIME type.", examples=["application/pdf"])
+    sizeBytes: int = Field(description="Size in bytes.", examples=[12345])
+    sha256: str = Field(description="SHA-256 digest (hex).", examples=["abc123..."])
+    createdAt: str = Field(description="ISO timestamp when stored.", examples=["2026-02-09T18:00:00.000Z"])
+    updatedAt: str = Field(description="ISO timestamp when last updated.", examples=["2026-02-09T18:00:00.000Z"])
+
+
 class StartFreshReplayRequest(BaseModel):
     """Admin-only: clear derived state and mark all logs as pending for classifier replay."""
 
@@ -69,6 +89,10 @@ class InstanceOut(ModelBase):
 class TopicOut(ModelBase):
     id: str = Field(description="Topic ID.", examples=["topic-1"])
     name: str = Field(description="Topic name.", examples=["Clawboard"])
+    createdBy: Optional[str] = Field(
+        description="Creation source (user | classifier | import).",
+        examples=["user"],
+    )
     sortIndex: int = Field(description="Manual ordering index (lower comes first).", examples=[0])
     color: Optional[str] = Field(description="Topic color #RRGGBB.", examples=["#FF8A4A"])
     description: Optional[str] = Field(description="Topic description.", examples=["Product and platform work."])
@@ -127,6 +151,10 @@ class LogOut(ModelBase):
         description="Source metadata (channel, sessionKey, messageId).",
         examples=[{"channel": "discord", "sessionKey": "main", "messageId": "msg-001"}],
     )
+    attachments: Optional[List[AttachmentRef]] = Field(
+        default=None,
+        description="Optional attachments metadata embedded on the log entry.",
+    )
 
 
 class LogOutLite(ModelBase):
@@ -152,6 +180,10 @@ class LogOutLite(ModelBase):
     source: Optional[Dict[str, Any]] = Field(
         description="Source metadata (channel, sessionKey, messageId).",
         examples=[{"channel": "discord", "sessionKey": "main", "messageId": "msg-001"}],
+    )
+    attachments: Optional[List[AttachmentRef]] = Field(
+        default=None,
+        description="Optional attachments metadata embedded on the log entry.",
     )
 
 
@@ -301,6 +333,10 @@ class LogAppend(BaseModel):
         description="Source metadata (channel, sessionKey, messageId).",
         examples=[{"channel": "discord", "sessionKey": "main", "messageId": "msg-001"}],
     )
+    attachments: Optional[List[AttachmentRef]] = Field(
+        default=None,
+        description="Optional attachments metadata embedded on the log entry.",
+    )
 
 
 class LogPatch(BaseModel):
@@ -317,10 +353,36 @@ class LogPatch(BaseModel):
     classificationError: Optional[str] = Field(default=None, description="Last error")
 
 
+class DraftUpsert(BaseModel):
+    """Upsert a draft value by key (used for cross-device draft persistence)."""
+
+    key: str = Field(
+        ...,
+        min_length=1,
+        max_length=240,
+        description="Stable draft key (e.g. draft:chat:clawboard:topic:topic-123).",
+        examples=["draft:chat:clawboard:topic:topic-123"],
+    )
+    value: str = Field(
+        default="",
+        max_length=50_000,
+        description="Draft value (may be empty to clear).",
+        examples=["Working on the onboarding flow..."],
+    )
+
+
+class DraftOut(ModelBase):
+    key: str = Field(description="Draft key.", examples=["draft:chat:clawboard:topic:topic-123"])
+    value: str = Field(description="Draft value.", examples=["Working on the onboarding flow..."])
+    createdAt: str = Field(description="ISO timestamp when created.", examples=["2026-02-09T18:00:00.000Z"])
+    updatedAt: str = Field(description="ISO timestamp when updated.", examples=["2026-02-09T18:05:00.000Z"])
+
+
 class ChangesResponse(BaseModel):
     topics: List[TopicOut] = Field(description="Topics updated since timestamp.")
     tasks: List[TaskOut] = Field(description="Tasks updated since timestamp.")
     logs: List[LogOutLite] = Field(description="Logs created since timestamp (lightweight, excludes raw).")
+    drafts: List[DraftOut] = Field(description="Drafts updated since timestamp.")
 
 
 class OpenClawChatRequest(BaseModel):
@@ -351,6 +413,12 @@ class OpenClawChatRequest(BaseModel):
         default="main",
         description="OpenClaw agent id to route this request to.",
         examples=["main"],
+    )
+    attachmentIds: Optional[List[str]] = Field(
+        default=None,
+        description="Attachment IDs (from POST /api/attachments) to include in the OpenClaw request.",
+        examples=[["att-123", "att-456"]],
+        max_length=16,
     )
 
 
@@ -413,3 +481,49 @@ class ClawgraphResponse(BaseModel):
     stats: ClawgraphStats = Field(description="Graph-level statistics.")
     nodes: List[ClawgraphNode] = Field(description="Graph nodes.")
     edges: List[ClawgraphEdge] = Field(description="Graph edges.")
+
+
+class SessionRoutingItem(BaseModel):
+    """One routing decision for a session (topic mandatory, task optional)."""
+
+    ts: str = Field(description="Decision timestamp (ISO).", examples=["2026-02-10T18:00:00.000Z"])
+    topicId: str = Field(description="Chosen topic id.", examples=["topic-1"])
+    topicName: Optional[str] = Field(default=None, description="Chosen topic name (best-effort).", examples=["Clawboard"])
+    taskId: Optional[str] = Field(default=None, description="Chosen task id (optional).", examples=["task-1"])
+    taskTitle: Optional[str] = Field(default=None, description="Chosen task title (best-effort).", examples=["Ship onboarding wizard"])
+    anchor: Optional[str] = Field(
+        default=None,
+        description="Compact intent anchor text used to resolve future follow-ups.",
+        examples=["Fix the login redirect bug in NIMBUS."],
+    )
+
+
+class SessionRoutingMemoryOut(ModelBase):
+    sessionKey: str = Field(description="Session key (source.sessionKey).")
+    items: List[SessionRoutingItem] = Field(default_factory=list, description="Recent routing decisions (newest last).")
+    createdAt: Optional[str] = Field(default=None, description="ISO timestamp when created.")
+    updatedAt: Optional[str] = Field(default=None, description="ISO timestamp when last updated.")
+
+
+class SessionRoutingAppend(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "sessionKey": "channel:discord|thread:123",
+                "topicId": "topic-1",
+                "topicName": "Clawboard",
+                "taskId": "task-1",
+                "taskTitle": "Ship onboarding wizard",
+                "anchor": "Fix the login redirect bug in NIMBUS.",
+                "ts": "2026-02-10T18:00:00.000Z",
+            }
+        }
+    )
+
+    sessionKey: str = Field(description="Session key to update.", min_length=1, max_length=512)
+    topicId: str = Field(description="Chosen topic id.", min_length=1, max_length=128)
+    topicName: Optional[str] = Field(default=None, description="Chosen topic name (best-effort).", max_length=200)
+    taskId: Optional[str] = Field(default=None, description="Chosen task id (optional).", max_length=128)
+    taskTitle: Optional[str] = Field(default=None, description="Chosen task title (best-effort).", max_length=200)
+    anchor: Optional[str] = Field(default=None, description="Compact anchor text.", max_length=800)
+    ts: Optional[str] = Field(default=None, description="Optional explicit timestamp (ISO).")

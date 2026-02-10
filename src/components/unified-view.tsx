@@ -14,8 +14,12 @@ import { cn } from "@/lib/cn";
 import { apiFetch } from "@/lib/api";
 import { useDataStore } from "@/components/data-provider";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
-import { BoardChatComposer } from "@/components/board-chat-composer";
+import { BoardChatComposer, type BoardChatComposerHandle } from "@/components/board-chat-composer";
 import { BOARD_TASK_SESSION_PREFIX, BOARD_TOPIC_SESSION_PREFIX, taskSessionKey, topicSessionKey } from "@/lib/board-session";
+import { Markdown } from "@/components/markdown";
+import { AttachmentStrip, type AttachmentLike } from "@/components/attachments";
+import { queueDraftUpsert, readBestDraftValue, usePersistentDraft } from "@/lib/drafts";
+import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 
 const STATUS_TONE: Record<string, "muted" | "accent" | "accent2" | "warning" | "success"> = {
   todo: "muted",
@@ -55,12 +59,24 @@ function GripIcon({ className }: { className?: string }) {
   );
 }
 
+function TypingDots({ className, dotClassName }: { className?: string; dotClassName?: string }) {
+  const baseDot = cn("h-1.5 w-1.5 rounded-full", dotClassName ?? "bg-[rgba(148,163,184,0.9)]");
+  return (
+    <span className={cn("inline-flex items-center gap-1", className)}>
+      <span className={cn(baseDot, "animate-pulse")} />
+      <span className={cn(baseDot, "animate-pulse [animation-delay:120ms]")} />
+      <span className={cn(baseDot, "animate-pulse [animation-delay:240ms]")} />
+    </span>
+  );
+}
+
 const TASK_TIMELINE_LIMIT = 2;
 const TOPIC_TIMELINE_LIMIT = 4;
 type MessageDensity = "comfortable" | "compact";
 const TOPIC_FALLBACK_COLORS = ["#FF8A4A", "#4DA39E", "#6FA8FF", "#E0B35A", "#8BC17E", "#F17C8E"];
 const TASK_FALLBACK_COLORS = ["#4EA1FF", "#59C3A6", "#F4B55F", "#9A8BFF", "#F0897C", "#6FB8D8"];
-const topicChatLimitKey = (topicId: string) => `topic-chat:${topicId}`;
+const chatKeyForTopic = (topicId: string) => `topic:${topicId}`;
+const chatKeyForTask = (taskId: string) => `task:${taskId}`;
 
 const TOPIC_ACTION_REVEAL_PX = 248;
 // New Topics/Tasks should float to the very top immediately after creation.
@@ -113,35 +129,30 @@ function deriveChatHeaderBlurb(entries: LogEntry[]) {
     return normalizeInlineText(entry.summary) || normalizeInlineText(entry.content) || normalizeInlineText(entry.raw);
   };
 
-  for (let i = entries.length - 1; i >= 0; i -= 1) {
-    const entry = entries[i];
-    if (entry.type !== "conversation") continue;
-    if ((entry.classificationStatus ?? "pending") !== "classified") continue;
-    const isUser = (entry.agentId ?? "").trim().toLowerCase() === "user";
-    if (!isUser) continue;
-    const full = pickText(entry);
-    if (!full) continue;
-    return { full, clipped: truncateText(full, CHAT_HEADER_BLURB_LIMIT) };
-  }
+  const pick = (predicate: (entry: LogEntry) => boolean) => {
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      const entry = entries[i];
+      if (!predicate(entry)) continue;
+      const full = pickText(entry);
+      if (!full) continue;
+      return { full, clipped: truncateText(full, CHAT_HEADER_BLURB_LIMIT) };
+    }
+    return null;
+  };
 
-  for (let i = entries.length - 1; i >= 0; i -= 1) {
-    const entry = entries[i];
-    if (entry.type !== "conversation") continue;
-    if ((entry.classificationStatus ?? "pending") !== "classified") continue;
-    const full = pickText(entry);
-    if (!full) continue;
-    return { full, clipped: truncateText(full, CHAT_HEADER_BLURB_LIMIT) };
-  }
+  const isUser = (entry: LogEntry) => (entry.agentId ?? "").trim().toLowerCase() === "user";
+  const status = (entry: LogEntry) => (entry.classificationStatus ?? "pending");
 
-  for (let i = entries.length - 1; i >= 0; i -= 1) {
-    const entry = entries[i];
-    if (entry.type !== "note") continue;
-    const full = pickText(entry);
-    if (!full) continue;
-    return { full, clipped: truncateText(full, CHAT_HEADER_BLURB_LIMIT) };
-  }
-
-  return null;
+  return (
+    // Prefer stable classifier summaries first...
+    pick((entry) => entry.type === "conversation" && status(entry) === "classified" && isUser(entry)) ??
+    pick((entry) => entry.type === "conversation" && status(entry) === "classified") ??
+    // ...but fall back to pending chat so newly-sent messages still surface instantly.
+    pick((entry) => entry.type === "conversation" && status(entry) !== "failed" && isUser(entry)) ??
+    pick((entry) => entry.type === "conversation" && status(entry) !== "failed") ??
+    pick((entry) => entry.type === "note") ??
+    null
+  );
 }
 
 function SwipeRevealRow({
@@ -226,14 +237,18 @@ function SwipeRevealRow({
           }
         }}
         onWheel={(event) => {
-          // Enable two-finger horizontal trackpad swipe (desktop) to reveal actions.
+          // Enable swipe-to-reveal on trackpads via horizontal wheel deltas.
+          // Gate on pixel-based deltas so mouse wheels (line/page deltas) don't accidentally open rows.
+          if (event.deltaMode !== 0) return;
+
           const target = event.target as HTMLElement | null;
           if (target?.closest("button, a, input, textarea, select, [data-no-swipe='true']")) return;
           const dx = event.deltaX;
           const dy = event.deltaY;
-          if (Math.abs(dx) < 6) return;
-          if (Math.abs(dx) < Math.abs(dy) * 1.15) return;
+          if (Math.abs(dx) < 10) return;
+          if (Math.abs(dx) < Math.abs(dy) * 1.35) return;
           event.preventDefault();
+          event.stopPropagation();
 
           // deltaX > 0 corresponds to a leftward finger swipe on macOS trackpads in most cases.
           const current = swipingRef.current ? dragOffsetRef.current : isOpen ? TOPIC_ACTION_REVEAL_PX : 0;
@@ -259,6 +274,8 @@ function SwipeRevealRow({
           // Desktop clicks should never feel like swipes. For mouse pointers we only
           // support swipe actions via horizontal trackpad scroll (wheel deltaX).
           if (event.pointerType === "mouse") return;
+          // Prevent nested SwipeRevealRow parents from starting a competing gesture.
+          event.stopPropagation();
           setSwiping(false);
           swipingRef.current = false;
           gesture.current = {
@@ -287,6 +304,7 @@ function SwipeRevealRow({
             if (openId !== rowId) setOpenId(rowId);
           }
           event.preventDefault();
+          event.stopPropagation();
           const next = clamp(g.startOffset - dx, 0, TOPIC_ACTION_REVEAL_PX);
           scheduleOffset(next);
         }}
@@ -469,12 +487,14 @@ function getInitialUrlState(basePath: string): UrlState {
 
 export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const { token, tokenRequired } = useAppConfig();
-  const { topics, tasks, logs, openclawTyping, setTopics, setTasks, setLogs } = useDataStore();
+  const { topics, tasks, logs, drafts, openclawTyping, hydrated, setTopics, setTasks, setLogs } = useDataStore();
   const readOnly = tokenRequired && !token;
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const scrollMemory = useRef<Record<string, number>>({});
+  const restoreScrollOnNextSyncRef = useRef(false);
   const [initialUrlState] = useState(() => getInitialUrlState(basePath));
+  const twoColumn = useLocalStorageItem("clawboard.unified.twoColumn") === "true";
   const [expandedTopics, setExpandedTopics] = useState<Set<string>>(new Set(initialUrlState.topics));
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set(initialUrlState.tasks));
   // Topic chat should feel "always there"; default to expanded for any expanded topic.
@@ -487,13 +507,35 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     isTaskStatusFilter(initialUrlState.status) ? initialUrlState.status : "all"
   );
   const [showViewOptions, setShowViewOptions] = useState(false);
-  const [timelineLimits, setTimelineLimits] = useState<Record<string, number>>({});
+  const toggleTwoColumn = () => {
+    setLocalStorageItem("clawboard.unified.twoColumn", twoColumn ? "false" : "true");
+  };
+  // Per-chat "oldest visible index" into that chat's log list.
+  // Keyed by chat scroller keys (e.g. `topic:${topicId}`, `task:${taskId}`).
+  const [chatHistoryStarts, setChatHistoryStarts] = useState<Record<string, number>>({});
+  // Local "OpenClaw is responding" signal so the UI doesn't depend entirely on the gateway
+  // returning a long-lived request for typing events.
+  const [awaitingAssistant, setAwaitingAssistant] = useState<Record<string, { sentAt: string; requestId?: string }>>(
+    {}
+  );
   const [moveTaskId, setMoveTaskId] = useState<string | null>(null);
   const [editingTopicId, setEditingTopicId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [topicNameDraft, setTopicNameDraft] = useState("");
   const [topicColorDraft, setTopicColorDraft] = useState("#FF8A4A");
   const [topicTagsDraft, setTopicTagsDraft] = useState("");
+  const [newTopicDraftOpen, setNewTopicDraftOpen] = useState(false);
+  const { value: newTopicNameDraft, setValue: setNewTopicNameDraft } = usePersistentDraft("draft:new-topic:name", {
+    fallback: "",
+  });
+  const { value: newTopicColorDraft, setValue: setNewTopicColorDraft } = usePersistentDraft("draft:new-topic:color", {
+    fallback: TOPIC_FALLBACK_COLORS[0],
+  });
+  const { value: newTopicTagsDraft, setValue: setNewTopicTagsDraft } = usePersistentDraft("draft:new-topic:tags", {
+    fallback: "",
+  });
+  const [newTopicError, setNewTopicError] = useState<string | null>(null);
+  const [newTopicSaving, setNewTopicSaving] = useState(false);
   const [taskNameDraft, setTaskNameDraft] = useState("");
   const [taskColorDraft, setTaskColorDraft] = useState("#4EA1FF");
   const [taskTagsDraft, setTaskTagsDraft] = useState("");
@@ -519,21 +561,32 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const activeChatAtBottomRef = useRef(true);
   const chatLastSeenRef = useRef<Map<string, string>>(new Map());
   const chatScrollers = useRef<Map<string, HTMLElement>>(new Map());
+  const chatAtBottomRef = useRef<Map<string, boolean>>(new Map());
+  const chatLoadOlderCooldownRef = useRef<Map<string, number>>(new Map());
+  const typingAliasRef = useRef<Map<string, { sourceSessionKey: string; createdAt: number }>>(new Map());
   const [pendingMessages, setPendingMessages] = useState<
     Array<{
       localId: string;
       requestId?: string;
       sessionKey: string;
       message: string;
+      attachments?: AttachmentLike[];
       createdAt: string;
       status: "sending" | "sent" | "failed";
       error?: string;
     }>
   >([]);
+  const composerHandlesRef = useRef<Map<string, BoardChatComposerHandle>>(new Map());
+  const prevPendingAttachmentsRef = useRef<Map<string, AttachmentLike[]>>(new Map());
   const [chatTopFade, setChatTopFade] = useState<Record<string, boolean>>({});
   const [chatBottomFade, setChatBottomFade] = useState<Record<string, boolean>>({});
 
   const CHAT_AUTO_SCROLL_THRESHOLD_PX = 160;
+  const topicAutosaveTimerRef = useRef<number | null>(null);
+  const taskAutosaveTimerRef = useRef<number | null>(null);
+  const skipTopicAutosaveRef = useRef(false);
+  const skipTaskAutosaveRef = useRef(false);
+  const recentBoardSendAtRef = useRef<Map<string, number>>(new Map());
 
   const scheduleScrollChatToBottom = useCallback(
     (key: string, attempts = 8) => {
@@ -547,6 +600,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         if (scroller) {
           scroller.scrollTo({ top: scroller.scrollHeight, behavior: "auto" });
           activeChatAtBottomRef.current = true;
+          chatAtBottomRef.current.set(trimmed, true);
           return;
         }
         if (remaining <= 0) return;
@@ -555,6 +609,61 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       window.requestAnimationFrame(tick);
     },
     []
+  );
+
+  const computeChatStart = (state: Record<string, number>, key: string, len: number, initialLimit: number) => {
+    const maxStart = Math.max(0, len - 1);
+    const has = Object.prototype.hasOwnProperty.call(state, key);
+    const raw = has ? Number(state[key]) : len - initialLimit;
+    const value = Number.isFinite(raw) ? Math.floor(raw) : 0;
+    return clamp(value, 0, maxStart);
+  };
+
+  const loadOlderChat = useCallback(
+    (chatKey: string, step: number, len: number, initialLimit: number) => {
+      if (typeof window === "undefined") return;
+      const key = (chatKey ?? "").trim();
+      if (!key) return;
+      const scroller = chatScrollers.current.get(key) ?? null;
+      const beforeTop = scroller?.scrollTop ?? 0;
+      const beforeHeight = scroller?.scrollHeight ?? 0;
+
+      setChatHistoryStarts((prev) => {
+        const current = computeChatStart(prev, key, len, initialLimit);
+        const nextStart = Math.max(0, current - Math.max(1, Math.floor(step)));
+        if (nextStart >= current) return prev;
+        return { ...prev, [key]: nextStart };
+      });
+
+      if (!scroller) return;
+      window.requestAnimationFrame(() => {
+        const node = chatScrollers.current.get(key);
+        if (!node) return;
+        const afterHeight = node.scrollHeight;
+        const delta = afterHeight - beforeHeight;
+        node.scrollTop = beforeTop + delta;
+      });
+    },
+    [setChatHistoryStarts]
+  );
+
+  const isSessionResponding = useCallback(
+    (sessionKey: string) => {
+      const key = String(sessionKey ?? "").trim();
+      if (!key) return false;
+      if (openclawTyping[key]?.typing) return true;
+      if (Object.prototype.hasOwnProperty.call(awaitingAssistant, key)) return true;
+      const alias = typingAliasRef.current.get(key);
+      if (!alias) return false;
+      if (Date.now() - alias.createdAt > 30 * 60 * 1000) {
+        typingAliasRef.current.delete(key);
+        return false;
+      }
+      const sourceKey = alias.sourceSessionKey;
+      if (openclawTyping[sourceKey]?.typing) return true;
+      return Object.prototype.hasOwnProperty.call(awaitingAssistant, sourceKey);
+    },
+    [awaitingAssistant, openclawTyping]
   );
 
   const prevExpandedTaskIdsRef = useRef<Set<string>>(new Set());
@@ -568,6 +677,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [topicSwipeOpenId, setTopicSwipeOpenId] = useState<string | null>(null);
   const [taskSwipeOpenId, setTaskSwipeOpenId] = useState<string | null>(null);
   const [newTaskDraftByTopicId, setNewTaskDraftByTopicId] = useState<Record<string, string>>({});
+  const newTaskDraftEditedAtRef = useRef<Map<string, number>>(new Map());
   const [newTaskSavingKey, setNewTaskSavingKey] = useState<string | null>(null);
   const topicPointerReorder = useRef<{
     pointerId: number;
@@ -591,6 +701,30 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (taskSwipeOpenId) setTopicSwipeOpenId(null);
   }, [taskSwipeOpenId]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const now = Date.now();
+    const topicIds = topics.map((topic) => topic.id);
+    const keys = ["unassigned", ...topicIds];
+    setNewTaskDraftByTopicId((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const id of keys) {
+        const draftKey = `draft:new-task:${id}`;
+        const best = readBestDraftValue(draftKey, drafts[draftKey] ?? null, "");
+        const editedAt = newTaskDraftEditedAtRef.current.get(id) ?? 0;
+        if (now - editedAt < 1500) continue;
+        const hasPrev = Object.prototype.hasOwnProperty.call(next, id);
+        const prevValue = hasPrev ? String(next[id] ?? "") : "";
+        if (!hasPrev && !best) continue;
+        if (prevValue === best) continue;
+        next[id] = best;
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [drafts, topics]);
+
   const moveInArray = useCallback(<T,>(items: T[], from: number, to: number) => {
     if (from === to) return items;
     if (from < 0 || to < 0) return items;
@@ -605,9 +739,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (!key) return;
     if (node) {
       chatScrollers.current.set(key, node);
+      const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
+      chatAtBottomRef.current.set(key, remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX);
       return;
     }
     chatScrollers.current.delete(key);
+    chatAtBottomRef.current.delete(key);
   }, []);
 
   const updateActiveChatAtBottom = useCallback(() => {
@@ -842,6 +979,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return "";
   }, []);
 
+  const markRecentBoardSend = useCallback((sessionKey: string) => {
+    const key = (sessionKey ?? "").trim();
+    if (!key) return;
+    const now = Date.now();
+    const map = recentBoardSendAtRef.current;
+    map.set(key, now);
+    for (const [k, ts] of map) {
+      if (now - ts > 10 * 60 * 1000) map.delete(k);
+    }
+  }, []);
+
   const getChatLastLogId = useCallback(
     (key: string) => {
       const trimmed = (key ?? "").trim();
@@ -896,26 +1044,130 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   }, [logs, pendingMessages.length]);
 
   useEffect(() => {
-    const key = (activeChatKeyRef.current ?? "").trim();
-    if (!key) return;
-    const lastId = getChatLastLogId(key);
-    if (lastId) chatLastSeenRef.current.set(key, lastId);
-  }, [activeComposer, getChatLastLogId]);
+    const sessions = Object.keys(awaitingAssistant);
+    if (sessions.length === 0) return;
+    const now = Date.now();
+    const latestAssistantBySession = new Map<string, string>();
+    const terminalRequestIds = new Set<string>();
+
+    for (const entry of logs) {
+      const sessionKey = String(entry.source?.sessionKey ?? "").trim();
+      if (sessionKey) {
+        const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+        if (agentId === "assistant" && entry.type === "conversation") {
+          const ts = entry.createdAt;
+          const prev = latestAssistantBySession.get(sessionKey) ?? "";
+          if (!prev || ts > prev) latestAssistantBySession.set(sessionKey, ts);
+        }
+      }
+      const reqId = String(entry.source?.requestId ?? "").trim();
+      if (reqId) {
+        const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+        if (agentId === "system") terminalRequestIds.add(reqId);
+      }
+    }
+
+    setAwaitingAssistant((prev) => {
+      let changed = false;
+      const next: typeof prev = {};
+      for (const [sessionKey, info] of Object.entries(prev)) {
+        const sentAtMs = Date.parse(info.sentAt);
+        if (Number.isFinite(sentAtMs) && now - sentAtMs > 10 * 60 * 1000) {
+          changed = true;
+          continue;
+        }
+        if (info.requestId && terminalRequestIds.has(info.requestId)) {
+          changed = true;
+          continue;
+        }
+        const assistantAt = latestAssistantBySession.get(sessionKey);
+        if (assistantAt && assistantAt > info.sentAt) {
+          changed = true;
+          continue;
+        }
+        next[sessionKey] = info;
+      }
+      return changed ? next : prev;
+    });
+  }, [awaitingAssistant, logs]);
 
   useEffect(() => {
-    const key = (activeChatKeyRef.current ?? "").trim();
-    if (!key) return;
-    const lastId = getChatLastLogId(key);
-    if (!lastId) return;
-    const prev = chatLastSeenRef.current.get(key) ?? "";
-    chatLastSeenRef.current.set(key, lastId);
-    if (!prev || prev === lastId) return;
+    const prev = prevPendingAttachmentsRef.current;
+    const next = new Map<string, AttachmentLike[]>();
+    for (const msg of pendingMessages) {
+      next.set(msg.localId, msg.attachments ?? []);
+    }
+    for (const [localId, atts] of prev.entries()) {
+      if (next.has(localId)) continue;
+      for (const att of atts) {
+        if (!att.previewUrl) continue;
+        try {
+          URL.revokeObjectURL(att.previewUrl);
+        } catch {
+          // ignore
+        }
+      }
+    }
+    prevPendingAttachmentsRef.current = next;
+  }, [pendingMessages]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const hasFiles = (dt: DataTransfer | null) => {
+      if (!dt) return false;
+      const types = Array.from(dt.types ?? []);
+      return types.includes("Files");
+    };
+
+    const onDragOver = (event: DragEvent) => {
+      if (!hasFiles(event.dataTransfer)) return;
+      // Prevent the browser from navigating away (opening the file).
+      event.preventDefault();
+    };
+
+    const onDrop = (event: DragEvent) => {
+      if (!hasFiles(event.dataTransfer)) return;
+      event.preventDefault();
+
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      if (files.length === 0) return;
+
+      const active = activeComposer;
+      const session =
+        active?.kind === "topic"
+          ? topicSessionKey(active.topicId)
+          : active?.kind === "task"
+            ? taskSessionKey(active.topicId, active.taskId)
+            : "";
+      const handle = session ? composerHandlesRef.current.get(session) : null;
+      if (handle) {
+        handle.addFiles(files);
+        handle.focus();
+      }
+    };
+
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, [activeComposer]);
+
+  useEffect(() => {
     if (normalizedSearch) return;
-    if (!activeChatAtBottomRef.current) return;
-    const scroller = chatScrollers.current.get(key);
-    if (!scroller) return;
-    scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
-    activeChatAtBottomRef.current = true;
+    for (const [key, scroller] of chatScrollers.current.entries()) {
+      const lastId = getChatLastLogId(key);
+      if (!lastId) continue;
+      const prev = chatLastSeenRef.current.get(key) ?? "";
+      chatLastSeenRef.current.set(key, lastId);
+      if (!prev || prev === lastId) continue;
+      const atBottom = chatAtBottomRef.current.get(key) ?? false;
+      if (!atBottom) continue;
+      scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
+      chatAtBottomRef.current.set(key, true);
+    }
   }, [getChatLastLogId, logs, normalizedSearch]);
 
   const semanticLimits = useMemo(
@@ -1139,7 +1391,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     });
   }, []);
 
-  const requestEmbeddingRefresh = async (payload: { kind: "topic" | "task"; id: string; text: string; topicId?: string | null }) => {
+  const requestEmbeddingRefresh = useCallback(async (payload: { kind: "topic" | "task"; id: string; text: string; topicId?: string | null }) => {
     try {
       await apiFetch(
         "/api/reindex",
@@ -1153,7 +1405,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     } catch {
       // Best-effort only; DB update remains source of truth.
     }
-  };
+  }, [token, writeHeaders]);
 
   const updateTask = async (taskId: string, updates: Partial<Task>) => {
     if (readOnly) return;
@@ -1412,7 +1664,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     void persistTaskOrder(state.scopeTopicId, state.orderedIds);
   }, [persistTaskOrder]);
 
-  const saveTopicRename = async (topic: Topic) => {
+  const saveTopicRename = useCallback(async (topic: Topic, options?: { close?: boolean }) => {
+    const shouldClose = options?.close !== false;
     const renameKey = `topic:${topic.id}`;
     const nextName = topicNameDraft.trim();
     const currentColor =
@@ -1431,11 +1684,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       return;
     }
     if (!nameChanged && !colorChanged && !tagsChanged) {
-      setEditingTopicId(null);
-      setTopicNameDraft("");
-      setTopicColorDraft(currentColor);
-      setTopicTagsDraft(formatTags(currentTags));
-      setDeleteArmedKey(null);
+      if (shouldClose) {
+        setEditingTopicId(null);
+        setTopicNameDraft("");
+        setTopicColorDraft(currentColor);
+        setTopicTagsDraft(formatTags(currentTags));
+        setDeleteArmedKey(null);
+      }
       setRenameError(renameKey);
       return;
     }
@@ -1495,18 +1750,32 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           await requestEmbeddingRefresh({ kind: "topic", id: topic.id, text: nextName });
         }
       }
-      setEditingTopicId(null);
-      setTopicNameDraft("");
-      setTopicColorDraft(currentColor);
-      setTopicTagsDraft("");
-      setDeleteArmedKey(null);
+      if (shouldClose) {
+        setEditingTopicId(null);
+        setTopicNameDraft("");
+        setTopicColorDraft(currentColor);
+        setTopicTagsDraft("");
+        setDeleteArmedKey(null);
+      }
       setRenameError(renameKey);
     } finally {
       setRenameSavingKey(null);
     }
-  };
+  }, [
+    readOnly,
+    requestEmbeddingRefresh,
+    setRenameError,
+    setTopics,
+    token,
+    topicColorDraft,
+    topicDisplayColors,
+    topicNameDraft,
+    topicTagsDraft,
+    writeHeaders,
+  ]);
 
-  const saveTaskRename = async (task: Task) => {
+  const saveTaskRename = useCallback(async (task: Task, options?: { close?: boolean }) => {
+    const shouldClose = options?.close !== false;
     const renameKey = `task:${task.id}`;
     const nextTitle = taskNameDraft.trim();
     const currentColor =
@@ -1525,12 +1794,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       return;
     }
     if (!titleChanged && !colorChanged && !tagsChanged) {
-      setEditingTaskId(null);
-      setTaskNameDraft("");
-      setTaskColorDraft(currentColor);
-      setTaskTagsDraft(formatTags(currentTags));
-      setMoveTaskId(null);
-      setDeleteArmedKey(null);
+      if (shouldClose) {
+        setEditingTaskId(null);
+        setTaskNameDraft("");
+        setTaskColorDraft(currentColor);
+        setTaskTagsDraft(formatTags(currentTags));
+        setMoveTaskId(null);
+        setDeleteArmedKey(null);
+      }
       setRenameError(renameKey);
       return;
     }
@@ -1603,50 +1874,112 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           });
         }
       }
-      setEditingTaskId(null);
-      setTaskNameDraft("");
-      setTaskColorDraft(currentColor);
-      setTaskTagsDraft("");
-      setMoveTaskId(null);
-      setDeleteArmedKey(null);
+      if (shouldClose) {
+        setEditingTaskId(null);
+        setTaskNameDraft("");
+        setTaskColorDraft(currentColor);
+        setTaskTagsDraft("");
+        setMoveTaskId(null);
+        setDeleteArmedKey(null);
+      }
       setRenameError(renameKey);
     } finally {
       setRenameSavingKey(null);
     }
-  };
+  }, [
+    readOnly,
+    requestEmbeddingRefresh,
+    setRenameError,
+    setTasks,
+    taskColorDraft,
+    taskDisplayColors,
+    taskNameDraft,
+    taskTagsDraft,
+    token,
+    writeHeaders,
+  ]);
 
-  const createTopic = async () => {
+  const createTopic = () => {
     if (readOnly) return;
-    const res = await apiFetch(
-      "/api/topics",
-      {
-        method: "POST",
-        headers: writeHeaders,
-        body: JSON.stringify({ name: "New topic" }),
-      },
-      token
-    );
-    if (!res.ok) {
-      return;
-    }
-    const created = (await res.json().catch(() => null)) as Topic | null;
-    if (!created?.id) return;
-    setTopics((prev) => (prev.some((item) => item.id === created.id) ? prev : [created, ...prev]));
-    markBumped("topic", created.id);
-
-    setPage(1);
-    setExpandedTopics((prev) => new Set(prev).add(created.id));
-    pushUrl({ topics: Array.from(new Set([...expandedTopicsSafe, created.id])), page: "1" }, "replace");
     setEditingTaskId(null);
     setTaskNameDraft("");
     setTaskColorDraft(TASK_FALLBACK_COLORS[0]);
-    setEditingTopicId(created.id);
-    setTopicNameDraft(created.name ?? "New topic");
-    setTopicColorDraft(created.color ?? TOPIC_FALLBACK_COLORS[0]);
-    setTopicTagsDraft(formatTags(created.tags));
+    setEditingTopicId(null);
+    setTopicNameDraft("");
+    setTopicTagsDraft("");
+    setNewTopicDraftOpen(true);
+    setNewTopicError(null);
     setDeleteArmedKey(null);
-    setRenameError(`topic:${created.id}`);
   };
+
+  useEffect(() => {
+    if (editingTopicId) {
+      skipTopicAutosaveRef.current = true;
+      return;
+    }
+    if (topicAutosaveTimerRef.current != null) {
+      window.clearTimeout(topicAutosaveTimerRef.current);
+      topicAutosaveTimerRef.current = null;
+    }
+  }, [editingTopicId]);
+
+  useEffect(() => {
+    if (editingTaskId) {
+      skipTaskAutosaveRef.current = true;
+      return;
+    }
+    if (taskAutosaveTimerRef.current != null) {
+      window.clearTimeout(taskAutosaveTimerRef.current);
+      taskAutosaveTimerRef.current = null;
+    }
+  }, [editingTaskId]);
+
+  useEffect(() => {
+    return () => {
+      if (topicAutosaveTimerRef.current != null) window.clearTimeout(topicAutosaveTimerRef.current);
+      if (taskAutosaveTimerRef.current != null) window.clearTimeout(taskAutosaveTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (readOnly) return;
+    if (!editingTopicId) return;
+    const topic = topics.find((item) => item.id === editingTopicId);
+    if (!topic) return;
+    if (skipTopicAutosaveRef.current) {
+      skipTopicAutosaveRef.current = false;
+      return;
+    }
+    if (!topicNameDraft.trim()) return;
+    if (topicAutosaveTimerRef.current != null) window.clearTimeout(topicAutosaveTimerRef.current);
+    topicAutosaveTimerRef.current = window.setTimeout(() => {
+      void saveTopicRename(topic, { close: false });
+    }, 650);
+    return () => {
+      if (topicAutosaveTimerRef.current != null) window.clearTimeout(topicAutosaveTimerRef.current);
+      topicAutosaveTimerRef.current = null;
+    };
+  }, [editingTopicId, readOnly, saveTopicRename, topicNameDraft, topics]);
+
+  useEffect(() => {
+    if (readOnly) return;
+    if (!editingTaskId) return;
+    const task = tasks.find((item) => item.id === editingTaskId);
+    if (!task) return;
+    if (skipTaskAutosaveRef.current) {
+      skipTaskAutosaveRef.current = false;
+      return;
+    }
+    if (!taskNameDraft.trim()) return;
+    if (taskAutosaveTimerRef.current != null) window.clearTimeout(taskAutosaveTimerRef.current);
+    taskAutosaveTimerRef.current = window.setTimeout(() => {
+      void saveTaskRename(task, { close: false });
+    }, 650);
+    return () => {
+      if (taskAutosaveTimerRef.current != null) window.clearTimeout(taskAutosaveTimerRef.current);
+      taskAutosaveTimerRef.current = null;
+    };
+  }, [editingTaskId, readOnly, saveTaskRename, taskNameDraft, tasks]);
 
   const createTask = async (scopeTopicId: string | null, title: string) => {
     if (readOnly) return;
@@ -1686,6 +2019,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       });
 
       setNewTaskDraftByTopicId((prev) => ({ ...prev, [draftKey]: "" }));
+      newTaskDraftEditedAtRef.current.delete(draftKey);
+      queueDraftUpsert(`draft:new-task:${draftKey}`, "");
     } finally {
       setNewTaskSavingKey((prev) => (prev === draftKey ? null : prev));
     }
@@ -1694,6 +2029,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const patchTopic = useCallback(
     async (topicId: string, patch: Partial<Topic>) => {
       if (readOnly) return;
+      const current = topics.find((item) => item.id === topicId);
+      if (!current) return;
       const snapshot = topics;
       const optimisticTs = new Date().toISOString();
       setTopics((prev) => prev.map((row) => (row.id === topicId ? { ...row, ...patch, updatedAt: optimisticTs } : row)));
@@ -1703,7 +2040,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           {
             method: "POST",
             headers: writeHeaders,
-            body: JSON.stringify({ id: topicId, ...patch }),
+            // TopicUpsert requires a name, even for partial updates.
+            body: JSON.stringify({ id: topicId, name: patch.name ?? current.name, ...patch }),
           },
           token
         );
@@ -2053,17 +2391,23 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       setAutoFocusTopicId(nextTopics[0] ?? null);
     }
 
-    const key = `${url.pathname}${url.search}`;
-    const y = scrollMemory.current[key];
-    if (typeof y === "number") {
-      window.requestAnimationFrame(() => {
-        window.scrollTo({ top: y, left: 0, behavior: "auto" });
-      });
+    if (restoreScrollOnNextSyncRef.current) {
+      restoreScrollOnNextSyncRef.current = false;
+      const key = `${url.pathname}${url.search}`;
+      const y = scrollMemory.current[key];
+      if (typeof y === "number") {
+        window.requestAnimationFrame(() => {
+          window.scrollTo({ top: y, left: 0, behavior: "auto" });
+        });
+      }
     }
   }, [basePath, resolveTaskId, resolveTopicId]);
 
   useEffect(() => {
-    const handlePop = () => syncFromUrl();
+    const handlePop = () => {
+      restoreScrollOnNextSyncRef.current = true;
+      syncFromUrl();
+    };
     window.addEventListener("popstate", handlePop);
     return () => window.removeEventListener("popstate", handlePop);
   }, [syncFromUrl]);
@@ -2098,6 +2442,35 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     prevExpandedTopicChatIdsRef.current = new Set(expandedTopicChatsSafe);
   }, [expandedTopicChatsSafe, scheduleScrollChatToBottom]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    // Initialize per-chat history windows once we have the initial snapshot so the
+    // "loaded messages" window doesn't slide forward as new logs append.
+    setChatHistoryStarts((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const taskId of expandedTasksSafe) {
+        const key = chatKeyForTask(taskId);
+        if (Object.prototype.hasOwnProperty.call(prev, key)) continue;
+        const all = logsByTaskAll.get(taskId) ?? [];
+        const start = Math.max(0, all.length - TASK_TIMELINE_LIMIT);
+        next[key] = start;
+        changed = true;
+      }
+      for (const topicId of expandedTopicChatsSafe) {
+        if (topicId === "unassigned") continue;
+        const key = chatKeyForTopic(topicId);
+        if (Object.prototype.hasOwnProperty.call(prev, key)) continue;
+        const allTopic = logsByTopicAll.get(topicId) ?? [];
+        const all = allTopic.filter((entry) => !entry.taskId);
+        const start = Math.max(0, all.length - TOPIC_TIMELINE_LIMIT);
+        next[key] = start;
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [expandedTasksSafe, expandedTopicChatsSafe, hydrated, logsByTaskAll, logsByTopicAll]);
 
   const pushUrl = useCallback(
     (
@@ -2137,15 +2510,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const nextPath = segments.length > 0 ? `${trimmedBase}/${segments.join("/")}` : trimmedBase;
       const query = params.toString();
       const nextUrl = query ? `${nextPath}?${query}` : nextPath;
-      if (typeof window !== "undefined") {
-        const currentKey = currentUrlKey();
-        scrollMemory.current[currentKey] = window.scrollY;
-        scrollMemory.current[nextUrl] = window.scrollY;
-        if (mode === "replace") {
-          window.history.replaceState({ clawboard: true }, "", nextUrl);
-        } else {
-          window.history.pushState({ clawboard: true }, "", nextUrl);
-        }
+      if (typeof window === "undefined") return;
+      const currentKey = currentUrlKey();
+      scrollMemory.current[currentKey] = window.scrollY;
+      scrollMemory.current[nextUrl] = window.scrollY;
+      if (currentKey === nextUrl) return;
+      if (mode === "replace") {
+        window.history.replaceState({ clawboard: true }, "", nextUrl);
+      } else {
+        window.history.pushState({ clawboard: true }, "", nextUrl);
       }
     },
     [
@@ -2164,12 +2537,82 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     ]
   );
 
+  const submitNewTopicDraft = useCallback(async () => {
+    if (readOnly) return null;
+    const nextName = newTopicNameDraft.trim();
+    const nextColor = normalizeHexColor(newTopicColorDraft) ?? TOPIC_FALLBACK_COLORS[0];
+    const nextTags = parseTags(newTopicTagsDraft);
+    if (!nextName) {
+      setNewTopicError("Topic name cannot be empty.");
+      return null;
+    }
+    if (newTopicSaving) return null;
+    setNewTopicSaving(true);
+    setNewTopicError(null);
+    try {
+      const res = await apiFetch(
+        "/api/topics",
+        {
+          method: "POST",
+          headers: writeHeaders,
+          body: JSON.stringify({ name: nextName, color: nextColor, tags: nextTags }),
+        },
+        token
+      );
+      if (!res.ok) {
+        setNewTopicError("Failed to create topic.");
+        return null;
+      }
+      const created = (await res.json().catch(() => null)) as Topic | null;
+      if (!created?.id) {
+        setNewTopicError("Failed to create topic.");
+        return null;
+      }
+
+      setTopics((prev) => (prev.some((item) => item.id === created.id) ? prev : [created, ...prev]));
+      markBumped("topic", created.id);
+
+      setPage(1);
+      setExpandedTopics((prev) => new Set(prev).add(created.id));
+      setExpandedTopicChats((prev) => new Set(prev).add(created.id));
+      pushUrl({ topics: Array.from(new Set([...expandedTopicsSafe, created.id])), page: "1" }, "replace");
+
+      setNewTopicDraftOpen(false);
+      setNewTopicNameDraft("");
+      setNewTopicColorDraft(TOPIC_FALLBACK_COLORS[0]);
+      setNewTopicTagsDraft("");
+      setNewTopicError(null);
+      setAutoFocusTopicId(created.id);
+      return created;
+    } finally {
+      setNewTopicSaving(false);
+    }
+  }, [
+    expandedTopicsSafe,
+    markBumped,
+    newTopicColorDraft,
+    newTopicNameDraft,
+    newTopicSaving,
+    newTopicTagsDraft,
+    pushUrl,
+    readOnly,
+    setExpandedTopicChats,
+    setExpandedTopics,
+    setNewTopicColorDraft,
+    setNewTopicNameDraft,
+    setNewTopicTagsDraft,
+    setPage,
+    setTopics,
+    token,
+    writeHeaders,
+  ]);
+
   // Auto-promote topic chat into a task when classifier patches a topic-scoped log with taskId.
   // This keeps the "continue chatting" UX deterministic: once a task exists, new sends should target
   // the task sessionKey so future turns attach immediately.
   useEffect(() => {
     const prev = prevTaskByLogId.current;
-    let promotion: { topicId: string; taskId: string } | null = null;
+    let promotion: { topicId: string; taskId: string; sessionKey: string } | null = null;
 
     for (const entry of logs) {
       const hadPrev = prev.has(entry.id);
@@ -2179,7 +2622,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         const sessionKey = String(entry.source?.sessionKey ?? "").trim();
         if (sessionKey.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
           const topicId = sessionKey.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim();
-          if (topicId) promotion = { topicId, taskId: nextTask };
+          if (topicId) promotion = { topicId, taskId: nextTask, sessionKey };
         }
       }
       prev.set(entry.id, nextTask);
@@ -2193,8 +2636,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
 
     if (!promotion) return;
-    if (!activeComposer || activeComposer.kind !== "topic") return;
-    if (activeComposer.topicId !== promotion.topicId) return;
+    const sentAt = recentBoardSendAtRef.current.get(promotion.sessionKey) ?? 0;
+    if (!sentAt || Date.now() - sentAt > 30 * 60 * 1000) return;
+    recentBoardSendAtRef.current.delete(promotion.sessionKey);
 
     setExpandedTopics((prevSet) => {
       const next = new Set(prevSet);
@@ -2207,6 +2651,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       return next;
     });
     setAutoFocusTask({ topicId: promotion.topicId, taskId: promotion.taskId });
+    // If the classifier promotes a topic session into a task mid-turn, keep "typing" and
+    // response indicators visible in the new task chat even though the underlying sessionKey
+    // for this turn was topic-scoped.
+    typingAliasRef.current.set(taskSessionKey(promotion.topicId, promotion.taskId), {
+      sourceSessionKey: topicSessionKey(promotion.topicId),
+      createdAt: Date.now(),
+    });
     // Ensure the newly promoted task chat opens scrolled to the latest messages
     // without forcing a window scroll.
     const promotedChatKey = `task:${promotion.taskId}`;
@@ -2217,7 +2668,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const nextTopics = Array.from(new Set([...expandedTopicsSafe, promotion.topicId]));
     const nextTasks = Array.from(new Set([...expandedTasksSafe, promotion.taskId]));
     pushUrl({ topics: nextTopics, tasks: nextTasks }, "replace");
-  }, [activeComposer, expandedTasksSafe, expandedTopicsSafe, logs, pushUrl, scheduleScrollChatToBottom]);
+  }, [expandedTasksSafe, expandedTopicsSafe, logs, pushUrl, scheduleScrollChatToBottom]);
 
 
 
@@ -2262,6 +2713,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             aria-expanded={showViewOptions}
           >
             {showViewOptions ? "Hide options" : "View options"}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            className={cn(twoColumn ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+            onClick={toggleTwoColumn}
+            title={twoColumn ? "Switch to single column" : "Switch to two columns"}
+          >
+            {twoColumn ? "1 column" : "2 column"}
           </Button>
         </div>
         {showViewOptions && (
@@ -2346,13 +2806,99 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               variant="secondary"
               size="sm"
               onClick={() => {
-                void createTopic();
+                createTopic();
               }}
             >
               + New topic
             </Button>
           </div>
         )}
+        {!readOnly && newTopicDraftOpen && (
+          <div
+            className="rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] bg-[linear-gradient(145deg,rgba(28,32,40,0.6),rgba(16,19,24,0.5))] p-4 shadow-[0_0_0_1px_rgba(0,0,0,0.25)] backdrop-blur"
+            onBlur={(event) => {
+              const next = event.relatedTarget as HTMLElement | null;
+              if (next && event.currentTarget.contains(next)) return;
+              if (newTopicSaving) return;
+              if (newTopicNameDraft.trim()) {
+                void submitNewTopicDraft();
+              } else {
+                setNewTopicDraftOpen(false);
+                setNewTopicError(null);
+              }
+            }}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">New topic</div>
+              {newTopicSaving ? (
+                <span className="text-xs text-[rgb(var(--claw-muted))]">Creating…</span>
+              ) : null}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Input
+                data-testid="new-topic-name"
+                value={newTopicNameDraft}
+                autoFocus
+                onChange={(event) => setNewTopicNameDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void submitNewTopicDraft();
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setNewTopicDraftOpen(false);
+                    setNewTopicError(null);
+                  }
+                }}
+                placeholder="Topic name"
+                className="h-9 w-[260px] max-w-[70vw]"
+                disabled={newTopicSaving}
+              />
+              <Input
+                value={newTopicTagsDraft}
+                onChange={(event) => setNewTopicTagsDraft(event.target.value)}
+                placeholder="Tags (comma separated)"
+                className="h-9 w-[240px] max-w-[70vw]"
+                disabled={newTopicSaving}
+              />
+              <label className="flex h-9 items-center gap-2 rounded-full border border-[rgb(var(--claw-border))] px-2 text-[10px] uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">
+                Color
+                <input
+                  type="color"
+                  value={newTopicColorDraft}
+                  disabled={newTopicSaving}
+                  onChange={(event) => {
+                    const next = normalizeHexColor(event.target.value);
+                    if (next) setNewTopicColorDraft(next);
+                  }}
+                  className="h-6 w-7 cursor-pointer rounded border border-[rgb(var(--claw-border))] bg-transparent p-0 disabled:cursor-not-allowed"
+                />
+              </label>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={newTopicSaving || !newTopicNameDraft.trim() || !normalizeHexColor(newTopicColorDraft)}
+                onClick={() => void submitNewTopicDraft()}
+              >
+                Create
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={newTopicSaving}
+                onClick={() => {
+                  setNewTopicDraftOpen(false);
+                  setNewTopicError(null);
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+            {newTopicError ? <p className="mt-2 text-xs text-[rgb(var(--claw-warning))]">{newTopicError}</p> : null}
+          </div>
+        )}
+        <div className={cn(twoColumn ? "grid gap-4 md:grid-cols-2" : "space-y-4")}>
         {pagedTopics.map((topic, topicIndex) => {
           const topicId = topic.id;
           const isUnassigned = topicId === "unassigned";
@@ -2368,10 +2914,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const showTasks = true;
           const isExpanded = expandedTopicsSafe.has(topicId);
           const topicChatExpanded = expandedTopicChatsSafe.has(topicId);
-          const topicChatLimit = timelineLimits[topicChatLimitKey(topicId)] ?? TOPIC_TIMELINE_LIMIT;
-          const topicChatStart = Math.max(0, topicChatAllLogs.length - topicChatLimit);
+          const topicChatKey = chatKeyForTopic(topicId);
+          const topicChatStart = normalizedSearch
+            ? 0
+            : computeChatStart(chatHistoryStarts, topicChatKey, topicChatAllLogs.length, TOPIC_TIMELINE_LIMIT);
           const topicChatLogs = topicChatAllLogs.slice(topicChatStart);
-          const topicChatTruncated = topicChatAllLogs.length > topicChatLimit;
+          const topicChatTruncated = !normalizedSearch && topicChatStart > 0;
           const topicColor =
             topicDisplayColors.get(topicId) ??
             normalizeHexColor(topic.color) ??
@@ -2765,7 +3313,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                           value={newTaskDraftByTopicId[topicId === "unassigned" ? "unassigned" : topicId] ?? ""}
                           onChange={(event) => {
                             const key = topicId === "unassigned" ? "unassigned" : topicId;
-                            setNewTaskDraftByTopicId((prev) => ({ ...prev, [key]: event.target.value }));
+                            const next = event.target.value;
+                            newTaskDraftEditedAtRef.current.set(key, Date.now());
+                            setNewTaskDraftByTopicId((prev) => ({ ...prev, [key]: next }));
+                            queueDraftUpsert(`draft:new-task:${key}`, next);
                           }}
                           onKeyDown={(event) => {
                             if (event.key !== "Enter") return;
@@ -2881,10 +3432,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       );
                       const taskChatAllLogs = taskLogs.filter(matchesLogSearchChat);
                       const taskChatBlurb = deriveChatHeaderBlurb(taskChatAllLogs);
-                      const limit = timelineLimits[task.id] ?? TASK_TIMELINE_LIMIT;
-                      const start = Math.max(0, taskChatAllLogs.length - limit);
+                      const taskChatKey = chatKeyForTask(task.id);
+                      const start = normalizedSearch
+                        ? 0
+                        : computeChatStart(chatHistoryStarts, taskChatKey, taskChatAllLogs.length, TASK_TIMELINE_LIMIT);
                       const limitedLogs = taskChatAllLogs.slice(start);
-                      const truncated = taskChatAllLogs.length > limit;
+                      const truncated = !normalizedSearch && start > 0;
 	                      return (
                           <SwipeRevealRow
                             key={task.id}
@@ -3242,6 +3795,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                           </div>
 	                          <div className="flex items-center gap-2">
 	                            <StatusPill tone={STATUS_TONE[task.status]} label={STATUS_LABELS[task.status] ?? task.status} />
+	                            {isSessionResponding(taskSessionKey(topicId, task.id)) ? (
+	                              <span title="OpenClaw responding" className="inline-flex items-center">
+	                                <TypingDots />
+	                              </span>
+	                            ) : null}
 	                            <button
 	                              type="button"
 	                              aria-label={taskExpanded ? `Collapse task ${task.title}` : `Expand task ${task.title}`}
@@ -3266,6 +3824,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 				                                  <div className="shrink-0 text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">
 				                                    TASK CHAT
 				                                  </div>
+				                                  {isSessionResponding(taskSessionKey(topicId, task.id)) ? (
+				                                    <TypingDots />
+				                                  ) : null}
 				                                  {taskChatBlurb ? (
 				                                    <>
 				                                      <span className="text-xs text-[rgba(var(--claw-muted),0.55)]">·</span>
@@ -3284,13 +3845,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 				                                      size="sm"
 			                                      variant="secondary"
 			                                      onClick={() =>
-			                                        setTimelineLimits((prev) => ({
-			                                          ...prev,
-			                                          [task.id]: (prev[task.id] ?? TASK_TIMELINE_LIMIT) + TASK_TIMELINE_LIMIT,
-			                                        }))
+			                                        loadOlderChat(taskChatKey, TASK_TIMELINE_LIMIT, taskChatAllLogs.length, TASK_TIMELINE_LIMIT)
 			                                      }
 			                                    >
-			                                      Load 2 more
+			                                      Load older
 			                                    </Button>
 			                                  ) : null}
 			                                  <span className="text-xs text-[rgb(var(--claw-muted))]">{taskChatAllLogs.length} entries</span>
@@ -3336,18 +3894,27 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       const showTop = node.scrollTop > 2;
                                       const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
                                       const showBottom = remaining > 2;
+                                      chatAtBottomRef.current.set(key, remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX);
                                       setChatTopFade((prev) =>
                                         prev[key] === showTop ? prev : { ...prev, [key]: showTop }
                                       );
                                       setChatBottomFade((prev) =>
                                         prev[key] === showBottom ? prev : { ...prev, [key]: showBottom }
                                       );
+                                      if (!normalizedSearch && truncated && node.scrollTop <= 28) {
+                                        const now = Date.now();
+                                        const last = chatLoadOlderCooldownRef.current.get(key) ?? 0;
+                                        if (now - last > 350) {
+                                          chatLoadOlderCooldownRef.current.set(key, now);
+                                          loadOlderChat(key, TASK_TIMELINE_LIMIT, taskChatAllLogs.length, TASK_TIMELINE_LIMIT);
+                                        }
+                                      }
                                       if (activeChatKeyRef.current === key) updateActiveChatAtBottom();
                                     }}
                                     className="overflow-y-auto pr-1"
                                     style={{
                                       // Keep the composer visible while allowing long conversations to scroll within the chat pane.
-                                      maxHeight: "min(560px, calc(100dvh - var(--claw-header-h, 0px) - 440px))",
+                                      maxHeight: "max(240px, calc(100dvh - var(--claw-header-h, 0px) - 360px))",
                                     }}
                                   >
                                     <LogList
@@ -3383,7 +3950,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 				                                                "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
 				                                              )}
 				                                            >
-				                                              <p className="whitespace-pre-wrap break-words">{pending.message}</p>
+                                              {pending.attachments && pending.attachments.length > 0 ? (
+                                                <AttachmentStrip attachments={pending.attachments} className="mt-0 mb-3" />
+                                              ) : null}
+                                              <Markdown>{pending.message}</Markdown>
 				                                            </div>
 				                                            <div className="mt-1 text-right text-[10px] text-[rgba(148,163,184,0.9)]">
 				                                              {pending.status === "sending"
@@ -3398,18 +3968,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 				                                        </div>
 				                                      </div>
 				                                    ))}
-				                                  {openclawTyping[taskSessionKey(topicId, task.id)]?.typing ? (
+				                                  {isSessionResponding(taskSessionKey(topicId, task.id)) ? (
 				                                    <div className="py-1">
 				                                      <div className="flex justify-start">
 				                                        <div className="w-full max-w-[78%]">
 				                                          <div className="rounded-[20px] border border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] px-4 py-3 text-sm text-[rgb(var(--claw-text))]">
 				                                            <div className="flex items-center gap-2">
 				                                              <span className="text-xs text-[rgba(148,163,184,0.9)]">OpenClaw</span>
-				                                              <div className="flex items-center gap-1">
-				                                                <span className="h-1.5 w-1.5 rounded-full bg-[rgba(148,163,184,0.9)] animate-pulse" />
-				                                                <span className="h-1.5 w-1.5 rounded-full bg-[rgba(148,163,184,0.9)] animate-pulse [animation-delay:120ms]" />
-				                                                <span className="h-1.5 w-1.5 rounded-full bg-[rgba(148,163,184,0.9)] animate-pulse [animation-delay:240ms]" />
-				                                              </div>
+				                                              <TypingDots />
 				                                            </div>
 				                                          </div>
 				                                        </div>
@@ -3417,6 +3983,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 				                                    </div>
 				                                  ) : null}
 				                                <BoardChatComposer
+                                      ref={(node) => {
+                                        const key = taskSessionKey(topicId, task.id);
+                                        if (node) composerHandlesRef.current.set(key, node);
+                                        else composerHandlesRef.current.delete(key);
+                                      }}
 			                                  sessionKey={taskSessionKey(topicId, task.id)}
 			                                  className="mt-4"
 			                                  variant="seamless"
@@ -3435,18 +4006,28 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                  }
 			                                  onSendUpdate={(event) => {
 			                                    if (!event) return;
+			                                    markRecentBoardSend(event.sessionKey);
 			                                    if (event.phase === "sending") {
+			                                      setAwaitingAssistant((prev) => ({
+			                                        ...prev,
+			                                        [event.sessionKey]: { sentAt: event.createdAt },
+			                                      }));
 			                                      setPendingMessages((prev) => [
 			                                        ...prev.filter((item) => item.localId !== event.localId),
 			                                        {
 			                                          localId: event.localId,
 			                                          sessionKey: event.sessionKey,
 			                                          message: event.message,
+			                                          attachments: event.attachments,
 			                                          createdAt: event.createdAt,
 			                                          status: "sending",
 			                                        },
 			                                      ]);
 			                                    } else if (event.phase === "queued") {
+			                                      setAwaitingAssistant((prev) => ({
+			                                        ...prev,
+			                                        [event.sessionKey]: { sentAt: event.createdAt, requestId: event.requestId },
+			                                      }));
 			                                      setPendingMessages((prev) =>
 			                                        prev.map((item) =>
 			                                          item.localId === event.localId
@@ -3455,6 +4036,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                        )
 			                                      );
 			                                    } else if (event.phase === "failed") {
+			                                      setAwaitingAssistant((prev) => {
+			                                        if (!Object.prototype.hasOwnProperty.call(prev, event.sessionKey)) return prev;
+			                                        const next = { ...prev };
+			                                        delete next[event.sessionKey];
+			                                        return next;
+			                                      });
 			                                      setPendingMessages((prev) =>
 			                                        prev.map((item) =>
 			                                          item.localId === event.localId
@@ -3502,6 +4089,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                            <div className="shrink-0 text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">
 			                              TOPIC CHAT
 			                            </div>
+			                            {isSessionResponding(topicSessionKey(topicId)) ? <TypingDots /> : null}
 			                            {topicChatBlurb ? (
 			                              <>
 			                                <span className="text-xs text-[rgba(var(--claw-muted),0.55)]">·</span>
@@ -3543,14 +4131,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 				                              onClick={(event) => {
 				                                event.stopPropagation();
 				                                event.preventDefault();
-				                                setTimelineLimits((prev) => ({
-				                                  ...prev,
-				                                  [topicChatLimitKey(topicId)]:
-				                                    (prev[topicChatLimitKey(topicId)] ?? TOPIC_TIMELINE_LIMIT) + TOPIC_TIMELINE_LIMIT,
-				                                }));
+				                                loadOlderChat(topicChatKey, TOPIC_TIMELINE_LIMIT, topicChatAllLogs.length, TOPIC_TIMELINE_LIMIT);
 				                              }}
 				                            >
-				                              Load 4 more
+				                              Load older
 				                            </Button>
 				                          ) : null}
 				                          <span className="text-xs text-[rgb(var(--claw-muted))]">{topicChatAllLogs.length} entries</span>
@@ -3596,17 +4180,26 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                                const showTop = node.scrollTop > 2;
 		                                const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
 		                                const showBottom = remaining > 2;
+		                                chatAtBottomRef.current.set(key, remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX);
 		                                setChatTopFade((prev) =>
 		                                  prev[key] === showTop ? prev : { ...prev, [key]: showTop }
 		                                );
 		                                setChatBottomFade((prev) =>
 		                                  prev[key] === showBottom ? prev : { ...prev, [key]: showBottom }
 		                                );
+		                                if (!normalizedSearch && topicChatTruncated && node.scrollTop <= 28) {
+		                                  const now = Date.now();
+		                                  const last = chatLoadOlderCooldownRef.current.get(key) ?? 0;
+		                                  if (now - last > 350) {
+		                                    chatLoadOlderCooldownRef.current.set(key, now);
+		                                    loadOlderChat(key, TOPIC_TIMELINE_LIMIT, topicChatAllLogs.length, TOPIC_TIMELINE_LIMIT);
+		                                  }
+		                                }
 		                                if (activeChatKeyRef.current === key) updateActiveChatAtBottom();
 		                              }}
 		                              className="overflow-y-auto pr-1"
 		                              style={{
-		                                maxHeight: "min(560px, calc(100dvh - var(--claw-header-h, 0px) - 400px))",
+		                                maxHeight: "max(240px, calc(100dvh - var(--claw-header-h, 0px) - 320px))",
 		                              }}
 		                            >
 		                              <LogList
@@ -3640,7 +4233,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                                        "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
 		                                      )}
 		                                    >
-		                                      <p className="whitespace-pre-wrap break-words">{pending.message}</p>
+                                          {pending.attachments && pending.attachments.length > 0 ? (
+                                            <AttachmentStrip attachments={pending.attachments} className="mt-0 mb-3" />
+                                          ) : null}
+                                          <Markdown>{pending.message}</Markdown>
 		                                    </div>
 		                                    <div className="mt-1 text-right text-[10px] text-[rgba(148,163,184,0.9)]">
 		                                      {pending.status === "sending"
@@ -3655,18 +4251,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                                </div>
 		                              </div>
 		                            ))}
-		                          {openclawTyping[topicSessionKey(topicId)]?.typing ? (
+		                          {isSessionResponding(topicSessionKey(topicId)) ? (
 		                            <div className="py-1">
 		                              <div className="flex justify-start">
 		                                <div className="w-full max-w-[78%]">
 		                                  <div className="rounded-[20px] border border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] px-4 py-3 text-sm text-[rgb(var(--claw-text))]">
 		                                    <div className="flex items-center gap-2">
 		                                      <span className="text-xs text-[rgba(148,163,184,0.9)]">OpenClaw</span>
-		                                      <div className="flex items-center gap-1">
-		                                        <span className="h-1.5 w-1.5 rounded-full bg-[rgba(148,163,184,0.9)] animate-pulse" />
-		                                        <span className="h-1.5 w-1.5 rounded-full bg-[rgba(148,163,184,0.9)] animate-pulse [animation-delay:120ms]" />
-		                                        <span className="h-1.5 w-1.5 rounded-full bg-[rgba(148,163,184,0.9)] animate-pulse [animation-delay:240ms]" />
-		                                      </div>
+		                                      <TypingDots />
 		                                    </div>
 		                                  </div>
 		                                </div>
@@ -3674,6 +4266,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                            </div>
 		                          ) : null}
 		                          <BoardChatComposer
+                                ref={(node) => {
+                                  const key = topicSessionKey(topicId);
+                                  if (node) composerHandlesRef.current.set(key, node);
+                                  else composerHandlesRef.current.delete(key);
+                                }}
 		                            sessionKey={topicSessionKey(topicId)}
 		                            className="mt-4"
 		                            variant="seamless"
@@ -3688,18 +4285,28 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                            }
 		                            onSendUpdate={(event) => {
 		                              if (!event) return;
+		                              markRecentBoardSend(event.sessionKey);
 		                              if (event.phase === "sending") {
+		                                setAwaitingAssistant((prev) => ({
+		                                  ...prev,
+		                                  [event.sessionKey]: { sentAt: event.createdAt },
+		                                }));
 		                                setPendingMessages((prev) => [
 		                                  ...prev.filter((item) => item.localId !== event.localId),
 		                                  {
 		                                    localId: event.localId,
 		                                    sessionKey: event.sessionKey,
 		                                    message: event.message,
+		                                    attachments: event.attachments,
 		                                    createdAt: event.createdAt,
 		                                    status: "sending",
 		                                  },
 		                                ]);
 		                              } else if (event.phase === "queued") {
+		                                setAwaitingAssistant((prev) => ({
+		                                  ...prev,
+		                                  [event.sessionKey]: { sentAt: event.createdAt, requestId: event.requestId },
+		                                }));
 		                                setPendingMessages((prev) =>
 		                                  prev.map((item) =>
 		                                    item.localId === event.localId
@@ -3708,6 +4315,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                                  )
 		                                );
 		                              } else if (event.phase === "failed") {
+		                                setAwaitingAssistant((prev) => {
+		                                  if (!Object.prototype.hasOwnProperty.call(prev, event.sessionKey)) return prev;
+		                                  const next = { ...prev };
+		                                  delete next[event.sessionKey];
+		                                  return next;
+		                                });
 		                                setPendingMessages((prev) =>
 		                                  prev.map((item) =>
 		                                    item.localId === event.localId
@@ -3751,6 +4364,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             </SwipeRevealRow>
           );
 	        })}
+        </div>
       </div>
 
       {pageCount > 1 && (

@@ -29,7 +29,7 @@ const EDGE_COLORS: Record<string, string> = {
 
 const MIN_ZOOM = 0.38;
 const MAX_ZOOM = 2.6;
-const MAX_NODE_DRAG = 140;
+const MAX_NODE_DRAG = 1200;
 
 const NODE_THEME: Record<ClawgraphNodeType, { color: string; glow: string }> = {
   topic: { color: "#FF8A4A", glow: "#FF8A4A" },
@@ -525,7 +525,6 @@ export function ClawgraphLive() {
       offsetY: offset.y,
       dragging: false,
     };
-    canvasRef.current?.setPointerCapture(event.pointerId);
   };
 
   const handlePointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
@@ -549,11 +548,18 @@ export function ClawgraphLive() {
       // Drag intent must be measured in screen pixels. Measuring in graph-space makes click jitter
       // look like a drag when zoomed out, which breaks node selection.
       if (!nodeDrag.dragging) {
-        if (Math.abs(pixelDeltaX) < 5 && Math.abs(pixelDeltaY) < 5) {
+        if (Math.abs(pixelDeltaX) < 8 && Math.abs(pixelDeltaY) < 8) {
           return;
         }
         nodeDrag.dragging = true;
         didDragRef.current = true;
+        try {
+          // Only capture once we have real drag intent; capturing on pointerdown can
+          // redirect click events away from the node (breaking selection).
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {
+          // ignore
+        }
       }
       const point = pointerToGraph(event);
       const deltaX = point.x - nodeDrag.startX;
@@ -581,13 +587,21 @@ export function ClawgraphLive() {
     const nodeDrag = nodeDragRef.current;
     if (nodeDrag && nodeDrag.pointerId === event.pointerId) {
       nodeDragRef.current = null;
-      event.currentTarget.releasePointerCapture(event.pointerId);
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      } catch {
+        // ignore
+      }
       return;
     }
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     dragRef.current = null;
-    event.currentTarget.releasePointerCapture(event.pointerId);
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // ignore
+    }
   };
 
   const stats = graph.stats;
@@ -661,7 +675,7 @@ export function ClawgraphLive() {
           onClick={() => setIsMapFullScreen(false)}
         />
       )}
-      <div className={cn("grid gap-6 xl:grid-cols-[2.2fr_1fr]", isMapFullScreen && "block")}>
+      <div className={cn("space-y-6", isMapFullScreen && "block")}>
         <div className={cn(isMapFullScreen && "fixed inset-4 z-50")}>
           <Card className={cn("overflow-hidden", isMapFullScreen && "h-full w-full")}>
             <CardHeader className="flex flex-wrap items-start justify-between gap-3">
@@ -821,7 +835,7 @@ export function ClawgraphLive() {
         </div>
 
         {!isMapFullScreen && (
-          <div className="space-y-4">
+          <div className="grid gap-4 lg:grid-cols-2">
             <Card data-testid="clawgraph-detail">
               <CardHeader>
                 <h2 className="text-lg font-semibold">Node Detail</h2>
@@ -875,59 +889,59 @@ export function ClawgraphLive() {
               )}
             </Card>
 
-          <Card>
-            <CardHeader>
-              <h2 className="text-lg font-semibold">Graph Health</h2>
-              <Badge tone="muted">Realtime</Badge>
-            </CardHeader>
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
-                <div className="text-xs text-[rgb(var(--claw-muted))]">Topics</div>
-                <div className="font-semibold">{stats.topicCount}</div>
-              </div>
-              <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
-                <div className="text-xs text-[rgb(var(--claw-muted))]">Tasks</div>
-                <div className="font-semibold">{stats.taskCount}</div>
-              </div>
-              <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
-                <div className="text-xs text-[rgb(var(--claw-muted))]">Entities</div>
-                <div className="font-semibold">{stats.entityCount}</div>
-              </div>
-              <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
-                <div className="text-xs text-[rgb(var(--claw-muted))]">Agents</div>
-                <div className="font-semibold">{stats.agentCount}</div>
-              </div>
-            </div>
-            <div className="mt-3 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-3 text-xs text-[rgb(var(--claw-muted))]">
-              Query matches: <span className="text-[rgb(var(--claw-text))]">{matchedNodes.size}</span>
-              <br />
-              Visible nodes: <span className="text-[rgb(var(--claw-text))]">{displayNodes.length}</span>
-              <br />
-              Visible edges: <span className="text-[rgb(var(--claw-text))]">{edgesForRender.length}</span>
-            </div>
-            {connectedNodes.length > 0 && (
-              <div className="mt-3">
-                <div className="mb-2 text-xs uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">Neighbors</div>
-                <div className="flex flex-wrap gap-2">
-                  {connectedNodes.slice(0, 18).map((node) => (
-                    <button
-                      key={node.id}
-                      className={cn(
-                        "rounded-full border px-2 py-1 text-xs transition",
-                        node.id === selectedNodeId
-                          ? "border-[rgba(255,90,45,0.6)] text-[rgb(var(--claw-text))]"
-                          : "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
-                      )}
-                      onClick={() => setSelectedNodeId(node.id)}
-                    >
-                      {node.label.length > 24 ? `${node.label.slice(0, 23)}…` : node.label}
-                    </button>
-                  ))}
+            <Card>
+              <CardHeader>
+                <h2 className="text-lg font-semibold">Graph Health</h2>
+                <Badge tone="muted">Realtime</Badge>
+              </CardHeader>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
+                  <div className="text-xs text-[rgb(var(--claw-muted))]">Topics</div>
+                  <div className="font-semibold">{stats.topicCount}</div>
+                </div>
+                <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
+                  <div className="text-xs text-[rgb(var(--claw-muted))]">Tasks</div>
+                  <div className="font-semibold">{stats.taskCount}</div>
+                </div>
+                <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
+                  <div className="text-xs text-[rgb(var(--claw-muted))]">Entities</div>
+                  <div className="font-semibold">{stats.entityCount}</div>
+                </div>
+                <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
+                  <div className="text-xs text-[rgb(var(--claw-muted))]">Agents</div>
+                  <div className="font-semibold">{stats.agentCount}</div>
                 </div>
               </div>
-            )}
-          </Card>
-        </div>
+              <div className="mt-3 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-3 text-xs text-[rgb(var(--claw-muted))]">
+                Query matches: <span className="text-[rgb(var(--claw-text))]">{matchedNodes.size}</span>
+                <br />
+                Visible nodes: <span className="text-[rgb(var(--claw-text))]">{displayNodes.length}</span>
+                <br />
+                Visible edges: <span className="text-[rgb(var(--claw-text))]">{edgesForRender.length}</span>
+              </div>
+              {connectedNodes.length > 0 && (
+                <div className="mt-3">
+                  <div className="mb-2 text-xs uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">Neighbors</div>
+                  <div className="flex flex-wrap gap-2">
+                    {connectedNodes.slice(0, 18).map((node) => (
+                      <button
+                        key={node.id}
+                        className={cn(
+                          "rounded-full border px-2 py-1 text-xs transition",
+                          node.id === selectedNodeId
+                            ? "border-[rgba(255,90,45,0.6)] text-[rgb(var(--claw-text))]"
+                            : "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
+                        )}
+                        onClick={() => setSelectedNodeId(node.id)}
+                      >
+                        {node.label.length > 24 ? `${node.label.slice(0, 23)}…` : node.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </Card>
+          </div>
       )}
       </div>
     </div>

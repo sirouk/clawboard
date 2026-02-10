@@ -3,6 +3,7 @@ export type IntegrationLevel = "manual" | "write" | "full";
 export type Topic = {
   id: string;
   name: string;
+  createdBy?: "user" | "classifier" | "import";
   sortIndex?: number;
   color?: string;
   description?: string;
@@ -34,6 +35,20 @@ export type Task = {
   updatedAt: string;
 };
 
+export type Attachment = {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+};
+
+export type Draft = {
+  key: string;
+  value: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type LogEntry = {
   id: string;
   topicId: string | null;
@@ -44,6 +59,7 @@ export type LogEntry = {
   content: string;
   summary?: string;
   raw?: string;
+  attachments?: Attachment[] | null;
 
   // Async classifier metadata
   classificationStatus?: "pending" | "classified" | "failed";

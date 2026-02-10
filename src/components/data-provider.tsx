@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useMemo, useState } from "react";
-import type { LogEntry, Task, Topic } from "@/lib/types";
+import type { Draft, LogEntry, Task, Topic } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
 import { useLiveUpdates } from "@/lib/use-live-updates";
 import { LiveEvent, mergeById, mergeLogs, maxTimestamp, removeById, upsertById } from "@/lib/live-utils";
@@ -10,13 +10,17 @@ type DataContextValue = {
   topics: Topic[];
   tasks: Task[];
   logs: LogEntry[];
+  drafts: Record<string, Draft>;
   openclawTyping: Record<string, { typing: boolean; requestId?: string; updatedAt: string }>;
+  hydrated: boolean;
   setTopics: React.Dispatch<React.SetStateAction<Topic[]>>;
   setTasks: React.Dispatch<React.SetStateAction<Task[]>>;
   setLogs: React.Dispatch<React.SetStateAction<LogEntry[]>>;
+  setDrafts: React.Dispatch<React.SetStateAction<Record<string, Draft>>>;
   upsertTopic: (topic: Topic) => void;
   upsertTask: (task: Task) => void;
   appendLog: (log: LogEntry) => void;
+  upsertDraft: (draft: Draft) => void;
 };
 
 const DataContext = createContext<DataContextValue | null>(null);
@@ -25,13 +29,23 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [topics, setTopics] = useState<Topic[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [openclawTyping, setOpenclawTyping] = useState<
     Record<string, { typing: boolean; requestId?: string; updatedAt: string }>
   >({});
+  const [hydrated, setHydrated] = useState(false);
 
   const upsertTopic = (topic: Topic) => setTopics((prev) => upsertById(prev, topic));
   const upsertTask = (task: Task) => setTasks((prev) => upsertById(prev, task));
   const appendLog = (log: LogEntry) => setLogs((prev) => mergeLogs(prev, [log]));
+  const upsertDraft = (draft: Draft) =>
+    setDrafts((prev) => {
+      const key = (draft?.key ?? "").trim();
+      if (!key) return prev;
+      const current = prev[key];
+      if (current && JSON.stringify(current) === JSON.stringify(draft)) return prev;
+      return { ...prev, [key]: draft };
+    });
 
   const reconcile = async (since?: string) => {
     const url = since ? `/api/changes?since=${encodeURIComponent(since)}` : "/api/changes";
@@ -39,10 +53,43 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     if (!res.ok) return;
     const payload = await res.json().catch(() => null);
     if (!payload) return;
-    if (Array.isArray(payload.topics)) setTopics((prev) => mergeById(prev, payload.topics as Topic[]));
-    if (Array.isArray(payload.tasks)) setTasks((prev) => mergeById(prev, payload.tasks as Task[]));
-    if (Array.isArray(payload.logs)) setLogs((prev) => mergeLogs(prev, payload.logs as LogEntry[]));
-    const ts = maxTimestamp([...(payload.topics ?? []), ...(payload.tasks ?? []), ...(payload.logs ?? [])]);
+    // Full snapshot: replace to avoid keeping stale items when the stream resets or base/token changes.
+    if (!since) {
+      if (Array.isArray(payload.topics)) setTopics(payload.topics as Topic[]);
+      if (Array.isArray(payload.tasks)) setTasks(payload.tasks as Task[]);
+      if (Array.isArray(payload.logs)) setLogs(mergeLogs([], payload.logs as LogEntry[]));
+      if (Array.isArray(payload.drafts)) {
+        const next: Record<string, Draft> = {};
+        for (const item of payload.drafts as Draft[]) {
+          const key = String((item as Draft | undefined)?.key ?? "").trim();
+          if (!key) continue;
+          next[key] = item as Draft;
+        }
+        setDrafts(next);
+      }
+      setHydrated(true);
+    } else {
+      if (Array.isArray(payload.topics)) setTopics((prev) => mergeById(prev, payload.topics as Topic[]));
+      if (Array.isArray(payload.tasks)) setTasks((prev) => mergeById(prev, payload.tasks as Task[]));
+      if (Array.isArray(payload.logs)) setLogs((prev) => mergeLogs(prev, payload.logs as LogEntry[]));
+      if (Array.isArray(payload.drafts)) {
+        setDrafts((prev) => {
+          const next = { ...prev };
+          for (const item of payload.drafts as Draft[]) {
+            const key = String((item as Draft | undefined)?.key ?? "").trim();
+            if (!key) continue;
+            next[key] = item as Draft;
+          }
+          return next;
+        });
+      }
+    }
+    const ts = maxTimestamp([
+      ...(payload.topics ?? []),
+      ...(payload.tasks ?? []),
+      ...(payload.logs ?? []),
+      ...(payload.drafts ?? []),
+    ]);
     return ts;
   };
 
@@ -95,6 +142,13 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         }));
         return;
       }
+      if (event.type === "draft.upserted" && event.data && typeof event.data === "object") {
+        const draft = event.data as Draft;
+        const key = String((draft as Draft | undefined)?.key ?? "").trim();
+        if (!key) return;
+        upsertDraft(draft);
+        return;
+      }
       if (event.type === "log.deleted" && event.data && typeof event.data === "object") {
         const id = (event.data as { id?: string }).id;
         if (id) setLogs((prev) => removeById(prev, id));
@@ -108,15 +162,19 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       topics,
       tasks,
       logs,
+      drafts,
       openclawTyping,
+      hydrated,
       setTopics,
       setTasks,
       setLogs,
+      setDrafts,
       upsertTopic,
       upsertTask,
       appendLog,
+      upsertDraft,
     }),
-    [topics, tasks, logs, openclawTyping]
+    [topics, tasks, logs, drafts, openclawTyping, hydrated]
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

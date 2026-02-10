@@ -25,6 +25,10 @@ class InstanceConfig(SQLModel, table=True):
 class Topic(SQLModel, table=True):
     id: str = Field(primary_key=True, description="Topic ID.")
     name: str = Field(description="Topic name.")
+    createdBy: str = Field(
+        default="user",
+        description="Creation source (user | classifier | import).",
+    )
     sortIndex: int = Field(
         default=0,
         description="Manual ordering index (lower comes first).",
@@ -184,6 +188,29 @@ class LogEntry(SQLModel, table=True):
         sa_column=Column(JSON),
         description="Source metadata (channel, sessionKey, messageId).",
     )
+    attachments: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        sa_column=Column(JSON),
+        description="Optional attachments metadata (id, fileName, mimeType, sizeBytes).",
+    )
+
+
+class SessionRoutingMemory(SQLModel, table=True):
+    """Small per-session memory to improve routing under low-signal follow-ups.
+
+    Stores recent topic/task decisions for a given `source.sessionKey` so the
+    classifier can resolve ambiguous turns (e.g., "yes", "ship it") without
+    expanding the LLM/context window.
+    """
+
+    sessionKey: str = Field(primary_key=True, description="Session key (source.sessionKey).")
+    items: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON),
+        description="Recent routing decisions (bounded list, newest last).",
+    )
+    createdAt: str = Field(description="ISO timestamp when the memory was created.")
+    updatedAt: str = Field(description="ISO timestamp of last update.")
 
 
 class IngestQueue(SQLModel, table=True):
@@ -193,3 +220,37 @@ class IngestQueue(SQLModel, table=True):
     attempts: int = Field(default=0)
     lastError: Optional[str] = Field(default=None)
     createdAt: str = Field(description="ISO timestamp when enqueued.")
+
+
+class Attachment(SQLModel, table=True):
+    """Binary attachment metadata stored alongside logs.
+
+    The file bytes live on disk under CLAWBOARD_ATTACHMENTS_DIR; this table stores
+    stable IDs + metadata so logs can reference attachments reliably.
+    """
+
+    id: str = Field(primary_key=True, description="Attachment ID.")
+    logId: Optional[str] = Field(
+        default=None,
+        foreign_key="logentry.id",
+        description="Owning log entry ID once attached to a chat message.",
+    )
+    fileName: str = Field(description="Original filename (sanitized).")
+    mimeType: str = Field(description="MIME type (validated allowlist).")
+    sizeBytes: int = Field(description="File size in bytes.")
+    sha256: str = Field(description="SHA-256 digest (hex) of the file bytes.")
+    storagePath: str = Field(description="Path relative to CLAWBOARD_ATTACHMENTS_DIR.")
+    createdAt: str = Field(description="ISO timestamp when the attachment was stored.")
+    updatedAt: str = Field(description="ISO timestamp when the attachment metadata was last updated.")
+
+
+class Draft(SQLModel, table=True):
+    """Ephemeral UI drafts (message composers, new topic/task names, note drafts, etc.).
+
+    Drafts are keyed by a stable string so multiple browsers can share in-progress input.
+    """
+
+    key: str = Field(primary_key=True, description="Stable draft key.")
+    value: str = Field(description="Draft value (may be empty).")
+    createdAt: str = Field(description="ISO timestamp when the draft was created.")
+    updatedAt: str = Field(description="ISO timestamp when the draft was last updated.")

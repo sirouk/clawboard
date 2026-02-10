@@ -138,6 +138,21 @@ SUMMARY_MAX = int(os.environ.get("CLASSIFIER_SUMMARY_MAX", "56"))
 LOCK_PATH = os.environ.get("CLASSIFIER_LOCK_PATH", "/data/classifier.lock")
 REINDEX_QUEUE_PATH = os.environ.get("CLASSIFIER_REINDEX_QUEUE_PATH", "/data/reindex-queue.jsonl")
 CREATION_AUDIT_PATH = os.environ.get("CLASSIFIER_CREATION_AUDIT_PATH", "/data/creation-gate.jsonl")
+CLASSIFIER_AUDIT_PATH = (os.environ.get("CLASSIFIER_AUDIT_PATH") or "").strip() or None
+
+SESSION_ROUTING_ENABLED = (os.environ.get("CLASSIFIER_SESSION_ROUTING_ENABLED", "1") or "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+SESSION_ROUTING_PROMPT_ITEMS = int(os.environ.get("CLASSIFIER_SESSION_ROUTING_PROMPT_ITEMS", "4"))
+
+# Audit file retention/rotation (size-based). These logs are useful in production, but must be bounded.
+CREATION_AUDIT_MAX_BYTES = int(os.environ.get("CLASSIFIER_CREATION_AUDIT_MAX_BYTES", str(8 * 1024 * 1024)))
+CREATION_AUDIT_MAX_FILES = int(os.environ.get("CLASSIFIER_CREATION_AUDIT_MAX_FILES", "12"))
+CLASSIFIER_AUDIT_MAX_BYTES = int(os.environ.get("CLASSIFIER_AUDIT_MAX_BYTES", str(16 * 1024 * 1024)))
+CLASSIFIER_AUDIT_MAX_FILES = int(os.environ.get("CLASSIFIER_AUDIT_MAX_FILES", "8"))
 
 OPENCLAW_MEMORY_DB_PATH = os.environ.get("OPENCLAW_MEMORY_DB_PATH")
 OPENCLAW_MEMORY_DB_FALLBACK = os.environ.get("OPENCLAW_MEMORY_DB_FALLBACK", "/data/openclaw-memory/main.sqlite")
@@ -388,12 +403,14 @@ def _llm_enabled() -> bool:
     return True
 
 
-def headers_clawboard():
+def headers_clawboard(actor: str | None = None):
     if requests is None:
         raise RuntimeError("classifier dependency missing: requests")
     h = {"Content-Type": "application/json"}
     if CLAWBOARD_TOKEN:
         h["X-Clawboard-Token"] = CLAWBOARD_TOKEN
+    if actor:
+        h["X-Clawboard-Actor"] = str(actor).strip()
     return h
 
 
@@ -992,8 +1009,6 @@ def _is_system_artifact_text(text: str) -> bool:
     lower = text.lower()
     if "tool call:" in lower or "tool result:" in lower or "tool error:" in lower:
         return True
-    if "openclaw" in lower or "clawboard" in lower:
-        return True
     if "classifier" in lower and "payload" in lower:
         return True
     if re.search(r"\bmemory[_-]?(search|get|query|fetch|retrieve|read|write|store|list|prune|delete)\b", lower):
@@ -1586,6 +1601,47 @@ def process_reindex_queue():
             print(f"classifier: reindex {op} failed for {kind}:{item_id}: {exc}")
 
 
+def _rotate_audit_file(path: str, *, max_bytes: int, max_files: int) -> None:
+    """Best-effort size-based rotation for JSONL audit logs.
+
+    Rotation is intentionally simple (no compression) and safe under failures.
+    """
+
+    if not path:
+        return
+    if max_bytes <= 0 or max_files <= 0:
+        return
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return
+    except Exception:
+        return
+    if st.st_size < max_bytes:
+        return
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    except Exception:
+        ts = str(int(time.time()))
+    rotated = f"{path}.{ts}"
+    try:
+        os.replace(path, rotated)
+    except Exception:
+        return
+    try:
+        dir_name = os.path.dirname(path) or "."
+        base = os.path.basename(path)
+        siblings = [name for name in os.listdir(dir_name) if name.startswith(base + ".")]
+        siblings.sort(reverse=True)
+        for name in siblings[max_files:]:
+            try:
+                os.unlink(os.path.join(dir_name, name))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _record_creation_gate(kind: str, decision: str, proposed: str | None, selected_id: str | None = None):
     if not CREATION_AUDIT_PATH:
         return
@@ -1602,8 +1658,37 @@ def _record_creation_gate(kind: str, decision: str, proposed: str | None, select
     }
     try:
         os.makedirs(os.path.dirname(CREATION_AUDIT_PATH), exist_ok=True)
+        _rotate_audit_file(
+            CREATION_AUDIT_PATH,
+            max_bytes=int(CREATION_AUDIT_MAX_BYTES),
+            max_files=int(CREATION_AUDIT_MAX_FILES),
+        )
         with open(CREATION_AUDIT_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
+
+
+def _record_classifier_audit(payload: dict) -> None:
+    if not CLASSIFIER_AUDIT_PATH:
+        return
+    out = dict(payload or {})
+    if "ts" not in out:
+        try:
+            out["ts"] = datetime.now(timezone.utc).isoformat()
+        except Exception:
+            out["ts"] = str(time.time())
+    try:
+        dir_name = os.path.dirname(CLASSIFIER_AUDIT_PATH)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+        _rotate_audit_file(
+            CLASSIFIER_AUDIT_PATH,
+            max_bytes=int(CLASSIFIER_AUDIT_MAX_BYTES),
+            max_files=int(CLASSIFIER_AUDIT_MAX_FILES),
+        )
+        with open(CLASSIFIER_AUDIT_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(out) + "\n")
     except Exception:
         pass
 
@@ -1633,6 +1718,71 @@ def list_pending_conversations(limit=500, offset=0):
     )
     r.raise_for_status()
     return r.json()
+
+
+def get_session_routing_memory(session_key: str) -> dict | None:
+    if not SESSION_ROUTING_ENABLED:
+        return None
+    if not requests or not CLAWBOARD_TOKEN:
+        return None
+    sk = (session_key or "").strip()
+    if not sk:
+        return None
+    try:
+        r = requests.get(
+            f"{CLAWBOARD_API_BASE}/api/classifier/session-routing",
+            params={"sessionKey": sk},
+            headers=headers_clawboard(),
+            timeout=4,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, dict):
+            return None
+        items = data.get("items")
+        if not isinstance(items, list) or not items:
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def append_session_routing_memory(
+    session_key: str,
+    *,
+    topic_id: str,
+    topic_name: str | None,
+    task_id: str | None,
+    task_title: str | None,
+    anchor: str | None,
+    ts: str | None = None,
+) -> None:
+    if not SESSION_ROUTING_ENABLED:
+        return
+    if not requests or not CLAWBOARD_TOKEN:
+        return
+    sk = (session_key or "").strip()
+    tid = (topic_id or "").strip()
+    if not sk or not tid:
+        return
+    payload: dict = {
+        "sessionKey": sk,
+        "topicId": tid,
+        "topicName": (str(topic_name).strip() if topic_name else None),
+        "taskId": (str(task_id).strip() if task_id else None),
+        "taskTitle": (str(task_title).strip() if task_title else None),
+        "anchor": (str(anchor).strip() if anchor else None),
+        "ts": ts,
+    }
+    try:
+        requests.post(
+            f"{CLAWBOARD_API_BASE}/api/classifier/session-routing",
+            headers=headers_clawboard(),
+            data=json.dumps(payload),
+            timeout=4,
+        )
+    except Exception:
+        return
 
 
 def list_logs_by_session(session_key: str, limit: int = 200, offset: int = 0, classificationStatus: str | None = None):
@@ -1674,23 +1824,81 @@ def list_tasks(topic_id: str):
     return r.json()
 
 
-def upsert_topic(topic_id: str | None, name: str):
-    payload = {"name": name, "tags": ["classified"]}
+def _clip_text(value: str, limit: int = 1400) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _indexable_tags(tags: object) -> list[str]:
+    """Filter tag values that should influence embeddings/lexical retrieval."""
+    if not isinstance(tags, list):
+        return []
+    out: list[str] = []
+    for t in tags:
+        s = str(t).strip()
+        if not s:
+            continue
+        if s.lower().startswith("system:"):
+            continue
+        out.append(s)
+    return out
+
+
+def _topic_index_text(topic: dict) -> str:
+    name = str(topic.get("name") or "").strip()
+    description = str(topic.get("description") or "").strip()
+    tag_text = " ".join(_indexable_tags(topic.get("tags")))
+    parts = [name, description, tag_text]
+    return _clip_text(" ".join([p for p in parts if p]).strip(), 1400)
+
+
+def _task_index_text(task: dict) -> str:
+    title = str(task.get("title") or "").strip()
+    status = str(task.get("status") or "").strip()
+    tag_text = " ".join(_indexable_tags(task.get("tags")))
+    parts = [title, status, tag_text]
+    return _clip_text(" ".join([p for p in parts if p]).strip(), 1400)
+
+
+def upsert_topic(topic_id: str | None, name: str, *, tags: list[str] | None = None, status: str | None = None):
+    payload: dict = {"name": name}
     if topic_id:
         payload["id"] = topic_id
+    if tags is not None:
+        payload["tags"] = tags
+    if status is not None:
+        payload["status"] = status
     r = requests.post(
         f"{CLAWBOARD_API_BASE}/api/topics",
-        headers=headers_clawboard(),
+        headers=headers_clawboard("classifier" if not topic_id else None),
         data=json.dumps(payload),
         timeout=15,
     )
     r.raise_for_status()
     topic = r.json()
     try:
-        embed_upsert("topic", topic["id"], embed_text(topic.get("name") or topic["id"]))
+        text = _topic_index_text(topic) or str(topic.get("id") or "")
+        embed_upsert("topic", topic["id"], embed_text(text))
     except Exception:
         pass
     return topic
+
+
+def _ensure_topic_indexed(topic: dict) -> None:
+    """Best-effort embeddings upsert for an existing topic without mutating it via the API."""
+    try:
+        topic_id = str(topic.get("id") or "").strip()
+        if not topic_id:
+            return
+        text = _topic_index_text(topic) or topic_id
+        vec = embed_text(text)
+        if vec is None:
+            return
+        embed_upsert("topic", topic_id, vec)
+    except Exception:
+        pass
 
 
 def upsert_task(task_id: str | None, topic_id: str, title: str, status: str = "todo"):
@@ -1706,7 +1914,8 @@ def upsert_task(task_id: str | None, topic_id: str, title: str, status: str = "t
     r.raise_for_status()
     task = r.json()
     try:
-        embed_upsert(f"task:{task['topicId']}", task["id"], embed_text(task.get("title") or task["id"]))
+        text = _task_index_text(task) or str(task.get("id") or "")
+        embed_upsert(f"task:{task['topicId']}", task["id"], embed_text(text))
     except Exception:
         pass
     return task
@@ -1725,29 +1934,52 @@ def patch_log(log_id: str, patch: dict):
 
 def ensure_topic_index_seeded():
     """Populate embeddings index for existing topics (best-effort)."""
+    global _topic_index_seeded_at
     try:
+        if "_topic_index_seeded_at" not in globals():
+            _topic_index_seeded_at = 0.0  # type: ignore[assignment]
+        seed_ttl = float(os.environ.get("CLASSIFIER_SEED_TTL_SECONDS", "600") or "600")
+        now = time.time()
+        if seed_ttl > 0 and (now - float(_topic_index_seeded_at)) < seed_ttl:  # type: ignore[arg-type]
+            return
         for t in list_topics():
             if not t.get("id"):
                 continue
-            name = t.get("name") or t["id"]
-            embed_upsert("topic", t["id"], embed_text(name))
+            text = _topic_index_text(t) or str(t.get("id") or "")
+            vec = embed_text(text)
+            if vec is None:
+                continue
+            embed_upsert("topic", t["id"], vec)
+        _topic_index_seeded_at = now  # type: ignore[assignment]
     except Exception:
         pass
 
 
 def ensure_task_index_seeded(topic_id: str):
+    global _task_index_seeded_at
     try:
+        if "_task_index_seeded_at" not in globals():
+            _task_index_seeded_at = {}  # type: ignore[assignment]
+        seed_ttl = float(os.environ.get("CLASSIFIER_SEED_TTL_SECONDS", "600") or "600")
+        now = time.time()
+        last = float((_task_index_seeded_at or {}).get(topic_id, 0.0))  # type: ignore[union-attr]
+        if seed_ttl > 0 and (now - last) < seed_ttl:
+            return
         for t in list_tasks(topic_id):
             if not t.get("id"):
                 continue
-            title = t.get("title") or t["id"]
-            embed_upsert(f"task:{topic_id}", t["id"], embed_text(title))
+            text = _task_index_text(t) or str(t.get("id") or "")
+            vec = embed_text(text)
+            if vec is None:
+                continue
+            embed_upsert(f"task:{topic_id}", t["id"], vec)
+        (_task_index_seeded_at or {})[topic_id] = now  # type: ignore[index,union-attr]
     except Exception:
         pass
 
 
 def topic_candidates(query_text: str, k: int = 6):
-    topics = [t for t in list_topics() if isinstance(t.get("name"), str) and "_" not in (t.get("name") or "")]
+    topics = [t for t in list_topics() if isinstance(t.get("name"), str)]
     if not topics:
         return []
 
@@ -1763,9 +1995,10 @@ def topic_candidates(query_text: str, k: int = 6):
         tid = topic.get("id")
         name = topic.get("name") or ""
         description = topic.get("description") or ""
+        tag_text = " ".join(_indexable_tags(topic.get("tags")))
         if not tid or not name:
             continue
-        text = f"{name} {description}".strip()
+        text = f"{name} {description} {tag_text}".strip()
         topic_text[tid] = text
         lexical_scores[tid] = _name_similarity(query_text, name)
 
@@ -1785,6 +2018,9 @@ def topic_candidates(query_text: str, k: int = 6):
     for topic in topics:
         tid = topic.get("id")
         name = topic.get("name") or ""
+        description = topic.get("description") or ""
+        status = topic.get("status") or "active"
+        tags = topic.get("tags") or []
         if not tid or not name:
             continue
         vector = vector_scores.get(tid, 0.0)
@@ -1804,10 +2040,20 @@ def topic_candidates(query_text: str, k: int = 6):
         topical = max(vector, bm25n)
         support = min(vector, bm25n)
         score = (topical * 0.62) + (support * 0.18) + (lexical * 0.12) + (coverage * 0.06) + (phrase * 0.02)
+        # Archived topics should be "sticky off": allow selection only on strong evidence.
+        # Use a subtractive penalty (not multiplicative) so a perfect match can still win.
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status == "archived":
+            score = max(0.0, score - 0.22)
+        elif normalized_status == "paused":
+            score = max(0.0, score - 0.08)
         out.append(
             {
                 "id": tid,
                 "name": name,
+                "description": description,
+                "status": status,
+                "tags": tags if isinstance(tags, list) else [],
                 "score": score,
                 "vectorScore": vector,
                 "bm25Score": bm25,
@@ -1840,9 +2086,10 @@ def task_candidates(topic_id: str, query_text: str, k: int = 8):
         tid = task.get("id")
         title = task.get("title") or ""
         status = task.get("status") or "todo"
+        tag_text = " ".join(_indexable_tags(task.get("tags")))
         if not tid or not title:
             continue
-        text = f"{title} {status}".strip()
+        text = f"{title} {status} {tag_text}".strip()
         task_text[tid] = text
         lexical_scores[tid] = _name_similarity(query_text, title)
 
@@ -1860,6 +2107,8 @@ def task_candidates(topic_id: str, query_text: str, k: int = 8):
     for task in tasks:
         tid = task.get("id")
         title = task.get("title") or ""
+        status = task.get("status") or "todo"
+        tags = task.get("tags") or []
         if not tid or not title:
             continue
         lexical = lexical_scores.get(tid, 0.0)
@@ -1875,10 +2124,15 @@ def task_candidates(topic_id: str, query_text: str, k: int = 8):
         topical = max(vector, bm25n)
         support = min(vector, bm25n)
         score = (topical * 0.62) + (support * 0.18) + (lexical * 0.12) + (coverage * 0.06) + (phrase * 0.02)
+        # Completed tasks should require stronger intent to be selected.
+        if str(status or "").strip().lower() == "done":
+            score = max(0.0, score - 0.12)
         out.append(
             {
                 "id": tid,
                 "title": title,
+                "status": status,
+                "tags": tags if isinstance(tags, list) else [],
                 "score": score,
                 "vectorScore": vector,
                 "bm25Score": bm25,
@@ -1931,6 +2185,50 @@ def summarize_logs(logs: list[dict], notes_index: dict[str, list[str]] | None = 
     return out
 
 
+def _recent_context_profile_text(recent: list[dict]) -> str:
+    """Build a compact text profile from recent summarized logs for late-interaction scoring."""
+    parts: list[str] = []
+    for e in recent or []:
+        if not isinstance(e, dict):
+            continue
+        summary = str(e.get("summary") or "").strip()
+        content = str(e.get("content") or "").strip()
+        if summary:
+            parts.append(summary)
+        elif content:
+            parts.append(content)
+        notes = e.get("notes")
+        if isinstance(notes, list):
+            for n in notes[:1]:
+                if isinstance(n, str) and n.strip():
+                    parts.append(n.strip())
+        if len(parts) >= 12:
+            break
+    return _clip_text(" \n".join([p for p in parts if p]).strip(), 1400)
+
+
+def _attach_profile_scores(candidates: list[dict], contexts: dict[str, list[dict]], query_text: str) -> None:
+    if not candidates or not contexts:
+        return
+    q = str(query_text or "").strip()
+    if not q:
+        return
+    for cand in candidates:
+        cid = str(cand.get("id") or "").strip()
+        if not cid:
+            continue
+        recent = contexts.get(cid)
+        if not recent:
+            continue
+        profile_text = _recent_context_profile_text(recent)
+        if not profile_text:
+            continue
+        try:
+            cand["profileScore"] = float(_late_interaction_score(q, profile_text))
+        except Exception:
+            continue
+
+
 def window_text(window: list[dict], notes_index: dict[str, list[str]] | None = None) -> str:
     parts = []
     notes_index = notes_index or {}
@@ -1979,6 +2277,7 @@ def call_classifier(
     topic_contexts: dict[str, list[dict]],
     task_contexts: dict[str, list[dict]],
     memory_hits: list[dict],
+    continuity: dict | None = None,
 ):
     def build_prompt(compact: bool):
         content_limit = 360 if compact else 800
@@ -2016,23 +2315,27 @@ def call_classifier(
                 for t in candidate_tasks
             ],
             "memory": memory_hits[:memory_limit],
+            "continuity": continuity,
             "pendingIds": pending_ids,
             "outputTemplate": output_template,
-            "instructions": (
-                "Return STRICT JSON only (no markdown, no code fences, no leading/trailing text). "
-                "Output MUST be a single JSON object that matches outputTemplate EXACTLY: "
-                "same keys, same nesting, no extra keys. Replace placeholder values with real values. "
-                "Context: pendingIds correspond to ONE coherent request/response bundle. "
-                "Anchor on the earliest meaningful user intent within that bundle; "
-                "if the earliest user turn is only an affirmation ('yes', 'ok', 'do it'), "
-                "anchor on the immediately preceding assistant plan in window. "
-                "Rules: (1) Topic is MANDATORY. Always return a meaningful topic name, never generic placeholders. "
-                "(2) Prefer an existing topic ONLY when it clearly matches the bundle's anchor intent + recent context. "
-                "Do NOT pick an existing topic just because it exists or is the only candidate. "
-                "(3) If no existing topic clearly fits, set topic.id=null and topic.create=true and propose a durable topic.name. "
-                "(4) Topic names must be 1-5 words, noun-centric, human-readable; "
-                "avoid generic names and avoid copying the first words of the user prompt. "
-                "(5) Task is OPTIONAL. Only return/create a task when execution intent is explicit "
+		            "instructions": (
+		                "Return STRICT JSON only (no markdown, no code fences, no leading/trailing text). "
+		                "Output MUST be a single JSON object that matches outputTemplate EXACTLY: "
+		                "same keys, same nesting, no extra keys. Replace placeholder values with real values. "
+		                "Context: pendingIds correspond to ONE coherent request/response bundle. "
+		                "Anchor on the earliest meaningful user intent within that bundle; "
+		                "if the earliest user turn is only an affirmation ('yes', 'ok', 'do it'), "
+		                "anchor on the immediately preceding assistant plan in window. "
+		                "Rules: (1) Topic is MANDATORY. Always return a meaningful topic name, never generic placeholders. "
+		                "(2) Prefer an existing topic ONLY when it clearly matches the bundle's anchor intent + recent context. "
+		                "Candidates may include profileScore (0..1) which measures similarity between this bundle and the candidate's recent context; "
+		                "treat a very low profileScore as evidence AGAINST reusing that candidate. "
+		                "If continuity.isAmbiguousBundle is true, strongly prefer continuity.suggested unless the user clearly introduces a new intent. "
+		                "Do NOT pick an existing topic just because it exists or is the only candidate. "
+		                "(3) If no existing topic clearly fits, set topic.id=null and topic.create=true and propose a durable topic.name. "
+		                "(4) Topic names must be 1-5 words, noun-centric, human-readable; "
+		                "avoid generic names and avoid copying the first words of the user prompt. "
+		                "(5) Task is OPTIONAL. Only return/create a task when execution intent is explicit "
                 "(build/fix/implement/ship/next step) or the user confirms an assistant action plan. "
                 "(6) For recall/explanation/brainstorming/status chat, set task=null. "
                 "(7) If task intent exists, prefer an existing matching task before creating. "
@@ -2404,8 +2707,14 @@ def classify_without_llm(
         if topic_cands:
             top = topic_cands[0]
             if float(top.get("score") or 0.0) >= 0.52:
-                chosen_topic_id = top.get("id")
-                chosen_topic_name = top.get("name")
+                # Require at least one additional anchor beyond "broad semantic similarity"
+                # to avoid false-positive topic reuse under busy, multi-thread sessions.
+                lexical = float(top.get("lexicalScore") or 0.0)
+                profile_val = top.get("profileScore")
+                profile = float(profile_val) if profile_val is not None else None
+                if lexical >= 0.22 or (profile is None or profile >= 0.24):
+                    chosen_topic_id = top.get("id")
+                    chosen_topic_name = top.get("name")
 
         # 2) Otherwise reuse the latest classified topic in this stream (continuity).
         if not chosen_topic_id and last_topic_id:
@@ -2430,7 +2739,8 @@ def classify_without_llm(
     if not chosen_topic_id:
         chosen_topic_name = _refine_topic_name(chosen_topic_name, window, topic_cands, [])
     else:
-        chosen_topic_name = _humanize_topic_name(chosen_topic_name or "") or chosen_topic_name or "General"
+        # Never rename existing topics as a side-effect of classification.
+        chosen_topic_name = str(chosen_topic_name or "").strip() or chosen_topic_name or "General"
 
     if create_topic and not _topic_creation_allowed(window, chosen_topic_name, topic_cands, text, topics):
         create_topic = False
@@ -2446,8 +2756,34 @@ def classify_without_llm(
     if not chosen_topic_id and not topics:
         create_topic = True
 
-    topic = upsert_topic(chosen_topic_id if not create_topic else None, chosen_topic_name)
-    topic_id = topic["id"]
+    topic: dict | None = None
+    if create_topic or not chosen_topic_id:
+        topic = upsert_topic(None, chosen_topic_name)
+        create_topic = True
+    else:
+        topic = topics_by_id.get(chosen_topic_id)
+        if not topic:
+            try:
+                refreshed = list_topics()
+                refreshed_by_id = {t.get("id"): t for t in refreshed if t.get("id")}
+                topic = refreshed_by_id.get(chosen_topic_id)
+                if topic:
+                    topics = refreshed
+                    topics_by_id = refreshed_by_id
+            except Exception:
+                topic = None
+        if not topic:
+            # Avoid mutating an unexpected/unknown id via upsert. If we can't find it,
+            # create a new topic from the derived name.
+            topic = upsert_topic(None, chosen_topic_name)
+            create_topic = True
+        else:
+            _ensure_topic_indexed(topic)
+    topic_id = str(topic.get("id") or "").strip() if isinstance(topic, dict) else None
+    if not topic_id:
+        topic = upsert_topic(None, chosen_topic_name)
+        topic_id = topic["id"]
+        create_topic = True
 
     task_id = None
     task_title = _derive_task_title(window)
@@ -2479,7 +2815,7 @@ def classify_without_llm(
             summaries.append({"id": lid, "summary": summary})
 
     return {
-        "topic": {"id": topic_id, "name": topic.get("name") or chosen_topic_name, "create": False},
+        "topic": {"id": topic_id, "name": (topic.get("name") if isinstance(topic, dict) else None) or chosen_topic_name, "create": False},
         "task": {"id": task_id, "title": task_title, "create": False} if task_id else None,
         "summaries": summaries,
     }
@@ -2783,6 +3119,118 @@ def classify_session(session_key: str):
     # when the bundle itself has no semantic anchor (e.g., "yes/ok" style turns).
     llm_window = bundle if has_non_affirm_user else window
 
+    # Session routing memory: resolve low-signal follow-ups ("yes/ok/ship it") without
+    # expanding the lookback/context window. This is persisted server-side so it
+    # survives restarts and scales across multiple classifier instances.
+    #
+    # For scale, only fetch memory when the current bundle is ambiguous.
+    continuity_prompt: dict | None = None
+    continuity_topic_id: str | None = None
+    continuity_topic_name: str | None = None
+    continuity_task_id: str | None = None
+    continuity_task_title: str | None = None
+    continuity_anchor: str | None = None
+    forced_by_continuity = False
+
+    # Detect low-signal follow-ups where continuity should be preferred.
+    latest_user_text, _latest_user_idx = _latest_user_text(bundle)
+    latest_user_text = _strip_slash_command(latest_user_text or "")
+    latest_user_norm = _normalize_text(latest_user_text)
+    low_signal_followup = (not has_non_affirm_user) or (not latest_user_norm) or _is_affirmation(latest_user_text)
+    if latest_user_norm and any(cue in latest_user_norm for cue in SMALL_TALK_CUES):
+        low_signal_followup = True
+    if latest_user_norm in {
+        "also",
+        "and",
+        "another",
+        "one more",
+        "quick question",
+        "btw",
+        "by the way",
+        "next",
+        "continue",
+    }:
+        low_signal_followup = True
+
+    # If the user clearly introduced a new intent, do not force continuity.
+    has_new_intent = _has_topic_intent(llm_window, text)
+    # Affirmations ("yes/ok") are almost never a new topic intent, even if capitalized.
+    if _is_affirmation(latest_user_text) or (not has_non_affirm_user):
+        has_new_intent = False
+
+    if low_signal_followup and not has_new_intent:
+        session_routing = get_session_routing_memory(session_key)
+        if session_routing and isinstance(session_routing.get("items"), list):
+            items = [it for it in session_routing.get("items") if isinstance(it, dict)]
+            if items:
+                latest = None
+                # Avoid "Small Talk" becoming a sticky continuity bucket for real work sessions.
+                for it in reversed(items):
+                    name = str(it.get("topicName") or "").strip().lower()
+                    if name == "small talk":
+                        continue
+                    latest = it
+                    break
+                if latest is None:
+                    latest = items[-1]
+                continuity_topic_id = str(latest.get("topicId") or "").strip() or None
+                continuity_topic_name = str(latest.get("topicName") or "").strip() or None
+                continuity_task_id = str(latest.get("taskId") or "").strip() or None
+                continuity_task_title = str(latest.get("taskTitle") or "").strip() or None
+                continuity_anchor = str(latest.get("anchor") or "").strip() or None
+
+                prompt_items: list[dict] = []
+                for it in items[-max(1, min(8, int(SESSION_ROUTING_PROMPT_ITEMS))):]:
+                    prompt_items.append(
+                        {
+                            "ts": it.get("ts"),
+                            "topicId": it.get("topicId"),
+                            "topicName": it.get("topicName"),
+                            "taskId": it.get("taskId"),
+                            "taskTitle": it.get("taskTitle"),
+                            "anchor": it.get("anchor"),
+                        }
+                    )
+                continuity_prompt = {
+                    "isAmbiguousBundle": True,
+                    "suggested": {
+                        "topicId": continuity_topic_id,
+                        "topicName": continuity_topic_name,
+                        "taskId": continuity_task_id,
+                        "taskTitle": continuity_task_title,
+                        "anchor": continuity_anchor,
+                    },
+                    "recent": prompt_items,
+                }
+
+        if (not forced_topic_id) and continuity_topic_id:
+            try:
+                topics = list_topics()
+                if any(str(t.get("id") or "").strip() == continuity_topic_id for t in (topics or [])):
+                    forced_topic_id = continuity_topic_id
+                    forced_by_continuity = True
+            except Exception:
+                forced_by_continuity = False
+
+        # When a follow-up is low-signal, augment retrieval text with the last known anchor.
+        # This improves task candidate selection in heuristic mode and gives the LLM a stable handle.
+        if continuity_anchor:
+            text = (text + "\n\nPrior intent: " + continuity_anchor).strip()[-6000:]
+
+    # Build a compact intent anchor to persist for future continuity decisions.
+    anchor_for_memory: str | None = None
+    if has_non_affirm_user:
+        for e in bundle:
+            if _conversation_agent(e) != "user":
+                continue
+            utext = _strip_slash_command(_conversation_text(e))
+            if utext and not _is_affirmation(utext):
+                anchor_for_memory = utext
+                break
+    if not anchor_for_memory:
+        anchor_for_memory = continuity_anchor or latest_user_text or ""
+    anchor_for_memory = _clip_text(anchor_for_memory or "", 800).strip() or None
+
     # Small-talk fast path: skip the LLM and attach to a stable "Small Talk" topic.
     # This avoids topic bloat (every small chat turn becoming a new topic) and keeps
     # the classifier loop fast under casual chatter.
@@ -2790,9 +3238,13 @@ def classify_session(session_key: str):
         try:
             all_topics = list_topics()
             match, score = _best_name_match("Small Talk", all_topics, "name")
-            existing_id = match.get("id") if match and score >= 0.92 else None
-            topic = upsert_topic(existing_id if existing_id else None, "Small Talk")
-            topic_id = topic["id"]
+            existing = match if match and score >= 0.92 else None
+            if existing and existing.get("id"):
+                topic_id = str(existing.get("id") or "").strip()
+                _ensure_topic_indexed(existing)
+            else:
+                topic = upsert_topic(None, "Small Talk")
+                topic_id = topic["id"]
         except Exception:
             mark_window_failure("small_talk_topic_error")
             return
@@ -2902,6 +3354,14 @@ def classify_session(session_key: str):
             task_notes = build_notes_index(logs)
             task_contexts[tid] = summarize_logs(logs, task_notes, limit=6)
 
+    # Late-interaction profile scoring: compare the current bundle text against each candidate's
+    # recent context (when hydrated). This helps avoid false-positive reuses under busy sessions.
+    try:
+        _attach_profile_scores(topic_cands, topic_contexts, text)
+        _attach_profile_scores(task_cands, task_contexts, text)
+    except Exception:
+        pass
+
     fallback_error: str | None = None
     if _llm_enabled():
         try:
@@ -2914,6 +3374,7 @@ def classify_session(session_key: str):
                 topic_contexts,
                 task_contexts,
                 memory_hits,
+                continuity=continuity_prompt,
             )
         except requests.exceptions.ReadTimeout:
             fallback_error = "llm_timeout"
@@ -3096,14 +3557,22 @@ def classify_session(session_key: str):
         if not chosen_topic_id:
             chosen_topic_name = _refine_topic_name(chosen_topic_name, llm_window, topic_cands, memory_hits)
         else:
-            chosen_topic_name = _humanize_topic_name(chosen_topic_name or "") or chosen_topic_name or "General"
+            # Never rename existing topics as a side-effect of classification.
+            chosen_topic_name = str(chosen_topic_name or "").strip() or chosen_topic_name or "General"
 
         all_topics = list_topics()
+        existing_topic: dict | None = None
+        if chosen_topic_id:
+            existing_topic = next((t for t in all_topics if t.get("id") == chosen_topic_id), None)
+            if existing_topic and existing_topic.get("name"):
+                chosen_topic_name = str(existing_topic.get("name") or "").strip() or chosen_topic_name
         topic_name_match, topic_name_score = _best_name_match(chosen_topic_name, all_topics, "name")
         if topic_name_match and topic_name_score >= TOPIC_NAME_SIM_THRESHOLD:
             chosen_topic_id = topic_name_match["id"]
             chosen_topic_name = topic_name_match.get("name") or chosen_topic_name
             create_topic = False
+        # Re-resolve after any id/name de-dupe adjustments above.
+        existing_topic = next((t for t in all_topics if t.get("id") == chosen_topic_id), None) if chosen_topic_id else None
 
         if create_topic and not _topic_creation_allowed(llm_window, chosen_topic_name, topic_cands, text, all_topics):
             create_topic = False
@@ -3136,20 +3605,59 @@ def classify_session(session_key: str):
         if not chosen_topic_id and not all_topics:
             create_topic = True
 
-        topic = upsert_topic(chosen_topic_id if not create_topic else None, chosen_topic_name)
-        topic_id = topic["id"]
+        topic_id: str | None = None
+        if create_topic or not chosen_topic_id:
+            topic = upsert_topic(None, chosen_topic_name)
+            topic_id = str(topic.get("id") or "").strip()
+        else:
+            # If this is an existing topic, avoid mutating it (no renames/tag clobber).
+            if not existing_topic:
+                existing_topic = next((t for t in all_topics if t.get("id") == chosen_topic_id), None)
+            if existing_topic and existing_topic.get("id"):
+                topic_id = str(existing_topic.get("id") or "").strip()
+                if existing_topic.get("name"):
+                    chosen_topic_name = str(existing_topic.get("name") or "").strip() or chosen_topic_name
+                _ensure_topic_indexed(existing_topic)
+            else:
+                topic = upsert_topic(None, chosen_topic_name)
+                topic_id = str(topic.get("id") or "").strip()
+        if not topic_id:
+            topic = upsert_topic(None, chosen_topic_name)
+            topic_id = str(topic.get("id") or "").strip()
 
     # Task selection/creation (within topic)
     task_id = None
+    task_from_continuity = False
     task_cands2 = task_candidates(topic_id, text)
     task_result = result.get("task")
     task_intent = _window_has_task_intent(llm_window, text)
+    if forced_topic_id and isinstance(task_result, dict):
+        # Board Topic Chat: trust the LLM when it explicitly proposes/selects a task.
+        # This prevents false negatives when heuristic intent detection is too conservative.
+        if bool(task_result.get("create")) or bool(task_result.get("id")):
+            task_intent = True
     existing_tasks: list[dict] = []
     try:
         existing_tasks = list_tasks(topic_id)
     except Exception:
         existing_tasks = []
     valid_task_ids: set[str] = {str(t.get("id") or "").strip() for t in existing_tasks if t.get("id")}
+
+    # Sticky task continuity for low-signal follow-ups in the same session.
+    # This keeps "ok/yes/thanks" turns attached to the active task even when intent
+    # detection is too conservative and retrieval text is minimal.
+    if (
+        not task_id
+        and low_signal_followup
+        and not has_new_intent
+        and continuity_topic_id
+        and continuity_topic_id == topic_id
+        and continuity_task_id
+        and continuity_task_id in valid_task_ids
+    ):
+        task_id = continuity_task_id
+        task_from_continuity = True
+
     if isinstance(task_result, dict):
         task_title = task_result.get("title")
         create_task = bool(task_result.get("create"))
@@ -3195,7 +3703,7 @@ def classify_session(session_key: str):
                     task = upsert_task(None, topic_id, task_title)
                     task_id = task["id"]
 
-    if task_id and not task_intent:
+    if task_id and not task_intent and not task_from_continuity:
         task_id = None
 
     # Keep task continuity without creating duplicates.
@@ -3280,6 +3788,56 @@ def classify_session(session_key: str):
         if concise:
             summary_updates[sid] = concise
 
+    # Optional: write a compact audit record for tuning/debugging classifier policies.
+    _record_classifier_audit(
+        {
+            "sessionKey": session_key,
+            "boardTopicId": board_topic_id,
+            "boardTaskId": board_task_id,
+            "forcedTopicId": forced_topic_id,
+            "forcedByContinuity": bool(forced_by_continuity),
+            "lowSignalFollowup": bool(low_signal_followup),
+            "continuitySuggested": (continuity_prompt.get("suggested") if isinstance(continuity_prompt, dict) else None),
+            "pendingIds": pending_ids,
+            "scopeIds": [str(e.get("id")) for e in scope_logs if e.get("id")],
+            "queryText": _clip_text(text or "", 2000),
+            "fallbackError": fallback_error,
+            "decision": {"topicId": topic_id, "taskId": task_id},
+            "topicCandidates": [
+                {
+                    "id": t.get("id"),
+                    "name": t.get("name"),
+                    "status": t.get("status"),
+                    "tags": (t.get("tags")[:8] if isinstance(t.get("tags"), list) else []),
+                    "score": float(t.get("score") or 0.0),
+                    "vectorScore": float(t.get("vectorScore") or 0.0),
+                    "bm25Norm": float(t.get("bm25Norm") or 0.0),
+                    "lexicalScore": float(t.get("lexicalScore") or 0.0),
+                    "coverageScore": float(t.get("coverageScore") or 0.0),
+                    "phraseScore": float(t.get("phraseScore") or 0.0),
+                    "profileScore": (float(t.get("profileScore")) if t.get("profileScore") is not None else None),
+                }
+                for t in (topic_cands or [])[:8]
+            ],
+            "taskCandidates": [
+                {
+                    "id": t.get("id"),
+                    "title": t.get("title"),
+                    "status": t.get("status"),
+                    "tags": (t.get("tags")[:8] if isinstance(t.get("tags"), list) else []),
+                    "score": float(t.get("score") or 0.0),
+                    "vectorScore": float(t.get("vectorScore") or 0.0),
+                    "bm25Norm": float(t.get("bm25Norm") or 0.0),
+                    "lexicalScore": float(t.get("lexicalScore") or 0.0),
+                    "coverageScore": float(t.get("coverageScore") or 0.0),
+                    "phraseScore": float(t.get("phraseScore") or 0.0),
+                    "profileScore": (float(t.get("profileScore")) if t.get("profileScore") is not None else None),
+                }
+                for t in (task_cands or [])[:10]
+            ],
+        }
+    )
+
     # Patch only logs in this bundle scope (conversation + interleaved actions), not the entire session.
     for e in scope_logs:
         if (e.get("classificationStatus") or "pending") != "pending":
@@ -3344,6 +3902,58 @@ def classify_session(session_key: str):
             e["id"],
             patch_payload,
         )
+
+    # Best-effort: persist continuity memory for this session so future low-signal
+    # follow-ups can be routed without widening the context window.
+    try:
+        topic_name_for_memory: str | None = None
+        candidate_topic_name = None
+        try:
+            for cand in (topic_cands or []):
+                if str(cand.get("id") or "").strip() == str(topic_id or "").strip():
+                    candidate_topic_name = cand.get("name")
+                    break
+        except Exception:
+            candidate_topic_name = None
+        if candidate_topic_name:
+            topic_name_for_memory = str(candidate_topic_name).strip() or None
+
+        chosen_topic_name_val = locals().get("chosen_topic_name")
+        if not topic_name_for_memory and isinstance(chosen_topic_name_val, str) and chosen_topic_name_val.strip():
+            topic_name_for_memory = chosen_topic_name_val.strip()
+
+        if not topic_name_for_memory and continuity_topic_name:
+            topic_name_for_memory = continuity_topic_name
+
+        chosen_task_title: str | None = None
+        if task_id:
+            for t in (existing_tasks or []):
+                if str(t.get("id") or "").strip() == str(task_id).strip():
+                    title = t.get("title")
+                    if title:
+                        chosen_task_title = str(title).strip()
+                        break
+        if not chosen_task_title and task_from_continuity and continuity_task_title:
+            chosen_task_title = continuity_task_title
+
+        decision_ts = None
+        try:
+            if scope_logs and isinstance(scope_logs[-1], dict):
+                decision_ts = scope_logs[-1].get("createdAt") or None
+        except Exception:
+            decision_ts = None
+
+        append_session_routing_memory(
+            session_key,
+            topic_id=str(topic_id or "").strip(),
+            topic_name=topic_name_for_memory,
+            task_id=(str(task_id).strip() if task_id else None),
+            task_title=chosen_task_title,
+            anchor=anchor_for_memory,
+            ts=(str(decision_ts).strip() if decision_ts else None),
+        )
+    except Exception:
+        pass
 
 
 def main():

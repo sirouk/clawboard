@@ -78,6 +78,8 @@ def init_db() -> None:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN updatedAt TEXT NOT NULL DEFAULT '';")
             if "idempotencyKey" not in existing:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN idempotencyKey TEXT;")
+            if "attachments" not in existing:
+                conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN attachments JSON;")
             duplicate_keys = conn.exec_driver_sql(
                 'SELECT "idempotencyKey", COUNT(*) FROM logentry '
                 'WHERE "idempotencyKey" IS NOT NULL GROUP BY "idempotencyKey" HAVING COUNT(*) > 1;'
@@ -120,6 +122,16 @@ def init_db() -> None:
                 'ON logentry("relatedLogId", "createdAt");'
             )
 
+            # Session routing memory: keep GC fast for large instances.
+            try:
+                conn.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_sessionroutingmemory_updated_at "
+                    'ON sessionroutingmemory("updatedAt");'
+                )
+            except Exception:
+                # Table may not exist if the model isn't loaded yet; create_all will handle later.
+                pass
+
             topic_cols = conn.exec_driver_sql("PRAGMA table_info(topic);").fetchall()
             topic_existing = {row[1] for row in topic_cols}
             if "color" not in topic_existing:
@@ -135,6 +147,8 @@ def init_db() -> None:
                     conn.exec_driver_sql("UPDATE topic SET sortIndex = ? WHERE id = ?;", (idx, row[0]))
             if "snoozedUntil" not in topic_existing:
                 conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN snoozedUntil TEXT;")
+            if "createdBy" not in topic_existing:
+                conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN createdBy TEXT NOT NULL DEFAULT 'user';")
             conn.exec_driver_sql("UPDATE topic SET tags = '[]' WHERE tags IS NULL;")
 
             task_cols = conn.exec_driver_sql("PRAGMA table_info(task);").fetchall()

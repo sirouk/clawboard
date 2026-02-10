@@ -150,3 +150,24 @@ button {
   color: rgba(var(--claw-muted), 0.95);
   letter-spacing: 0.08em;
 }
+
+.claw-markdown {
+  /* Chat bubbles should look like iMessage-style text: compact blocks, no default <p> margins. */
+  white-space: normal;
+}
+
+.claw-markdown :where(p, ul, ol, pre, blockquote, h1, h2, h3, h4, h5, h6) {
+  margin: 0;
+}
+
+.claw-markdown :where(> * + *) {
+  margin-top: 0.65rem;
+}
+
+.claw-markdown :where(ul, ol) {
+  padding-left: 1.25rem;
+}
+
+.claw-markdown :where(pre) {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}

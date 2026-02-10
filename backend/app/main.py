@@ -3,19 +3,22 @@ from __future__ import annotations
 import os
 import json
 import hashlib
+import base64
+from io import BytesIO
 import colorsys
 import asyncio
 import threading
 import time
 import re
+from pathlib import Path
 import urllib.request
 import urllib.error
 from difflib import SequenceMatcher
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from fastapi import Request
 from uuid import uuid4
-from fastapi import FastAPI, Depends, Query, Body, HTTPException, Header, BackgroundTasks
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, Depends, Query, Body, HTTPException, Header, BackgroundTasks, UploadFile, File
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from typing import List, Any
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, text
@@ -26,7 +29,7 @@ from sqlmodel import select
 
 from .auth import ensure_read_access, ensure_write_access, is_token_configured, is_token_required, require_token
 from .db import DATABASE_URL, init_db, get_session
-from .models import InstanceConfig, Topic, Task, LogEntry, IngestQueue
+from .models import InstanceConfig, Topic, Task, LogEntry, SessionRoutingMemory, IngestQueue, Attachment, Draft
 from .schemas import (
     StartFreshReplayRequest,
     InstanceUpdate,
@@ -47,6 +50,11 @@ from .schemas import (
     OpenClawChatRequest,
     OpenClawChatQueuedResponse,
     ReindexRequest,
+    AttachmentOut,
+    DraftUpsert,
+    DraftOut,
+    SessionRoutingMemoryOut,
+    SessionRoutingAppend,
 )
 from .events import event_hub
 from .clawgraph import build_clawgraph
@@ -141,6 +149,191 @@ SLASH_COMMANDS = {
     "/reset",
     "/clear",
 }
+
+ATTACHMENTS_DIR = os.getenv("CLAWBOARD_ATTACHMENTS_DIR", "./data/attachments").strip() or "./data/attachments"
+ATTACHMENT_MAX_FILES = int(os.getenv("CLAWBOARD_ATTACHMENT_MAX_FILES", "8") or "8")
+ATTACHMENT_MAX_BYTES = int(os.getenv("CLAWBOARD_ATTACHMENT_MAX_BYTES", str(10 * 1024 * 1024)) or str(10 * 1024 * 1024))
+ATTACHMENT_ALLOWED_MIME_TYPES = {
+    mt.strip().lower()
+    for mt in (
+        os.getenv(
+            "CLAWBOARD_ATTACHMENT_ALLOWED_MIME_TYPES",
+            ",".join(
+                [
+                    "image/png",
+                    "image/jpeg",
+                    "image/gif",
+                    "image/webp",
+                    "application/pdf",
+                    "text/plain",
+                    "text/markdown",
+                    "application/json",
+                    "text/csv",
+                    "audio/mpeg",
+                    "audio/wav",
+                    "audio/x-wav",
+                    "audio/mp4",
+                    "audio/webm",
+                    "audio/ogg",
+                ]
+            ),
+        )
+        or ""
+    ).split(",")
+    if mt.strip()
+}
+ATTACHMENT_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+ATTACHMENT_TEXT_MIME_TYPES = {"text/plain", "text/markdown", "text/csv", "application/json"}
+OPENCLAW_EXTRACTED_TEXT_LIMIT = int(os.getenv("OPENCLAW_EXTRACTED_TEXT_LIMIT", "15000") or "15000")
+
+
+def _sanitize_attachment_filename(name: str) -> str:
+    # Prevent path traversal + keep filenames readable.
+    text = (name or "").replace("\\", "/").split("/")[-1].strip()
+    text = re.sub(r"[\x00-\x1f\x7f]+", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "attachment"
+    if len(text) > 180:
+        root, dot, ext = text.rpartition(".")
+        if dot and ext and len(ext) <= 12:
+            root = root[: 180 - (len(ext) + 1)].rstrip()
+            text = f"{root}.{ext}"
+        else:
+            text = text[:180].rstrip()
+    return text
+
+
+def _normalize_mime_type(value: str | None) -> str:
+    raw = (value or "").strip().lower()
+    if raw == "image/jpg":
+        return "image/jpeg"
+    return raw
+
+
+def _infer_mime_type_from_filename(filename: str) -> str:
+    name = (filename or "").strip().lower()
+    _, dot, ext = name.rpartition(".")
+    if not dot or not ext:
+        return ""
+    ext = f".{ext}"
+    mapping = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".pdf": "application/pdf",
+        ".txt": "text/plain",
+        ".md": "text/markdown",
+        ".markdown": "text/markdown",
+        ".json": "application/json",
+        ".csv": "text/csv",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".mp4": "audio/mp4",
+        ".webm": "audio/webm",
+        ".ogg": "audio/ogg",
+    }
+    return mapping.get(ext, "")
+
+
+def _decode_text_attachment(data: bytes, *, limit: int = OPENCLAW_EXTRACTED_TEXT_LIMIT) -> str:
+    if not data:
+        return ""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        text = data.decode("utf-8", errors="replace")
+    return _clip(text.strip(), limit)
+
+
+def _extract_pdf_text(data: bytes, *, limit: int = OPENCLAW_EXTRACTED_TEXT_LIMIT) -> str:
+    """Best-effort PDF text extraction. Returns empty string if unavailable/failed."""
+    if not data:
+        return ""
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except Exception:
+        return ""
+    try:
+        reader = PdfReader(BytesIO(data))
+        parts: list[str] = []
+        used = 0
+        for page in reader.pages:
+            if used >= limit:
+                break
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
+            text = text.strip()
+            if not text:
+                continue
+            remaining = limit - used
+            if remaining <= 0:
+                break
+            if len(text) > remaining:
+                text = text[:remaining]
+            parts.append(text)
+            used += len(text)
+        return _clip("\n\n".join(parts).strip(), limit)
+    except Exception:
+        return ""
+
+
+def _verify_attachment_magic(path: Path, mime_type: str, filename: str) -> None:
+    """Best-effort content sniffing to catch obvious MIME spoofing."""
+    mt = _normalize_mime_type(mime_type)
+    try:
+        head = path.read_bytes()[:64]
+    except Exception:
+        return
+
+    if mt == "application/pdf":
+        if not head.startswith(b"%PDF-"):
+            raise HTTPException(status_code=400, detail=f"Attachment is not a valid PDF: {filename}.")
+        return
+
+    if mt == "image/png":
+        if not head.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise HTTPException(status_code=400, detail=f"Attachment is not a valid PNG: {filename}.")
+        return
+
+    if mt == "image/jpeg":
+        if not head.startswith(b"\xff\xd8\xff"):
+            raise HTTPException(status_code=400, detail=f"Attachment is not a valid JPEG: {filename}.")
+        return
+
+    if mt == "image/gif":
+        if not (head.startswith(b"GIF87a") or head.startswith(b"GIF89a")):
+            raise HTTPException(status_code=400, detail=f"Attachment is not a valid GIF: {filename}.")
+        return
+
+    if mt == "image/webp":
+        if not (head.startswith(b"RIFF") and len(head) >= 12 and head[8:12] == b"WEBP"):
+            raise HTTPException(status_code=400, detail=f"Attachment is not a valid WebP: {filename}.")
+        return
+
+    if mt.startswith("text/") or mt == "application/json":
+        # Keep this permissive: allow UTF-8 text and reject obvious binary blobs.
+        if b"\x00" in head:
+            raise HTTPException(status_code=400, detail=f"Attachment appears to be binary: {filename}.")
+        return
+
+def _validate_attachment_mime_type(mime_type: str) -> None:
+    if not mime_type:
+        raise HTTPException(status_code=400, detail="Attachment MIME type missing.")
+    if mime_type not in ATTACHMENT_ALLOWED_MIME_TYPES:
+        allowed = ", ".join(sorted(ATTACHMENT_ALLOWED_MIME_TYPES))
+        raise HTTPException(status_code=400, detail=f"Attachment type not allowed: {mime_type}. Allowed: {allowed}")
+
+
+def _attachments_root() -> Path:
+    root = Path(ATTACHMENTS_DIR).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def enqueue_reindex_request(payload: dict) -> None:
@@ -348,6 +541,9 @@ def on_startup() -> None:
     if os.getenv("CLAWBOARD_DISABLE_SNOOZE_WORKER", "").strip() != "1":
         thread = threading.Thread(target=_snooze_worker, daemon=True)
         thread.start()
+    if os.getenv("CLAWBOARD_DISABLE_SESSION_ROUTING_GC", "").strip() != "1":
+        thread = threading.Thread(target=_session_routing_gc_worker, daemon=True)
+        thread.start()
 
 
 @app.get("/api/health")
@@ -426,6 +622,40 @@ def _snooze_worker() -> None:
         time.sleep(poll_interval)
 
 
+def _session_routing_gc_worker() -> None:
+    """Garbage-collect old session routing memory rows.
+
+    This keeps the table bounded over time for large deployments.
+    """
+
+    poll_interval = float(os.getenv("CLAWBOARD_SESSION_ROUTING_GC_SECONDS", str(6 * 60 * 60)))
+    ttl_days = float(os.getenv("CLAWBOARD_SESSION_ROUTING_TTL_DAYS", "90"))
+    if ttl_days <= 0:
+        return
+    batch_size = int(os.getenv("CLAWBOARD_SESSION_ROUTING_GC_BATCH", "500"))
+    # Best-effort: run forever, never crash the API.
+    while True:
+        try:
+            cutoff_dt = datetime.now(timezone.utc) - timedelta(days=ttl_days)
+            cutoff = cutoff_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            with get_session() as session:
+                rows = (
+                    session.exec(
+                        select(SessionRoutingMemory)
+                        .where(SessionRoutingMemory.updatedAt < cutoff)
+                        .order_by(SessionRoutingMemory.updatedAt.asc())
+                        .limit(batch_size)
+                    ).all()
+                )
+                if rows:
+                    for row in rows:
+                        session.delete(row)
+                    session.commit()
+        except Exception:
+            pass
+        time.sleep(poll_interval)
+
+
 def _idempotency_key(payload: LogAppend, header_key: str | None) -> str | None:
     if header_key and header_key.strip():
         return header_key.strip()
@@ -493,6 +723,17 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     topic_id = payload.topicId
     task_id = payload.taskId
 
+    # Clawboard routing: if a sender only provides `source.sessionKey` (common for OpenClaw
+    # assistant logs), derive topic/task so the UI threads stay stable.
+    if payload.source and isinstance(payload.source, dict):
+        session_key = str(payload.source.get("sessionKey") or "").strip()
+        if session_key:
+            derived_topic_id, derived_task_id = _parse_board_session_key(session_key)
+            if not task_id and derived_task_id:
+                task_id = derived_task_id
+            if not topic_id and derived_topic_id:
+                topic_id = derived_topic_id
+
     task_row = None
     if task_id:
         task_row = session.get(Task, task_id)
@@ -510,6 +751,17 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     if task_row:
         topic_id = task_row.topicId
 
+    attachments = None
+    if payload.attachments:
+        attachments = []
+        for item in payload.attachments:
+            if hasattr(item, "model_dump"):
+                attachments.append(item.model_dump())
+            elif isinstance(item, dict):
+                attachments.append(item)
+            else:
+                attachments.append({"value": str(item)})
+
     entry = LogEntry(
         id=create_id("log"),
         topicId=topic_id,
@@ -525,6 +777,7 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         agentId=payload.agentId,
         agentLabel=payload.agentLabel,
         source=payload.source,
+        attachments=attachments,
         classificationStatus=payload.classificationStatus or "pending",
     )
     session.add(entry)
@@ -629,8 +882,193 @@ def _parse_board_session_key(session_key: str) -> tuple[str | None, str | None]:
     return (None, None)
 
 
-def _run_openclaw_chat(request_id: str, *, base_url: str, token: str, session_key: str, agent_id: str, message: str) -> None:
-    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+@app.get("/api/attachments/policy", tags=["attachments"])
+def get_attachment_policy():
+    """Return attachment allowlist + limits so clients can validate before upload."""
+    return {
+        "allowedMimeTypes": sorted(ATTACHMENT_ALLOWED_MIME_TYPES),
+        "maxFiles": ATTACHMENT_MAX_FILES,
+        "maxBytes": ATTACHMENT_MAX_BYTES,
+    }
+
+
+@app.post(
+    "/api/attachments",
+    dependencies=[Depends(require_token)],
+    response_model=List[AttachmentOut],
+    tags=["attachments"],
+)
+async def upload_attachments(files: List[UploadFile] = File(..., description="Files to attach (multipart).")):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided.")
+    if len(files) > ATTACHMENT_MAX_FILES:
+        raise HTTPException(status_code=400, detail=f"Too many files. Max is {ATTACHMENT_MAX_FILES}.")
+
+    root = _attachments_root()
+    tmp_dir = root / ".tmp" / create_id("upload")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    staged: list[dict[str, Any]] = []
+    moved: list[Path] = []
+    try:
+        # Stage all files first; if any fails validation we do not persist partial uploads.
+        for upload in files:
+            filename = _sanitize_attachment_filename(upload.filename or "")
+            mime_type = _normalize_mime_type(getattr(upload, "content_type", None))
+            if not mime_type or mime_type == "application/octet-stream":
+                mime_type = _infer_mime_type_from_filename(filename)
+            _validate_attachment_mime_type(mime_type)
+
+            attachment_id = create_id("att")
+            tmp_path = tmp_dir / attachment_id
+            sha = hashlib.sha256()
+            size = 0
+
+            try:
+                with tmp_path.open("wb") as out:
+                    while True:
+                        chunk = await upload.read(1024 * 256)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > ATTACHMENT_MAX_BYTES:
+                            raise HTTPException(
+                                status_code=413,
+                                detail=f"Attachment too large: {filename}. Max is {ATTACHMENT_MAX_BYTES} bytes.",
+                            )
+                        sha.update(chunk)
+                        out.write(chunk)
+            finally:
+                try:
+                    await upload.close()
+                except Exception:
+                    pass
+
+            if size <= 0:
+                raise HTTPException(status_code=400, detail=f"Attachment was empty: {filename}.")
+
+            _verify_attachment_magic(tmp_path, mime_type, filename)
+
+            staged.append(
+                {
+                    "id": attachment_id,
+                    "fileName": filename,
+                    "mimeType": mime_type,
+                    "sizeBytes": size,
+                    "sha256": sha.hexdigest(),
+                    "tmpPath": tmp_path,
+                }
+            )
+
+        stored_at = now_iso()
+        persisted: list[Attachment] = []
+        with get_session() as session:
+            try:
+                for item in staged:
+                    final_path = root / item["id"]
+                    # Atomic move into the stable path.
+                    os.replace(str(item["tmpPath"]), str(final_path))
+                    moved.append(final_path)
+
+                    row = Attachment(
+                        id=item["id"],
+                        logId=None,
+                        fileName=item["fileName"],
+                        mimeType=item["mimeType"],
+                        sizeBytes=item["sizeBytes"],
+                        sha256=item["sha256"],
+                        storagePath=item["id"],
+                        createdAt=stored_at,
+                        updatedAt=stored_at,
+                    )
+                    session.add(row)
+                    persisted.append(row)
+
+                session.commit()
+                for row in persisted:
+                    session.refresh(row)
+                return persisted
+            except Exception:
+                session.rollback()
+                # Best-effort cleanup: avoid leaving orphaned files when DB write fails.
+                for path in moved:
+                    try:
+                        if path.exists():
+                            path.unlink()
+                    except Exception:
+                        pass
+                raise
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Failed to upload attachments.") from exc
+    finally:
+        # Clean up any remaining staged files.
+        try:
+            for item in staged:
+                path = item.get("tmpPath")
+                if path and isinstance(path, Path) and path.exists():
+                    try:
+                        path.unlink()
+                    except Exception:
+                        pass
+        finally:
+            try:
+                if tmp_dir.exists():
+                    for child in tmp_dir.iterdir():
+                        try:
+                            child.unlink()
+                        except Exception:
+                            pass
+                    try:
+                        tmp_dir.rmdir()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+
+@app.get("/api/attachments/{attachment_id}", tags=["attachments"])
+def download_attachment(attachment_id: str):
+    """Serve a stored attachment by ID."""
+    att_id = (attachment_id or "").strip()
+    if not att_id:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    with get_session() as session:
+        row = session.get(Attachment, att_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+
+    root = _attachments_root()
+    path = root / str(row.storagePath or row.id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Attachment file missing on disk")
+
+    filename = _sanitize_attachment_filename(row.fileName)
+    disposition = f'inline; filename="{filename}"'
+    return FileResponse(
+        str(path),
+        media_type=row.mimeType or "application/octet-stream",
+        filename=filename,
+        headers={"Content-Disposition": disposition},
+    )
+
+
+def _run_openclaw_chat(
+    request_id: str,
+    *,
+    base_url: str,
+    token: str,
+    session_key: str,
+    agent_id: str,
+    message: str,
+    attachments: list[dict[str, Any]] | None = None,
+) -> None:
+    """Dispatch a message to OpenClaw Gateway via OpenResponses (POST /v1/responses).
+
+    Using OpenResponses keeps message handling consistent and enables file + vision inputs.
+    """
+    url = f"{base_url.rstrip('/')}/v1/responses"
     timeout_seconds_raw = os.getenv("OPENCLAW_CHAT_TIMEOUT_SECONDS", "120").strip()
     try:
         timeout_seconds = float(timeout_seconds_raw)
@@ -638,9 +1076,84 @@ def _run_openclaw_chat(request_id: str, *, base_url: str, token: str, session_ke
     except Exception:
         timeout_seconds = 120.0
 
+    parts: list[dict[str, Any]] = [{"type": "input_text", "text": message}]
+    if attachments:
+        root = _attachments_root()
+        for att in attachments:
+            att_id = str(att.get("id") or "").strip()
+            if not att_id:
+                continue
+            storage_path = str(att.get("storagePath") or att_id).strip()
+            path = root / storage_path
+            if not path.exists():
+                _log_openclaw_chat_error(
+                    session_key=session_key,
+                    request_id=request_id,
+                    detail=f"OpenClaw chat failed: attachment missing on disk ({att_id}). requestId={request_id}",
+                )
+                return
+            try:
+                data_bytes = path.read_bytes()
+            except Exception as exc:
+                _log_openclaw_chat_error(
+                    session_key=session_key,
+                    request_id=request_id,
+                    detail=f"OpenClaw chat failed: unable to read attachment ({att_id}). requestId={request_id}",
+                    raw=str(exc),
+                )
+                return
+
+            mime_type = _normalize_mime_type(str(att.get("mimeType") or "application/octet-stream"))
+            filename = _sanitize_attachment_filename(str(att.get("fileName") or "attachment"))
+            if mime_type in ATTACHMENT_IMAGE_MIME_TYPES:
+                b64 = base64.b64encode(data_bytes).decode("ascii")
+                parts.append(
+                    {
+                        "type": "input_image",
+                        "source": {"type": "base64", "media_type": mime_type, "data": b64},
+                    }
+                )
+                continue
+
+            if mime_type in ATTACHMENT_TEXT_MIME_TYPES or mime_type.startswith("text/"):
+                extracted = _decode_text_attachment(data_bytes)
+                if extracted:
+                    parts.append(
+                        {
+                            "type": "input_text",
+                            "text": f"[Attachment: {filename} ({mime_type})]\n\n{extracted}",
+                        }
+                    )
+                    continue
+
+            if mime_type == "application/pdf":
+                extracted = _extract_pdf_text(data_bytes)
+                if extracted:
+                    parts.append(
+                        {
+                            "type": "input_text",
+                            "text": f"[Attachment: {filename} (extracted PDF text)]\n\n{extracted}",
+                        }
+                    )
+                    continue
+
+            b64 = base64.b64encode(data_bytes).decode("ascii")
+            parts.append(
+                {
+                    "type": "input_file",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": b64,
+                        "filename": filename,
+                    },
+                }
+            )
+
     body = {
         "model": "openclaw",
-        "messages": [{"role": "user", "content": message}],
+        "input": [{"type": "message", "role": "user", "content": parts}],
+        "stream": False,
     }
     data = json.dumps(body).encode("utf-8")
 
@@ -673,6 +1186,51 @@ def _run_openclaw_chat(request_id: str, *, base_url: str, token: str, session_ke
             raw = exc.read().decode("utf-8", errors="replace")
         except Exception:
             raw = str(exc)
+        # If OpenResponses is disabled but this is a text-only send, fall back to chat/completions
+        # so Clawboard remains usable even when gateway config drifts.
+        if not attachments and exc.code in {404, 405}:
+            fallback_url = f"{base_url.rstrip('/')}/v1/chat/completions"
+            fallback_body = {
+                "model": "openclaw",
+                "messages": [{"role": "user", "content": message}],
+            }
+            fallback_req = urllib.request.Request(
+                fallback_url,
+                data=json.dumps(fallback_body).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "x-openclaw-agent-id": agent_id,
+                    "x-openclaw-session-key": session_key,
+                },
+            )
+            try:
+                with urllib.request.urlopen(fallback_req, timeout=timeout_seconds) as resp:
+                    resp.read()
+                return
+            except Exception as fallback_exc:
+                _log_openclaw_chat_error(
+                    session_key=session_key,
+                    request_id=request_id,
+                    detail=f"OpenClaw chat failed (fallback). requestId={request_id}",
+                    raw=str(fallback_exc),
+                )
+                return
+
+        if attachments and exc.code in {404, 405}:
+            _log_openclaw_chat_error(
+                session_key=session_key,
+                request_id=request_id,
+                detail=(
+                    "OpenClaw chat failed: OpenResponses endpoint disabled. "
+                    "Run: openclaw config set gateway.http.endpoints.responses.enabled --json true "
+                    "then: openclaw gateway restart"
+                    f" (requestId={request_id})"
+                ),
+                raw=raw,
+            )
+            return
         _log_openclaw_chat_error(
             session_key=session_key,
             request_id=request_id,
@@ -717,10 +1275,13 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
     agent_id = (payload.agentId or "main").strip() or "main"
     session_key = payload.sessionKey.strip()
     message = payload.message.strip()
+    attachment_ids = [str(att_id).strip() for att_id in (payload.attachmentIds or []) if str(att_id).strip()]
     if not session_key:
         raise HTTPException(status_code=400, detail="sessionKey is required")
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
+    if len(attachment_ids) > ATTACHMENT_MAX_FILES:
+        raise HTTPException(status_code=400, detail=f"Too many attachments. Max is {ATTACHMENT_MAX_FILES}.")
     request_id = create_id("occhat")
 
     # Persist the user message immediately so the UI can render it without waiting for OpenClaw plugins.
@@ -728,7 +1289,52 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
     topic_id, task_id = _parse_board_session_key(session_key)
     created_at = now_iso()
     try:
-        payload_log = LogAppend(
+        attachments_meta: list[dict[str, Any]] | None = None
+        attachments_task: list[dict[str, Any]] | None = None
+        with get_session() as session:
+            if attachment_ids:
+                # Preserve client ordering while validating IDs.
+                unique_ids: list[str] = []
+                seen: set[str] = set()
+                for att_id in attachment_ids:
+                    if att_id in seen:
+                        continue
+                    seen.add(att_id)
+                    unique_ids.append(att_id)
+                attachment_ids = unique_ids
+
+                rows = session.exec(select(Attachment).where(Attachment.id.in_(attachment_ids))).all()
+                by_id = {row.id: row for row in rows}
+                missing = [att_id for att_id in attachment_ids if att_id not in by_id]
+                if missing:
+                    raise HTTPException(status_code=400, detail=f"Attachment(s) not found: {', '.join(missing)}")
+
+                attachments_meta = []
+                attachments_task = []
+                for att_id in attachment_ids:
+                    row = by_id[att_id]
+                    mime_type = _normalize_mime_type(row.mimeType)
+                    # Defensive re-validation (upload already enforced allowlist).
+                    _validate_attachment_mime_type(mime_type)
+                    attachments_meta.append(
+                        {
+                            "id": row.id,
+                            "fileName": row.fileName,
+                            "mimeType": mime_type,
+                            "sizeBytes": row.sizeBytes,
+                        }
+                    )
+                    attachments_task.append(
+                        {
+                            "id": row.id,
+                            "fileName": row.fileName,
+                            "mimeType": mime_type,
+                            "sizeBytes": row.sizeBytes,
+                            "storagePath": row.storagePath,
+                        }
+                    )
+
+            payload_log = LogAppend(
             topicId=topic_id,
             taskId=task_id,
             type="conversation",
@@ -739,10 +1345,29 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
             agentId="user",
             agentLabel="User",
             source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            attachments=attachments_meta,
             classificationStatus="pending",
         )
-        with get_session() as session:
-            append_log_entry(session, payload_log, idempotency_key=f"openclaw-chat:user:{request_id}")
+            entry = append_log_entry(session, payload_log, idempotency_key=f"openclaw-chat:user:{request_id}")
+
+            # Best-effort ownership marker (useful for cleanup/analytics). Do not fail the send
+            # if this update can't be persisted.
+            if attachment_ids:
+                stamp = now_iso()
+                for att_id in attachment_ids:
+                    row = by_id.get(att_id)
+                    if not row:
+                        continue
+                    if not row.logId:
+                        row.logId = entry.id
+                    row.updatedAt = stamp
+                    session.add(row)
+                try:
+                    session.commit()
+                except Exception:
+                    session.rollback()
+    except HTTPException:
+        raise
     except Exception as exc:
         # Fail closed: if we can't persist the user message, do not send it to OpenClaw.
         # Otherwise Clawboard can show assistant replies/tool traces without the user prompt that triggered them.
@@ -756,6 +1381,7 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
         session_key=session_key,
         agent_id=agent_id,
         message=message,
+        attachments=attachments_task,
     )
     return {"queued": True, "requestId": request_id}
 
@@ -790,7 +1416,10 @@ async def stream_events(request: Request):
                     event_id, payload = event
                     yield event_hub.encode(event_id, payload)
                 except asyncio.TimeoutError:
-                    yield ": ping\n\n"
+                    # Emit a lightweight heartbeat as a normal SSE message so clients can detect stale
+                    # connections without user interaction. Avoid `eventTs` so clients don't advance
+                    # incremental sync cursors based on heartbeats alone.
+                    yield event_hub.encode(None, {"type": "stream.ping", "ts": now_iso()})
         except asyncio.CancelledError:
             pass
         finally:
@@ -799,7 +1428,12 @@ async def stream_events(request: Request):
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            # Prevent proxy buffering (nginx) from stalling SSE delivery.
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -1039,7 +1673,8 @@ def upsert_topic(
                 },
             }
         },
-    )
+    ),
+    x_clawboard_actor: str | None = Header(default=None, alias="X-Clawboard-Actor"),
 ):
     """Create or update a topic."""
     with get_session() as session:
@@ -1067,6 +1702,8 @@ def upsert_topic(
                 topic.pinned = payload.pinned
             topic.updatedAt = timestamp
         else:
+            actor = str(x_clawboard_actor or "").strip().lower()
+            created_by = "classifier" if actor == "classifier" else "user"
             duplicate = _find_similar_topic(session, payload.name)
             if duplicate:
                 if payload.color is not None:
@@ -1098,7 +1735,20 @@ def upsert_topic(
                 session.commit()
                 session.refresh(duplicate)
                 event_hub.publish({"type": "topic.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
-                enqueue_reindex_request({"op": "upsert", "kind": "topic", "id": duplicate.id, "text": duplicate.name})
+                topic_text = " ".join(
+                    [
+                        str(duplicate.name or "").strip(),
+                        str(duplicate.description or "").strip(),
+                        " ".join(
+                            [
+                                str(t).strip()
+                                for t in (duplicate.tags or [])
+                                if str(t).strip() and not str(t).strip().lower().startswith("system:")
+                            ]
+                        ),
+                    ]
+                ).strip()
+                enqueue_reindex_request({"op": "upsert", "kind": "topic", "id": duplicate.id, "text": topic_text})
                 return duplicate
             used_colors = {
                 _normalize_hex_color(getattr(item, "color", None))
@@ -1112,6 +1762,7 @@ def upsert_topic(
             topic = Topic(
                 id=payload.id or create_id("topic"),
                 name=payload.name,
+                createdBy=created_by,
                 sortIndex=sort_index,
                 color=resolved_color,
                 description=payload.description,
@@ -1128,7 +1779,16 @@ def upsert_topic(
         session.commit()
         session.refresh(topic)
         event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
-        enqueue_reindex_request({"op": "upsert", "kind": "topic", "id": topic.id, "text": topic.name})
+        topic_text = " ".join(
+            [
+                str(topic.name or "").strip(),
+                str(topic.description or "").strip(),
+                " ".join(
+                    [str(t).strip() for t in (topic.tags or []) if str(t).strip() and not str(t).strip().lower().startswith("system:")]
+                ),
+            ]
+        ).strip()
+        enqueue_reindex_request({"op": "upsert", "kind": "topic", "id": topic.id, "text": topic_text})
         return topic
 
 
@@ -1161,13 +1821,21 @@ def delete_topic(topic_id: str):
         for task in tasks:
             enqueue_reindex_request(
                 {
-                    "op": "upsert",
-                    "kind": "task",
-                    "id": task.id,
-                    "topicId": task.topicId,
-                    "text": task.title,
-                }
-            )
+                            "op": "upsert",
+                            "kind": "task",
+                            "id": task.id,
+                            "topicId": task.topicId,
+                            "text": " ".join(
+                                [
+                                    str(task.title or "").strip(),
+                                    str(task.status or "").strip(),
+                                    " ".join(
+                                        [str(t).strip() for t in (task.tags or []) if str(t).strip() and not str(t).strip().lower().startswith("system:")]
+                                    ),
+                                ]
+                            ).strip(),
+                        }
+                    )
 
         for task in tasks:
             event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
@@ -1321,7 +1989,25 @@ def upsert_task(
                 session.refresh(duplicate)
                 event_hub.publish({"type": "task.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
                 enqueue_reindex_request(
-                    {"op": "upsert", "kind": "task", "id": duplicate.id, "topicId": duplicate.topicId, "text": duplicate.title}
+                    {
+                        "op": "upsert",
+                        "kind": "task",
+                        "id": duplicate.id,
+                        "topicId": duplicate.topicId,
+                        "text": " ".join(
+                            [
+                                str(duplicate.title or "").strip(),
+                                str(duplicate.status or "").strip(),
+                                " ".join(
+                                    [
+                                        str(t).strip()
+                                        for t in (duplicate.tags or [])
+                                        if str(t).strip() and not str(t).strip().lower().startswith("system:")
+                                    ]
+                                ),
+                            ]
+                        ).strip(),
+                    }
                 )
                 return duplicate
             used_colors = {
@@ -1352,7 +2038,23 @@ def upsert_task(
         session.commit()
         session.refresh(task)
         event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
-        enqueue_reindex_request({"op": "upsert", "kind": "task", "id": task.id, "topicId": task.topicId, "text": task.title})
+        enqueue_reindex_request(
+            {
+                "op": "upsert",
+                "kind": "task",
+                "id": task.id,
+                "topicId": task.topicId,
+                "text": " ".join(
+                    [
+                        str(task.title or "").strip(),
+                        str(task.status or "").strip(),
+                        " ".join(
+                            [str(t).strip() for t in (task.tags or []) if str(t).strip() and not str(t).strip().lower().startswith("system:")]
+                        ),
+                    ]
+                ).strip(),
+            }
+        )
         return task
 
 
@@ -1410,6 +2112,81 @@ def list_pending_conversations_for_classifier(
             .limit(limit)
         )
         return session.exec(query).all()
+
+
+@app.get(
+    "/api/classifier/session-routing",
+    response_model=SessionRoutingMemoryOut,
+    dependencies=[Depends(require_token)],
+    tags=["classifier"],
+)
+def get_session_routing_memory(
+    sessionKey: str = Query(..., min_length=1, max_length=512, description="Session key (source.sessionKey)."),
+):
+    """Fetch recent routing decisions for a session (best-effort)."""
+    with get_session() as session:
+        row = session.get(SessionRoutingMemory, sessionKey)
+        if not row:
+            return {"sessionKey": sessionKey, "items": []}
+        return row
+
+
+@app.post(
+    "/api/classifier/session-routing",
+    response_model=SessionRoutingMemoryOut,
+    dependencies=[Depends(require_token)],
+    tags=["classifier"],
+)
+def append_session_routing_memory(payload: SessionRoutingAppend):
+    """Append one routing decision to a session memory row.
+
+    Used by the classifier to resolve ambiguous follow-ups without expanding context windows.
+    """
+
+    max_items = int(os.getenv("CLAWBOARD_SESSION_ROUTING_MAX_ITEMS", "12"))
+    max_items = max(2, min(64, max_items))
+    now = now_iso()
+    ts = normalize_iso(payload.ts) or now
+
+    def _clip_text(value: str | None, limit: int) -> str | None:
+        if value is None:
+            return None
+        text = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            return None
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    item = {
+        "ts": ts,
+        "topicId": payload.topicId,
+        "topicName": _clip_text(payload.topicName, 200),
+        "taskId": payload.taskId,
+        "taskTitle": _clip_text(payload.taskTitle, 200),
+        "anchor": _clip_text(payload.anchor, 800),
+    }
+
+    with get_session() as session:
+        row = session.get(SessionRoutingMemory, payload.sessionKey)
+        if row:
+            items = list(row.items or [])
+            items.append(item)
+            # Keep newest last; bound growth.
+            row.items = items[-max_items:]
+            row.updatedAt = now
+            session.add(row)
+        else:
+            row = SessionRoutingMemory(
+                sessionKey=payload.sessionKey,
+                items=[item],
+                createdAt=now,
+                updatedAt=now,
+            )
+            session.add(row)
+        session.commit()
+        session.refresh(row)
+        return row
 
 
 @app.get("/api/log", response_model=List[LogOut], tags=["logs"])
@@ -1483,6 +2260,28 @@ def list_logs(
             for row in rows:
                 row.raw = None
         return rows
+
+
+@app.get("/api/log/{log_id}", response_model=LogOut, tags=["logs"])
+def get_log(
+    log_id: str,
+    includeRaw: bool = Query(
+        default=False,
+        description="Include raw payload field (can be large).",
+        example=False,
+    ),
+):
+    """Fetch one log entry by id (optionally with raw)."""
+    with get_session() as session:
+        query = select(LogEntry).where(LogEntry.id == log_id)
+        if not includeRaw:
+            query = query.options(defer(LogEntry.raw))
+        entry = session.exec(query).first()
+        if not entry:
+            raise HTTPException(status_code=404, detail="Log not found")
+        if not includeRaw:
+            entry.raw = None
+        return entry
 
 
 @app.post("/api/log", dependencies=[Depends(require_token)], response_model=LogOut, tags=["logs"])
@@ -1662,6 +2461,7 @@ def list_changes(
         if not since:
             topics = session.exec(select(Topic)).all()
             tasks = session.exec(select(Task)).all()
+            drafts = session.exec(select(Draft)).all()
             log_query = select(LogEntry).order_by(
                 LogEntry.createdAt.desc(),
                 (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
@@ -1672,6 +2472,7 @@ def list_changes(
         else:
             topics = session.exec(select(Topic).where(Topic.updatedAt >= since)).all()
             tasks = session.exec(select(Task).where(Task.updatedAt >= since)).all()
+            drafts = session.exec(select(Draft).where(Draft.updatedAt >= since)).all()
             log_query = (
                 select(LogEntry)
                 .where(LogEntry.updatedAt >= since)
@@ -1688,8 +2489,60 @@ def list_changes(
 
         topics.sort(key=lambda t: t.updatedAt, reverse=True)
         tasks.sort(key=lambda t: t.updatedAt, reverse=True)
+        drafts.sort(key=lambda d: d.updatedAt, reverse=True)
         # Preserve query ordering for logs (it may include SQLite rowid tiebreaks).
-        return {"topics": topics, "tasks": tasks, "logs": logs}
+        return {"topics": topics, "tasks": tasks, "logs": logs, "drafts": drafts}
+
+
+@app.post(
+    "/api/drafts",
+    dependencies=[Depends(require_token)],
+    response_model=DraftOut,
+    tags=["drafts"],
+)
+def upsert_draft(payload: DraftUpsert = Body(...)):
+    """Upsert a draft value by key (cross-browser draft persistence)."""
+    key = (payload.key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Draft key is required.")
+
+    value = payload.value or ""
+    stamp = now_iso()
+
+    with get_session() as session:
+        row = session.get(Draft, key)
+        if row:
+            row.value = value
+            row.updatedAt = stamp
+        else:
+            row = Draft(key=key, value=value, createdAt=stamp, updatedAt=stamp)
+        session.add(row)
+        try:
+            session.commit()
+        except OperationalError as exc:
+            if not DATABASE_URL.startswith("sqlite") or "database is locked" not in str(exc).lower():
+                raise
+            session.rollback()
+            last_exc: OperationalError | None = exc
+            for attempt in range(6):
+                try:
+                    # rollback() can detach pending instances; ensure this upsert is part of the new transaction.
+                    session.add(row)
+                    time.sleep(min(0.75, 0.05 * (2**attempt)))
+                    session.commit()
+                    last_exc = None
+                    break
+                except OperationalError as retry_exc:
+                    if "database is locked" not in str(retry_exc).lower():
+                        raise
+                    session.rollback()
+                    last_exc = retry_exc
+            if last_exc is not None:
+                raise last_exc
+        session.refresh(row)
+
+        event_hub.publish({"type": "draft.upserted", "data": row.model_dump(), "eventTs": row.updatedAt})
+        return row
 
 
 @app.get("/api/clawgraph", response_model=ClawgraphResponse, tags=["clawgraph"])

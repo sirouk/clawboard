@@ -10,6 +10,9 @@ import { useAppConfig } from "@/components/providers";
 import { apiFetch } from "@/lib/api";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { compareLogsDesc } from "@/lib/live-utils";
+import { Markdown } from "@/components/markdown";
+import { AttachmentStrip } from "@/components/attachments";
+import { usePersistentDraft } from "@/lib/drafts";
 
 const TYPE_LABELS: Record<string, string> = {
   note: "Note",
@@ -31,6 +34,52 @@ type LogPatchPayload = Partial<{
 }>;
 const MESSAGE_TRUNCATE_LIMIT = 220;
 const SUMMARY_TRUNCATE_LIMIT = 96;
+
+type ToolEventKind = "call" | "result" | "error";
+type ToolEvent = { kind: ToolEventKind; toolName: string };
+
+const TOOL_EVENT_RE = /^(Tool call|Tool result|Tool error)\s*:\s*(.+)\s*$/i;
+
+function parseToolEvent(entry: LogEntry): ToolEvent | null {
+  if (entry.type !== "action") return null;
+  const label = String(entry.summary ?? entry.content ?? "").trim();
+  if (!label) return null;
+  const match = label.match(TOOL_EVENT_RE);
+  if (!match) return null;
+  const kindRaw = match[1]?.trim().toLowerCase();
+  const toolName = String(match[2] ?? "").trim();
+  if (!toolName) return null;
+  const kind: ToolEventKind =
+    kindRaw === "tool call" ? "call" : kindRaw === "tool result" ? "result" : "error";
+  return { kind, toolName };
+}
+
+const logRawCache = new Map<string, string | null>();
+const logRawPromiseCache = new Map<string, Promise<string | null>>();
+
+async function fetchLogRaw(logId: string): Promise<string | null> {
+  const id = String(logId ?? "").trim();
+  if (!id) return null;
+  if (logRawCache.has(id)) return logRawCache.get(id) ?? null;
+  const inflight = logRawPromiseCache.get(id);
+  if (inflight) return inflight;
+  const promise = (async () => {
+    try {
+      const res = await apiFetch(`/api/log/${encodeURIComponent(id)}?includeRaw=1`, { cache: "no-store" });
+      if (!res.ok) return null;
+      const payload = (await res.json().catch(() => null)) as { raw?: unknown } | null;
+      const raw = typeof payload?.raw === "string" ? payload.raw : null;
+      logRawCache.set(id, raw);
+      return raw;
+    } catch {
+      return null;
+    } finally {
+      logRawPromiseCache.delete(id);
+    }
+  })();
+  logRawPromiseCache.set(id, promise);
+  return promise;
+}
 
 function normalizeInlineText(value: string | undefined | null) {
   return stripTransportNoise(value ?? "").replace(/\s+/g, " ").trim();
@@ -666,7 +715,10 @@ function LogRow({
   const [compactMessageVisible, setCompactMessageVisible] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [noteOpen, setNoteOpen] = useState(false);
-  const [noteText, setNoteText] = useState("");
+  const [noteDraftKey, setNoteDraftKey] = useState<string | null>(null);
+  const { value: noteText, setValue: setNoteText } = usePersistentDraft(noteDraftKey ? `draft:note:${noteDraftKey}` : "", {
+    fallback: "",
+  });
   const [noteStatus, setNoteStatus] = useState<string | null>(null);
   const notePanelRef = useRef<HTMLDivElement | null>(null);
   const noteTextAreaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -720,6 +772,8 @@ function LogRow({
 
   const typeLabel = TYPE_LABELS[entry.type] ?? entry.type;
   const isConversation = entry.type === "conversation";
+  const toolEvent = parseToolEvent(entry);
+  const allowEdit = allowDelete && !toolEvent;
   const agentLabel = entry.agentLabel || entry.agentId;
   const showAgentBadge = Boolean(agentLabel && agentLabel.trim().toLowerCase() !== typeLabel.trim().toLowerCase());
   const messageSource = stripTransportNoise((entry.content ?? entry.raw ?? entry.summary ?? "").trim());
@@ -742,6 +796,32 @@ function LogRow({
   const editTopicNullable = editTopicId ? editTopicId : null;
   const taskOptions = getTasksForTopic(editTopicNullable);
   const tasksLoadingForEdit = isTasksLoadingForTopic(editTopicNullable);
+
+  const [toolDetailsOpen, setToolDetailsOpen] = useState(false);
+  const [toolRawLoaded, setToolRawLoaded] = useState(() => {
+    if (typeof entry.raw === "string" && entry.raw.trim()) return true;
+    return logRawCache.has(entry.id);
+  });
+  const [toolRaw, setToolRaw] = useState<string | null>(() => {
+    if (typeof entry.raw === "string" && entry.raw.trim()) return entry.raw;
+    return logRawCache.has(entry.id) ? logRawCache.get(entry.id) ?? null : null;
+  });
+
+  useEffect(() => {
+    if (!toolEvent) return;
+    if (!toolDetailsOpen) return;
+    if (toolRawLoaded) return;
+    let alive = true;
+    void fetchLogRaw(entry.id)
+      .then((raw) => {
+        if (!alive) return;
+        setToolRaw(raw);
+        setToolRawLoaded(true);
+      })
+    return () => {
+      alive = false;
+    };
+  }, [entry.id, toolDetailsOpen, toolEvent, toolRawLoaded]);
 
   if (variant === "chat") {
     const chatBubbleText = (() => {
@@ -793,7 +873,10 @@ function LogRow({
 	                    : "border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] text-[rgb(var(--claw-text))]"
 	                }`}
 	              >
-	                <p className="whitespace-pre-wrap break-words">{chatBubbleText}</p>
+                  {entry.attachments && entry.attachments.length > 0 ? (
+                    <AttachmentStrip attachments={entry.attachments} className="mt-0 mb-3" />
+                  ) : null}
+                  <Markdown>{chatBubbleText}</Markdown>
 	                {shouldTruncate && (
 	                  <div className="mt-2">
 	                    <Button variant="ghost" size="sm" onClick={() => setExpanded(true)} aria-label="Expand message">
@@ -810,9 +893,9 @@ function LogRow({
 	                )}
 	              </div>
 
-              {(allowDelete || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen && (
+              {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen && (
                 <div className={`mt-2 flex flex-wrap items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
-                  {allowDelete && (
+                  {allowEdit && (
                     <Button
                       variant="ghost"
                       size="sm"
@@ -834,7 +917,14 @@ function LogRow({
                     </Button>
                   )}
                   {allowNotes && entry.type !== "note" && (
-                    <Button variant="ghost" size="sm" onClick={() => setNoteOpen(true)}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setNoteDraftKey(entry.id);
+                        setNoteOpen(true);
+                      }}
+                    >
                       Add note
                     </Button>
                   )}
@@ -876,12 +966,20 @@ function LogRow({
                           }
                           setNoteText("");
                           setNoteOpen(false);
+                          setNoteDraftKey(null);
                         }}
                         disabled={readOnly}
                       >
                         Save note
                       </Button>
-                      <Button variant="secondary" size="sm" onClick={() => setNoteOpen(false)}>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => {
+                          setNoteOpen(false);
+                          setNoteDraftKey(null);
+                        }}
+                      >
                         Cancel
                       </Button>
                     </div>
@@ -890,7 +988,7 @@ function LogRow({
                 </div>
               )}
 
-              {allowDelete && editOpen && (
+              {allowEdit && editOpen && (
                 <div className="mt-2">
                   <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
                     <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Edit message</div>
@@ -1072,16 +1170,55 @@ function LogRow({
 	                isPending ? "opacity-90" : ""
 	              }`}
 	            >
-	              <span className="uppercase tracking-[0.14em]">{typeLabel}</span>
-	              {isPending ? <span className="ml-2 text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">pending</span> : null}
-	              {chatBubbleText ? (
-	                <span className="ml-2 normal-case tracking-normal text-[rgb(var(--claw-text))]">{chatBubbleText}</span>
-	              ) : null}
+	              {toolEvent ? (
+	                <>
+	                  <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+	                    <span className="uppercase tracking-[0.14em]">
+	                      {toolEvent.kind === "call" ? "Tool call" : toolEvent.kind === "result" ? "Tool result" : "Tool error"}
+	                    </span>
+	                    {isPending ? (
+	                      <span className="text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">pending</span>
+	                    ) : null}
+	                    <span className="font-mono text-[rgb(var(--claw-text))]">{toolEvent.toolName}</span>
+	                    <button
+	                      type="button"
+	                      className="rounded-full border border-[rgba(255,255,255,0.10)] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)] transition hover:border-[rgba(255,90,45,0.35)] hover:text-[rgb(var(--claw-text))]"
+	                      onClick={() => setToolDetailsOpen((prev) => !prev)}
+	                    >
+	                      {toolDetailsOpen ? "Hide" : "Details"}
+	                    </button>
+	                  </div>
+	                  {toolDetailsOpen ? (
+	                    <div className="mt-2 text-left">
+	                      {!toolRawLoaded ? (
+	                        <div className="text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">
+	                          Loading…
+	                        </div>
+	                      ) : null}
+	                      <pre className="mt-2 max-h-[260px] overflow-auto whitespace-pre rounded-[10px] border border-[rgba(255,255,255,0.10)] bg-[rgba(10,12,16,0.55)] px-3 py-2 font-mono text-[11px] text-[rgb(var(--claw-text))]">
+	                        {toolRaw ?? "(No tool details)"}
+	                      </pre>
+	                    </div>
+	                  ) : null}
+	                </>
+	              ) : (
+	                <>
+	                  <span className="uppercase tracking-[0.14em]">{typeLabel}</span>
+	                  {isPending ? (
+	                    <span className="ml-2 text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">
+	                      pending
+	                    </span>
+	                  ) : null}
+	                  {chatBubbleText ? (
+	                    <span className="ml-2 normal-case tracking-normal text-[rgb(var(--claw-text))]">{chatBubbleText}</span>
+	                  ) : null}
+	                </>
+	              )}
 	            </div>
 
-            {(allowDelete || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen && (
+            {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen && (
               <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
-                {allowDelete && (
+                {allowEdit && (
                   <Button
                     variant="ghost"
                     size="sm"
@@ -1103,7 +1240,14 @@ function LogRow({
                   </Button>
                 )}
                 {allowNotes && entry.type !== "note" && (
-                  <Button variant="ghost" size="sm" onClick={() => setNoteOpen(true)}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setNoteDraftKey(entry.id);
+                      setNoteOpen(true);
+                    }}
+                  >
                     Add note
                   </Button>
                 )}
@@ -1141,12 +1285,20 @@ function LogRow({
                         }
                         setNoteText("");
                         setNoteOpen(false);
+                        setNoteDraftKey(null);
                       }}
                       disabled={readOnly}
                     >
                       Save note
                     </Button>
-                    <Button variant="secondary" size="sm" onClick={() => setNoteOpen(false)}>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        setNoteOpen(false);
+                        setNoteDraftKey(null);
+                      }}
+                    >
                       Cancel
                     </Button>
                   </div>
@@ -1155,7 +1307,7 @@ function LogRow({
               </div>
             )}
 
-            {allowDelete && editOpen && (
+            {allowEdit && editOpen && (
               <div className="mt-2 w-full max-w-[90%]">
                 <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
                   <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Edit message</div>
@@ -1451,9 +1603,9 @@ function LogRow({
           )}
         </>
       )}
-      {(allowDelete || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen && (
+      {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          {allowDelete && (
+          {allowEdit && (
             <Button
               variant="secondary"
               size="sm"
@@ -1475,7 +1627,14 @@ function LogRow({
             </Button>
           )}
           {allowNotes && entry.type !== "note" && (
-            <Button variant="secondary" size="sm" onClick={() => setNoteOpen(true)}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setNoteDraftKey(entry.id);
+                setNoteOpen(true);
+              }}
+            >
               Add note
             </Button>
           )}
@@ -1516,12 +1675,20 @@ function LogRow({
                   }
                   setNoteText("");
                   setNoteOpen(false);
+                  setNoteDraftKey(null);
                 }}
                 disabled={readOnly}
               >
                 Save note
               </Button>
-              <Button variant="secondary" size="sm" onClick={() => setNoteOpen(false)}>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setNoteOpen(false);
+                  setNoteDraftKey(null);
+                }}
+              >
                 Cancel
               </Button>
             </div>
@@ -1529,7 +1696,7 @@ function LogRow({
           </div>
         </div>
       )}
-      {allowDelete && editOpen && (
+      {allowEdit && editOpen && (
         <div className="mt-3">
           <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
             <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Edit message</div>

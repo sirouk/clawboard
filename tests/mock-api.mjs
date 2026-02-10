@@ -287,7 +287,7 @@ const server = http.createServer(async (req, res) => {
     }
     subscribers.add(res);
     const interval = setInterval(() => {
-      res.write(": ping\n\n");
+      res.write(`data: ${JSON.stringify({ type: "stream.ping", ts: nowIso() })}\n\n`);
     }, 20000);
     req.on("close", () => {
       clearInterval(interval);

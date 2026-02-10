@@ -14,6 +14,8 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // Local tooling/archives (not source).
     "_purge-archive/**",
+    // Python virtualenv artifacts (not source).
+    ".venv-tests/**",
   ]),
 ]);
 

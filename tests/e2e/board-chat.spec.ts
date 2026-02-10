@@ -16,7 +16,7 @@ test("board topics panel can search topics and navigate into unified view select
 
   // Expand the Board topics panel in the left nav.
   await page.locator("aside").getByRole("link", { name: "Board", exact: true }).click();
-  const searchInput = page.getByPlaceholder("Search topics…");
+  const searchInput = page.getByPlaceholder("Search tasks, topics…");
   await expect(searchInput).toBeVisible();
 
   await searchInput.fill(topicName);
@@ -68,7 +68,7 @@ test("topic chat send is instant and task promotion auto-expands task composer",
   await openclawSend;
 
   // The user message should appear immediately as pending in the active topic chat pane.
-  await expect(page.getByText(message, { exact: false })).toBeVisible();
+  await expect(page.locator("[data-testid^='message-bubble-']").filter({ hasText: message }).first()).toBeVisible();
 
   const logsRes = await request.get(`${apiBase}/api/log?sessionKey=${encodeURIComponent(sessionKey)}&limit=10`);
   expect(logsRes.ok()).toBeTruthy();

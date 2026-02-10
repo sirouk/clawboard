@@ -514,6 +514,22 @@ if [ "$SKIP_OPENCLAW" = false ]; then
   if ! command -v openclaw >/dev/null 2>&1; then
     log_warn "OpenClaw is still unavailable. Skipping skill/plugin setup."
   else
+    OPENCLAW_GATEWAY_RESTART_NEEDED=false
+
+    log_info "Enabling OpenClaw OpenResponses endpoint (POST /v1/responses)..."
+    CURRENT_RESPONSES_ENABLED="$(openclaw config get gateway.http.endpoints.responses.enabled 2>/dev/null || true)"
+    CURRENT_RESPONSES_ENABLED="$(printf "%s" "$CURRENT_RESPONSES_ENABLED" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    if [ "$CURRENT_RESPONSES_ENABLED" != "true" ]; then
+      if openclaw config set gateway.http.endpoints.responses.enabled --json true >/dev/null 2>&1; then
+        OPENCLAW_GATEWAY_RESTART_NEEDED=true
+        log_success "OpenResponses endpoint enabled."
+      else
+        log_warn "Failed to enable OpenResponses endpoint. You can run: openclaw config set gateway.http.endpoints.responses.enabled --json true"
+      fi
+    else
+      log_success "OpenResponses endpoint already enabled."
+    fi
+
     if [ "$SKIP_SKILL" = false ]; then
       log_info "Installing Clawboard skill..."
       mkdir -p "$HOME/.openclaw/skills"
@@ -534,10 +550,20 @@ if [ "$SKIP_OPENCLAW" = false ]; then
         CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true}' "$API_URL")
       fi
       openclaw config set plugins.entries.clawboard-logger.config --json "$CONFIG_JSON" >/dev/null 2>&1 || true
-      openclaw config set plugins.entries.clawboard-logger.enabled true >/dev/null 2>&1 || true
-
-      openclaw gateway restart >/dev/null 2>&1 || openclaw gateway start >/dev/null 2>&1 || true
+      openclaw config set plugins.entries.clawboard-logger.enabled --json true >/dev/null 2>&1 || true
+      OPENCLAW_GATEWAY_RESTART_NEEDED=true
       log_success "Logger plugin installed and enabled."
+    fi
+
+    if [ "$OPENCLAW_GATEWAY_RESTART_NEEDED" = true ]; then
+      log_info "Restarting OpenClaw gateway to apply configuration..."
+      if openclaw gateway restart >/dev/null 2>&1; then
+        log_success "OpenClaw gateway restarted."
+      elif openclaw gateway start >/dev/null 2>&1; then
+        log_success "OpenClaw gateway started."
+      else
+        log_warn "Unable to restart OpenClaw gateway automatically. Run: openclaw gateway restart"
+      fi
     fi
   fi
 fi
