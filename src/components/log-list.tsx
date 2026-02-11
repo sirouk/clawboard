@@ -411,8 +411,17 @@ export function LogList({
       const msg = typeof detail?.detail === "string" ? detail.detail : "Failed to purge forward.";
       return { ok: false, error: msg };
     }
-    const payload = (await res.json().catch(() => null)) as { deletedCount?: unknown } | null;
+    const payload = (await res.json().catch(() => null)) as { deletedCount?: unknown; deletedIds?: unknown } | null;
     const deletedCount = typeof payload?.deletedCount === "number" ? payload.deletedCount : undefined;
+    const deletedIds = Array.isArray(payload?.deletedIds)
+      ? payload.deletedIds.map((item) => String(item ?? "").trim()).filter(Boolean)
+      : [];
+
+    if (deletedIds.length > 0) {
+      const deletedSet = new Set(deletedIds);
+      setLogs((prev) => prev.filter((row) => !deletedSet.has(row.id)));
+    }
+
     return { ok: true, deletedCount };
   };
 
@@ -899,7 +908,7 @@ function LogRow({
   const typeLabel = TYPE_LABELS[entry.type] ?? entry.type;
   const isConversation = entry.type === "conversation";
   const toolEvent = parseToolEvent(entry);
-  const allowEdit = allowDelete && !toolEvent;
+  const allowEdit = allowDelete;
   const agentLabel = entry.agentLabel || entry.agentId;
   const showAgentBadge = Boolean(agentLabel && agentLabel.trim().toLowerCase() !== typeLabel.trim().toLowerCase());
   const messageSource = stripTransportNoise((entry.content ?? entry.raw ?? entry.summary ?? "").trim());
@@ -912,7 +921,12 @@ function LogRow({
   const compactMode = messageDensity === "compact";
   // Compact mode should still show chat bubbles; it mainly affects density/styling.
   const canShowMessage = variant === "chat" ? true : !compactMode || compactMessageVisible;
+  const speakerLabel = String(entry.source?.speakerLabel ?? "").trim();
+  const audienceLabel = String(entry.source?.audienceLabel ?? "").trim();
+  const flowLabel = speakerLabel && audienceLabel ? `${speakerLabel} -> ${audienceLabel}` : "";
+  const conversationLaneLabel = flowLabel || (isUser ? "You" : agentLabel || "Assistant");
   const sourceMetaParts = [
+    flowLabel ? `flow: ${flowLabel}` : null,
     entry.source?.channel ? `channel: ${entry.source.channel}` : null,
     entry.source?.sessionKey ? `session: ${entry.source.sessionKey}` : null,
     entry.source?.messageId ? `msg: ${entry.source.messageId}` : null,
@@ -923,7 +937,6 @@ function LogRow({
   const taskOptions = getTasksForTopic(editTopicNullable);
   const tasksLoadingForEdit = isTasksLoadingForTopic(editTopicNullable);
 
-  const [toolDetailsOpen, setToolDetailsOpen] = useState(false);
   const [toolRawLoaded, setToolRawLoaded] = useState(() => {
     if (typeof entry.raw === "string" && entry.raw.trim()) return true;
     return logRawCache.has(entry.id);
@@ -947,9 +960,9 @@ function LogRow({
   const [replayStatus, setReplayStatus] = useState<"idle" | "running" | "queued" | "failed">("idle");
   const [replayError, setReplayError] = useState<string | null>(null);
 
+  // Eagerly load tool raw content so it's visible by default (no click required).
   useEffect(() => {
     if (!toolEvent) return;
-    if (!toolDetailsOpen) return;
     if (toolRawLoaded) return;
     let alive = true;
     void fetchLogRaw(entry.id)
@@ -961,7 +974,7 @@ function LogRow({
     return () => {
       alive = false;
     };
-  }, [entry.id, toolDetailsOpen, toolEvent, toolRawLoaded]);
+  }, [entry.id, toolEvent, toolRawLoaded]);
 
   if (variant === "chat") {
     const chatBubbleText = (() => {
@@ -973,7 +986,7 @@ function LogRow({
       isUser && isConversation && scopeTaskId === null && Boolean(scopeTopicId) && typeof onReplayClassifier === "function";
 
     const showPurgeForward =
-      allowDelete && scopeTaskId === null && Boolean(scopeTopicId) && !entry.taskId && typeof onPurgeForward === "function";
+      allowDelete && scopeTaskId === null && Boolean(scopeTopicId) && typeof onPurgeForward === "function";
 
     return (
       <div
@@ -991,6 +1004,9 @@ function LogRow({
           <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
             <div className="w-full max-w-[78%]">
 	              <div className={`mb-1 flex items-center ${isUser ? "justify-end" : "justify-start"}`}>
+	                {flowLabel ? (
+	                  <span className="mr-2 text-[10px] uppercase tracking-[0.12em] text-[rgb(var(--claw-muted))]">{flowLabel}</span>
+	                ) : null}
 	                <span className="text-xs text-[rgb(var(--claw-muted))]">{formatDateTime(entry.createdAt)}</span>
 	                {isPending && (
 	                  <span className="ml-2 text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">
@@ -1410,44 +1426,38 @@ function LogRow({
             </div>
           </div>
 	        ) : (
-	          <div className="flex flex-col items-center">
+	          <div className="flex w-full flex-col items-start">
+	            <div className="mb-1 flex w-full max-w-[78%] items-center justify-start">
+	              <span className="text-xs text-[rgb(var(--claw-muted))]">{formatDateTime(entry.createdAt)}</span>
+	              {isPending && (
+	                <span className="ml-2 text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">pending</span>
+	              )}
+	            </div>
 	            <div
 	              title={bubbleTitle}
 	              data-classification-status={classificationStatus}
-	              className={`max-w-[90%] rounded-[14px] border border-[rgba(255,255,255,0.10)] bg-[rgba(20,24,31,0.55)] px-4 py-2 text-xs text-[rgb(var(--claw-muted))] ${
+	              className={`w-full max-w-[78%] rounded-[14px] border border-[rgba(255,255,255,0.10)] bg-[rgba(20,24,31,0.8)] px-4 py-3 text-xs text-[rgb(var(--claw-muted))] ${
 	                isPending ? "opacity-90" : ""
 	              }`}
 	            >
 	              {toolEvent ? (
 	                <>
-	                  <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+	                  <div className="flex flex-wrap items-center justify-start gap-x-2 gap-y-1">
 	                    <span className="uppercase tracking-[0.14em]">
 	                      {toolEvent.kind === "call" ? "Tool call" : toolEvent.kind === "result" ? "Tool result" : "Tool error"}
 	                    </span>
-	                    {isPending ? (
-	                      <span className="text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">pending</span>
-	                    ) : null}
 	                    <span className="font-mono text-[rgb(var(--claw-text))]">{toolEvent.toolName}</span>
-	                    <button
-	                      type="button"
-	                      className="rounded-full border border-[rgba(255,255,255,0.10)] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)] transition hover:border-[rgba(255,90,45,0.35)] hover:text-[rgb(var(--claw-text))]"
-	                      onClick={() => setToolDetailsOpen((prev) => !prev)}
-	                    >
-	                      {toolDetailsOpen ? "Hide" : "Details"}
-	                    </button>
 	                  </div>
-	                  {toolDetailsOpen ? (
-	                    <div className="mt-2 text-left">
-	                      {!toolRawLoaded ? (
-	                        <div className="text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">
-	                          Loading…
-	                        </div>
-	                      ) : null}
-	                      <pre className="mt-2 max-h-[260px] overflow-auto whitespace-pre rounded-[10px] border border-[rgba(255,255,255,0.10)] bg-[rgba(10,12,16,0.55)] px-3 py-2 font-mono text-[11px] text-[rgb(var(--claw-text))]">
-	                        {toolRaw ?? "(No tool details)"}
-	                      </pre>
-	                    </div>
-	                  ) : null}
+	                  <div className="mt-2 text-left">
+	                    {!toolRawLoaded ? (
+	                      <div className="text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">
+	                        Loading…
+	                      </div>
+	                    ) : null}
+	                    <pre className="mt-1 max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-[10px] border border-[rgba(255,255,255,0.10)] bg-[rgba(10,12,16,0.55)] px-3 py-2 font-mono text-[11px] text-[rgb(var(--claw-text))]">
+	                      {toolRaw ?? "(No tool details)"}
+	                    </pre>
+	                  </div>
 	                </>
 	              ) : (
 	                <>
@@ -1790,7 +1800,7 @@ function LogRow({
               <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
                 <div className={`w-full max-w-[78%] ${isUser ? "text-right" : "text-left"}`}>
                   <p className="mb-1 text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
-                    {isUser ? "You" : agentLabel || "Assistant"}
+                    {conversationLaneLabel}
                   </p>
                 </div>
               </div>

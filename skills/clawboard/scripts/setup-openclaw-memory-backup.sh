@@ -269,24 +269,35 @@ case "$(lc "${INSTALL_CRON:-}")" in
     JOB_SESSION="isolated"
     JOB_MESSAGE="Run the OpenClaw continuity backup now (automated 15-minute backup). Execute: $HOME/.openclaw/skills/clawboard/scripts/backup_openclaw_curated_memories.sh . IMPORTANT: Only notify me if (a) there were changes pushed, or (b) the backup failed. If there were no changes and the script exited 0 without output, respond with NO_REPLY."
 
-    # Idempotent cron install: update existing job by name; otherwise add.
+    # Idempotent cron install: update existing job by name (or backup script match); otherwise add.
     existing_id=""
     if openclaw cron list --json >/dev/null 2>&1; then
-      existing_id="$(openclaw cron list --json | python3 - <<'PY'
-import json,sys
-try:
-  jobs=json.load(sys.stdin)
-except Exception:
-  jobs=[]
-name="Clawboard: backup OpenClaw continuity"
-if isinstance(jobs, dict) and 'jobs' in jobs:
-  jobs=jobs['jobs']
-match=[j for j in jobs if isinstance(j,dict) and j.get('name')==name]
-if match:
-  # pick first deterministically
-  print(match[0].get('jobId') or match[0].get('id') or '')
-PY
-)"
+      existing_id="$(
+        openclaw cron list --json | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+jobs = data.get("jobs") if isinstance(data, dict) else []
+jobs = jobs or []
+
+name = "Clawboard: backup OpenClaw continuity"
+needle = "backup_openclaw_curated_memories.sh"
+
+cands = [
+  j
+  for j in jobs
+  if isinstance(j, dict)
+  and str(j.get("sessionTarget") or "").strip() == "isolated"
+  and (
+    str(j.get("name") or "") == name
+    or needle in str(((j.get("payload") if isinstance(j.get("payload"), dict) else {}) or {}).get("message") or "")
+  )
+]
+
+print((cands[0].get("id") or cands[0].get("jobId") or "") if cands else "", end="")
+' || true
+      )"
     fi
 
     cron_ok=0
@@ -296,6 +307,7 @@ PY
         --name "$JOB_NAME" \
         --every "$JOB_EVERY" \
         --session "$JOB_SESSION" \
+        --no-deliver \
         --message "$JOB_MESSAGE" \
         --enable; then
         cron_ok=1
@@ -306,6 +318,7 @@ PY
         --name "$JOB_NAME" \
         --every "$JOB_EVERY" \
         --session "$JOB_SESSION" \
+        --no-deliver \
         --message "$JOB_MESSAGE"; then
         cron_ok=1
       fi
@@ -316,6 +329,7 @@ PY
       say "  name: $JOB_NAME"
       say "  schedule: every $JOB_EVERY"
       say "  session: $JOB_SESSION"
+      say "  delivery: none"
       say "  message: $JOB_MESSAGE"
     else
       say "Cron job installed/updated successfully."

@@ -76,6 +76,16 @@ export type LogEntry = {
     messageId?: string;
     requestId?: string;
     channel?: string;
+    boardScopeTopicId?: string;
+    boardScopeTaskId?: string;
+    boardScopeKind?: "topic" | "task";
+    boardScopeSessionKey?: string;
+    boardScopeInherited?: boolean;
+    boardScopeLock?: boolean;
+    speakerId?: string;
+    speakerLabel?: string;
+    audienceId?: string;
+    audienceLabel?: string;
   };
 };
 

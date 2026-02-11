@@ -747,23 +747,50 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 if existing:
                     return existing
 
+    source_meta = payload.source.copy() if isinstance(payload.source, dict) else None
     topic_id = payload.topicId
     task_id = payload.taskId
 
-    # Clawboard routing: if a sender only provides `source.sessionKey` (common for OpenClaw
-    # assistant logs), derive topic/task so the UI threads stay stable.
-    if payload.source and isinstance(payload.source, dict):
-        session_key = str(payload.source.get("sessionKey") or "").strip()
+    source_scope_topic_id: str | None = None
+    source_scope_task_id: str | None = None
+    scope_lock = False
+
+    if source_meta:
+        session_key = str(source_meta.get("sessionKey") or "").strip()
         if session_key:
             derived_topic_id, derived_task_id = _parse_board_session_key(session_key)
-            if not task_id and derived_task_id:
-                task_id = derived_task_id
-            if not topic_id and derived_topic_id:
-                topic_id = derived_topic_id
+            if derived_task_id:
+                source_scope_topic_id = derived_topic_id or source_scope_topic_id
+                source_scope_task_id = derived_task_id
+                scope_lock = True
+            elif derived_topic_id:
+                source_scope_topic_id = derived_topic_id
+                scope_lock = True
+
+        explicit_topic = str(source_meta.get("boardScopeTopicId") or "").strip()
+        explicit_task = str(source_meta.get("boardScopeTaskId") or "").strip()
+        lock_raw = source_meta.get("boardScopeLock")
+        if lock_raw is True:
+            scope_lock = True
+        elif isinstance(lock_raw, str) and lock_raw.strip().lower() in {"1", "true", "yes", "on"}:
+            scope_lock = True
+
+        if explicit_topic:
+            source_scope_topic_id = explicit_topic
+        if explicit_task:
+            source_scope_task_id = explicit_task
+            scope_lock = True
+
+        # Clawboard routing: if a sender only provides source-scoped metadata (common for nested
+        # OpenClaw sessions), derive topic/task so thread affinity remains stable.
+        if source_scope_task_id and (scope_lock or not task_id):
+            task_id = source_scope_task_id
+        if source_scope_topic_id and (scope_lock or not topic_id):
+            topic_id = source_scope_topic_id
 
     source_channel = ""
-    if payload.source and isinstance(payload.source, dict):
-        source_channel = str(payload.source.get("channel") or "").strip().lower()
+    if source_meta:
+        source_channel = str(source_meta.get("channel") or "").strip().lower()
 
     # OpenClaw cron delivery/control messages should never be routed into user topics/tasks.
     # Treat them as terminal noise at ingest time so they can't briefly appear in Unified View
@@ -792,6 +819,29 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             topic_id = None
             topic_row = None
 
+    # Normalize source-level board scope metadata so downstream classifier/UI can reliably
+    # keep nested/subagent logs in the originating board Topic/Task.
+    if source_meta is not None:
+        canonical_topic = str(topic_id or "").strip()
+        canonical_task = str(task_id or "").strip()
+        if source_scope_topic_id and not canonical_topic:
+            canonical_topic = source_scope_topic_id
+        if source_scope_task_id and not canonical_task:
+            canonical_task = source_scope_task_id
+        if canonical_task and not canonical_topic and task_row and task_row.topicId:
+            canonical_topic = str(task_row.topicId).strip()
+
+        if canonical_topic:
+            source_meta["boardScopeTopicId"] = canonical_topic
+            source_meta["boardScopeKind"] = "task" if canonical_task else "topic"
+            source_meta["boardScopeLock"] = bool(scope_lock or canonical_task)
+            if canonical_task:
+                source_meta["boardScopeTaskId"] = canonical_task
+            else:
+                source_meta.pop("boardScopeTaskId", None)
+        elif scope_lock:
+            source_meta["boardScopeLock"] = True
+
     attachments = None
     if payload.attachments:
         attachments = []
@@ -817,7 +867,7 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         updatedAt=updated_at,
         agentId=payload.agentId,
         agentLabel=payload.agentLabel,
-        source=payload.source,
+        source=source_meta,
         attachments=attachments,
         classificationStatus="failed" if cron_event_filtered else (payload.classificationStatus or "pending"),
         classificationAttempts=1 if cron_event_filtered else 0,
@@ -3357,48 +3407,30 @@ def purge_log_forward(log_id: str):
         if not anchor:
             raise HTTPException(status_code=404, detail="Anchor log not found")
 
-        source = anchor.source if isinstance(anchor.source, dict) else None
-        session_key = str(source.get("sessionKey") or "").strip() if source else ""
-        if not session_key:
-            raise HTTPException(status_code=400, detail="Anchor log is missing source.sessionKey")
+        topic_id = str(getattr(anchor, "topicId", "") or "").strip()
+        task_id = getattr(anchor, "taskId", None)
+        if not topic_id or task_id is not None:
+            raise HTTPException(status_code=400, detail="Purge forward is only supported for Topic Chat messages")
 
-        base_session_key = (session_key.split("|", 1)[0] or "").strip()
-        if not base_session_key:
-            raise HTTPException(status_code=400, detail="Anchor log sessionKey is invalid")
-
-        topic_id, task_id = _parse_board_session_key(base_session_key)
-        if not topic_id:
-            raise HTTPException(status_code=400, detail="Purge forward is only supported for board chats")
-        if task_id:
-            raise HTTPException(status_code=400, detail="Purge forward is only supported for Topic Chat sessions")
-
-        # Load the full session thread (including provider thread suffix variants) so purging
-        # removes assistant/tool chatter that belongs to the same turn.
-        query = select(LogEntry)
-        if DATABASE_URL.startswith("sqlite"):
-            query = query.where(
-                text(
-                    "(json_extract(source, '$.sessionKey') = :base_key OR json_extract(source, '$.sessionKey') LIKE :like_key)"
-                )
-            ).params(base_key=base_session_key, like_key=f"{base_session_key}|%")
-        else:
-            expr = LogEntry.source["sessionKey"].as_string()
-            query = query.where(or_(expr == base_session_key, expr.like(f"{base_session_key}|%")))
-
-        query = query.order_by(
-            LogEntry.createdAt.asc(),
-            (text("rowid ASC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.asc()),
+        # Purge within Topic Chat scope only: same topicId + taskId is NULL, from anchor onward.
+        query = (
+            select(LogEntry)
+            .where(LogEntry.topicId == topic_id, LogEntry.taskId.is_(None))
+            .order_by(
+                LogEntry.createdAt.asc(),
+                (text("rowid ASC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.asc()),
+            )
         )
-        all_logs = session.exec(query).all()
-        if not all_logs:
+        topic_chat_logs = session.exec(query).all()
+        if not topic_chat_logs:
             return {"ok": True, "deleted": False, "deletedCount": 0, "deletedIds": []}
 
         # Purge from the anchor's position forward.
-        start_idx = next((idx for idx, row in enumerate(all_logs) if row.id == anchor_id), -1)
+        start_idx = next((idx for idx, row in enumerate(topic_chat_logs) if row.id == anchor_id), -1)
         if start_idx < 0:
-            raise HTTPException(status_code=400, detail="Anchor log is not part of the session thread")
+            raise HTTPException(status_code=400, detail="Anchor log is not part of Topic Chat")
 
-        roots = all_logs[start_idx:]
+        roots = topic_chat_logs[start_idx:]
         root_ids = [row.id for row in roots]
 
         notes = session.exec(select(LogEntry).where(LogEntry.relatedLogId.in_(root_ids))).all() if root_ids else []

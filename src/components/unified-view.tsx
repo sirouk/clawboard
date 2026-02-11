@@ -11,6 +11,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import type { LogEntry, Task, Topic } from "@/lib/types";
 import { Button, Input, Select, StatusPill } from "@/components/ui";
 import { LogList } from "@/components/log-list";
@@ -45,6 +46,7 @@ const STATUS_LABELS: Record<string, string> = {
   done: "Done",
 };
 
+const TASK_STATUS_OPTIONS: Task["status"][] = ["todo", "doing", "blocked", "done"];
 const TASK_STATUS_FILTERS = ["all", "todo", "doing", "blocked", "done"] as const;
 type TaskStatusFilter = (typeof TASK_STATUS_FILTERS)[number];
 
@@ -253,7 +255,7 @@ function SwipeRevealRow({
   }, [rowId, setOpenId]);
 
   return (
-    <div className="relative overflow-hidden rounded-[var(--radius-lg)]">
+    <div className="relative overflow-x-hidden overflow-y-visible rounded-[var(--radius-lg)]">
       {showActions ? (
         <div
           className="absolute inset-0 flex items-stretch justify-end gap-1 bg-[rgba(10,12,16,0.18)] p-2 transition-opacity"
@@ -390,6 +392,7 @@ function SwipeRevealRow({
         }}
         className={cn(
           "relative will-change-transform",
+          swiping || isOpen ? "z-20" : "z-0",
           swiping ? "" : "transition-transform duration-200 ease-out"
         )}
         style={{ transform: `translate3d(-${effectiveOffset}px,0,0)`, touchAction: "pan-y" }}
@@ -579,8 +582,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   }, [unsnoozedTasksRaw]);
   const [expandedTopics, setExpandedTopics] = useState<Set<string>>(new Set(initialUrlState.topics));
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set(initialUrlState.tasks));
-  // Topic chat should feel "always there"; default to expanded for any expanded topic.
-  const [expandedTopicChats, setExpandedTopicChats] = useState<Set<string>>(new Set(initialUrlState.topics));
+  // Topic chat is independent: topics can expand without auto-opening chat.
+  const [expandedTopicChats, setExpandedTopicChats] = useState<Set<string>>(new Set());
   const [showRaw, setShowRaw] = useState(initialUrlState.raw);
   const [messageDensity, setMessageDensity] = useState<MessageDensity>(initialUrlState.density);
   const [search, setSearch] = useState(initialUrlState.search);
@@ -622,6 +625,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [moveTaskId, setMoveTaskId] = useState<string | null>(null);
   const [editingTopicId, setEditingTopicId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [statusMenuTaskId, setStatusMenuTaskId] = useState<string | null>(null);
+  const [statusMenuPosition, setStatusMenuPosition] = useState<{
+    top: number;
+    left: number;
+    openUp: boolean;
+  } | null>(null);
   const [topicNameDraft, setTopicNameDraft] = useState("");
   const [topicColorDraft, setTopicColorDraft] = useState("#FF8A4A");
   const [topicTagsDraft, setTopicTagsDraft] = useState("");
@@ -688,6 +697,71 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const taskAutosaveTimerRef = useRef<number | null>(null);
   const skipTopicAutosaveRef = useRef(false);
   const skipTaskAutosaveRef = useRef(false);
+
+  const positionStatusMenu = useCallback((taskId: string) => {
+    if (typeof window === "undefined") return;
+    const trigger = document.querySelector<HTMLElement>(`[data-testid='task-status-trigger-${taskId}']`);
+    if (!trigger) {
+      setStatusMenuTaskId(null);
+      setStatusMenuPosition(null);
+      return;
+    }
+
+    const rect = trigger.getBoundingClientRect();
+    const menuWidth = 170;
+    const rowHeight = 34;
+    const menuHeight = Math.max(48, (TASK_STATUS_OPTIONS.length - 1) * rowHeight + 12);
+    const gap = 8;
+    const viewportPadding = 8;
+
+    const openUp = window.innerHeight - rect.bottom < menuHeight + gap + viewportPadding && rect.top > menuHeight + gap;
+    const top = openUp ? rect.top - gap : rect.bottom + gap;
+    const left = clamp(rect.right - menuWidth, viewportPadding, window.innerWidth - menuWidth - viewportPadding);
+
+    setStatusMenuPosition({ top, left, openUp });
+  }, []);
+
+  const openStatusMenu = useCallback(
+    (taskId: string) => {
+      setStatusMenuTaskId(taskId);
+      positionStatusMenu(taskId);
+    },
+    [positionStatusMenu]
+  );
+
+  useEffect(() => {
+    if (!statusMenuTaskId) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-task-status-menu]")) return;
+      setStatusMenuTaskId(null);
+      setStatusMenuPosition(null);
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setStatusMenuTaskId(null);
+        setStatusMenuPosition(null);
+      }
+    };
+
+    const onReposition = () => {
+      if (!statusMenuTaskId) return;
+      positionStatusMenu(statusMenuTaskId);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", onReposition);
+    window.addEventListener("scroll", onReposition, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", onReposition);
+      window.removeEventListener("scroll", onReposition, true);
+    };
+  }, [positionStatusMenu, statusMenuTaskId]);
   const recentBoardSendAtRef = useRef<Map<string, number>>(new Map());
 
   const scheduleScrollChatToBottom = useCallback(
@@ -1089,6 +1163,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return new Set([...expandedTopicChats].filter((id) => topicIds.has(id)));
   }, [expandedTopicChats, topics]);
 
+  // Keep topic chat strictly coupled to topic expansion: if a topic is collapsed
+  // by any code path, its chat must collapse too.
+  useEffect(() => {
+    setExpandedTopicChats((prev) => {
+      const allowed = new Set(expandedTopicsSafe);
+      const next = new Set(Array.from(prev).filter((id) => allowed.has(id)));
+      if (next.size === prev.size) return prev;
+      return next;
+    });
+  }, [expandedTopicsSafe]);
+
   const tasksByTopic = useMemo(() => {
     const map = new Map<string, Task[]>();
     for (const task of tasks) {
@@ -1181,7 +1266,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const normalizedSearch = search.trim().toLowerCase();
   const topicReorderEnabled = !readOnly && normalizedSearch.length === 0 && statusFilter === "all";
-  const taskReorderEnabled = topicReorderEnabled && showDone;
+  const taskReorderEnabled = topicReorderEnabled;
 
   const chatKeyFromSessionKey = useCallback((sessionKey: string) => {
     const key = (sessionKey ?? "").trim();
@@ -2379,46 +2464,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
   };
 
-  const purgeTopicChat = async (topic: Topic) => {
-    const deleteKey = `topic-chat:${topic.id}`;
-    if (readOnly) return;
-    if (topic.id === "unassigned") return;
 
-    const proceed = window.confirm(
-      `Purge Topic Chat for "${topic.name}"? This will permanently delete all topic-scoped chat entries (not task chats).`
-    );
-    if (!proceed) return;
-
-    const proceedAgain = window.confirm("This cannot be undone. Click OK to permanently purge the Topic Chat.");
-    if (!proceedAgain) return;
-
-    setDeleteInFlightKey(deleteKey);
-    setRenameError(deleteKey);
-    try {
-      const res = await apiFetch(`/api/topics/${encodeURIComponent(topic.id)}/topic_chat/purge`, { method: "POST" }, token);
-      if (!res.ok) {
-        setRenameError(deleteKey, "Failed to purge topic chat.");
-        return;
-      }
-
-      // Optimistically clear local state; SSE will reconcile as well.
-      const updatedAt = new Date().toISOString();
-      setLogs((prev) => prev.filter((item) => !(item.topicId === topic.id && !item.taskId)));
-      setPendingMessages((prev) => prev.filter((item) => item.sessionKey !== topicSessionKey(topic.id)));
-      setAwaitingAssistant((prev) => {
-        if (!Object.prototype.hasOwnProperty.call(prev, topicSessionKey(topic.id))) return prev;
-        const next = { ...prev };
-        delete next[topicSessionKey(topic.id)];
-        return next;
-      });
-      // Nudge topic updatedAt so it stays "fresh" in the UI.
-      setTopics((prev) => prev.map((row) => (row.id === topic.id ? { ...row, updatedAt } : row)));
-
-      setRenameError(deleteKey);
-    } finally {
-      setDeleteInFlightKey(null);
-    }
-  };
 
   const deleteTask = async (task: Task) => {
     const deleteKey = `task:${task.id}`;
@@ -2469,17 +2515,22 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const toggleTopicExpanded = (topicId: string) => {
     const next = new Set(expandedTopicsSafe);
     const nextChats = new Set(expandedTopicChatsSafe);
+    let nextTasks = new Set(expandedTasksSafe);
     if (next.has(topicId)) {
       next.delete(topicId);
       nextChats.delete(topicId);
+      // Auto-collapse child tasks when parent topic collapses.
+      const topicTaskIds = new Set((tasksByTopic.get(topicId) ?? []).map((task) => task.id));
+      if (topicTaskIds.size > 0) {
+        nextTasks = new Set(Array.from(nextTasks).filter((id) => !topicTaskIds.has(id)));
+      }
     } else {
       next.add(topicId);
-      nextChats.add(topicId);
-      scheduleScrollChatToBottom(`topic:${topicId}`);
     }
     setExpandedTopics(next);
     setExpandedTopicChats(nextChats);
-    pushUrl({ topics: Array.from(next) });
+    setExpandedTasks(nextTasks);
+    pushUrl({ topics: Array.from(next), tasks: Array.from(nextTasks) });
   };
 
   const toggleTaskExpanded = (taskId: string) => {
@@ -2667,8 +2718,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setPage(Number.isNaN(nextPage) ? 1 : nextPage);
     setExpandedTopics(new Set(nextTopics));
     setExpandedTasks(new Set(nextTasks));
-    // Topic chat is expanded by default for any expanded topic.
-    setExpandedTopicChats(new Set(nextTopics));
+    // Do not auto-open topic chat from topic expansion/url sync.
+    // Keep only chats that were already open and still belong to expanded topics.
+    setExpandedTopicChats((prev) => {
+      const allowed = new Set(nextTopics);
+      return new Set(Array.from(prev).filter((id) => allowed.has(id)));
+    });
     if (params.get("focus") === "1" && params.get("chat") === "1" && nextTasks.length === 0 && nextTopics.length > 0) {
       // When entering via left nav, take the user straight to the topic chat composer.
       setAutoFocusTopicId(nextTopics[0] ?? null);
@@ -3796,8 +3851,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                        <div
                               data-task-card-id={task.id}
 		                          className={cn(
-		                            "rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300",
-		                            draggingTaskId && taskDropTargetId === task.id ? "border-[rgba(77,171,158,0.55)]" : ""
+		                            "relative rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300",
+		                            draggingTaskId && taskDropTargetId === task.id ? "border-[rgba(77,171,158,0.55)]" : "",
+                                statusMenuTaskId === task.id ? "z-40" : ""
 		                          )}
 		                          style={taskGlowStyle(taskColor, taskIndex, taskExpanded)}
 		                        >
@@ -3867,7 +3923,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                                    ? "Read-only mode. Add token in Setup to reorder."
 		                                    : taskReorderEnabled
 		                                      ? "Drag to reorder tasks"
-		                                      : "Clear search, set Status=All, and show done tasks to reorder"
+		                                      : "Clear search and set Status=All to reorder"
 		                                }
 		                                disabled={readOnly || !taskReorderEnabled}
 		                                draggable={!readOnly && taskReorderEnabled}
@@ -4162,12 +4218,116 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                            </div>
 	                          </div>
 	                          <div className="flex items-center gap-2">
-	                            <StatusPill tone={STATUS_TONE[task.status]} label={STATUS_LABELS[task.status] ?? task.status} />
 	                            {isSessionResponding(taskSessionKey(topicId, task.id)) ? (
 	                              <span title="OpenClaw responding" className="inline-flex items-center">
 	                                <TypingDots />
 	                              </span>
 	                            ) : null}
+                              <div className="relative" data-task-status-menu>
+                                <button
+                                  type="button"
+                                  data-testid={`task-status-trigger-${task.id}`}
+                                  disabled={readOnly}
+                                  aria-haspopup="menu"
+                                  aria-expanded={statusMenuTaskId === task.id}
+                                  title={readOnly ? "Read only" : "Change status"}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    if (readOnly) return;
+                                    if (statusMenuTaskId === task.id) {
+                                      setStatusMenuTaskId(null);
+                                      setStatusMenuPosition(null);
+                                      return;
+                                    }
+                                    openStatusMenu(task.id);
+                                  }}
+                                  onKeyDown={(event) => {
+                                    if (readOnly) return;
+                                    if (event.key !== "ArrowDown" && event.key !== "Enter" && event.key !== " ") return;
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    openStatusMenu(task.id);
+                                    window.requestAnimationFrame(() => {
+                                      const first = document.querySelector<HTMLElement>(
+                                        `[data-testid='task-status-option-${task.id}-0']`
+                                      );
+                                      first?.focus();
+                                    });
+                                  }}
+                                  className={cn(
+                                    "inline-flex items-center gap-2 rounded-full border border-transparent px-1 py-0.5 transition",
+                                    readOnly
+                                      ? "cursor-not-allowed opacity-70"
+                                      : "hover:border-[rgba(148,163,184,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(77,171,158,0.35)]"
+                                  )}
+                                >
+                                  <StatusPill tone={STATUS_TONE[task.status]} label={STATUS_LABELS[task.status] ?? task.status} />
+                                  {!readOnly ? (
+                                    <span className="text-xs text-[rgb(var(--claw-muted))]">▾</span>
+                                  ) : null}
+                                </button>
+                                {statusMenuTaskId === task.id && !readOnly && statusMenuPosition && typeof document !== "undefined"
+                                  ? createPortal(
+                                      <div
+                                        role="menu"
+                                        data-task-status-menu
+                                        data-testid={`task-status-menu-${task.id}`}
+                                        className="fixed z-[1200] min-w-[170px] rounded-xl border border-[rgba(148,163,184,0.28)] bg-[rgba(16,19,24,0.96)] p-1.5 shadow-[0_14px_35px_rgba(0,0,0,0.4)] backdrop-blur"
+                                        style={{
+                                          top: statusMenuPosition.top,
+                                          left: statusMenuPosition.left,
+                                          transform: statusMenuPosition.openUp ? "translateY(-100%)" : undefined,
+                                        }}
+                                        onClick={(event) => event.stopPropagation()}
+                                      >
+                                        {TASK_STATUS_OPTIONS.filter((status) => status !== task.status).map((status, index, all) => (
+                                          <button
+                                            key={status}
+                                            type="button"
+                                            role="menuitem"
+                                            data-testid={`task-status-option-${task.id}-${index}`}
+                                            onClick={() => {
+                                              setStatusMenuTaskId(null);
+                                              setStatusMenuPosition(null);
+                                              void updateTask(task.id, { status });
+                                            }}
+                                            onKeyDown={(event) => {
+                                              if (event.key === "Escape") {
+                                                event.preventDefault();
+                                                setStatusMenuTaskId(null);
+                                                setStatusMenuPosition(null);
+                                                const trigger = document.querySelector<HTMLElement>(
+                                                  `[data-testid='task-status-trigger-${task.id}']`
+                                                );
+                                                trigger?.focus();
+                                                return;
+                                              }
+                                              if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
+                                              event.preventDefault();
+                                              const nextIndex =
+                                                event.key === "Home"
+                                                  ? 0
+                                                  : event.key === "End"
+                                                    ? all.length - 1
+                                                    : event.key === "ArrowDown"
+                                                      ? (index + 1) % all.length
+                                                      : (index - 1 + all.length) % all.length;
+                                              const next = document.querySelector<HTMLElement>(
+                                                `[data-testid='task-status-option-${task.id}-${nextIndex}']`
+                                              );
+                                              next?.focus();
+                                            }}
+                                            className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs text-[rgb(var(--claw-text))] transition hover:bg-[rgba(77,171,158,0.15)] focus-visible:bg-[rgba(77,171,158,0.15)] focus-visible:outline-none"
+                                          >
+                                            <span>{STATUS_LABELS[status] ?? status}</span>
+                                            <span className="h-1.5 w-1.5 rounded-full bg-[rgb(var(--claw-muted))]" />
+                                          </button>
+                                        ))}
+                                      </div>,
+                                      document.body
+                                    )
+                                  : null}
+                              </div>
 	                            <button
 	                              type="button"
 	                              aria-label={taskExpanded ? `Collapse task ${task.title}` : `Expand task ${task.title}`}
@@ -4540,26 +4700,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 				                              Load older
 				                            </Button>
 				                          ) : null}
-				                          <Button
-                            size="sm"
-                            variant="secondary"
-                            disabled={readOnly || topicChatAllLogs.length === 0}
-                            className={cn(
-                              "border-[rgba(255,90,45,0.28)] text-[rgba(255,90,45,0.92)] hover:bg-[rgba(255,90,45,0.08)]",
-                              deleteInFlightKey === `topic-chat:${topicId}` ? "opacity-60" : ""
-                            )}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              event.preventDefault();
-                              const topicRow = topics.find((row) => row.id === topicId);
-                              if (!topicRow) return;
-                              void purgeTopicChat(topicRow);
-                            }}
-                            title={topicChatAllLogs.length === 0 ? "No topic chat entries to purge." : "Purge Topic Chat"}
-                          >
-                            Purge
-                          </Button>
-                          <span className="text-xs text-[rgb(var(--claw-muted))]">{topicChatAllLogs.length} entries</span>
+								  <span className="text-xs text-[rgb(var(--claw-muted))]">{topicChatAllLogs.length} entries</span>
 				                        </div>
 			                          {topicChatAllLogs.length === 0 &&
                               !pendingMessages.some((pending) => pending.sessionKey === topicSessionKey(topicId)) &&

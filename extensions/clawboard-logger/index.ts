@@ -69,6 +69,28 @@ type PluginHookMessageContext = PluginHookContextBase;
 type PluginHookToolContext = PluginHookContextBase;
 type PluginHookAgentContext = PluginHookContextBase;
 
+type BoardScope = {
+  topicId: string;
+  taskId?: string;
+  kind: "topic" | "task";
+  sessionKey: string;
+  inherited: boolean;
+  updatedAt: number;
+};
+
+type RoutingScope = {
+  topicId?: string;
+  taskId?: string;
+  boardScope?: BoardScope;
+};
+
+type ActorFlow = {
+  speakerId?: string;
+  speakerLabel?: string;
+  audienceId?: string;
+  audienceLabel?: string;
+};
+
 type ClawboardLoggerConfig = {
   baseUrl: string;
   token?: string;
@@ -124,6 +146,7 @@ const DEFAULT_CONTEXT_LOG_LIMIT = 6;
 const CLAWBOARD_CONTEXT_BEGIN = "[CLAWBOARD_CONTEXT_BEGIN]";
 const CLAWBOARD_CONTEXT_END = "[CLAWBOARD_CONTEXT_END]";
 const IGNORE_SESSION_PREFIXES = getIgnoreSessionPrefixesFromEnv(process.env);
+const BOARD_SCOPE_TTL_MS = 15 * 60_000;
 
 function normalizeBaseUrl(url: string) {
   return url.replace(/\/$/, "");
@@ -580,6 +603,224 @@ export default function register(api: OpenClawPluginApi) {
     const resolved = fromCtx ?? fromSession;
     if (!resolved || resolved === "main") return "OpenClaw";
     return `Agent ${resolved}`;
+  }
+
+  const boardScopeBySession = new Map<string, BoardScope>();
+  const boardScopeByAgent = new Map<string, BoardScope>();
+
+  function normalizeId(value: string | undefined | null) {
+    const text = typeof value === "string" ? value.trim() : "";
+    return text || undefined;
+  }
+
+  function shortId(value: string, length = 8) {
+    const clean = value.replace(/[^a-zA-Z0-9]+/g, "");
+    return clean.slice(0, length) || value.slice(0, length);
+  }
+
+  function parseSubagentSession(sessionKey: string | undefined | null) {
+    const key = normalizeId(sessionKey);
+    if (!key || !key.startsWith("agent:")) return null;
+    const parts = key.split(":");
+    if (parts.length < 4) return null;
+    const ownerAgentId = normalizeId(parts[1]);
+    const subagentIdx = parts.indexOf("subagent");
+    if (!ownerAgentId || subagentIdx < 0 || subagentIdx + 1 >= parts.length) return null;
+    const subagentId = normalizeId(parts[subagentIdx + 1]);
+    if (!subagentId) return null;
+    return { ownerAgentId, subagentId };
+  }
+
+  function boardScopeFromSessionKey(sessionKey: string | undefined | null): BoardScope | undefined {
+    const key = normalizeId(sessionKey);
+    if (!key) return undefined;
+    const route = parseBoardSessionKey(key);
+    if (!route) return undefined;
+    if (route.kind === "task") {
+      return {
+        topicId: route.topicId,
+        taskId: route.taskId,
+        kind: "task",
+        sessionKey: key,
+        inherited: false,
+        updatedAt: nowMs(),
+      };
+    }
+    return {
+      topicId: route.topicId,
+      kind: "topic",
+      sessionKey: key,
+      inherited: false,
+      updatedAt: nowMs(),
+    };
+  }
+
+  function isFreshBoardScope(scope: BoardScope | undefined, now = nowMs()) {
+    return Boolean(scope && now - scope.updatedAt <= BOARD_SCOPE_TTL_MS);
+  }
+
+  function rememberBoardScope(
+    scope: BoardScope,
+    opts?: {
+      sessionKeys?: Array<string | undefined>;
+      agentIds?: Array<string | undefined>;
+    },
+  ) {
+    const stamped: BoardScope = { ...scope, updatedAt: nowMs() };
+    const sessionKeys = opts?.sessionKeys ?? [];
+    for (const rawKey of sessionKeys) {
+      const key = normalizeId(rawKey);
+      if (!key) continue;
+      boardScopeBySession.set(key, stamped);
+    }
+    const agentIds = opts?.agentIds ?? [];
+    for (const rawAgentId of agentIds) {
+      const agentId = normalizeId(rawAgentId);
+      if (!agentId) continue;
+      boardScopeByAgent.set(agentId, stamped);
+    }
+  }
+
+  function deriveConversationFlow(params: {
+    role: "user" | "assistant";
+    sessionKey?: string;
+    agentId?: string;
+    assistantLabel?: string;
+  }): ActorFlow {
+    const sessionKey = normalizeId(params.sessionKey);
+    const subagent = parseSubagentSession(sessionKey);
+    if (subagent) {
+      const ownerId = subagent.ownerAgentId;
+      const ownerLabel = resolveAgentLabel(ownerId, `agent:${ownerId}`);
+      const subagentSpeakerId = `subagent:${subagent.subagentId}`;
+      const subagentLabel = `Subagent ${shortId(subagent.subagentId)}`;
+      if (params.role === "user") {
+        return {
+          speakerId: ownerId,
+          speakerLabel: ownerLabel,
+          audienceId: subagentSpeakerId,
+          audienceLabel: subagentLabel,
+        };
+      }
+      return {
+        speakerId: subagentSpeakerId,
+        speakerLabel: subagentLabel,
+        audienceId: ownerId,
+        audienceLabel: ownerLabel,
+      };
+    }
+
+    const assistantId = normalizeId(params.agentId) ?? "assistant";
+    const assistantLabel = normalizeId(params.assistantLabel) ?? resolveAgentLabel(assistantId, sessionKey);
+    if (params.role === "user") {
+      return {
+        speakerId: "user",
+        speakerLabel: "User",
+        audienceId: assistantId,
+        audienceLabel: assistantLabel,
+      };
+    }
+    return {
+      speakerId: assistantId,
+      speakerLabel: assistantLabel,
+      audienceId: "user",
+      audienceLabel: "User",
+    };
+  }
+
+  function buildSourceMeta(params: {
+    channel?: string;
+    sessionKey?: string;
+    messageId?: string;
+    boardScope?: BoardScope;
+    flow?: ActorFlow;
+  }) {
+    const source: Record<string, unknown> = {};
+    if (params.channel !== undefined) source.channel = params.channel;
+    const sessionKey = normalizeId(params.sessionKey);
+    if (sessionKey) source.sessionKey = sessionKey;
+    const messageId = normalizeId(params.messageId);
+    if (messageId) source.messageId = messageId;
+
+    const boardScope = params.boardScope;
+    if (boardScope?.topicId) {
+      source.boardScopeTopicId = boardScope.topicId;
+      source.boardScopeKind = boardScope.kind;
+      source.boardScopeSessionKey = boardScope.sessionKey;
+      source.boardScopeInherited = Boolean(boardScope.inherited);
+      source.boardScopeLock = true;
+      if (boardScope.kind === "task" && boardScope.taskId) {
+        source.boardScopeTaskId = boardScope.taskId;
+      }
+    }
+
+    const flow = params.flow;
+    if (flow) {
+      if (flow.speakerId) source.speakerId = flow.speakerId;
+      if (flow.speakerLabel) source.speakerLabel = flow.speakerLabel;
+      if (flow.audienceId) source.audienceId = flow.audienceId;
+      if (flow.audienceLabel) source.audienceLabel = flow.audienceLabel;
+    }
+    return source;
+  }
+
+  async function resolveRoutingScope(
+    effectiveSessionKey: string | undefined,
+    ctx2: PluginHookContextBase,
+    meta?: Record<string, unknown> | undefined,
+  ): Promise<RoutingScope> {
+    const normalizedSessionKey = normalizeId(effectiveSessionKey);
+    const ctxSessionKey = normalizeId(ctx2.sessionKey);
+    const metaSessionKey = typeof meta?.sessionKey === "string" ? normalizeId(meta.sessionKey) : undefined;
+    const conversationKey = normalizeId(ctx2.conversationId);
+    const sessionCandidates = [normalizedSessionKey, ctxSessionKey, metaSessionKey, conversationKey];
+
+    // Direct board scope from any supplied session key always wins.
+    for (const candidate of sessionCandidates) {
+      const direct = boardScopeFromSessionKey(candidate);
+      if (!direct) continue;
+      const sub = parseSubagentSession(normalizedSessionKey ?? ctxSessionKey);
+      rememberBoardScope(direct, {
+        sessionKeys: sessionCandidates,
+        agentIds: [normalizeId(ctx2.agentId), sub?.ownerAgentId],
+      });
+      return {
+        topicId: direct.topicId,
+        taskId: direct.kind === "task" ? direct.taskId : undefined,
+        boardScope: direct,
+      };
+    }
+
+    // Subagent sessions inherit from the owning agent's most-recent board scope.
+    const subagent = parseSubagentSession(normalizedSessionKey ?? ctxSessionKey);
+    if (subagent) {
+      const now = nowMs();
+      const exact = sessionCandidates
+        .map((candidate) => (candidate ? boardScopeBySession.get(candidate) : undefined))
+        .find((scope) => isFreshBoardScope(scope, now));
+      const inherited = exact ?? boardScopeByAgent.get(subagent.ownerAgentId);
+      if (isFreshBoardScope(inherited, now)) {
+        const nextScope: BoardScope = {
+          ...(inherited as BoardScope),
+          inherited: true,
+          updatedAt: now,
+        };
+        rememberBoardScope(nextScope, {
+          sessionKeys: sessionCandidates,
+          agentIds: [subagent.ownerAgentId, normalizeId(ctx2.agentId)],
+        });
+        return {
+          topicId: nextScope.topicId,
+          taskId: nextScope.kind === "task" ? nextScope.taskId : undefined,
+          boardScope: nextScope,
+        };
+      }
+    }
+
+    return {
+      topicId: await resolveTopicId(normalizedSessionKey),
+      taskId: resolveTaskId(normalizedSessionKey),
+    };
   }
 
   // When Clawboard isn't reachable (common during local dev restarts and during purge),
@@ -1631,16 +1872,21 @@ export default function register(api: OpenClawPluginApi) {
     return computeEffectiveSessionKey(metaObj, ctx2);
   };
 
-  api.on("message_received", async (event: PluginHookMessageReceivedEvent, ctx: PluginHookMessageContext) => {
-    const createdAt = new Date().toISOString();
-    const raw = event.content ?? "";
-    const cleanRaw = sanitizeMessageContent(raw);
-    if (isClassifierPayloadText(cleanRaw)) return;
-    if (!cleanRaw) return;
+	  api.on("message_received", async (event: PluginHookMessageReceivedEvent, ctx: PluginHookMessageContext) => {
+	    const createdAt = new Date().toISOString();
+	    const raw = event.content ?? "";
+	    const cleanRaw = sanitizeMessageContent(raw);
+	    if (isClassifierPayloadText(cleanRaw)) return;
+	    if (!cleanRaw) return;
 	    const meta = (event.metadata as Record<string, unknown> | undefined) ?? undefined;
 	    const effectiveSessionKey = resolveSessionKey(meta as { sessionKey?: string } | undefined, ctx);
 	    if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
-	    if (parseBoardSessionKey(effectiveSessionKey ?? ctx?.sessionKey)) {
+	    const directBoardScope = boardScopeFromSessionKey(effectiveSessionKey ?? ctx?.sessionKey);
+	    if (directBoardScope) {
+	      rememberBoardScope(directBoardScope, {
+	        sessionKeys: [effectiveSessionKey, ctx.sessionKey],
+	        agentIds: [ctx.agentId, parseSubagentSession(ctx.sessionKey)?.ownerAgentId],
+	      });
 	      // Clawboard UI messages (board sessions) are already persisted immediately by the backend
 	      // (`/api/openclaw/chat`). Avoid double-logging if OpenClaw emits message_received for them.
 	      return;
@@ -1648,21 +1894,22 @@ export default function register(api: OpenClawPluginApi) {
 	    lastChannelId = ctx.channelId;
 	    lastEffectiveSessionKey = effectiveSessionKey;
 	    lastMessageAt = Date.now();
-    const ctxSessionKey = (ctx as unknown as { sessionKey?: string })?.sessionKey ?? (meta?.sessionKey as string | undefined);
-    if (ctxSessionKey) {
-      inboundBySession.set(ctxSessionKey, {
-        ts: lastMessageAt,
-        channelId: ctx.channelId,
-        sessionKey: effectiveSessionKey,
-      });
-    }
-    const topicId = await resolveTopicId(effectiveSessionKey);
-    const taskId = resolveTaskId(effectiveSessionKey);
+	    const ctxSessionKey = (ctx as unknown as { sessionKey?: string })?.sessionKey ?? (meta?.sessionKey as string | undefined);
+	    if (ctxSessionKey) {
+	      inboundBySession.set(ctxSessionKey, {
+	        ts: lastMessageAt,
+	        channelId: ctx.channelId,
+	        sessionKey: effectiveSessionKey,
+	      });
+	    }
+	    const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
+	    const topicId = routing.topicId;
+	    const taskId = routing.taskId;
 
-    const metaSummary = meta?.summary;
-    const summary =
-      typeof metaSummary === "string" && metaSummary.trim().length > 0 ? summarize(metaSummary) : summarize(cleanRaw);
-    const messageId = typeof meta?.messageId === "string" ? meta.messageId : undefined;
+	    const metaSummary = meta?.summary;
+	    const summary =
+	      typeof metaSummary === "string" && metaSummary.trim().length > 0 ? summarize(metaSummary) : summarize(cleanRaw);
+	    const messageId = typeof meta?.messageId === "string" ? meta.messageId : undefined;
     const incomingKey = messageId
       ? `received:${ctx.channelId ?? "nochannel"}:${effectiveSessionKey ?? ""}:${messageId}`
       : null;
@@ -1675,16 +1922,23 @@ export default function register(api: OpenClawPluginApi) {
       type: "conversation",
       content: cleanRaw,
       summary,
-      raw: truncateRaw(cleanRaw),
-      createdAt,
-      agentId: "user",
-      agentLabel: "User",
-      source: {
-        channel: ctx.channelId,
-        sessionKey: effectiveSessionKey,
-        messageId,
-      },
-    });
+	      raw: truncateRaw(cleanRaw),
+	      createdAt,
+	      agentId: "user",
+	      agentLabel: "User",
+	      source: buildSourceMeta({
+	        channel: ctx.channelId,
+	        sessionKey: effectiveSessionKey,
+	        messageId,
+	        boardScope: routing.boardScope,
+	        flow: deriveConversationFlow({
+	          role: "user",
+	          sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+	          agentId: ctx.agentId,
+	          assistantLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey),
+	        }),
+	      }),
+	    });
 
     // Intentionally allow topicId to be null/undefined. Stage-2 classifier
     // will attach this log to a real topic based on conversation context.
@@ -1721,8 +1975,9 @@ export default function register(api: OpenClawPluginApi) {
     const meta = sendEvent.metadata ?? undefined;
     const effectiveSessionKey = resolveSessionKey(meta as { sessionKey?: string } | undefined, ctx);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
-    const topicId = await resolveTopicId(effectiveSessionKey);
-    const taskId = resolveTaskId(effectiveSessionKey);
+    const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
+    const topicId = routing.topicId;
+    const taskId = routing.taskId;
 
     // Outbound message content is always assistant-side.
     const agentId = "assistant";
@@ -1749,11 +2004,18 @@ export default function register(api: OpenClawPluginApi) {
       createdAt,
       agentId,
       agentLabel,
-      source: {
+      source: buildSourceMeta({
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
         messageId,
-      },
+        boardScope: routing.boardScope,
+        flow: deriveConversationFlow({
+          role: "assistant",
+          sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+          agentId: ctx.agentId,
+          assistantLabel: agentLabel,
+        }),
+      }),
     });
   });
 
@@ -1774,8 +2036,9 @@ export default function register(api: OpenClawPluginApi) {
     const redacted = redact(event.params);
     const effectiveSessionKey = resolveSessionKey(undefined, ctx);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
-    const topicId = await resolveTopicId(effectiveSessionKey);
-    const taskId = resolveTaskId(effectiveSessionKey);
+    const routing = await resolveRoutingScope(effectiveSessionKey, ctx);
+    const topicId = routing.topicId;
+    const taskId = routing.taskId;
 
     sendAsync({
       topicId,
@@ -1787,10 +2050,11 @@ export default function register(api: OpenClawPluginApi) {
       createdAt,
       agentId: ctx.agentId,
       agentLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey),
-      source: {
+      source: buildSourceMeta({
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
-      },
+        boardScope: routing.boardScope,
+      }),
     });
   });
 
@@ -1802,8 +2066,9 @@ export default function register(api: OpenClawPluginApi) {
 
     const effectiveSessionKey = resolveSessionKey(undefined, ctx);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
-    const topicId = await resolveTopicId(effectiveSessionKey);
-    const taskId = resolveTaskId(effectiveSessionKey);
+    const routing = await resolveRoutingScope(effectiveSessionKey, ctx);
+    const topicId = routing.topicId;
+    const taskId = routing.taskId;
 
     sendAsync({
       topicId,
@@ -1815,10 +2080,11 @@ export default function register(api: OpenClawPluginApi) {
       createdAt,
       agentId: ctx.agentId,
       agentLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey),
-      source: {
+      source: buildSourceMeta({
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
-      },
+        boardScope: routing.boardScope,
+      }),
     });
   });
 
@@ -1888,8 +2154,9 @@ export default function register(api: OpenClawPluginApi) {
       (typeof ctx.provider === "string" ? ctx.provider : undefined) ??
       "direct";
 
-    const topicId = await resolveTopicId(inferredSessionKey);
-    const taskId = resolveTaskId(inferredSessionKey);
+    const routing = await resolveRoutingScope(inferredSessionKey, { ...ctx, channelId: inferredChannelId ?? ctx.channelId });
+    const topicId = routing.topicId;
+    const taskId = routing.taskId;
 
     // agent_end is always this agent's run: treat assistant-role messages as assistant output.
     const agentId = "assistant";
@@ -1913,7 +2180,11 @@ export default function register(api: OpenClawPluginApi) {
           createdAt,
           agentId: "system",
           agentLabel: "Clawboard Logger",
-          source: { channel: inferredChannelId, sessionKey: inferredSessionKey },
+          source: buildSourceMeta({
+            channel: inferredChannelId,
+            sessionKey: inferredSessionKey,
+            boardScope: routing.boardScope,
+          }),
         });
       } catch {
         // ignore
@@ -2002,11 +2273,18 @@ export default function register(api: OpenClawPluginApi) {
             createdAt: messageCreatedAt,
             agentId,
             agentLabel,
-            source: {
+            source: buildSourceMeta({
               channel: sourceChannel,
               sessionKey: inferredSessionKey,
               messageId,
-            },
+              boardScope: routing.boardScope,
+              flow: deriveConversationFlow({
+                role: "assistant",
+                sessionKey: inferredSessionKey,
+                agentId: ctx.agentId,
+                assistantLabel: agentLabel,
+              }),
+            }),
           });
         } else {
           const dedupeKey = `received:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${messageId}`;
@@ -2024,11 +2302,18 @@ export default function register(api: OpenClawPluginApi) {
             createdAt: messageCreatedAt,
             agentId: "user",
             agentLabel: "User",
-            source: {
+            source: buildSourceMeta({
               channel: sourceChannel,
               sessionKey: inferredSessionKey,
               messageId,
-            },
+              boardScope: routing.boardScope,
+              flow: deriveConversationFlow({
+                role: "user",
+                sessionKey: inferredSessionKey,
+                agentId: ctx.agentId,
+                assistantLabel: agentLabel,
+              }),
+            }),
           });
         }
       }
@@ -2049,10 +2334,11 @@ export default function register(api: OpenClawPluginApi) {
         createdAt,
         agentId: ctx.agentId,
         agentLabel: ctx.agentId ? `Agent ${ctx.agentId}` : "Agent",
-        source: {
+        source: buildSourceMeta({
           channel: inferredChannelId,
           sessionKey: inferredSessionKey,
-        },
+          boardScope: routing.boardScope,
+        }),
       });
     }
   });

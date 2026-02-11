@@ -24,6 +24,7 @@ test("shouldIgnoreSessionKey ignores classifier internal sessions by default", (
   assert.equal(shouldIgnoreSessionKey("internal:clawboard-classifier:classifier:123"), true);
   assert.equal(shouldIgnoreSessionKey("agent:main:internal:clawboard-classifier:classifier:123"), true);
   assert.equal(shouldIgnoreSessionKey("AGENT:MAIN:INTERNAL:CLAWBOARD-CLASSIFIER:CLASSIFIER:123"), true);
+  assert.equal(shouldIgnoreSessionKey("agent:main:cron:7a06627e-5fac-45af-9765-14d1f6e19708"), true);
 });
 
 test("shouldIgnoreSessionKey supports custom prefixes", () => {
@@ -31,4 +32,3 @@ test("shouldIgnoreSessionKey supports custom prefixes", () => {
   assert.equal(shouldIgnoreSessionKey("agent:main:internal:foo:bar", ["internal:foo:"]), true);
   assert.equal(shouldIgnoreSessionKey("internal:foo:bar", ["internal:bar:"]), false);
 });
-

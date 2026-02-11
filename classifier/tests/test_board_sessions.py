@@ -140,6 +140,68 @@ class BoardSessionClassificationTests(unittest.TestCase):
             self.assertEqual(payload.get("topicId"), "topic-abc")
             self.assertEqual(payload.get("taskId"), "task-xyz")
 
+    def test_subagent_session_with_existing_task_scope_stays_pinned(self):
+        session_key = "agent:main:subagent:abc-123"
+        logs = [
+            {
+                "id": "log-prev",
+                "type": "conversation",
+                "agentId": "assistant",
+                "content": "Prior scoped response.",
+                "classificationStatus": "classified",
+                "classificationAttempts": 1,
+                "topicId": "topic-abc",
+                "taskId": "task-xyz",
+                "createdAt": "2026-02-11T03:19:19.000Z",
+                "source": {"sessionKey": session_key},
+            },
+            {
+                "id": "log-1",
+                "type": "conversation",
+                "agentId": "user",
+                "content": "Give me your current best summary now.",
+                "classificationStatus": "pending",
+                "classificationAttempts": 0,
+                "createdAt": "2026-02-11T03:19:46.000Z",
+                "source": {"sessionKey": session_key},
+            },
+            {
+                "id": "log-2",
+                "type": "conversation",
+                "agentId": "assistant",
+                "content": "Here is my summary.",
+                "classificationStatus": "pending",
+                "classificationAttempts": 0,
+                "createdAt": "2026-02-11T03:19:46.100Z",
+                "source": {"sessionKey": session_key},
+            },
+        ]
+
+        patched: list[tuple[str, dict]] = []
+
+        def fake_list_logs_by_session(_sk: str, **kwargs):
+            self.assertEqual(_sk, session_key)
+            if kwargs.get("classificationStatus") == "pending":
+                return [item for item in logs if item.get("classificationStatus") == "pending"]
+            return logs
+
+        def fake_patch_log(log_id: str, patch: dict):
+            patched.append((log_id, patch))
+
+        with (
+            patch.object(c, "list_logs_by_session", side_effect=fake_list_logs_by_session),
+            patch.object(c, "patch_log", side_effect=fake_patch_log),
+        ):
+            c.classify_session(session_key)
+
+        by_id = {lid: payload for lid, payload in patched}
+        self.assertIn("log-1", by_id)
+        self.assertIn("log-2", by_id)
+        self.assertEqual(by_id["log-1"].get("topicId"), "topic-abc")
+        self.assertEqual(by_id["log-1"].get("taskId"), "task-xyz")
+        self.assertEqual(by_id["log-2"].get("topicId"), "topic-abc")
+        self.assertEqual(by_id["log-2"].get("taskId"), "task-xyz")
+
 
 if __name__ == "__main__":
     unittest.main()

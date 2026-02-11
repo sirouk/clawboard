@@ -427,6 +427,217 @@ export default function register(api) {
     return `Agent ${resolved}`;
   }
 
+  const boardScopeBySession = new Map();
+  const boardScopeByAgent = new Map();
+
+  function normalizeId(value) {
+    const text = typeof value === "string" ? value.trim() : "";
+    return text || void 0;
+  }
+
+  function shortId(value, length = 8) {
+    const clean = String(value).replace(/[^a-zA-Z0-9]+/g, "");
+    return clean.slice(0, length) || String(value).slice(0, length);
+  }
+
+  function parseSubagentSession(sessionKey) {
+    const key = normalizeId(sessionKey);
+    if (!key || !key.startsWith("agent:"))
+      return null;
+    const parts = key.split(":");
+    if (parts.length < 4)
+      return null;
+    const ownerAgentId = normalizeId(parts[1]);
+    const subagentIdx = parts.indexOf("subagent");
+    if (!ownerAgentId || subagentIdx < 0 || subagentIdx + 1 >= parts.length)
+      return null;
+    const subagentId = normalizeId(parts[subagentIdx + 1]);
+    if (!subagentId)
+      return null;
+    return { ownerAgentId, subagentId };
+  }
+
+  function boardScopeFromSessionKey(sessionKey) {
+    const key = normalizeId(sessionKey);
+    if (!key)
+      return void 0;
+    const route = parseBoardSessionKey(key);
+    if (!route)
+      return void 0;
+    if (route.kind === "task") {
+      return {
+        topicId: route.topicId,
+        taskId: route.taskId,
+        kind: "task",
+        sessionKey: key,
+        inherited: false,
+        updatedAt: nowMs(),
+      };
+    }
+    return {
+      topicId: route.topicId,
+      kind: "topic",
+      sessionKey: key,
+      inherited: false,
+      updatedAt: nowMs(),
+    };
+  }
+
+  function isFreshBoardScope(scope, now = nowMs()) {
+    return Boolean(scope && now - scope.updatedAt <= 15 * 60_000);
+  }
+
+  function rememberBoardScope(scope, opts) {
+    const stamped = { ...scope, updatedAt: nowMs() };
+    const sessionKeys = opts?.sessionKeys ?? [];
+    for (const rawKey of sessionKeys) {
+      const key = normalizeId(rawKey);
+      if (!key)
+        continue;
+      boardScopeBySession.set(key, stamped);
+    }
+    const agentIds = opts?.agentIds ?? [];
+    for (const rawAgentId of agentIds) {
+      const agentId = normalizeId(rawAgentId);
+      if (!agentId)
+        continue;
+      boardScopeByAgent.set(agentId, stamped);
+    }
+  }
+
+  function deriveConversationFlow(params) {
+    const sessionKey = normalizeId(params.sessionKey);
+    const subagent = parseSubagentSession(sessionKey);
+    if (subagent) {
+      const ownerId = subagent.ownerAgentId;
+      const ownerLabel = resolveAgentLabel(ownerId, `agent:${ownerId}`);
+      const subagentSpeakerId = `subagent:${subagent.subagentId}`;
+      const subagentLabel = `Subagent ${shortId(subagent.subagentId)}`;
+      if (params.role === "user") {
+        return {
+          speakerId: ownerId,
+          speakerLabel: ownerLabel,
+          audienceId: subagentSpeakerId,
+          audienceLabel: subagentLabel,
+        };
+      }
+      return {
+        speakerId: subagentSpeakerId,
+        speakerLabel: subagentLabel,
+        audienceId: ownerId,
+        audienceLabel: ownerLabel,
+      };
+    }
+
+    const assistantId = normalizeId(params.agentId) ?? "assistant";
+    const assistantLabel = normalizeId(params.assistantLabel) ?? resolveAgentLabel(assistantId, sessionKey);
+    if (params.role === "user") {
+      return {
+        speakerId: "user",
+        speakerLabel: "User",
+        audienceId: assistantId,
+        audienceLabel: assistantLabel,
+      };
+    }
+    return {
+      speakerId: assistantId,
+      speakerLabel: assistantLabel,
+      audienceId: "user",
+      audienceLabel: "User",
+    };
+  }
+
+  function buildSourceMeta(params) {
+    const source = {};
+    if (params.channel !== void 0)
+      source.channel = params.channel;
+    const sessionKey = normalizeId(params.sessionKey);
+    if (sessionKey)
+      source.sessionKey = sessionKey;
+    const messageId = normalizeId(params.messageId);
+    if (messageId)
+      source.messageId = messageId;
+
+    const boardScope = params.boardScope;
+    if (boardScope?.topicId) {
+      source.boardScopeTopicId = boardScope.topicId;
+      source.boardScopeKind = boardScope.kind;
+      source.boardScopeSessionKey = boardScope.sessionKey;
+      source.boardScopeInherited = Boolean(boardScope.inherited);
+      source.boardScopeLock = true;
+      if (boardScope.kind === "task" && boardScope.taskId) {
+        source.boardScopeTaskId = boardScope.taskId;
+      }
+    }
+
+    const flow = params.flow;
+    if (flow) {
+      if (flow.speakerId)
+        source.speakerId = flow.speakerId;
+      if (flow.speakerLabel)
+        source.speakerLabel = flow.speakerLabel;
+      if (flow.audienceId)
+        source.audienceId = flow.audienceId;
+      if (flow.audienceLabel)
+        source.audienceLabel = flow.audienceLabel;
+    }
+    return source;
+  }
+
+  async function resolveRoutingScope(effectiveSessionKey, ctx2, meta) {
+    const normalizedSessionKey = normalizeId(effectiveSessionKey);
+    const ctxSessionKey = normalizeId(ctx2.sessionKey);
+    const metaSessionKey = typeof meta?.sessionKey === "string" ? normalizeId(meta.sessionKey) : void 0;
+    const conversationKey = normalizeId(ctx2.conversationId);
+    const sessionCandidates = [normalizedSessionKey, ctxSessionKey, metaSessionKey, conversationKey];
+
+    for (const candidate of sessionCandidates) {
+      const direct = boardScopeFromSessionKey(candidate);
+      if (!direct)
+        continue;
+      const sub = parseSubagentSession(normalizedSessionKey ?? ctxSessionKey);
+      rememberBoardScope(direct, {
+        sessionKeys: sessionCandidates,
+        agentIds: [normalizeId(ctx2.agentId), sub?.ownerAgentId],
+      });
+      return {
+        topicId: direct.topicId,
+        taskId: direct.kind === "task" ? direct.taskId : void 0,
+        boardScope: direct,
+      };
+    }
+
+    const subagent = parseSubagentSession(normalizedSessionKey ?? ctxSessionKey);
+    if (subagent) {
+      const now = nowMs();
+      const exact = sessionCandidates
+        .map((candidate) => candidate ? boardScopeBySession.get(candidate) : void 0)
+        .find((scope) => isFreshBoardScope(scope, now));
+      const inherited = exact ?? boardScopeByAgent.get(subagent.ownerAgentId);
+      if (isFreshBoardScope(inherited, now)) {
+        const nextScope = {
+          ...inherited,
+          inherited: true,
+          updatedAt: now,
+        };
+        rememberBoardScope(nextScope, {
+          sessionKeys: sessionCandidates,
+          agentIds: [subagent.ownerAgentId, normalizeId(ctx2.agentId)],
+        });
+        return {
+          topicId: nextScope.topicId,
+          taskId: nextScope.kind === "task" ? nextScope.taskId : void 0,
+          boardScope: nextScope,
+        };
+      }
+    }
+
+    return {
+      topicId: await resolveTopicId(normalizedSessionKey),
+      taskId: resolveTaskId(normalizedSessionKey),
+    };
+  }
+
   // When Clawboard isn't reachable (common during local dev restarts and during purge),
   // Node's fetch throws (often: "TypeError: fetch failed"). Don't spam the logs.
   const SEND_WARN_INTERVAL_MS = 3e4;
@@ -1335,12 +1546,18 @@ export default function register(api) {
       return;
     if (!cleanRaw)
       return;
-    const meta = event.metadata ?? undefined;
+    const meta = event.metadata ?? void 0;
     const effectiveSessionKey = resolveSessionKey(meta, ctx);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
       return;
-    if (parseBoardSessionKey(effectiveSessionKey ?? ctx?.sessionKey))
+    const directBoardScope = boardScopeFromSessionKey(effectiveSessionKey ?? ctx?.sessionKey);
+    if (directBoardScope) {
+      rememberBoardScope(directBoardScope, {
+        sessionKeys: [effectiveSessionKey, ctx.sessionKey],
+        agentIds: [ctx.agentId, parseSubagentSession(ctx.sessionKey)?.ownerAgentId]
+      });
       return;
+    }
     lastChannelId = ctx.channelId;
     lastEffectiveSessionKey = effectiveSessionKey;
     lastMessageAt = Date.now();
@@ -1352,9 +1569,9 @@ export default function register(api) {
         sessionKey: effectiveSessionKey
       });
     }
-    const topicId = await resolveTopicId(effectiveSessionKey);
-    const taskId = resolveTaskId(effectiveSessionKey);
-
+    const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
+    const topicId = routing.topicId;
+    const taskId = routing.taskId;
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? summarize(metaSummary) : summarize(cleanRaw);
     const messageId = typeof meta?.messageId === "string" ? meta.messageId : void 0;
@@ -1363,7 +1580,6 @@ export default function register(api) {
       return;
     if (incomingKey)
       rememberIncoming(incomingKey);
-
     sendAsync({
       topicId,
       taskId,
@@ -1374,15 +1590,19 @@ export default function register(api) {
       createdAt,
       agentId: "user",
       agentLabel: "User",
-      source: {
+      source: buildSourceMeta({
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
         messageId,
-      },
+        boardScope: routing.boardScope,
+        flow: deriveConversationFlow({
+          role: "user",
+          sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+          agentId: ctx.agentId,
+          assistantLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey)
+        })
+      })
     });
-
-    // Intentionally allow topicId to be null/undefined. Stage-2 classifier
-    // will attach this log to a real topic based on conversation context.
   });
 
   const recentOutgoing = /* @__PURE__ */ new Set();
@@ -1418,8 +1638,9 @@ export default function register(api) {
     const effectiveSessionKey = resolveSessionKey(meta, ctx);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
       return;
-    const topicId = await resolveTopicId(effectiveSessionKey);
-    const taskId = resolveTaskId(effectiveSessionKey);
+    const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
+    const topicId = routing.topicId;
+    const taskId = routing.taskId;
     const agentId = "assistant";
     const agentLabel = resolveAgentLabel(ctx.agentId, meta?.sessionKey ?? ctx?.sessionKey);
     const metaSummary = meta?.summary;
@@ -1440,11 +1661,18 @@ export default function register(api) {
       createdAt,
       agentId,
       agentLabel,
-      source: {
+      source: buildSourceMeta({
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
-        messageId
-      }
+        messageId,
+        boardScope: routing.boardScope,
+        flow: deriveConversationFlow({
+          role: "assistant",
+          sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+          agentId: ctx.agentId,
+          assistantLabel: agentLabel
+        })
+      })
     });
   });
 
@@ -1466,9 +1694,9 @@ export default function register(api) {
     const effectiveSessionKey = resolveSessionKey(void 0, ctx);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
       return;
-    const topicId = await resolveTopicId(effectiveSessionKey);
-    const taskId = resolveTaskId(effectiveSessionKey);
-
+    const routing = await resolveRoutingScope(effectiveSessionKey, ctx);
+    const topicId = routing.topicId;
+    const taskId = routing.taskId;
     sendAsync({
       topicId,
       taskId,
@@ -1479,22 +1707,28 @@ export default function register(api) {
       createdAt,
       agentId: ctx.agentId,
       agentLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey),
-      source: {
+      source: buildSourceMeta({
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
-      },
+        boardScope: routing.boardScope
+      })
     });
   });
 
   api.on("after_tool_call", async (event, ctx) => {
     const createdAt = new Date().toISOString();
-    const payload = event.error ? { error: event.error } : { result: redact(event.result), durationMs: event.durationMs };
+    const payload = event.error ? {
+      error: event.error
+    } : {
+      result: redact(event.result),
+      durationMs: event.durationMs
+    };
     const effectiveSessionKey = resolveSessionKey(void 0, ctx);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
       return;
-    const topicId = await resolveTopicId(effectiveSessionKey);
-    const taskId = resolveTaskId(effectiveSessionKey);
-
+    const routing = await resolveRoutingScope(effectiveSessionKey, ctx);
+    const topicId = routing.topicId;
+    const taskId = routing.taskId;
     sendAsync({
       topicId,
       taskId,
@@ -1505,10 +1739,11 @@ export default function register(api) {
       createdAt,
       agentId: ctx.agentId,
       agentLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey),
-      source: {
+      source: buildSourceMeta({
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
-      },
+        boardScope: routing.boardScope
+      })
     });
   });
 
@@ -1519,14 +1754,14 @@ export default function register(api) {
       success: event.success,
       error: event.error,
       durationMs: event.durationMs,
-      messageCount: event.messages?.length ?? 0,
+      messageCount: event.messages?.length ?? 0
     };
-
     const messages = Array.isArray(event.messages) ? event.messages : [];
-
     const extractText = (value, depth = 0) => {
-      if (!value || depth > 4) return void 0;
-      if (typeof value === "string") return value;
+      if (!value || depth > 4)
+        return void 0;
+      if (typeof value === "string")
+        return value;
       if (Array.isArray(value)) {
         const parts = value.map((part) => extractText(part, depth + 1)).filter(Boolean);
         return parts.length ? parts.join("\n") : void 0;
@@ -1544,10 +1779,9 @@ export default function register(api) {
       }
       return void 0;
     };
-
     const anchor = ctx.sessionKey ? inboundBySession.get(ctx.sessionKey) : void 0;
-    const anchorFresh = !!anchor && Date.now() - anchor.ts < 2 * 60 * 1e3;
-    const channelFresh = Date.now() - lastMessageAt < 2 * 60 * 1e3;
+    const anchorFresh = !!anchor && Date.now() - anchor.ts < 12e4;
+    const channelFresh = Date.now() - lastMessageAt < 12e4;
     let inferredSessionKey = (anchorFresh ? anchor?.sessionKey : void 0) ?? ctx.sessionKey;
     const discordSignal = messages.some((msg) => {
       const role = typeof msg?.role === "string" ? msg.role : void 0;
@@ -1567,13 +1801,14 @@ export default function register(api) {
       return;
     const inferredChannelId = (anchorFresh ? anchor?.channelId : void 0) ?? (inferredSessionKey.startsWith("channel:") && channelFresh ? lastChannelId : void 0);
     const sourceChannel = inferredChannelId ?? ctx.channelId ?? (typeof ctx.messageProvider === "string" ? ctx.messageProvider : void 0) ?? (typeof ctx.provider === "string" ? ctx.provider : void 0) ?? "direct";
-
-    const topicId = await resolveTopicId(inferredSessionKey);
-    const taskId = resolveTaskId(inferredSessionKey);
-
+    const routing = await resolveRoutingScope(inferredSessionKey, {
+      ...ctx,
+      channelId: inferredChannelId ?? ctx.channelId
+    });
+    const topicId = routing.topicId;
+    const taskId = routing.taskId;
     const agentId = "assistant";
     const agentLabel = resolveAgentLabel(ctx.agentId, inferredSessionKey);
-
     if (debug) {
       try {
         const shape = messages.slice(-20).map((m) => ({
@@ -1591,12 +1826,15 @@ export default function register(api) {
           createdAt,
           agentId: "system",
           agentLabel: "Clawboard Logger",
-          source: { channel: inferredChannelId, sessionKey: inferredSessionKey }
+          source: buildSourceMeta({
+            channel: inferredChannelId,
+            sessionKey: inferredSessionKey,
+            boardScope: routing.boardScope
+          })
         });
       } catch {
       }
     }
-
     if (!inferredSessionKey) {
     } else {
       const isChannelSession = inferredSessionKey.startsWith("channel:");
@@ -1609,12 +1847,10 @@ export default function register(api) {
         } else {
           startIdx = Math.max(0, messages.length - 24);
         }
-      if (startIdx > messages.length)
-        startIdx = Math.max(0, messages.length - 24);
-    }
-
+        if (startIdx > messages.length)
+          startIdx = Math.max(0, messages.length - 24);
+      }
       let agentEndSeq = 0;
-
       for (let idx = startIdx; idx < messages.length; idx += 1) {
         const msg = messages[idx];
         const role = typeof msg?.role === "string" ? msg.role : void 0;
@@ -1669,11 +1905,18 @@ export default function register(api) {
             createdAt: messageCreatedAt,
             agentId,
             agentLabel,
-            source: {
+            source: buildSourceMeta({
               channel: sourceChannel,
               sessionKey: inferredSessionKey,
-              messageId
-            }
+              messageId,
+              boardScope: routing.boardScope,
+              flow: deriveConversationFlow({
+                role: "assistant",
+                sessionKey: inferredSessionKey,
+                agentId: ctx.agentId,
+                assistantLabel: agentLabel
+              })
+            })
           });
         } else {
           const dedupeKey = `received:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${messageId}`;
@@ -1692,20 +1935,25 @@ export default function register(api) {
             createdAt: messageCreatedAt,
             agentId: "user",
             agentLabel: "User",
-            source: {
+            source: buildSourceMeta({
               channel: sourceChannel,
               sessionKey: inferredSessionKey,
-              messageId
-            }
+              messageId,
+              boardScope: routing.boardScope,
+              flow: deriveConversationFlow({
+                role: "user",
+                sessionKey: inferredSessionKey,
+                agentId: ctx.agentId,
+                assistantLabel: agentLabel
+              })
+            })
           });
         }
       }
-
       if (!isChannelSession) {
         agentEndCursorBySession.set(inferredSessionKey, messages.length);
       }
     }
-
     if (!event.success || debug) {
       sendAsync({
         topicId,
@@ -1717,10 +1965,11 @@ export default function register(api) {
         createdAt,
         agentId: ctx.agentId,
         agentLabel: ctx.agentId ? `Agent ${ctx.agentId}` : "Agent",
-        source: {
-          channel: sourceChannel,
+        source: buildSourceMeta({
+          channel: inferredChannelId,
           sessionKey: inferredSessionKey,
-        },
+          boardScope: routing.boardScope
+        })
       });
     }
   });

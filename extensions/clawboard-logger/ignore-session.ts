@@ -1,4 +1,7 @@
-export const DEFAULT_IGNORE_SESSION_PREFIXES = ["internal:clawboard-classifier:"] as const;
+export const DEFAULT_IGNORE_SESSION_PREFIXES = [
+  "internal:clawboard-classifier:",
+  "agent:main:cron:",
+] as const;
 
 export function parseIgnoreSessionPrefixes(raw: string | undefined | null): string[] {
   if (typeof raw !== "string" || raw.trim().length === 0) return [...DEFAULT_IGNORE_SESSION_PREFIXES];
@@ -28,4 +31,3 @@ export function shouldIgnoreSessionKey(
   }
   return false;
 }
-

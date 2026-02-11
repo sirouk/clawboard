@@ -789,6 +789,37 @@ def _source_channel(entry: dict) -> str:
     return str(source.get("channel") or "").strip().lower()
 
 
+def _is_truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _entry_locked_scope(entry: dict) -> tuple[str | None, str | None, str | None]:
+    source = entry.get("source")
+    if not isinstance(source, dict):
+        return (None, None, None)
+
+    topic_id = str(source.get("boardScopeTopicId") or "").strip() or None
+    task_id = str(source.get("boardScopeTaskId") or "").strip() or None
+    kind = str(source.get("boardScopeKind") or "").strip().lower()
+    if kind not in {"topic", "task"}:
+        kind = "task" if task_id else ("topic" if topic_id else "")
+    lock = _is_truthy(source.get("boardScopeLock")) or bool(task_id)
+
+    if not lock:
+        return (None, None, None)
+    if task_id:
+        return (topic_id, task_id, "task")
+    if topic_id:
+        return (topic_id, None, "topic")
+    return (None, None, None)
+
+
 def _is_cron_event(entry: dict) -> bool:
     """True when the log originates from OpenClaw cron delivery/control messages."""
     return _source_channel(entry) in CRON_EVENT_CHANNELS
@@ -3453,7 +3484,29 @@ def classify_session(session_key: str):
 
     board_topic_id, board_task_id = _parse_board_session_key(session_key)
     forced_topic_id = board_topic_id or None
-    if board_topic_id and board_task_id:
+    forced_task_id = board_task_id or None
+
+    # Nested subagent sessions should stay in one scope. Prefer an already-task-scoped
+    # classification from this same session when present.
+    if not forced_topic_id and ":subagent:" in str(session_key or ""):
+        latest_task_scope: tuple[str, str] | None = None
+        latest_topic_scope: str | None = None
+        for item in reversed(ctx_logs):
+            if (item.get("classificationStatus") or "pending") != "classified":
+                continue
+            candidate_topic = str(item.get("topicId") or "").strip()
+            candidate_task = str(item.get("taskId") or "").strip()
+            if candidate_task and candidate_topic:
+                latest_task_scope = (candidate_topic, candidate_task)
+                break
+            if candidate_topic and not latest_topic_scope:
+                latest_topic_scope = candidate_topic
+        if latest_task_scope:
+            forced_topic_id, forced_task_id = latest_task_scope
+        elif latest_topic_scope:
+            forced_topic_id = latest_topic_scope
+
+    if forced_topic_id and forced_task_id:
         # Clawboard UI explicitly selects Topic/Task scope via `clawboard:topic:*` / `clawboard:task:*`.
         # Do not let the classifier re-route those logs into other topics/tasks (it can make the
         # user's message "disappear" from the chat pane they sent it from).
@@ -3481,8 +3534,8 @@ def classify_session(session_key: str):
                 patch_log(
                     e["id"],
                     {
-                        "topicId": board_topic_id,
-                        "taskId": board_task_id,
+                        "topicId": forced_topic_id,
+                        "taskId": forced_task_id,
                         "classificationStatus": "classified",
                         "classificationAttempts": attempts + 1,
                         "classificationError": "filtered_command",
@@ -3494,8 +3547,8 @@ def classify_session(session_key: str):
                 patch_log(
                     e["id"],
                     {
-                        "topicId": board_topic_id,
-                        "taskId": board_task_id,
+                        "topicId": forced_topic_id,
+                        "taskId": forced_task_id,
                         "classificationStatus": "failed",
                         "classificationAttempts": attempts + 1,
                         "classificationError": _noise_error_code(noise_text),
@@ -3507,8 +3560,8 @@ def classify_session(session_key: str):
                 patch_log(
                     e["id"],
                     {
-                        "topicId": board_topic_id,
-                        "taskId": board_task_id,
+                        "topicId": forced_topic_id,
+                        "taskId": forced_task_id,
                         "classificationStatus": "classified",
                         "classificationAttempts": attempts + 1,
                         "classificationError": "filtered_non_semantic",
@@ -3519,8 +3572,8 @@ def classify_session(session_key: str):
                 patch_log(
                     e["id"],
                     {
-                        "topicId": board_topic_id,
-                        "taskId": board_task_id,
+                        "topicId": forced_topic_id,
+                        "taskId": forced_task_id,
                         "classificationStatus": "classified",
                         "classificationAttempts": attempts + 1,
                         "classificationError": "filtered_memory_action",
@@ -3529,8 +3582,8 @@ def classify_session(session_key: str):
                 continue
 
             patch_payload = {
-                "topicId": board_topic_id,
-                "taskId": board_task_id,
+                "topicId": forced_topic_id,
+                "taskId": forced_task_id,
                 "classificationStatus": "classified",
                 "classificationAttempts": attempts + 1,
                 "classificationError": None,
@@ -4407,6 +4460,15 @@ def classify_session(session_key: str):
         if (e.get("classificationStatus") or "pending") != "pending":
             continue
         attempts = int(e.get("classificationAttempts") or 0)
+        locked_topic_id, locked_task_id, locked_kind = _entry_locked_scope(e)
+        target_topic_id = topic_id
+        target_task_id = task_id
+        if locked_kind == "task":
+            target_topic_id = locked_topic_id or target_topic_id
+            target_task_id = locked_task_id
+        elif locked_kind == "topic":
+            target_topic_id = locked_topic_id or target_topic_id
+            target_task_id = None
         if _is_cron_event(e):
             patch_log(
                 e["id"],
@@ -4425,6 +4487,8 @@ def classify_session(session_key: str):
             patch_log(
                 e["id"],
                 {
+                    "topicId": target_topic_id,
+                    "taskId": target_task_id,
                     "classificationStatus": "classified",
                     "classificationAttempts": attempts + 1,
                     "classificationError": "filtered_command",
@@ -4436,6 +4500,8 @@ def classify_session(session_key: str):
             patch_log(
                 e["id"],
                 {
+                    "topicId": target_topic_id,
+                    "taskId": target_task_id,
                     "classificationStatus": "failed",
                     "classificationAttempts": attempts + 1,
                     "classificationError": _noise_error_code(noise_text),
@@ -4447,6 +4513,8 @@ def classify_session(session_key: str):
             patch_log(
                 e["id"],
                 {
+                    "topicId": target_topic_id,
+                    "taskId": target_task_id,
                     "classificationStatus": "classified",
                     "classificationAttempts": attempts + 1,
                     "classificationError": "filtered_non_semantic",
@@ -4457,6 +4525,8 @@ def classify_session(session_key: str):
             patch_log(
                 e["id"],
                 {
+                    "topicId": target_topic_id,
+                    "taskId": target_task_id,
                     "classificationStatus": "classified",
                     "classificationAttempts": attempts + 1,
                     "classificationError": "filtered_memory_action",
@@ -4464,8 +4534,8 @@ def classify_session(session_key: str):
             )
             continue
         patch_payload = {
-            "topicId": topic_id,
-            "taskId": task_id,
+            "topicId": target_topic_id,
+            "taskId": target_task_id,
             "classificationStatus": "classified",
             "classificationAttempts": attempts + 1,
             "classificationError": None,
