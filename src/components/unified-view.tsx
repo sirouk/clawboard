@@ -142,6 +142,15 @@ function stripTransportNoise(value: string) {
   return text.trim();
 }
 
+const CRON_EVENT_SOURCE_CHANNELS = new Set(["cron-event"]);
+
+function isCronEventLog(entry: LogEntry) {
+  const channel = String(entry.source?.channel ?? "")
+    .trim()
+    .toLowerCase();
+  return CRON_EVENT_SOURCE_CHANNELS.has(channel);
+}
+
 function normalizeInlineText(value: string | undefined | null) {
   return stripTransportNoise(value ?? "").replace(/\s+/g, " ").trim();
 }
@@ -672,6 +681,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const prevPendingAttachmentsRef = useRef<Map<string, AttachmentLike[]>>(new Map());
   const [chatTopFade, setChatTopFade] = useState<Record<string, boolean>>({});
   const [chatJumpToBottom, setChatJumpToBottom] = useState<Record<string, boolean>>({});
+  const chatLastScrollTopRef = useRef<Map<string, number>>(new Map());
 
   const CHAT_AUTO_SCROLL_THRESHOLD_PX = 160;
   const topicAutosaveTimerRef = useRef<number | null>(null);
@@ -835,6 +845,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
       chatAtBottomRef.current.set(key, atBottom);
       setChatJumpToBottom((prev) => (prev[key] === !atBottom ? prev : { ...prev, [key]: !atBottom }));
+      chatLastScrollTopRef.current.set(key, node.scrollTop);
       return;
     }
     chatScrollers.current.delete(key);
@@ -845,6 +856,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       delete next[key];
       return next;
     });
+    chatLastScrollTopRef.current.delete(key);
   }, []);
 
   // Keep ref callbacks stable per key. Inline `ref={(node) => ...}` creates a new function each render,
@@ -899,7 +911,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   // Use ?raw=1 to include everything (raw / debugging view).
   const visibleLogs = useMemo(() => {
     if (showRaw) return logs;
-    return logs.filter((entry) => (entry.classificationStatus ?? "pending") === "classified");
+    return logs.filter(
+      (entry) => (entry.classificationStatus ?? "pending") === "classified" && !isCronEventLog(entry)
+    );
   }, [logs, showRaw]);
 
   const currentUrlKey = useCallback(() => {
@@ -1138,6 +1152,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const logsByTaskAll = useMemo(() => {
     const map = new Map<string, LogEntry[]>();
     for (const entry of logs) {
+      if (!showRaw && isCronEventLog(entry)) continue;
       if (!entry.taskId) continue;
       const list = map.get(entry.taskId) ?? [];
       list.push(entry);
@@ -1147,11 +1162,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       list.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
     }
     return map;
-  }, [logs]);
+  }, [logs, showRaw]);
 
   const logsByTopicAll = useMemo(() => {
     const map = new Map<string, LogEntry[]>();
     for (const entry of logs) {
+      if (!showRaw && isCronEventLog(entry)) continue;
       if (!entry.topicId) continue;
       const list = map.get(entry.topicId) ?? [];
       list.push(entry);
@@ -1161,7 +1177,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       list.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
     }
     return map;
-  }, [logs]);
+  }, [logs, showRaw]);
 
   const normalizedSearch = search.trim().toLowerCase();
   const topicReorderEnabled = !readOnly && normalizedSearch.length === 0 && statusFilter === "all";
@@ -1374,13 +1390,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
       if (!atBottom) continue;
 
-      scroller.scrollTo({
-        top: scroller.scrollHeight,
-        behavior: prevLastId && prevLastId !== lastId ? "smooth" : "auto",
-      });
+      // Use the shared scheduler so we hit the true bottom even as the last message grows over
+      // a few frames (common with streaming). This avoids leaving partial messages visible.
+      activeChatAtBottomRef.current = true;
+      scheduleScrollChatToBottom(key, prevLastId && prevLastId !== lastId ? 4 : 8);
       chatAtBottomRef.current.set(key, true);
+      setChatJumpToBottom((prev) => (prev[key] === false ? prev : { ...prev, [key]: false }));
     }
-  }, [getChatLastLogId, logs, normalizedSearch]);
+  }, [getChatLastLogId, logs, normalizedSearch, scheduleScrollChatToBottom]);
 
   const semanticLimits = useMemo(
     () => ({
@@ -2356,6 +2373,47 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       setEditingTopicId(null);
       setTopicNameDraft("");
       setDeleteArmedKey(null);
+      setRenameError(deleteKey);
+    } finally {
+      setDeleteInFlightKey(null);
+    }
+  };
+
+  const purgeTopicChat = async (topic: Topic) => {
+    const deleteKey = `topic-chat:${topic.id}`;
+    if (readOnly) return;
+    if (topic.id === "unassigned") return;
+
+    const proceed = window.confirm(
+      `Purge Topic Chat for "${topic.name}"? This will permanently delete all topic-scoped chat entries (not task chats).`
+    );
+    if (!proceed) return;
+
+    const proceedAgain = window.confirm("This cannot be undone. Click OK to permanently purge the Topic Chat.");
+    if (!proceedAgain) return;
+
+    setDeleteInFlightKey(deleteKey);
+    setRenameError(deleteKey);
+    try {
+      const res = await apiFetch(`/api/topics/${encodeURIComponent(topic.id)}/topic_chat/purge`, { method: "POST" }, token);
+      if (!res.ok) {
+        setRenameError(deleteKey, "Failed to purge topic chat.");
+        return;
+      }
+
+      // Optimistically clear local state; SSE will reconcile as well.
+      const updatedAt = new Date().toISOString();
+      setLogs((prev) => prev.filter((item) => !(item.topicId === topic.id && !item.taskId)));
+      setPendingMessages((prev) => prev.filter((item) => item.sessionKey !== topicSessionKey(topic.id)));
+      setAwaitingAssistant((prev) => {
+        if (!Object.prototype.hasOwnProperty.call(prev, topicSessionKey(topic.id))) return prev;
+        const next = { ...prev };
+        delete next[topicSessionKey(topic.id)];
+        return next;
+      });
+      // Nudge topic updatedAt so it stays "fresh" in the UI.
+      setTopics((prev) => prev.map((row) => (row.id === topic.id ? { ...row, updatedAt } : row)));
+
       setRenameError(deleteKey);
     } finally {
       setDeleteInFlightKey(null);
@@ -4208,7 +4266,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                                      const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
 	                                      const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
 	                                      chatAtBottomRef.current.set(key, atBottom);
-	                                      setChatJumpToBottom((prev) => (prev[key] === !atBottom ? prev : { ...prev, [key]: !atBottom }));
+
+	                                      const prevTop = chatLastScrollTopRef.current.get(key) ?? node.scrollTop;
+	                                      const delta = node.scrollTop - prevTop;
+	                                      chatLastScrollTopRef.current.set(key, node.scrollTop);
+
+	                                      // UX: hide the jump-to-latest button while the user scrolls UP (reading history).
+	                                      // Only show it again when scrolling DOWN and not at bottom.
+	                                      const shouldShowJump = !atBottom && delta > 0;
+	                                      setChatJumpToBottom((prev) =>
+	                                        prev[key] === shouldShowJump ? prev : { ...prev, [key]: shouldShowJump }
+	                                      );
 	                                      setChatTopFade((prev) =>
 	                                        prev[key] === showTop ? prev : { ...prev, [key]: showTop }
 	                                      );
@@ -4304,6 +4372,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                           </div>
                                         </div>
                                       ) : null}
+                                      {/* Spacer so overlay controls never cover the last message. */}
+                                      <div aria-hidden className="h-12" />
 	                                  </div>
 	                                </div>
 					                              {/* Load more moved into the chat header (top-right). */}
@@ -4321,6 +4391,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                  placeholder={`Message ${task.title}…`}
 			                                  onFocus={() => {
 			                                    setActiveComposer({ kind: "task", topicId, taskId: task.id });
+			                                    const chatKey = `task:${task.id}`;
+			                                    activeChatAtBottomRef.current = true;
+			                                    scheduleScrollChatToBottom(chatKey);
+			                                    setChatJumpToBottom((prev) =>
+			                                      prev[chatKey] === false ? prev : { ...prev, [chatKey]: false }
+			                                    );
 			                                  }}
 			                                  onBlur={() =>
 			                                    setActiveComposer((prev) =>
@@ -4464,7 +4540,26 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 				                              Load older
 				                            </Button>
 				                          ) : null}
-				                          <span className="text-xs text-[rgb(var(--claw-muted))]">{topicChatAllLogs.length} entries</span>
+				                          <Button
+                            size="sm"
+                            variant="secondary"
+                            disabled={readOnly || topicChatAllLogs.length === 0}
+                            className={cn(
+                              "border-[rgba(255,90,45,0.28)] text-[rgba(255,90,45,0.92)] hover:bg-[rgba(255,90,45,0.08)]",
+                              deleteInFlightKey === `topic-chat:${topicId}` ? "opacity-60" : ""
+                            )}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              event.preventDefault();
+                              const topicRow = topics.find((row) => row.id === topicId);
+                              if (!topicRow) return;
+                              void purgeTopicChat(topicRow);
+                            }}
+                            title={topicChatAllLogs.length === 0 ? "No topic chat entries to purge." : "Purge Topic Chat"}
+                          >
+                            Purge
+                          </Button>
+                          <span className="text-xs text-[rgb(var(--claw-muted))]">{topicChatAllLogs.length} entries</span>
 				                        </div>
 			                          {topicChatAllLogs.length === 0 &&
                               !pendingMessages.some((pending) => pending.sessionKey === topicSessionKey(topicId)) &&
@@ -4511,7 +4606,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
 			                                const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
 			                                chatAtBottomRef.current.set(key, atBottom);
-			                                setChatJumpToBottom((prev) => (prev[key] === !atBottom ? prev : { ...prev, [key]: !atBottom }));
+
+			                                const prevTop = chatLastScrollTopRef.current.get(key) ?? node.scrollTop;
+			                                const delta = node.scrollTop - prevTop;
+			                                chatLastScrollTopRef.current.set(key, node.scrollTop);
+
+			                                // UX: hide the jump-to-latest button while the user scrolls UP (reading history).
+			                                // Only show it again when scrolling DOWN and not at bottom.
+			                                const shouldShowJump = !atBottom && delta > 0;
+			                                setChatJumpToBottom((prev) =>
+			                                  prev[key] === shouldShowJump ? prev : { ...prev, [key]: shouldShowJump }
+			                                );
 			                                setChatTopFade((prev) =>
 			                                  prev[key] === showTop ? prev : { ...prev, [key]: showTop }
 			                                );
@@ -4604,6 +4709,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                           </div>
                                         </div>
                                       ) : null}
+                                      {/* Spacer so overlay controls never cover the last message. */}
+                                      <div aria-hidden className="h-12" />
 			                            </div>
 			                          </div>
 			                          {/* Load more moved into the chat header (top-right). */}
@@ -4619,6 +4726,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                            placeholder={`Message ${topic.name}…`}
 		                            onFocus={() => {
 		                              setActiveComposer({ kind: "topic", topicId });
+		                              const chatKey = `topic:${topicId}`;
+		                              activeChatAtBottomRef.current = true;
+		                              scheduleScrollChatToBottom(chatKey);
+		                              setChatJumpToBottom((prev) => (prev[chatKey] === false ? prev : { ...prev, [chatKey]: false }));
 		                            }}
 		                            onBlur={() =>
 		                              setActiveComposer((prev) =>
