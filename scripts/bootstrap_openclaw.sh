@@ -142,6 +142,7 @@ CONTEXT_FALLBACK_MODE_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE:-}"
 CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS:-}"
 CONTEXT_TOTAL_BUDGET_MS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS:-}"
 CONTEXT_MAX_CHARS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS:-}"
+SKILL_INSTALL_MODE="${CLAWBOARD_SKILL_INSTALL_MODE:-symlink}"
 
 SKIP_DOCKER=false
 SKIP_OPENCLAW=false
@@ -173,6 +174,8 @@ while [ $# -gt 0 ]; do
     --context-fetch-timeout-ms) CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE="$2"; shift 2 ;;
     --context-total-budget-ms) CONTEXT_TOTAL_BUDGET_MS_OVERRIDE="$2"; shift 2 ;;
     --context-max-chars) CONTEXT_MAX_CHARS_OVERRIDE="$2"; shift 2 ;;
+    --skill-copy) SKILL_INSTALL_MODE="copy"; shift ;;
+    --skill-symlink) SKILL_INSTALL_MODE="symlink"; shift ;;
     --update) UPDATE_REPO=true; shift ;;
     --skip-docker) SKIP_DOCKER=true; shift ;;
     --skip-openclaw) SKIP_OPENCLAW=true; shift ;;
@@ -193,6 +196,8 @@ Options:
 Environment overrides:
   CLAWBOARD_DIR=<path>        Install directory (overrides everything)
   CLAWBOARD_PARENT_DIR=<path> Install parent directory (repo goes in <path>/clawboard)
+  CLAWBOARD_SKILL_INSTALL_MODE=<copy|symlink>
+                              Skill install strategy for ~/.openclaw/skills (default: symlink)
   --api-url <url>      Clawboard API base (default: http://localhost:8010)
   --web-url <url>      Clawboard web URL (default: http://localhost:3010)
   --public-api-base <url>
@@ -217,11 +222,13 @@ Environment overrides:
                        Total budget for before_agent_start context retrieval in the OpenClaw plugin (writes CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS)
   --context-max-chars <n>
                        Hard cap for injected context block size (writes CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS)
+  --skill-copy         Install skill by copying files into ~/.openclaw/skills
+  --skill-symlink      Install skill as symlink to repo copy (default; best for local skill development)
   --no-backfill        Shortcut for --integration-level manual
   --update             Pull latest repo if already present
   --skip-docker        Skip docker compose up
   --skip-openclaw      Skip OpenClaw CLI steps
-  --skip-skill         Skip copying skill into ~/.openclaw/skills
+  --skip-skill         Skip skill install into ~/.openclaw/skills
   --skip-plugin        Skip installing logger plugin
   --skip-chutes-prompt Do not prompt to run Chutes fast path when openclaw is missing
   --install-chutes-if-missing-openclaw
@@ -248,6 +255,14 @@ is_valid_integration_level() {
 if ! is_valid_integration_level "$INTEGRATION_LEVEL"; then
   log_error "Invalid integration level: $INTEGRATION_LEVEL (expected manual|write|full)"
 fi
+
+case "$SKILL_INSTALL_MODE" in
+  copy|symlink) ;;
+  *)
+    log_warn "Invalid skill install mode: $SKILL_INSTALL_MODE (expected copy|symlink). Falling back to symlink."
+    SKILL_INSTALL_MODE="symlink"
+    ;;
+esac
 
 if [ "$INTEGRATION_LEVEL_EXPLICIT" = false ] && [ -t 0 ]; then
   echo ""
@@ -844,11 +859,101 @@ if [ "$SKIP_OPENCLAW" = false ]; then
     fi
 
     if [ "$SKIP_SKILL" = false ]; then
-      log_info "Installing Clawboard skill..."
-      mkdir -p "$HOME/.openclaw/skills"
-      rm -rf "$HOME/.openclaw/skills/clawboard"
-      cp -R "$INSTALL_DIR/skills/clawboard" "$HOME/.openclaw/skills/clawboard"
-      log_success "Skill installed to ~/.openclaw/skills/clawboard."
+      log_info "Installing Clawboard skill (mode: $SKILL_INSTALL_MODE)..."
+      SKILL_REPO_SRC="$INSTALL_DIR/skills/clawboard"
+      SKILL_OPENCLAW_DST="$HOME/.openclaw/skills/clawboard"
+      LOGGER_SKILL_REPO_SRC="$INSTALL_DIR/skills/clawboard-logger"
+      LOGGER_SKILL_OPENCLAW_DST="$HOME/.openclaw/skills/clawboard-logger"
+
+      if [ ! -d "$SKILL_REPO_SRC" ]; then
+        log_warn "Repo skill directory not found: $SKILL_REPO_SRC"
+      else
+        mkdir -p "$HOME/.openclaw/skills"
+        rm -rf "$SKILL_OPENCLAW_DST"
+        if [ "$SKILL_INSTALL_MODE" = "symlink" ]; then
+          ln -s "$SKILL_REPO_SRC" "$SKILL_OPENCLAW_DST"
+          log_success "Skill linked: ~/.openclaw/skills/clawboard -> $SKILL_REPO_SRC"
+        else
+          cp -R "$SKILL_REPO_SRC" "$SKILL_OPENCLAW_DST"
+          log_success "Skill installed to ~/.openclaw/skills/clawboard."
+        fi
+      fi
+
+      if [ "$SKILL_INSTALL_MODE" = "copy" ]; then
+        log_warn "Using copy mode for skills. Repo edits will not appear in OpenClaw until synced/copied again."
+      fi
+
+      if [ -d "$LOGGER_SKILL_REPO_SRC" ]; then
+        rm -rf "$LOGGER_SKILL_OPENCLAW_DST"
+        if [ "$SKILL_INSTALL_MODE" = "symlink" ]; then
+          ln -s "$LOGGER_SKILL_REPO_SRC" "$LOGGER_SKILL_OPENCLAW_DST"
+          log_success "Logger skill linked: ~/.openclaw/skills/clawboard-logger -> $LOGGER_SKILL_REPO_SRC"
+        else
+          cp -R "$LOGGER_SKILL_REPO_SRC" "$LOGGER_SKILL_OPENCLAW_DST"
+          log_success "Logger skill installed to ~/.openclaw/skills/clawboard-logger."
+        fi
+      elif [ -e "$LOGGER_SKILL_OPENCLAW_DST" ]; then
+        log_warn "Found ~/.openclaw/skills/clawboard-logger, but repo copy is missing at $LOGGER_SKILL_REPO_SRC (left unchanged)."
+      fi
+    fi
+
+    # Harden OpenClaw cron jobs created by the Clawboard skill so they don't inject "cron-event"
+    # messages into active chats (these messages can interrupt streaming and pollute routing).
+    # Best-effort: patch any existing cron jobs that run the memory backup script.
+    if command -v python3 >/dev/null 2>&1; then
+      log_info "Hardening OpenClaw cron delivery (disable announce for Clawboard memory backup jobs)..."
+      CRON_PATCH_IDS="$(python3 - <<'PY'
+import json
+import subprocess
+import sys
+
+needle = "backup_openclaw_curated_memories.sh"
+
+try:
+  raw = subprocess.check_output(["openclaw", "cron", "list", "--json"], stderr=subprocess.DEVNULL)
+  data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+except Exception:
+  print("", end="")
+  sys.exit(0)
+
+jobs = data.get("jobs") if isinstance(data, dict) else []
+jobs = jobs or []
+ids: list[str] = []
+
+for j in jobs:
+  if not isinstance(j, dict):
+    continue
+  if str(j.get("sessionTarget") or "").strip() != "isolated":
+    continue
+  payload = j.get("payload") if isinstance(j.get("payload"), dict) else {}
+  msg = str(payload.get("message") or "")
+  if needle not in msg:
+    continue
+  delivery = j.get("delivery") if isinstance(j.get("delivery"), dict) else {}
+  mode = str(delivery.get("mode") or "").strip().lower()
+  # Missing delivery means OpenClaw will default to announce for isolated agentTurn jobs.
+  if mode == "none":
+    continue
+  job_id = str(j.get("id") or j.get("jobId") or "").strip()
+  if job_id:
+    ids.append(job_id)
+
+print(" ".join(ids), end="")
+PY
+)"
+      if [ -n "${CRON_PATCH_IDS:-}" ]; then
+        for id in $CRON_PATCH_IDS; do
+          if openclaw cron edit "$id" --no-deliver >/dev/null 2>&1; then
+            log_success "Cron job updated: $id (delivery=none)."
+          else
+            log_warn "Failed to update cron job delivery for: $id"
+          fi
+        done
+      else
+        log_success "No memory-backup cron jobs needed delivery changes."
+      fi
+    else
+      log_warn "python3 not found; skipping cron hardening step."
     fi
 
     if [ "$SKIP_PLUGIN" = false ]; then

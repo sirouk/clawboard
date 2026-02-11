@@ -3,8 +3,8 @@ set -euo pipefail
 
 # sync_openclaw_skill.sh
 #
-# Sync the canonical production skill from ~/.openclaw back into this repo.
-# Source of truth: ~/.openclaw/skills/clawboard (or $OPENCLAW_HOME/skills/clawboard).
+# Sync a skill directory between this repo and ~/.openclaw.
+# Default skill: clawboard (override via --skill or $CLAWBOARD_SKILL_NAME).
 #
 # Default is DRY RUN. Use --apply to perform the sync.
 
@@ -13,19 +13,21 @@ FORCE=0
 SRC_OVERRIDE=""
 DST_OVERRIDE=""
 DIRECTION=""
+SKILL_NAME="${CLAWBOARD_SKILL_NAME:-clawboard}"
 
 usage() {
   cat <<'USAGE'
-Usage: bash scripts/sync_openclaw_skill.sh [--apply] [--force] [--src <path>] [--dst <path>]
+Usage: bash scripts/sync_openclaw_skill.sh [--apply] [--force] [--to-repo|--to-openclaw] [--skill <name>] [--src <path>] [--dst <path>]
 
 Defaults:
+  - Skill: clawboard
   - Direction default: --to-repo
   - --to-repo:
-    - --src: $OPENCLAW_HOME/skills/clawboard (or ~/.openclaw/skills/clawboard)
-    - --dst: <repo>/skills/clawboard
+    - --src: $OPENCLAW_HOME/skills/<skill> (or ~/.openclaw/skills/<skill>)
+    - --dst: <repo>/skills/<skill>
   - --to-openclaw:
-    - --src: <repo>/skills/clawboard
-    - --dst: $OPENCLAW_HOME/skills/clawboard (or ~/.openclaw/skills/clawboard)
+    - --src: <repo>/skills/<skill>
+    - --dst: $OPENCLAW_HOME/skills/<skill> (or ~/.openclaw/skills/<skill>)
 
 Notes:
   - DRY RUN prints a quick diff summary.
@@ -37,6 +39,9 @@ Examples:
 
   # Sync skill edits from the deployed OpenClaw instance back into this repo:
   bash scripts/sync_openclaw_skill.sh --to-repo --apply
+
+  # Sync an optional logger skill (if present in your repo and OpenClaw):
+  bash scripts/sync_openclaw_skill.sh --skill clawboard-logger --to-openclaw --apply --force
 USAGE
 }
 
@@ -46,6 +51,7 @@ while [[ $# -gt 0 ]]; do
     --force) FORCE=1; shift ;;
     --to-openclaw) DIRECTION="to-openclaw"; shift ;;
     --to-repo) DIRECTION="to-repo"; shift ;;
+    --skill) SKILL_NAME="${2:-}"; shift 2 ;;
     --src) SRC_OVERRIDE="${2:-}"; shift 2 ;;
     --dst) DST_OVERRIDE="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -64,11 +70,16 @@ if [[ -z "$DIRECTION" ]]; then
   DIRECTION="to-repo"
 fi
 
-SRC_DEFAULT="$OPENCLAW_HOME/skills/clawboard"
-DST_DEFAULT="$REPO_ROOT/skills/clawboard"
+if [[ -z "${SKILL_NAME:-}" ]]; then
+  echo "error: skill name cannot be empty" >&2
+  exit 1
+fi
+
+SRC_DEFAULT="$OPENCLAW_HOME/skills/$SKILL_NAME"
+DST_DEFAULT="$REPO_ROOT/skills/$SKILL_NAME"
 if [[ "$DIRECTION" == "to-openclaw" ]]; then
-  SRC_DEFAULT="$REPO_ROOT/skills/clawboard"
-  DST_DEFAULT="$OPENCLAW_HOME/skills/clawboard"
+  SRC_DEFAULT="$REPO_ROOT/skills/$SKILL_NAME"
+  DST_DEFAULT="$OPENCLAW_HOME/skills/$SKILL_NAME"
 fi
 
 SRC="${SRC_OVERRIDE:-$SRC_DEFAULT}"
@@ -87,10 +98,30 @@ if [[ ! -d "$DST" ]]; then
   fi
 fi
 
+resolve_dir() {
+  (cd "$1" >/dev/null 2>&1 && pwd -P) || return 1
+}
+
+SRC_REAL="$(resolve_dir "$SRC" || true)"
+DST_REAL="$(resolve_dir "$DST" || true)"
+if [[ -n "$SRC_REAL" && -n "$DST_REAL" && "$SRC_REAL" == "$DST_REAL" ]]; then
+  echo "== Skill sync =="
+  echo "Source: $SRC"
+  echo "Dest:   $DST"
+  echo "Dir:    $DIRECTION"
+  echo "Skill:  $SKILL_NAME"
+  echo "Mode:   $([[ $APPLY == 1 ]] && echo APPLY || echo DRY_RUN)"
+  echo ""
+  echo "No-op: source and destination resolve to the same directory:"
+  echo "  $SRC_REAL"
+  exit 0
+fi
+
 echo "== Skill sync =="
 echo "Source: $SRC"
 echo "Dest:   $DST"
 echo "Dir:    $DIRECTION"
+echo "Skill:  $SKILL_NAME"
 echo "Mode:   $([[ $APPLY == 1 ]] && echo APPLY || echo DRY_RUN)"
 echo ""
 

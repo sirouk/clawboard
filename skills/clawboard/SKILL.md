@@ -36,22 +36,56 @@ Get a user to a working Clawboard install where:
 
 ## Hard Rules (Repo vs Installed Skill)
 
-- **There are two separate copies of this skill**:
-  - Repo copy (version controlled): `$CLAWBOARD_DIR/skills/clawboard`
-  - Installed copy (what OpenClaw reads at runtime): `$HOME/.openclaw/skills/clawboard`
-- **Editing the repo copy does not update the installed copy.** After changing skill files (SKILL.md, `agents/`, `references/`, `scripts/`), sync it into OpenClaw:
+- Repo copy (version controlled): `$CLAWBOARD_DIR/skills/clawboard`
+- Installed skill path (what OpenClaw reads): `$HOME/.openclaw/skills/clawboard`
+- **Default install mode is symlink** (`~/.openclaw/skills/clawboard -> $CLAWBOARD_DIR/skills/clawboard`).
+- Detect mode deterministically at runtime:
+
+```bash
+if [ -L "$HOME/.openclaw/skills/clawboard" ]; then
+  echo "symlink"
+else
+  echo "copy"
+fi
+```
+
+- In **symlink mode** (default), repo edits are immediately visible to OpenClaw.
+- In **copy mode**, repo edits do not update OpenClaw until you sync/copy again. After skill file changes (SKILL.md, `agents/`, `references/`, `scripts/`), sync into OpenClaw:
 
 ```bash
 cd "$CLAWBOARD_DIR"
 bash scripts/sync_openclaw_skill.sh --to-openclaw --apply --force
 ```
 
-- **Editing the installed copy does not update your repo.** If you changed files under `~/.openclaw/skills/clawboard`, sync them back before committing:
+- If you changed files under `~/.openclaw/skills/clawboard` while in copy mode, sync them back before committing:
 
 ```bash
 cd "$CLAWBOARD_DIR"
 bash scripts/sync_openclaw_skill.sh --to-repo --apply
 ```
+
+## Workspace + Runtime Assumptions (for coding tasks)
+
+- Typical repo locations for Clawboard code:
+  - `~/[agent_name]/clawboard`
+  - `~/[agent_name]/projects/clawboard`
+- For scripted installs, bootstrap auto-detects OpenClaw workspace conventions and usually lands in one of those layouts.
+- When asked to work on Clawboard frontend/backend, prefer the active git repo copy under those locations, not `~/.openclaw/skills/*`.
+- After typical bootstrap, assume Docker services are running:
+  - `CLAWBOARD_WEB_HOT_RELOAD=1`: `web-dev` is used for Next.js hot reload (`web` is stopped).
+  - `CLAWBOARD_WEB_HOT_RELOAD=0`: production-style `web` service is used.
+- Fast runtime check commands:
+  - `docker compose ps`
+  - `echo "$CLAWBOARD_WEB_HOT_RELOAD"` (or read from `$CLAWBOARD_DIR/.env`)
+  - `curl -s http://localhost:8010/api/health`
+- Parity rules while editing:
+  - Skill path mode should be checked first (`test -L ~/.openclaw/skills/clawboard`).
+  - If symlink mode: edit repo files directly (`$CLAWBOARD_DIR/skills/clawboard/**`).
+  - If copy mode: sync to OpenClaw after edits (`bash scripts/sync_openclaw_skill.sh --to-openclaw --apply --force`).
+  - Logger plugin edits (`extensions/clawboard-logger/**`) must be reinstalled/enabled in OpenClaw:
+    - `openclaw plugins install -l "$CLAWBOARD_DIR/extensions/clawboard-logger"`
+    - `openclaw plugins enable clawboard-logger`
+  - `~/.openclaw/skills/clawboard-logger` is optional and may not exist by default. If your environment has it, keep it synced with its repo copy explicitly.
 
 ## Install Modes
 
@@ -71,7 +105,7 @@ What the script does:
 - Detects browser access URLs (Tailscale if available, else localhost) and writes `.env` `CLAWBOARD_PUBLIC_API_BASE` and `CLAWBOARD_PUBLIC_WEB_URL`.
 - Builds and starts Docker services.
 - Ensures `web` + `api` + `classifier` + `qdrant` are running.
-- Installs skill to `$HOME/.openclaw/skills/clawboard`.
+- Installs skill at `$HOME/.openclaw/skills/clawboard` (default: symlink to repo skill; optional copy mode).
 - Installs/enables `clawboard-logger` plugin.
 - Writes plugin config (`baseUrl`, `token`, `enabled`) via `openclaw config set`.
 - Ensures OpenClaw OpenResponses endpoint is enabled (`POST /v1/responses`) for attachments.
@@ -87,10 +121,13 @@ Useful flags:
 - `--no-backfill` (same as `manual`)
 - `--api-url http://localhost:8010`
 - `--web-url http://localhost:3010`
+- `--web-hot-reload` / `--no-web-hot-reload`
 - `--public-api-base https://api.example.com`
 - `--public-web-url https://clawboard.example.com`
 - `--token <token>`
 - `--title "<name>"`
+- `--skill-symlink` (default)
+- `--skill-copy` (fallback if you do not want symlink mode)
 - `--update`
 
 ### 2) Human Manual Install
@@ -138,6 +175,15 @@ docker compose up -d --build
 
 ```bash
 mkdir -p "$HOME/.openclaw/skills"
+rm -rf "$HOME/.openclaw/skills/clawboard"
+ln -s "$CLAWBOARD_DIR/skills/clawboard" "$HOME/.openclaw/skills/clawboard"
+```
+
+If you explicitly want copy mode instead of symlink:
+
+```bash
+mkdir -p "$HOME/.openclaw/skills"
+rm -rf "$HOME/.openclaw/skills/clawboard"
 cp -R "$CLAWBOARD_DIR/skills/clawboard" "$HOME/.openclaw/skills/clawboard"
 ```
 
@@ -200,7 +246,7 @@ Install Clawboard for me end-to-end. ClawHub is not available yet, so choose one
 - Set `CLAWBOARD_PUBLIC_API_BASE` (local/Tailscale/custom domain) in `$CLAWBOARD_DIR/.env`
 - Set `CLAWBOARD_PUBLIC_WEB_URL` (local/Tailscale/custom domain) in `$CLAWBOARD_DIR/.env`
 - Start docker compose
-- Copy skill to $HOME/.openclaw/skills/clawboard
+- Symlink skill to $HOME/.openclaw/skills/clawboard (default; copy only if explicitly requested)
 - Install/enable clawboard-logger plugin
 - Set plugin config (baseUrl + token) in OpenClaw config
 - Restart gateway
