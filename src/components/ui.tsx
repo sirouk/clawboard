@@ -1,6 +1,12 @@
 import { cn } from "@/lib/cn";
 import type { ComponentProps } from "react";
 
+// iOS Safari zooms the page when focusing inputs with font-size < 16px.
+// Default to 16px on small screens, and keep the denser `text-sm` on desktop.
+const FORM_FIELD_TEXT_SIZE = "max-md:text-[16px] md:text-sm";
+const FORM_FIELD_DISABLED = "disabled:cursor-not-allowed disabled:opacity-70";
+const FORM_FIELD_PLACEHOLDER_HINT = "placeholder:font-normal placeholder:opacity-60";
+
 export function Card({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
@@ -101,7 +107,10 @@ export function Input({ className, ...props }: ComponentProps<"input">) {
   return (
     <input
       className={cn(
-        "h-11 w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] transition focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)]",
+        "h-11 w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] transition focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)]",
+        FORM_FIELD_TEXT_SIZE,
+        FORM_FIELD_DISABLED,
+        FORM_FIELD_PLACEHOLDER_HINT,
         className
       )}
       {...props}
@@ -113,7 +122,9 @@ export function Select({ className, ...props }: ComponentProps<"select">) {
   return (
     <select
       className={cn(
-        "h-11 w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 text-sm text-[rgb(var(--claw-text))] transition focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)]",
+        "h-11 w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 text-[rgb(var(--claw-text))] transition focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)]",
+        FORM_FIELD_TEXT_SIZE,
+        FORM_FIELD_DISABLED,
         className
       )}
       {...props}
@@ -125,7 +136,10 @@ export function TextArea({ className, ...props }: ComponentProps<"textarea">) {
   return (
     <textarea
       className={cn(
-        "min-h-[120px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] transition focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)]",
+        "min-h-[120px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] transition focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)]",
+        FORM_FIELD_TEXT_SIZE,
+        FORM_FIELD_DISABLED,
+        FORM_FIELD_PLACEHOLDER_HINT,
         className
       )}
       {...props}

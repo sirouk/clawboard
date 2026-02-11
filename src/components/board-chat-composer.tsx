@@ -401,7 +401,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
       <div className="mt-2">
         <TextArea
           ref={textareaRef}
-          className={cn("min-h-[78px] resize-none overflow-hidden", readOnly ? "cursor-not-allowed opacity-70" : "")}
+          className="min-h-[78px] resize-none overflow-hidden"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder={placeholder ?? (readOnly ? "Add a token in Setup to send messages." : "Type a message…")}
