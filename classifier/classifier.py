@@ -776,6 +776,23 @@ def _is_noise_conversation(entry: dict) -> bool:
     text = _log_text(entry)
     return _is_classifier_payload(text) or _is_injected_context_artifact(text)
 
+CRON_EVENT_CHANNELS = {
+    # OpenClaw cron delivery/control messages. These should not be routed into user topics/tasks.
+    "cron-event",
+}
+
+
+def _source_channel(entry: dict) -> str:
+    source = entry.get("source")
+    if not isinstance(source, dict):
+        return ""
+    return str(source.get("channel") or "").strip().lower()
+
+
+def _is_cron_event(entry: dict) -> bool:
+    """True when the log originates from OpenClaw cron delivery/control messages."""
+    return _source_channel(entry) in CRON_EVENT_CHANNELS
+
 
 def _is_memory_action(entry: dict) -> bool:
     if entry.get("type") != "action":
@@ -798,6 +815,8 @@ def _is_command_conversation(entry: dict) -> bool:
 
 def _is_context_log(entry: dict) -> bool:
     if entry.get("type") not in ("conversation", "note"):
+        return False
+    if _is_cron_event(entry):
         return False
     if _is_command_conversation(entry):
         return False
@@ -3271,6 +3290,35 @@ def classify_session(session_key: str):
                 continue
             ctx_logs.append(item)
     ctx_logs = sorted(ctx_logs, key=lambda e: e.get("createdAt") or "")
+
+    # Cron delivery/control messages should never be classified into topics/tasks. Mark them terminal
+    # immediately so they can't be swept into a bundle scope patch.
+    for e in ctx_logs:
+        if not _is_cron_event(e):
+            continue
+        if (e.get("classificationStatus") or "pending") != "pending":
+            continue
+        attempts = int(e.get("classificationAttempts") or 0)
+        try:
+            patch_log(
+                e["id"],
+                {
+                    "topicId": None,
+                    "taskId": None,
+                    "classificationStatus": "failed",
+                    "classificationAttempts": attempts + 1,
+                    "classificationError": "filtered_cron_event",
+                },
+            )
+            # Keep local copy consistent so this turn doesn't re-process it.
+            e["topicId"] = None
+            e["taskId"] = None
+            e["classificationStatus"] = "failed"
+            e["classificationAttempts"] = attempts + 1
+            e["classificationError"] = "filtered_cron_event"
+        except Exception:
+            # Best-effort; if we can't patch, classification below still skips cron logs.
+            pass
     ctx_context = [e for e in ctx_logs if _is_context_log(e)]
 
     # Anchor on the oldest pending conversation so older rows don't starve.
@@ -3282,6 +3330,18 @@ def classify_session(session_key: str):
             if (e.get("classificationStatus") or "pending") != "pending":
                 continue
             attempts = int(e.get("classificationAttempts") or 0)
+            if _is_cron_event(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": None,
+                        "taskId": None,
+                        "classificationStatus": "failed",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_cron_event",
+                    },
+                )
+                continue
             if attempts >= MAX_ATTEMPTS:
                 continue
             if _is_command_conversation(e):
@@ -3316,6 +3376,18 @@ def classify_session(session_key: str):
             if (e.get("classificationStatus") or "pending") != "pending":
                 continue
             attempts = int(e.get("classificationAttempts") or 0)
+            if _is_cron_event(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": None,
+                        "taskId": None,
+                        "classificationStatus": "failed",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_cron_event",
+                    },
+                )
+                continue
             if attempts >= MAX_ATTEMPTS:
                 continue
             if _is_command_conversation(e):
@@ -3389,6 +3461,19 @@ def classify_session(session_key: str):
             if (e.get("classificationStatus") or "pending") != "pending":
                 continue
             attempts = int(e.get("classificationAttempts") or 0)
+            if _is_cron_event(e):
+                # Never attach cron control messages to user topics/tasks.
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": None,
+                        "taskId": None,
+                        "classificationStatus": "failed",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_cron_event",
+                    },
+                )
+                continue
             if attempts >= MAX_ATTEMPTS:
                 continue
 
@@ -3462,7 +3547,20 @@ def classify_session(session_key: str):
         for e in scope_logs:
             if (e.get("classificationStatus") or "pending") != "pending":
                 continue
-            attempts = int(e.get("classificationAttempts") or 0) + 1
+            attempts0 = int(e.get("classificationAttempts") or 0)
+            if _is_cron_event(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": None,
+                        "taskId": None,
+                        "classificationStatus": "failed",
+                        "classificationAttempts": attempts0 + 1,
+                        "classificationError": "filtered_cron_event",
+                    },
+                )
+                continue
+            attempts = attempts0 + 1
             next_status = "failed" if attempts >= MAX_ATTEMPTS else "pending"
             patch_log(
                 e["id"],
@@ -3683,6 +3781,18 @@ def classify_session(session_key: str):
             if (entry.get("classificationStatus") or "pending") != "pending":
                 continue
             attempts = int(entry.get("classificationAttempts") or 0)
+            if _is_cron_event(entry):
+                patch_log(
+                    entry["id"],
+                    {
+                        "topicId": None,
+                        "taskId": None,
+                        "classificationStatus": "failed",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_cron_event",
+                    },
+                )
+                continue
             if attempts >= MAX_ATTEMPTS:
                 continue
             payload = {
@@ -3864,6 +3974,18 @@ def classify_session(session_key: str):
                     if (entry.get("classificationStatus") or "pending") != "pending":
                         continue
                     attempts = int(entry.get("classificationAttempts") or 0)
+                    if _is_cron_event(entry):
+                        patch_log(
+                            entry["id"],
+                            {
+                                "topicId": None,
+                                "taskId": None,
+                                "classificationStatus": "failed",
+                                "classificationAttempts": attempts + 1,
+                                "classificationError": "filtered_cron_event",
+                            },
+                        )
+                        continue
                     if attempts >= MAX_ATTEMPTS:
                         continue
                     payload = {
@@ -3914,6 +4036,18 @@ def classify_session(session_key: str):
                 if (entry.get("classificationStatus") or "pending") != "pending":
                     continue
                 attempts = int(entry.get("classificationAttempts") or 0)
+                if _is_cron_event(entry):
+                    patch_log(
+                        entry["id"],
+                        {
+                            "topicId": None,
+                            "taskId": None,
+                            "classificationStatus": "failed",
+                            "classificationAttempts": attempts + 1,
+                            "classificationError": "filtered_cron_event",
+                        },
+                    )
+                    continue
                 if attempts >= MAX_ATTEMPTS:
                     continue
                 payload = {
@@ -4273,6 +4407,18 @@ def classify_session(session_key: str):
         if (e.get("classificationStatus") or "pending") != "pending":
             continue
         attempts = int(e.get("classificationAttempts") or 0)
+        if _is_cron_event(e):
+            patch_log(
+                e["id"],
+                {
+                    "topicId": None,
+                    "taskId": None,
+                    "classificationStatus": "failed",
+                    "classificationAttempts": attempts + 1,
+                    "classificationError": "filtered_cron_event",
+                },
+            )
+            continue
         if attempts >= MAX_ATTEMPTS:
             continue
         if _is_command_conversation(e):
