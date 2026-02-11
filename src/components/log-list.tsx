@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { LogEntry, Task, Topic } from "@/lib/types";
-import { Badge, Button, Input, Select } from "@/components/ui";
+import { Badge, Button, Input, Select, TextArea } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
 import { useAppConfig } from "@/components/providers";
@@ -401,6 +401,21 @@ export function LogList({
     return { ok: true, logCount };
   };
 
+  const purgeForward = async (anchorLogId: string) => {
+    const id = String(anchorLogId ?? "").trim();
+    if (!id) return { ok: false, error: "Missing anchor log id." };
+    if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
+    const res = await apiFetch(`/api/log/${encodeURIComponent(id)}/purge_forward`, { method: "POST" }, token);
+    if (!res.ok) {
+      const detail = await res.json().catch(() => null);
+      const msg = typeof detail?.detail === "string" ? detail.detail : "Failed to purge forward.";
+      return { ok: false, error: msg };
+    }
+    const payload = (await res.json().catch(() => null)) as { deletedCount?: unknown } | null;
+    const deletedCount = typeof payload?.deletedCount === "number" ? payload.deletedCount : undefined;
+    return { ok: true, deletedCount };
+  };
+
   const normalizedSearch = search.trim().toLowerCase();
   const semanticRefreshKey = useMemo(() => {
     const latestLog = logs.reduce((acc, item) => {
@@ -741,6 +756,7 @@ export function LogList({
                   onDelete={deleteLogEntry}
                   onPatch={patchLogEntry}
                   onReplayClassifier={replayClassifierBundle}
+                  onPurgeForward={purgeForward}
                   getTasksForTopic={getTasksForTopic}
                   ensureTasksForTopic={ensureTasksForTopic}
                   isTasksLoadingForTopic={isTasksLoadingForTopic}
@@ -787,6 +803,7 @@ function LogRow({
   onDelete,
   onPatch,
   onReplayClassifier,
+  onPurgeForward,
   getTasksForTopic,
   ensureTasksForTopic,
   isTasksLoadingForTopic,
@@ -810,6 +827,7 @@ function LogRow({
     patch: LogPatchPayload
   ) => Promise<{ ok: boolean; error?: string; entry?: LogEntry }>;
   onReplayClassifier: (anchorLogId: string) => Promise<{ ok: boolean; error?: string; logCount?: number }>;
+  onPurgeForward: (anchorLogId: string) => Promise<{ ok: boolean; error?: string; deletedCount?: number }>;
   getTasksForTopic: (topicId: string | null) => Task[];
   ensureTasksForTopic: (topicId: string | null) => Promise<void>;
   isTasksLoadingForTopic: (topicId: string | null) => boolean;
@@ -837,6 +855,8 @@ function LogRow({
   const [editSaving, setEditSaving] = useState(false);
   const [deleteArmed, setDeleteArmed] = useState(false);
   const [deleteStatus, setDeleteStatus] = useState<string | null>(null);
+  const [purgeArmed, setPurgeArmed] = useState(false);
+  const [purgeStatus, setPurgeStatus] = useState<string | null>(null);
   const showFullMessage = showRawAll || expanded;
   const summary = entry.summary ?? entry.content;
   const resolvedTopic = entry.topicId ? topics.find((topic) => topic.id === entry.topicId) : null;
@@ -951,6 +971,9 @@ function LogRow({
     const bubbleTitle = sourceMeta ? `${formatDateTime(entry.createdAt)}\n${sourceMeta}` : formatDateTime(entry.createdAt);
     const showReplay =
       isUser && isConversation && scopeTaskId === null && Boolean(scopeTopicId) && typeof onReplayClassifier === "function";
+
+    const showPurgeForward =
+      allowDelete && scopeTaskId === null && Boolean(scopeTopicId) && !entry.taskId && typeof onPurgeForward === "function";
 
     return (
       <div
@@ -1068,6 +1091,8 @@ function LogRow({
                           setEditOpen(true);
                           setDeleteArmed(false);
                           setDeleteStatus(null);
+                          setPurgeArmed(false);
+                          setPurgeStatus(null);
                           setEditTopicId(entry.topicId ?? "");
                           setEditTaskId(entry.taskId ?? "");
                           setEditContent(entry.content ?? "");
@@ -1106,21 +1131,19 @@ function LogRow({
 	                    ref={notePanelRef}
 	                    className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3"
 	                  >
-	                    <textarea
+	                    <TextArea
 	                      ref={noteTextAreaRef}
 	                      value={noteText}
 	                      onChange={(event) => setNoteText(event.target.value)}
 	                      placeholder={
 	                        readOnly
 	                          ? "Add token in Setup to enable curated notes that steer classification."
-                          : "Add a curated note to this conversation..."
-                      }
-                      disabled={readOnly}
-                      readOnly={readOnly}
-                      className={`min-h-[90px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
-                        readOnly ? "cursor-not-allowed opacity-70" : ""
-                      }`}
-                    />
+	                          : "Add a curated note to this conversation..."
+	                      }
+	                      disabled={readOnly}
+	                      readOnly={readOnly}
+	                      className="min-h-[90px]"
+	                    />
                     {noteStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{noteStatus}</p>}
                     <div className={`flex flex-wrap items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
                       <Button
@@ -1215,14 +1238,12 @@ function LogRow({
 
                     <div className="space-y-1">
                       <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Content</div>
-                      <textarea
+                      <TextArea
                         value={editContent}
                         onChange={(event) => setEditContent(event.target.value)}
                         disabled={readOnly}
                         readOnly={readOnly}
-                        className={`min-h-[110px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
-                          readOnly ? "cursor-not-allowed opacity-70" : ""
-                        }`}
+                        className="min-h-[110px]"
                       />
                     </div>
 
@@ -1249,6 +1270,8 @@ function LogRow({
                           setEditOpen(false);
                           setDeleteArmed(false);
                           setDeleteStatus(null);
+                          setPurgeArmed(false);
+                          setPurgeStatus(null);
                         }}
                       >
                         {editSaving ? "Saving…" : "Save"}
@@ -1260,6 +1283,8 @@ function LogRow({
                           setEditOpen(false);
                           setDeleteArmed(false);
                           setDeleteStatus(null);
+                          setPurgeArmed(false);
+                          setPurgeStatus(null);
                           setEditStatus(null);
                         }}
                       >
@@ -1317,6 +1342,60 @@ function LogRow({
                           </Button>
                         )}
                       </div>
+
+                      {showPurgeForward && (
+                        <>
+                          {purgeStatus && <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">{purgeStatus}</p>}
+                          <div className={`mt-2 flex flex-wrap items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
+                            {!purgeArmed ? (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                className="border-[rgba(255,90,45,0.35)] text-[rgba(255,90,45,0.92)]"
+                                disabled={readOnly}
+                                onClick={() => {
+                                  setPurgeArmed(true);
+                                  setPurgeStatus(null);
+                                }}
+                                title="Delete this message and everything after it in this Topic Chat session"
+                              >
+                                Purge from here
+                              </Button>
+                            ) : (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                className="border-[rgba(255,90,45,0.35)] text-[rgba(255,90,45,0.92)]"
+                                disabled={readOnly}
+                                onClick={async () => {
+                                  setPurgeStatus(null);
+                                  const result = await onPurgeForward(entry.id);
+                                  if (!result.ok) {
+                                    setPurgeStatus(result.error ?? "Failed to purge forward.");
+                                    return;
+                                  }
+                                  setEditOpen(false);
+                                  setPurgeArmed(false);
+                                }}
+                              >
+                                Confirm purge
+                              </Button>
+                            )}
+                            {purgeArmed && (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => {
+                                  setPurgeArmed(false);
+                                  setPurgeStatus(null);
+                                }}
+                              >
+                                Cancel
+                              </Button>
+                            )}
+                          </div>
+                        </>
+                      )}
                     </div>
 
                     {sourceMeta && (
@@ -1429,7 +1508,7 @@ function LogRow({
             {allowNotes && entry.type !== "note" && noteOpen && (
               <div className="mt-2 w-full max-w-[90%]">
                 <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
-                  <textarea
+                  <TextArea
                     value={noteText}
                     onChange={(event) => setNoteText(event.target.value)}
                     placeholder={
@@ -1439,9 +1518,7 @@ function LogRow({
                     }
                     disabled={readOnly}
                     readOnly={readOnly}
-                    className={`min-h-[90px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
-                      readOnly ? "cursor-not-allowed opacity-70" : ""
-                    }`}
+                    className="min-h-[90px]"
                   />
                   {noteStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{noteStatus}</p>}
                   <div className="flex flex-wrap items-center justify-center gap-2">
@@ -1533,14 +1610,12 @@ function LogRow({
 
                   <div className="space-y-1">
                     <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Content</div>
-                    <textarea
+                    <TextArea
                       value={editContent}
                       onChange={(event) => setEditContent(event.target.value)}
                       disabled={readOnly}
                       readOnly={readOnly}
-                      className={`min-h-[110px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
-                        readOnly ? "cursor-not-allowed opacity-70" : ""
-                      }`}
+                      className="min-h-[110px]"
                     />
                   </div>
 
@@ -1818,21 +1893,19 @@ function LogRow({
 	            ref={notePanelRef}
 	            className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3"
 	          >
-	            <textarea
+	            <TextArea
 	              ref={noteTextAreaRef}
 	              value={noteText}
 	              onChange={(event) => setNoteText(event.target.value)}
 	              placeholder={
 	                readOnly
 	                  ? "Add token in Setup to enable curated notes that steer classification."
-                  : "Add a curated note to this conversation..."
-              }
-              disabled={readOnly}
-              readOnly={readOnly}
-              className={`min-h-[90px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
-                readOnly ? "cursor-not-allowed opacity-70" : ""
-              }`}
-            />
+	                  : "Add a curated note to this conversation..."
+	              }
+	              disabled={readOnly}
+	              readOnly={readOnly}
+	              className="min-h-[90px]"
+	            />
             {noteStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{noteStatus}</p>}
             <div className="flex flex-wrap items-center gap-2">
               <Button
@@ -1922,14 +1995,12 @@ function LogRow({
 
             <div className="space-y-1">
               <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Content</div>
-              <textarea
+              <TextArea
                 value={editContent}
                 onChange={(event) => setEditContent(event.target.value)}
                 disabled={readOnly}
                 readOnly={readOnly}
-                className={`min-h-[110px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)] ${
-                  readOnly ? "cursor-not-allowed opacity-70" : ""
-                }`}
+                className="min-h-[110px]"
               />
             </div>
 
