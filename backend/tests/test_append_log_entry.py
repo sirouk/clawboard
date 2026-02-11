@@ -127,3 +127,61 @@ class AppendLogEntryTests(unittest.TestCase):
         # Task implies its real topic.
         self.assertEqual(payload.get("topicId"), "topic-a")
 
+    def test_append_log_filters_cron_event_logs(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+            session.add(
+                Task(
+                    id="task-a",
+                    topicId="topic-a",
+                    title="Task A",
+                    color="#4EA1FF",
+                    status="todo",
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "topicId": "topic-a",
+                "taskId": "task-a",
+                "content": "System: Cron: backup ran.",
+                "summary": "Cron backup ran",
+                "raw": "System: Cron: backup ran.",
+                "createdAt": ts,
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {"channel": "cron-event", "sessionKey": "agent:main:main", "messageId": "oc:test"},
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertIsNone(payload.get("topicId"))
+        self.assertIsNone(payload.get("taskId"))
+        self.assertEqual(payload.get("classificationStatus"), "failed")
+        self.assertEqual(payload.get("classificationError"), "filtered_cron_event")
+        self.assertEqual(payload.get("classificationAttempts"), 1)

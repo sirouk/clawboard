@@ -761,6 +761,18 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             if not topic_id and derived_topic_id:
                 topic_id = derived_topic_id
 
+    source_channel = ""
+    if payload.source and isinstance(payload.source, dict):
+        source_channel = str(payload.source.get("channel") or "").strip().lower()
+
+    # OpenClaw cron delivery/control messages should never be routed into user topics/tasks.
+    # Treat them as terminal noise at ingest time so they can't briefly appear in Unified View
+    # before the classifier cycle runs.
+    cron_event_filtered = source_channel == "cron-event"
+    if cron_event_filtered:
+        topic_id = None
+        task_id = None
+
     task_row = None
     if task_id:
         task_row = session.get(Task, task_id)
@@ -807,7 +819,9 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         agentLabel=payload.agentLabel,
         source=payload.source,
         attachments=attachments,
-        classificationStatus=payload.classificationStatus or "pending",
+        classificationStatus="failed" if cron_event_filtered else (payload.classificationStatus or "pending"),
+        classificationAttempts=1 if cron_event_filtered else 0,
+        classificationError="filtered_cron_event" if cron_event_filtered else None,
     )
     session.add(entry)
     try:
@@ -3248,6 +3262,191 @@ def delete_log(log_id: str):
         for deleted_id in deleted_ids:
             event_hub.publish({"type": "log.deleted", "data": {"id": deleted_id, "rootId": log_id}, "eventTs": event_ts})
         return {"ok": True, "deleted": True, "deletedIds": deleted_ids}
+
+
+@app.post(
+    "/api/topics/{topic_id}/topic_chat/purge",
+    dependencies=[Depends(require_token)],
+    tags=["topics"],
+)
+def purge_topic_chat(topic_id: str):
+    """Permanently delete Topic Chat logs (topic-scoped logs with no taskId).
+
+    This is intentionally irreversible (no soft-delete). The UI should provide a double
+    confirmation before calling this endpoint.
+    """
+    topic_id = (topic_id or "").strip()
+    if not topic_id:
+        raise HTTPException(status_code=400, detail="topic_id is required")
+
+    with get_session() as session:
+        topic = session.get(Topic, topic_id)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+
+        roots = session.exec(select(LogEntry).where(LogEntry.topicId == topic_id, LogEntry.taskId.is_(None))).all()
+        if not roots:
+            return {"ok": True, "topicId": topic_id, "deleted": False, "deletedCount": 0, "deletedIds": []}
+
+        root_ids = [row.id for row in roots]
+        notes = session.exec(select(LogEntry).where(LogEntry.relatedLogId.in_(root_ids))).all() if root_ids else []
+        to_delete = list(roots) + [row for row in notes if row.id not in set(root_ids)]
+
+        deleted_ids = [row.id for row in to_delete]
+
+        # Best-effort attachment cleanup (DB rows + on-disk files).
+        attachment_ids: set[str] = set()
+        for row in roots:
+            atts = row.attachments if isinstance(row.attachments, list) else []
+            for att in atts:
+                if not isinstance(att, dict):
+                    continue
+                att_id = str(att.get("id") or "").strip()
+                if att_id:
+                    attachment_ids.add(att_id)
+
+        if attachment_ids:
+            try:
+                attachment_rows = session.exec(select(Attachment).where(Attachment.id.in_(list(attachment_ids)))).all()
+            except Exception:
+                attachment_rows = []
+            root = _attachments_root()
+            for att_row in attachment_rows:
+                storage_path = str(att_row.storagePath or att_row.id)
+                path = root / storage_path
+                try:
+                    if path.exists():
+                        path.unlink()
+                except Exception:
+                    pass
+                try:
+                    session.delete(att_row)
+                except Exception:
+                    pass
+
+        for row in to_delete:
+            session.delete(row)
+        session.commit()
+
+        for deleted_id in deleted_ids:
+            enqueue_reindex_request({"op": "delete", "kind": "log", "id": deleted_id})
+
+        event_ts = now_iso()
+        for deleted_id in deleted_ids:
+            event_hub.publish({"type": "log.deleted", "data": {"id": deleted_id, "rootId": deleted_id}, "eventTs": event_ts})
+
+        return {"ok": True, "topicId": topic_id, "deleted": True, "deletedCount": len(deleted_ids), "deletedIds": deleted_ids}
+
+
+@app.post(
+    "/api/log/{log_id}/purge_forward",
+    dependencies=[Depends(require_token)],
+    tags=["logs"],
+)
+def purge_log_forward(log_id: str):
+    """Permanently delete the given log entry and everything after it in the same board chat session.
+
+    Intended for Topic Chat cleanup when a thread goes in a bad direction.
+    """
+    anchor_id = (log_id or "").strip()
+    if not anchor_id:
+        raise HTTPException(status_code=400, detail="log_id is required")
+
+    with get_session() as session:
+        anchor = session.get(LogEntry, anchor_id)
+        if not anchor:
+            raise HTTPException(status_code=404, detail="Anchor log not found")
+
+        source = anchor.source if isinstance(anchor.source, dict) else None
+        session_key = str(source.get("sessionKey") or "").strip() if source else ""
+        if not session_key:
+            raise HTTPException(status_code=400, detail="Anchor log is missing source.sessionKey")
+
+        base_session_key = (session_key.split("|", 1)[0] or "").strip()
+        if not base_session_key:
+            raise HTTPException(status_code=400, detail="Anchor log sessionKey is invalid")
+
+        topic_id, task_id = _parse_board_session_key(base_session_key)
+        if not topic_id:
+            raise HTTPException(status_code=400, detail="Purge forward is only supported for board chats")
+        if task_id:
+            raise HTTPException(status_code=400, detail="Purge forward is only supported for Topic Chat sessions")
+
+        # Load the full session thread (including provider thread suffix variants) so purging
+        # removes assistant/tool chatter that belongs to the same turn.
+        query = select(LogEntry)
+        if DATABASE_URL.startswith("sqlite"):
+            query = query.where(
+                text(
+                    "(json_extract(source, '$.sessionKey') = :base_key OR json_extract(source, '$.sessionKey') LIKE :like_key)"
+                )
+            ).params(base_key=base_session_key, like_key=f"{base_session_key}|%")
+        else:
+            expr = LogEntry.source["sessionKey"].as_string()
+            query = query.where(or_(expr == base_session_key, expr.like(f"{base_session_key}|%")))
+
+        query = query.order_by(
+            LogEntry.createdAt.asc(),
+            (text("rowid ASC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.asc()),
+        )
+        all_logs = session.exec(query).all()
+        if not all_logs:
+            return {"ok": True, "deleted": False, "deletedCount": 0, "deletedIds": []}
+
+        # Purge from the anchor's position forward.
+        start_idx = next((idx for idx, row in enumerate(all_logs) if row.id == anchor_id), -1)
+        if start_idx < 0:
+            raise HTTPException(status_code=400, detail="Anchor log is not part of the session thread")
+
+        roots = all_logs[start_idx:]
+        root_ids = [row.id for row in roots]
+
+        notes = session.exec(select(LogEntry).where(LogEntry.relatedLogId.in_(root_ids))).all() if root_ids else []
+        to_delete = list(roots) + [row for row in notes if row.id not in set(root_ids)]
+        deleted_ids = [row.id for row in to_delete]
+
+        # Best-effort attachment cleanup (DB rows + on-disk files).
+        attachment_ids: set[str] = set()
+        for row in roots:
+            atts = row.attachments if isinstance(row.attachments, list) else []
+            for att in atts:
+                if not isinstance(att, dict):
+                    continue
+                att_id = str(att.get("id") or "").strip()
+                if att_id:
+                    attachment_ids.add(att_id)
+
+        if attachment_ids:
+            try:
+                attachment_rows = session.exec(select(Attachment).where(Attachment.id.in_(list(attachment_ids)))).all()
+            except Exception:
+                attachment_rows = []
+            root = _attachments_root()
+            for att_row in attachment_rows:
+                storage_path = str(att_row.storagePath or att_row.id)
+                path = root / storage_path
+                try:
+                    if path.exists():
+                        path.unlink()
+                except Exception:
+                    pass
+                try:
+                    session.delete(att_row)
+                except Exception:
+                    pass
+
+        for row in to_delete:
+            session.delete(row)
+        session.commit()
+
+        for deleted_id in deleted_ids:
+            enqueue_reindex_request({"op": "delete", "kind": "log", "id": deleted_id})
+
+        event_ts = now_iso()
+        for deleted_id in deleted_ids:
+            event_hub.publish({"type": "log.deleted", "data": {"id": deleted_id, "rootId": anchor_id}, "eventTs": event_ts})
+
+        return {"ok": True, "deleted": True, "deletedCount": len(deleted_ids), "deletedIds": deleted_ids, "anchorLogId": anchor_id}
 
 
 @app.get("/api/changes", response_model=ChangesResponse, tags=["changes"])
