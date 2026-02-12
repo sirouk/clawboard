@@ -47,6 +47,9 @@ def _seed_clawboard_db(path: str) -> None:
             "INSERT INTO logentry(id, topicId, type, summary, content, raw) VALUES ('log-memory', 'topic-1', 'action', 'Tool call: memory_search', '', '')"
         )
         conn.execute(
+            "INSERT INTO logentry(id, topicId, type, summary, content, raw) VALUES ('log-tool', 'topic-1', 'action', 'Tool call: exec diagnostics', '', '')"
+        )
+        conn.execute(
             "INSERT INTO logentry(id, topicId, type, summary, content, raw) VALUES ('log-system', 'topic-1', 'system', '', 'internal', '')"
         )
         conn.commit()
@@ -78,6 +81,7 @@ def _seed_embeddings_db(path: str) -> None:
             ("log", "log-good"),
             ("log", "log-command"),
             ("log", "log-memory"),
+            ("log", "log-tool"),
             ("log", "log-system"),
             ("log", "log-orphan"),
         ]
@@ -112,13 +116,14 @@ class VectorMaintenanceTests(unittest.TestCase):
         plan = vm.build_cleanup_plan(self.clawboard_db, self.embeddings_db)
 
         self.assertEqual(plan["desiredCount"], 4)
-        self.assertEqual(plan["managedExistingCount"], 10)
-        self.assertEqual(len(plan["deletePairs"]), 7)
+        self.assertEqual(plan["managedExistingCount"], 11)
+        self.assertEqual(len(plan["deletePairs"]), 8)
         self.assertEqual(len(plan["missingPairs"]), 1)
 
         self.assertIn(("task:topic-1", "task-1"), set(plan["missingPairs"]))
         self.assertIn(("topic", "topic-orphan"), set(plan["deletePairs"]))
         self.assertIn(("log", "log-command"), set(plan["deletePairs"]))
+        self.assertIn(("log", "log-tool"), set(plan["deletePairs"]))
 
     def test_run_one_time_cleanup_applies_sqlite_and_enqueues_reindex(self):
         report = vm.run_one_time_vector_cleanup(
@@ -129,8 +134,8 @@ class VectorMaintenanceTests(unittest.TestCase):
             dry_run=False,
         )
 
-        self.assertEqual(report["sqliteDeleted"], 7)
-        self.assertEqual(report["queueEnqueued"], 8)
+        self.assertEqual(report["sqliteDeleted"], 8)
+        self.assertEqual(report["queueEnqueued"], 9)
         self.assertEqual(report["qdrantDeleteAttempted"], 0)
 
         remaining = self._embedding_keys()
@@ -145,11 +150,11 @@ class VectorMaintenanceTests(unittest.TestCase):
 
         with open(self.queue_path, "r", encoding="utf-8") as f:
             payloads = [json.loads(line) for line in f if line.strip()]
-        self.assertEqual(len(payloads), 8)
+        self.assertEqual(len(payloads), 9)
 
         deletes = [item for item in payloads if item.get("op") == "delete"]
         upserts = [item for item in payloads if item.get("op") == "upsert"]
-        self.assertEqual(len(deletes), 7)
+        self.assertEqual(len(deletes), 8)
         self.assertEqual(len(upserts), 1)
 
         upsert = upserts[0]
@@ -169,8 +174,19 @@ class VectorMaintenanceTests(unittest.TestCase):
         self.assertTrue(report["dryRun"])
         self.assertEqual(report["sqliteDeleted"], 0)
         self.assertEqual(report["queueEnqueued"], 0)
-        self.assertEqual(len(self._embedding_keys()), 10)
+        self.assertEqual(len(self._embedding_keys()), 11)
         self.assertFalse(os.path.exists(self.queue_path))
+
+    def test_cleanup_plan_can_keep_tool_call_logs_when_enabled(self):
+        original = vm.SEARCH_INCLUDE_TOOL_CALL_LOGS
+        vm.SEARCH_INCLUDE_TOOL_CALL_LOGS = True
+        try:
+            plan = vm.build_cleanup_plan(self.clawboard_db, self.embeddings_db)
+        finally:
+            vm.SEARCH_INCLUDE_TOOL_CALL_LOGS = original
+
+        self.assertEqual(plan["desiredCount"], 5)
+        self.assertNotIn(("log", "log-tool"), set(plan["deletePairs"]))
 
 
 if __name__ == "__main__":

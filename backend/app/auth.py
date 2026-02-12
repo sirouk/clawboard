@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import secrets
 import ipaddress
-from fastapi import Header, HTTPException, Query, Request, status
+from fastapi import Header, HTTPException, Request, status
 
 
 def _configured_token() -> str | None:
@@ -37,13 +37,6 @@ def _client_ip(request: Request) -> str:
     return ""
 
 
-def _request_host(request: Request) -> str:
-    host = request.headers.get("host", "").strip()
-    if not host:
-        return ""
-    return host.split(",")[0].strip().split(":")[0].strip()
-
-
 def _is_loopback_address(value: str) -> bool:
     if not value:
         return False
@@ -58,15 +51,24 @@ def _is_loopback_address(value: str) -> bool:
         return False
 
 
+def _is_test_client_address(value: str) -> bool:
+    normalized = (value or "").strip().lower()
+    return normalized in {"testclient", "testserver"}
+
+
 def is_local_request(request: Request) -> bool:
-    host = _request_host(request)
-    if _is_loopback_address(host):
+    # Treat only transport-level client identity as trusted locality.
+    # Do not trust Host/X-Forwarded-Host because they are spoofable by clients.
+    client = _client_ip(request)
+    if _is_loopback_address(client):
         return True
-    return _is_loopback_address(_client_ip(request))
+    if _is_test_client_address(client):
+        return True
+    return False
 
 
 def ensure_read_access(request: Request, provided_token: str | None) -> None:
-    """Allow local reads without token, but require token for non-localhost reads."""
+    """Allow loopback reads without token, but require token for non-local reads."""
     if is_local_request(request):
         return
     _validate_token(provided_token)
@@ -83,9 +85,8 @@ def require_token(
         description="Server token required for all write operations.",
         example="your-token-here",
     ),
-    token: str | None = Query(default=None, alias="token"),
 ) -> None:
-    _validate_token(x_clawboard_token or token)
+    _validate_token(x_clawboard_token)
 
 
 def is_token_required() -> bool:

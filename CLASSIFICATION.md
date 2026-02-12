@@ -218,6 +218,8 @@ For each log in `scope_logs` still pending and under attempt budget:
   - classifier payload noise / injected context artifacts → mark `failed` with a specific code
   - `system/import` → `filtered_non_semantic`
   - memory tool actions → `filtered_memory_action`
+  - tool call/result/error action logs are excluded from semantic indexing/retrieval by default (`CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS=0`)
+  - tool call/result/error action logs are excluded from Clawgraph memory-map extraction
 - Normal case:
   - patch `topicId`, `taskId`, `summary` (conversation only)
   - set `classificationStatus=classified`
@@ -263,6 +265,9 @@ In `classifier/embeddings_store.py`:
 
 In `backend/app/main.py` (API):
 - Session routing memory retention: `CLAWBOARD_SESSION_ROUTING_MAX_ITEMS`, `CLAWBOARD_SESSION_ROUTING_TTL_DAYS`, `CLAWBOARD_SESSION_ROUTING_GC_SECONDS`, `CLAWBOARD_SESSION_ROUTING_GC_BATCH`, `CLAWBOARD_DISABLE_SESSION_ROUTING_GC`
+- Search ingestion policy: `CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS` (`0` default, `1` to include tool activity logs)
+- Search stability controls: `CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_*`, `CLAWBOARD_SEARCH_WINDOW_*`, `CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS`, `CLAWBOARD_SEARCH_CONCURRENCY_*`, `CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS`
+- Search efficiency controls: `CLAWBOARD_SEARCH_SOURCE_TOPK_*`, `CLAWBOARD_RERANK_CHUNKS_PER_DOC`, `CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE`
 
 ---
 

@@ -161,7 +161,7 @@ def _normalize_text(value: str) -> str:
     return text.strip()
 
 
-def _is_memory_action_log(row: Any) -> bool:
+def _is_tool_call_log(row: Any) -> bool:
     log_type = str(getattr(row, "type", "") or "")
     if log_type != "action":
         return False
@@ -174,10 +174,7 @@ def _is_memory_action_log(row: Any) -> bool:
         ]
         if part
     ).lower()
-    if "tool call:" in combined or "tool result:" in combined or "tool error:" in combined:
-        if re.search(r"\bmemory[_-]?(search|get|query|fetch|retrieve|read|write|store|list|prune|delete)\b", combined):
-            return True
-    return False
+    return "tool call:" in combined or "tool result:" in combined or "tool error:" in combined
 
 
 def _is_command_log(row: Any) -> bool:
@@ -486,7 +483,9 @@ def build_clawgraph(
         log_type = str(getattr(row, "type", "") or "")
         if log_type in ("note", "system", "import"):
             continue
-        if _is_memory_action_log(row) or _is_command_log(row):
+        if _is_tool_call_log(row):
+            continue
+        if _is_command_log(row):
             continue
 
         summary = str(getattr(row, "summary", "") or "")

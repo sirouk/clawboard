@@ -32,20 +32,64 @@ class AccessPolicyTests(unittest.TestCase):
         init_db()
         cls.client = TestClient(app)
 
-    def test_localhost_read_without_token_allowed(self):
-        res = self.client.get("/api/health", headers={"Host": "localhost:8010"})
+    def test_loopback_read_without_token_allowed(self):
+        res = self.client.get("/api/health")
         self.assertEqual(res.status_code, 200, res.text)
 
-    def test_non_localhost_read_without_token_rejected(self):
-        res = self.client.get("/api/health", headers={"Host": "100.91.119.30:8010"})
+    def test_spoofed_host_header_does_not_bypass_remote_read_auth(self):
+        prev = os.environ.get("CLAWBOARD_TRUST_PROXY")
+        os.environ["CLAWBOARD_TRUST_PROXY"] = "1"
+        try:
+            res = self.client.get(
+                "/api/health",
+                headers={
+                    "Host": "localhost:8010",
+                    "X-Forwarded-For": "203.0.113.9",
+                },
+            )
+        finally:
+            if prev is None:
+                os.environ.pop("CLAWBOARD_TRUST_PROXY", None)
+            else:
+                os.environ["CLAWBOARD_TRUST_PROXY"] = prev
         self.assertEqual(res.status_code, 401, res.text)
 
-    def test_non_localhost_read_with_token_allowed(self):
-        res = self.client.get(
-            "/api/health",
-            headers={"Host": "100.91.119.30:8010", "X-Clawboard-Token": "test-token"},
-        )
+    def test_remote_read_with_token_allowed_when_proxy_trust_enabled(self):
+        prev = os.environ.get("CLAWBOARD_TRUST_PROXY")
+        os.environ["CLAWBOARD_TRUST_PROXY"] = "1"
+        try:
+            res = self.client.get(
+                "/api/health",
+                headers={
+                    "Host": "localhost:8010",
+                    "X-Forwarded-For": "203.0.113.9",
+                    "X-Clawboard-Token": "test-token",
+                },
+            )
+        finally:
+            if prev is None:
+                os.environ.pop("CLAWBOARD_TRUST_PROXY", None)
+            else:
+                os.environ["CLAWBOARD_TRUST_PROXY"] = prev
         self.assertEqual(res.status_code, 200, res.text)
+
+    def test_query_token_is_rejected_for_remote_reads(self):
+        prev = os.environ.get("CLAWBOARD_TRUST_PROXY")
+        os.environ["CLAWBOARD_TRUST_PROXY"] = "1"
+        try:
+            res = self.client.get(
+                "/api/health?token=test-token",
+                headers={
+                    "Host": "localhost:8010",
+                    "X-Forwarded-For": "203.0.113.9",
+                },
+            )
+        finally:
+            if prev is None:
+                os.environ.pop("CLAWBOARD_TRUST_PROXY", None)
+            else:
+                os.environ["CLAWBOARD_TRUST_PROXY"] = prev
+        self.assertEqual(res.status_code, 401, res.text)
 
     def test_write_requires_token_even_on_localhost(self):
         payload = {"name": "Access policy topic"}

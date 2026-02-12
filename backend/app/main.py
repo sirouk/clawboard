@@ -20,7 +20,7 @@ from fastapi import Request
 from uuid import uuid4
 from fastapi import FastAPI, Depends, Query, Body, HTTPException, Header, BackgroundTasks, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
-from typing import List, Any
+from typing import List, Any, Iterable
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, text, or_, and_
 from sqlalchemy.exc import IntegrityError
@@ -98,7 +98,7 @@ async def enforce_api_access_policy(request: Request, call_next):
     if method == "OPTIONS":
         return await call_next(request)
 
-    provided_token = request.headers.get("x-clawboard-token") or request.query_params.get("token")
+    provided_token = request.headers.get("x-clawboard-token")
     try:
         if method in {"GET", "HEAD"}:
             ensure_read_access(request, provided_token)
@@ -161,6 +161,51 @@ def create_id(prefix: str) -> str:
 
 
 REINDEX_QUEUE_PATH = os.getenv("CLAWBOARD_REINDEX_QUEUE_PATH", "./data/reindex-queue.jsonl")
+SEARCH_INCLUDE_TOOL_CALL_LOGS = str(os.getenv("CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS", "0") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+TOPIC_LOG_PROPAGATION_FACTOR = 0.22
+TOPIC_LOG_PROPAGATION_PER_LOG_CAP = 0.18
+TOPIC_LOG_PROPAGATION_TOP_K = 6
+TOPIC_LOG_PROPAGATION_CAP = 0.42
+TOPIC_TASK_PROPAGATION_FACTOR = 0.32
+TOPIC_TASK_PROPAGATION_PER_TASK_CAP = 0.24
+TOPIC_TASK_PROPAGATION_LEXICAL_FACTOR = 2.8
+TOPIC_TASK_PROPAGATION_LEXICAL_CAP = 0.34
+TOPIC_TASK_PROPAGATION_EXACT_BONUS = 0.22
+TOPIC_TASK_PROPAGATION_PER_TASK_TOTAL_CAP = 0.62
+TOPIC_TASK_PROPAGATION_TOP_K = 3
+TOPIC_TASK_PROPAGATION_CAP = 0.72
+TOPIC_TASK_PROPAGATION_TOPIC_EXACT_BONUS = 0.12
+TASK_LOG_PROPAGATION_FACTOR = 0.25
+TASK_LOG_PROPAGATION_PER_LOG_CAP = 0.2
+TASK_LOG_PROPAGATION_TOP_K = 6
+TASK_LOG_PROPAGATION_CAP = 0.48
+SEARCH_LOG_CONTENT_SNIPPET_CHARS = int(os.getenv("CLAWBOARD_SEARCH_LOG_CONTENT_SNIPPET_CHARS", "640") or "640")
+SEARCH_LOG_TEXT_BUDGET_CHARS = int(os.getenv("CLAWBOARD_SEARCH_LOG_TEXT_BUDGET_CHARS", "960") or "960")
+SEARCH_LOG_CONTENT_PREVIEW_SCAN_LIMIT = int(os.getenv("CLAWBOARD_SEARCH_LOG_CONTENT_PREVIEW_SCAN_LIMIT", "320") or "320")
+SEARCH_LOG_CONTENT_MATCH_SCAN_LIMIT = int(os.getenv("CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_SCAN_LIMIT", "120") or "120")
+SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS = int(os.getenv("CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS", "1800") or "1800")
+SEARCH_LOG_CONTENT_ID_CHUNK_SIZE = 320
+SEARCH_EFFECTIVE_LIMIT_TOPICS = int(os.getenv("CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TOPICS", "120") or "120")
+SEARCH_EFFECTIVE_LIMIT_TASKS = int(os.getenv("CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TASKS", "240") or "240")
+SEARCH_EFFECTIVE_LIMIT_LOGS = int(os.getenv("CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_LOGS", "320") or "320")
+SEARCH_WINDOW_MULTIPLIER = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MULTIPLIER", "2") or "2")
+SEARCH_WINDOW_MIN_LOGS = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MIN_LOGS", "320") or "320")
+SEARCH_WINDOW_MAX_LOGS = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MAX_LOGS", "2000") or "2000")
+SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS = int(os.getenv("CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS", "360") or "360")
+SEARCH_CONCURRENCY_LIMIT = int(os.getenv("CLAWBOARD_SEARCH_CONCURRENCY_LIMIT", "3") or "3")
+SEARCH_CONCURRENCY_WAIT_SECONDS = float(os.getenv("CLAWBOARD_SEARCH_CONCURRENCY_WAIT_SECONDS", "0.25") or "0.25")
+SEARCH_BUSY_FALLBACK_LIMIT_TOPICS = int(os.getenv("CLAWBOARD_SEARCH_BUSY_FALLBACK_LIMIT_TOPICS", "64") or "64")
+SEARCH_BUSY_FALLBACK_LIMIT_TASKS = int(os.getenv("CLAWBOARD_SEARCH_BUSY_FALLBACK_LIMIT_TASKS", "160") or "160")
+SEARCH_BUSY_FALLBACK_LIMIT_LOGS = int(os.getenv("CLAWBOARD_SEARCH_BUSY_FALLBACK_LIMIT_LOGS", "180") or "180")
+SEARCH_DIRECT_LABEL_EXACT_BOOST = float(os.getenv("CLAWBOARD_SEARCH_DIRECT_LABEL_EXACT_BOOST", "0.38") or "0.38")
+SEARCH_DIRECT_LABEL_PREFIX_BOOST = float(os.getenv("CLAWBOARD_SEARCH_DIRECT_LABEL_PREFIX_BOOST", "0.2") or "0.2")
+SEARCH_DIRECT_LABEL_COVERAGE_BOOST = float(os.getenv("CLAWBOARD_SEARCH_DIRECT_LABEL_COVERAGE_BOOST", "0.16") or "0.16")
+_SEARCH_QUERY_GATE = threading.BoundedSemaphore(max(1, SEARCH_CONCURRENCY_LIMIT))
 SLASH_COMMANDS = {
     "/new",
     "/topic",
@@ -402,6 +447,65 @@ def _sanitize_log_text(value: str | None) -> str:
     return text
 
 
+def _search_query_tokens(value: str | None) -> set[str]:
+    normalized = _sanitize_log_text(value).lower()
+    if not normalized:
+        return set()
+    words = re.findall(r"[a-z0-9][a-z0-9'/_:-]*", normalized)
+    return {token for token in words if len(token) > 1}
+
+
+def _direct_label_match_boost(label: str | None, normalized_query: str, query_tokens: set[str]) -> float:
+    cleaned_label = _sanitize_log_text(label).lower()
+    if not cleaned_label:
+        return 0.0
+    label_tokens = _search_query_tokens(cleaned_label)
+    if not label_tokens:
+        return 0.0
+
+    if normalized_query and normalized_query in cleaned_label:
+        if len(query_tokens) >= 2:
+            return max(0.0, SEARCH_DIRECT_LABEL_EXACT_BOOST + 0.04)
+        return max(0.0, SEARCH_DIRECT_LABEL_EXACT_BOOST)
+
+    if len(query_tokens) == 1:
+        query_token = next(iter(query_tokens))
+        if query_token in label_tokens:
+            return max(0.0, SEARCH_DIRECT_LABEL_EXACT_BOOST)
+        if len(query_token) >= 3 and any(token.startswith(query_token) for token in label_tokens):
+            return max(0.0, SEARCH_DIRECT_LABEL_PREFIX_BOOST)
+        return 0.0
+
+    overlap = len(query_tokens & label_tokens)
+    if query_tokens and overlap >= len(query_tokens):
+        return max(0.0, SEARCH_DIRECT_LABEL_COVERAGE_BOOST)
+    if len(query_tokens) >= 3 and overlap >= 2:
+        return max(0.0, SEARCH_DIRECT_LABEL_COVERAGE_BOOST * 0.6)
+    return 0.0
+
+
+def _extract_query_snippet(value: str | None, terms: list[str], *, radius: int = 220, cap: int = 720) -> str:
+    cleaned = _sanitize_log_text(value)
+    if not cleaned:
+        return ""
+    hay = cleaned.lower()
+    first_pos = -1
+    for term in terms:
+        pos = hay.find(term.lower())
+        if pos >= 0 and (first_pos < 0 or pos < first_pos):
+            first_pos = pos
+    if first_pos < 0:
+        return _clip(cleaned, cap)
+    start = max(0, first_pos - max(40, radius))
+    end = min(len(cleaned), first_pos + max(80, radius))
+    snippet = cleaned[start:end].strip()
+    if start > 0:
+        snippet = f"…{snippet}"
+    if end < len(cleaned):
+        snippet = f"{snippet}…"
+    return _clip(snippet, cap)
+
+
 def _is_command_log(entry: LogEntry) -> bool:
     if getattr(entry, "type", None) != "conversation":
         return False
@@ -420,9 +524,34 @@ def _clip(value: str, limit: int) -> str:
     return value[: limit - 1].rstrip() + "…"
 
 
+def _chunked_values(values: list[str], chunk_size: int) -> Iterable[list[str]]:
+    size = max(1, int(chunk_size or 1))
+    for index in range(0, len(values), size):
+        chunk = values[index : index + size]
+        if chunk:
+            yield chunk
+
+
+def _is_tool_call_log(entry: LogEntry) -> bool:
+    if getattr(entry, "type", None) != "action":
+        return False
+    combined = " ".join(
+        part
+        for part in [
+            str(entry.summary or ""),
+            str(entry.content or ""),
+            str(entry.raw or ""),
+        ]
+        if part
+    ).lower()
+    return "tool call:" in combined or "tool result:" in combined or "tool error:" in combined
+
+
 def _log_reindex_text(entry: LogEntry) -> str:
     log_type = str(getattr(entry, "type", "") or "")
     if log_type in ("system", "import"):
+        return ""
+    if not SEARCH_INCLUDE_TOOL_CALL_LOGS and _is_tool_call_log(entry):
         return ""
     if _is_memory_action_log(entry) or _is_command_log(entry):
         return ""
@@ -453,6 +582,17 @@ def _is_memory_action_log(entry: LogEntry) -> bool:
     return False
 
 
+def _log_allowed_for_semantic_search(entry: LogEntry) -> bool:
+    log_type = str(getattr(entry, "type", "") or "")
+    if log_type in ("system", "import"):
+        return False
+    if not SEARCH_INCLUDE_TOOL_CALL_LOGS and _is_tool_call_log(entry):
+        return False
+    if _is_memory_action_log(entry) or _is_command_log(entry):
+        return False
+    return True
+
+
 def _enqueue_log_reindex(entry: LogEntry) -> None:
     text = _log_reindex_text(entry)
     if not text:
@@ -465,7 +605,18 @@ def _log_matches_session(entry: LogEntry, session_key: str) -> bool:
     source = getattr(entry, "source", None)
     if not isinstance(source, dict):
         return False
-    return str(source.get("sessionKey") or "") == session_key
+    source_key = str(source.get("sessionKey") or "").strip()
+    target_key = str(session_key or "").strip()
+    if not source_key or not target_key:
+        return False
+    if source_key == target_key:
+        return True
+    target_base = target_key.split("|", 1)[0].strip()
+    if not target_base:
+        return False
+    if source_key == target_base:
+        return True
+    return source_key.startswith(f"{target_base}|")
 
 
 def _normalize_hex_color(value: str | None) -> str | None:
@@ -3639,15 +3790,35 @@ def _search_impl(
     limit_topics: int,
     limit_tasks: int,
     limit_logs: int,
+    allow_deep_content_scan: bool = True,
 ) -> dict:
+    normalized_query = str(query or "").strip().lower()
+    query_tokens = _search_query_tokens(normalized_query)
+    max_query_token_length = max((len(token) for token in query_tokens), default=0)
+    single_token_query = len(query_tokens) == 1
+    require_sparse_for_propagation = len(query_tokens) >= 2 or max_query_token_length >= 5
+    propagation_scale = 1.0
+    if single_token_query:
+        propagation_scale = 0.72 if max_query_token_length >= 5 else 0.9
+
+    effective_limit_topics = max(1, min(int(limit_topics), max(1, SEARCH_EFFECTIVE_LIMIT_TOPICS)))
+    effective_limit_tasks = max(1, min(int(limit_tasks), max(1, SEARCH_EFFECTIVE_LIMIT_TASKS)))
+    effective_limit_logs = max(10, min(int(limit_logs), max(10, SEARCH_EFFECTIVE_LIMIT_LOGS)))
+
     topics = session.exec(select(Topic)).all()
     tasks = session.exec(select(Task)).all()
     # Never load the entire log table into memory for search.
     # This endpoint is used from the UI and must remain safe for large instances.
-    window_logs = max(2000, min(20000, limit_logs * 8))
+    window_multiplier = max(1, SEARCH_WINDOW_MULTIPLIER)
+    window_min_logs = max(200, SEARCH_WINDOW_MIN_LOGS)
+    window_max_logs = max(window_min_logs, SEARCH_WINDOW_MAX_LOGS)
+    window_logs = max(window_min_logs, min(window_max_logs, effective_limit_logs * window_multiplier))
+    if single_token_query:
+        single_token_window_cap = max(200, SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS)
+        window_logs = min(window_logs, single_token_window_cap)
     # Raw payloads can be very large; exclude from bulk search window.
-    # Content can also be huge (tool output, long transcripts). For search ranking we can
-    # rely on summary text and avoid pulling full content into memory.
+    # For content, we fetch bounded snippets in a separate query so lexical/BM25 can still
+    # use query terms that were not preserved in summaries.
     log_query = select(LogEntry).options(defer(LogEntry.raw), defer(LogEntry.content))
     if topic_id:
         log_query = log_query.where(LogEntry.topicId == topic_id)
@@ -3659,6 +3830,94 @@ def _search_impl(
         (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
     ).limit(window_logs)
     logs = session.exec(log_query).all()
+    recent_log_ids = [str(entry.id or "").strip() for entry in logs if getattr(entry, "id", None)]
+    preview_scan_cap_base = max(0, int(SEARCH_LOG_CONTENT_PREVIEW_SCAN_LIMIT))
+    preview_dynamic_cap = max(80, min(320, effective_limit_logs * 2))
+    preview_scan_cap = min(preview_scan_cap_base, preview_dynamic_cap) if preview_scan_cap_base > 0 else 0
+    if not allow_deep_content_scan:
+        preview_scan_cap = min(preview_scan_cap, max(48, min(120, effective_limit_logs)))
+    if preview_scan_cap > 0:
+        preview_scan_ids = recent_log_ids[:preview_scan_cap]
+    else:
+        preview_scan_ids = []
+
+    content_preview_by_log_id: dict[str, str] = {}
+    if SEARCH_LOG_CONTENT_SNIPPET_CHARS > 0 and preview_scan_ids:
+        snippet_head_chars = max(220, SEARCH_LOG_CONTENT_SNIPPET_CHARS // 2)
+        snippet_tail_chars = max(220, SEARCH_LOG_CONTENT_SNIPPET_CHARS // 2)
+        content_expr = func.coalesce(LogEntry.content, "")
+        for id_chunk in _chunked_values(preview_scan_ids, SEARCH_LOG_CONTENT_ID_CHUNK_SIZE):
+            content_query = select(
+                LogEntry.id,
+                func.substr(content_expr, 1, snippet_head_chars).label("contentHead"),
+                func.substr(content_expr, func.length(content_expr) - snippet_tail_chars + 1, snippet_tail_chars).label("contentTail"),
+            ).where(LogEntry.id.in_(id_chunk))
+            for row in session.exec(content_query).all():
+                try:
+                    log_id = str(row[0] or "").strip()
+                    head_raw = str(row[1] or "")
+                    tail_raw = str(row[2] or "")
+                except Exception:
+                    continue
+                if not log_id:
+                    continue
+                if head_raw and tail_raw and head_raw != tail_raw:
+                    preview_raw = f"{head_raw}\n{tail_raw}"
+                else:
+                    preview_raw = head_raw or tail_raw
+                if not preview_raw:
+                    continue
+                preview = _clip(_sanitize_log_text(preview_raw), SEARCH_LOG_CONTENT_SNIPPET_CHARS)
+                if preview:
+                    content_preview_by_log_id[log_id] = preview
+
+    if query_tokens and SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS > 0:
+        query_terms = [token for token in sorted(query_tokens) if len(token) >= 3][:6]
+        max_query_token_length = max((len(token) for token in query_tokens), default=0)
+        allow_query_term_scan = len(query_tokens) >= 2 or max_query_token_length >= 7
+        match_scan_cap_base = max(0, int(SEARCH_LOG_CONTENT_MATCH_SCAN_LIMIT))
+        if len(query_tokens) >= 2:
+            match_dynamic_cap = max(60, min(240, effective_limit_logs))
+        else:
+            match_dynamic_cap = max(30, min(120, effective_limit_logs))
+        match_scan_cap = min(match_scan_cap_base, match_dynamic_cap) if match_scan_cap_base > 0 else 0
+        if not allow_deep_content_scan:
+            match_scan_cap = 0
+        if not allow_query_term_scan:
+            match_scan_cap = 0
+        match_scan_ids = preview_scan_ids[:match_scan_cap] if match_scan_cap > 0 else []
+        if query_terms and match_scan_ids:
+            content_clip_chars = max(1000, int(SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS))
+            content_expr = func.coalesce(LogEntry.content, "")
+            for id_chunk in _chunked_values(match_scan_ids, SEARCH_LOG_CONTENT_ID_CHUNK_SIZE):
+                content_match_query = select(
+                    LogEntry.id,
+                    func.substr(content_expr, 1, content_clip_chars).label("contentClip"),
+                ).where(LogEntry.id.in_(id_chunk))
+                for row in session.exec(content_match_query).all():
+                    try:
+                        log_id = str(row[0] or "").strip()
+                        content_raw = str(row[1] or "")
+                    except Exception:
+                        continue
+                    if not log_id or not content_raw:
+                        continue
+                    lowered = content_raw.lower()
+                    if not any(term in lowered for term in query_terms):
+                        continue
+                    snippet = _extract_query_snippet(
+                        content_raw,
+                        query_terms,
+                        radius=max(180, SEARCH_LOG_CONTENT_SNIPPET_CHARS // 2),
+                        cap=max(280, SEARCH_LOG_CONTENT_SNIPPET_CHARS),
+                    )
+                    if not snippet:
+                        continue
+                    prior = content_preview_by_log_id.get(log_id) or ""
+                    if prior and snippet in prior:
+                        continue
+                    merged = _clip(" ".join(part for part in [prior, snippet] if part), max(280, SEARCH_LOG_CONTENT_SNIPPET_CHARS))
+                    content_preview_by_log_id[log_id] = merged
 
     if topic_id:
         tasks = [task for task in tasks if task.topicId == topic_id]
@@ -3705,8 +3964,16 @@ def _search_impl(
     # Build a lightweight log payload for semantic_search without touching deferred columns.
     # If we access entry.content here, SQLAlchemy will lazy-load it and defeat the point.
     log_payloads: list[dict[str, Any]] = []
+    log_text_limit = max(280, SEARCH_LOG_TEXT_BUDGET_CHARS)
     for entry in logs:
-        summary_text = str(entry.summary or "").strip()
+        summary_text = _clip(_sanitize_log_text(str(entry.summary or "")), 280)
+        content_preview = content_preview_by_log_id.get(str(entry.id), "")
+        if content_preview and summary_text and summary_text.lower() in content_preview.lower():
+            content_text = _clip(content_preview, log_text_limit)
+        else:
+            content_text = _clip(" ".join(part for part in [summary_text, content_preview] if part), log_text_limit)
+        if not content_text:
+            content_text = summary_text
         log_payloads.append(
             {
                 "id": entry.id,
@@ -3716,7 +3983,7 @@ def _search_impl(
                 "idempotencyKey": entry.idempotencyKey,
                 "type": entry.type,
                 "summary": summary_text,
-                "content": summary_text,
+                "content": content_text,
                 "raw": "",
                 "createdAt": entry.createdAt,
                 "updatedAt": entry.updatedAt,
@@ -3726,14 +3993,59 @@ def _search_impl(
             }
         )
 
+    topic_query_hints: dict[str, list[str]] = {}
+
+    def _append_topic_hint(topic_id_hint: str | None, text_hint: str, *, max_items: int = 8) -> None:
+        topic_key = str(topic_id_hint or "").strip()
+        if not topic_key:
+            return
+        cleaned_hint_raw = _sanitize_log_text(text_hint)
+        if not cleaned_hint_raw:
+            return
+        if query_tokens:
+            hint_tokens = _search_query_tokens(cleaned_hint_raw)
+            overlap = len(query_tokens & hint_tokens)
+            phrase_hit = bool(normalized_query and normalized_query in cleaned_hint_raw.lower())
+            if overlap <= 0 and not phrase_hit:
+                return
+        cleaned_hint = _clip(cleaned_hint_raw, 420)
+        bucket = topic_query_hints.setdefault(topic_key, [])
+        if cleaned_hint in bucket:
+            return
+        if len(bucket) >= max_items:
+            return
+        bucket.append(cleaned_hint)
+
+    if query_tokens:
+        for task in tasks:
+            _append_topic_hint(task.topicId, str(task.title or ""))
+        for entry in logs:
+            if not _log_allowed_for_semantic_search(entry):
+                continue
+            topic_key = str(entry.topicId or "").strip()
+            if not topic_key:
+                continue
+            _append_topic_hint(topic_key, str(entry.summary or ""))
+            preview = content_preview_by_log_id.get(str(entry.id), "")
+            if preview:
+                _append_topic_hint(topic_key, preview)
+
+    topics_payload: list[dict[str, Any]] = []
+    for topic in topics:
+        payload = topic.model_dump()
+        hints = topic_query_hints.get(topic.id) or []
+        if hints:
+            payload["searchText"] = _clip(" ".join(hints), 900)
+        topics_payload.append(payload)
+
     search_result = semantic_search(
         query,
-        [item.model_dump() for item in topics],
+        topics_payload,
         [item.model_dump() for item in tasks],
         log_payloads,
-        topic_limit=limit_topics,
-        task_limit=limit_tasks,
-        log_limit=limit_logs,
+        topic_limit=effective_limit_topics,
+        task_limit=effective_limit_tasks,
+        log_limit=effective_limit_logs,
     )
 
     topic_base_score: dict[str, float] = {
@@ -3755,17 +4067,131 @@ def _search_impl(
         str(item.get("id") or ""): item for item in search_result.get("logs", []) if item.get("id")
     }
 
+    def _aggregate_parent_boosts(
+        candidates: dict[str, list[float]],
+        *,
+        top_k: int,
+        total_cap: float,
+    ) -> dict[str, float]:
+        boosts: dict[str, float] = {}
+        effective_top_k = max(1, int(top_k))
+        effective_cap = max(0.0, float(total_cap))
+        for parent_id, values in candidates.items():
+            if not parent_id or not values:
+                continue
+            clipped: list[float] = []
+            for value in values:
+                score = float(value or 0.0)
+                if score > 0:
+                    clipped.append(score)
+            if not clipped:
+                continue
+            clipped.sort(reverse=True)
+            boosts[parent_id] = min(effective_cap, sum(clipped[:effective_top_k]))
+        return boosts
+
     # Parent propagation from matched logs.
+    # Keep this bounded so one large topic with many weak matches cannot dominate.
+    topic_boost_candidates: dict[str, list[float]] = {}
+    task_boost_candidates: dict[str, list[float]] = {}
     for log_id, score in log_base_score.items():
         entry = log_map.get(log_id)
         if not entry:
             continue
+        log_row = log_search_rows.get(log_id) or {}
+        bm25_score = max(0.0, float(log_row.get("bm25Score") or 0.0))
+        lexical_score = max(0.0, float(log_row.get("lexicalScore") or 0.0))
+        chunk_score = max(0.0, float(log_row.get("chunkScore") or 0.0))
+        best_chunk_text = ""
+        best_chunk = log_row.get("bestChunk")
+        if isinstance(best_chunk, dict):
+            best_chunk_text = str(best_chunk.get("text") or "").strip().lower()
+        exact_phrase_hit = bool(normalized_query and best_chunk_text and normalized_query in best_chunk_text)
+        if require_sparse_for_propagation and not (bm25_score > 0 or lexical_score > 0 or chunk_score > 0 or exact_phrase_hit):
+            continue
         if entry.topicId:
-            boosted = topic_base_score.get(entry.topicId, 0.0) + min(0.18, score * 0.22)
-            topic_base_score[entry.topicId] = boosted
+            topic_boost_candidates.setdefault(entry.topicId, []).append(
+                min(
+                    TOPIC_LOG_PROPAGATION_PER_LOG_CAP * propagation_scale,
+                    score * TOPIC_LOG_PROPAGATION_FACTOR * propagation_scale,
+                )
+            )
         if entry.taskId:
-            boosted = task_base_score.get(entry.taskId, 0.0) + min(0.2, score * 0.25)
-            task_base_score[entry.taskId] = boosted
+            task_boost_candidates.setdefault(entry.taskId, []).append(
+                min(
+                    TASK_LOG_PROPAGATION_PER_LOG_CAP * propagation_scale,
+                    score * TASK_LOG_PROPAGATION_FACTOR * propagation_scale,
+                )
+            )
+
+    topic_log_boost = _aggregate_parent_boosts(
+        topic_boost_candidates,
+        top_k=TOPIC_LOG_PROPAGATION_TOP_K,
+        total_cap=TOPIC_LOG_PROPAGATION_CAP,
+    )
+    task_log_boost = _aggregate_parent_boosts(
+        task_boost_candidates,
+        top_k=TASK_LOG_PROPAGATION_TOP_K,
+        total_cap=TASK_LOG_PROPAGATION_CAP,
+    )
+    topic_task_boost_candidates: dict[str, list[float]] = {}
+    topic_task_exact_match_bonus: dict[str, float] = {}
+    for task_id2, task_score in task_base_score.items():
+        task = task_map.get(task_id2)
+        topic_id2 = str(getattr(task, "topicId", "") or "")
+        if not topic_id2:
+            continue
+        task_row = task_search_rows.get(task_id2) or {}
+        support = min(
+            TOPIC_TASK_PROPAGATION_PER_TASK_CAP * propagation_scale,
+            float(task_score or 0.0) * TOPIC_TASK_PROPAGATION_FACTOR * propagation_scale,
+        )
+        bm25_score = max(0.0, float(task_row.get("bm25Score") or 0.0))
+        lexical_score = max(0.0, float(task_row.get("lexicalScore") or 0.0))
+        chunk_score = max(0.0, float(task_row.get("chunkScore") or 0.0))
+        support += min(
+            TOPIC_TASK_PROPAGATION_LEXICAL_CAP * propagation_scale,
+            lexical_score * TOPIC_TASK_PROPAGATION_LEXICAL_FACTOR * propagation_scale,
+        )
+        best_chunk = task_row.get("bestChunk")
+        best_chunk_text = ""
+        if isinstance(best_chunk, dict):
+            best_chunk_text = str(best_chunk.get("text") or "").strip().lower()
+        exact_phrase_hit = bool(normalized_query and best_chunk_text and normalized_query in best_chunk_text)
+        if exact_phrase_hit:
+            support += TOPIC_TASK_PROPAGATION_EXACT_BONUS * propagation_scale
+            topic_task_exact_match_bonus[topic_id2] = TOPIC_TASK_PROPAGATION_TOPIC_EXACT_BONUS * propagation_scale
+        if require_sparse_for_propagation and not (bm25_score > 0 or lexical_score > 0 or chunk_score > 0 or exact_phrase_hit):
+            continue
+        support = min(TOPIC_TASK_PROPAGATION_PER_TASK_TOTAL_CAP * propagation_scale, support)
+        if support > 0:
+            topic_task_boost_candidates.setdefault(topic_id2, []).append(support)
+    topic_task_boost = _aggregate_parent_boosts(
+        topic_task_boost_candidates,
+        top_k=TOPIC_TASK_PROPAGATION_TOP_K,
+        total_cap=TOPIC_TASK_PROPAGATION_CAP,
+    )
+
+    for topic_id2, boost in topic_log_boost.items():
+        topic_base_score[topic_id2] = topic_base_score.get(topic_id2, 0.0) + boost
+    for topic_id2, boost in topic_task_boost.items():
+        topic_base_score[topic_id2] = topic_base_score.get(topic_id2, 0.0) + boost
+    for topic_id2, bonus in topic_task_exact_match_bonus.items():
+        topic_base_score[topic_id2] = topic_base_score.get(topic_id2, 0.0) + bonus
+    for task_id2, boost in task_log_boost.items():
+        task_base_score[task_id2] = task_base_score.get(task_id2, 0.0) + boost
+
+    topic_direct_match_boost: dict[str, float] = {}
+    for topic in topics:
+        boost = _direct_label_match_boost(getattr(topic, "name", None), normalized_query, query_tokens)
+        if boost > 0:
+            topic_direct_match_boost[topic.id] = boost
+
+    task_direct_match_boost: dict[str, float] = {}
+    for task in tasks:
+        boost = _direct_label_match_boost(getattr(task, "title", None), normalized_query, query_tokens)
+        if boost > 0:
+            task_direct_match_boost[task.id] = boost
 
     topic_rows: list[dict[str, Any]] = []
     for topic_id2, base_score in topic_base_score.items():
@@ -3773,6 +4199,8 @@ def _search_impl(
         if not topic:
             continue
         score = base_score
+        direct_match_boost = topic_direct_match_boost.get(topic_id2, 0.0)
+        score += direct_match_boost
         score += min(0.26, note_weight_by_topic.get(topic_id2, 0.0))
         if topic_id2 in session_topic_ids:
             score += 0.12
@@ -3788,12 +4216,16 @@ def _search_impl(
                 "rrfScore": float((topic_search_rows.get(topic_id2) or {}).get("rrfScore") or 0.0),
                 "rerankScore": float((topic_search_rows.get(topic_id2) or {}).get("rerankScore") or 0.0),
                 "bestChunk": (topic_search_rows.get(topic_id2) or {}).get("bestChunk"),
+                "logPropagationWeight": round(topic_log_boost.get(topic_id2, 0.0), 6),
+                "taskPropagationWeight": round(topic_task_boost.get(topic_id2, 0.0), 6),
+                "taskExactMatchBonus": round(topic_task_exact_match_bonus.get(topic_id2, 0.0), 6),
+                "directMatchBoost": round(direct_match_boost, 6),
                 "noteWeight": round(min(0.26, note_weight_by_topic.get(topic_id2, 0.0)), 6),
                 "sessionBoosted": topic_id2 in session_topic_ids,
             }
         )
     topic_rows.sort(key=lambda item: float(item["score"]), reverse=True)
-    topic_rows = topic_rows[:limit_topics]
+    topic_rows = topic_rows[:effective_limit_topics]
 
     task_rows: list[dict[str, Any]] = []
     for task_id2, base_score in task_base_score.items():
@@ -3801,6 +4233,8 @@ def _search_impl(
         if not task:
             continue
         score = base_score
+        direct_match_boost = task_direct_match_boost.get(task_id2, 0.0)
+        score += direct_match_boost
         score += min(0.26, note_weight_by_task.get(task_id2, 0.0))
         if task_id2 in session_task_ids:
             score += 0.1
@@ -3817,18 +4251,27 @@ def _search_impl(
                 "rrfScore": float((task_search_rows.get(task_id2) or {}).get("rrfScore") or 0.0),
                 "rerankScore": float((task_search_rows.get(task_id2) or {}).get("rerankScore") or 0.0),
                 "bestChunk": (task_search_rows.get(task_id2) or {}).get("bestChunk"),
+                "logPropagationWeight": round(task_log_boost.get(task_id2, 0.0), 6),
+                "directMatchBoost": round(direct_match_boost, 6),
                 "noteWeight": round(min(0.26, note_weight_by_task.get(task_id2, 0.0)), 6),
                 "sessionBoosted": task_id2 in session_task_ids,
             }
         )
     task_rows.sort(key=lambda item: float(item["score"]), reverse=True)
-    task_rows = task_rows[:limit_tasks]
+    task_rows = task_rows[:effective_limit_tasks]
 
     log_rows: list[dict[str, Any]] = []
     for log_id2, base_score in log_base_score.items():
         entry = log_map.get(log_id2)
         if not entry:
             continue
+        search_row = log_search_rows.get(log_id2) or {}
+        best_chunk = search_row.get("bestChunk")
+        best_chunk_text = ""
+        if isinstance(best_chunk, dict):
+            best_chunk_text = _sanitize_log_text(str(best_chunk.get("text") or ""))
+        content_preview = _sanitize_log_text(content_preview_by_log_id.get(log_id2, ""))
+        response_content = content_preview or best_chunk_text or _sanitize_log_text(entry.summary or "")
         score = base_score
         note_count = int(note_count_by_log.get(log_id2) or 0)
         note_weight = min(0.24, 0.06 * note_count)
@@ -3844,15 +4287,15 @@ def _search_impl(
                 "agentId": entry.agentId,
                 "agentLabel": entry.agentLabel,
                 "summary": _clip(_sanitize_log_text(entry.summary or ""), 140),
-                "content": _clip(_sanitize_log_text(entry.summary or ""), 320),
+                "content": _clip(response_content, 320),
                 "createdAt": entry.createdAt,
                 "score": round(score, 6),
-                "vectorScore": float((log_search_rows.get(log_id2) or {}).get("vectorScore") or 0.0),
-                "bm25Score": float((log_search_rows.get(log_id2) or {}).get("bm25Score") or 0.0),
-                "lexicalScore": float((log_search_rows.get(log_id2) or {}).get("lexicalScore") or 0.0),
-                "rrfScore": float((log_search_rows.get(log_id2) or {}).get("rrfScore") or 0.0),
-                "rerankScore": float((log_search_rows.get(log_id2) or {}).get("rerankScore") or 0.0),
-                "bestChunk": (log_search_rows.get(log_id2) or {}).get("bestChunk"),
+                "vectorScore": float(search_row.get("vectorScore") or 0.0),
+                "bm25Score": float(search_row.get("bm25Score") or 0.0),
+                "lexicalScore": float(search_row.get("lexicalScore") or 0.0),
+                "rrfScore": float(search_row.get("rrfScore") or 0.0),
+                "rerankScore": float(search_row.get("rerankScore") or 0.0),
+                "bestChunk": best_chunk if isinstance(best_chunk, dict) else None,
                 "noteCount": note_count,
                 "noteWeight": round(note_weight, 6),
                 "sessionBoosted": log_id2 in session_log_ids,
@@ -3865,7 +4308,7 @@ def _search_impl(
         ),
         reverse=True,
     )
-    log_rows = log_rows[:limit_logs]
+    log_rows = log_rows[:effective_limit_logs]
 
     note_rows: list[dict[str, Any]] = []
     emitted_note_ids: set[str] = set()
@@ -3875,6 +4318,8 @@ def _search_impl(
             if note.id in emitted_note_ids:
                 continue
             emitted_note_ids.add(note.id)
+            note_content_preview = _sanitize_log_text(content_preview_by_log_id.get(str(note.id), ""))
+            note_content = note_content_preview or _sanitize_log_text(note.summary or "")
             note_rows.append(
                 {
                     "id": note.id,
@@ -3882,7 +4327,7 @@ def _search_impl(
                     "topicId": note.topicId,
                     "taskId": note.taskId,
                     "summary": _clip(_sanitize_log_text(note.summary or ""), 140),
-                    "content": _clip(_sanitize_log_text(note.summary or ""), 280),
+                    "content": _clip(note_content, 280),
                     "createdAt": note.createdAt,
                 }
             )
@@ -3899,6 +4344,18 @@ def _search_impl(
         "matchedTopicIds": [item["id"] for item in topic_rows],
         "matchedTaskIds": [item["id"] for item in task_rows],
         "matchedLogIds": [item["id"] for item in log_rows],
+        "searchMeta": {
+            "effectiveLimits": {
+                "topics": int(effective_limit_topics),
+                "tasks": int(effective_limit_tasks),
+                "logs": int(effective_limit_logs),
+            },
+            "queryTokenCount": int(len(query_tokens)),
+            "singleTokenQuery": bool(single_token_query),
+            "requireSparseForPropagation": bool(require_sparse_for_propagation),
+            "windowLogs": int(len(logs)),
+            "allowDeepContentScan": bool(allow_deep_content_scan),
+        },
     }
 
 
@@ -4354,6 +4811,7 @@ def context(
                 limit_topics=limit_topics,
                 limit_tasks=limit_tasks,
                 limit_logs=limit_logs,
+                allow_deep_content_scan=False,
             )
             data["semantic"] = semantic
             layers.append("B:semantic")
@@ -4427,6 +4885,7 @@ def search(
 ):
     """Hybrid semantic + lexical search across topics, tasks, and logs."""
     query = (q or "").strip()
+    started_at = time.perf_counter()
     if len(query) < 1:
         return {
             "query": "",
@@ -4438,19 +4897,70 @@ def search(
             "matchedTopicIds": [],
             "matchedTaskIds": [],
             "matchedLogIds": [],
+            "searchMeta": {
+                "degraded": False,
+                "gateAcquired": True,
+                "gateWaitMs": 0.0,
+                "durationMs": round((time.perf_counter() - started_at) * 1000.0, 2),
+            },
         }
 
-    with get_session() as session:
-        return _search_impl(
-            session,
-            query,
-            topic_id=topicId,
-            session_key=sessionKey,
-            include_pending=includePending,
-            limit_topics=limitTopics,
-            limit_tasks=limitTasks,
-            limit_logs=limitLogs,
-        )
+    wait_seconds = max(0.0, SEARCH_CONCURRENCY_WAIT_SECONDS)
+    gate_wait_started = time.perf_counter()
+    acquired = _SEARCH_QUERY_GATE.acquire(timeout=wait_seconds)
+    gate_wait_ms = round((time.perf_counter() - gate_wait_started) * 1000.0, 2)
+    degraded_busy_fallback = not acquired
+    effective_limit_topics = int(limitTopics)
+    effective_limit_tasks = int(limitTasks)
+    effective_limit_logs = int(limitLogs)
+    allow_deep_content_scan = True
+    if degraded_busy_fallback:
+        # If the deep-search gate is saturated, run a bounded degraded pass instead of
+        # returning a hard 429. This preserves semantic ordering while avoiding UI fallback.
+        effective_limit_topics = min(effective_limit_topics, max(1, SEARCH_BUSY_FALLBACK_LIMIT_TOPICS))
+        effective_limit_tasks = min(effective_limit_tasks, max(1, SEARCH_BUSY_FALLBACK_LIMIT_TASKS))
+        effective_limit_logs = min(effective_limit_logs, max(10, SEARCH_BUSY_FALLBACK_LIMIT_LOGS))
+        allow_deep_content_scan = False
+    try:
+        with get_session() as session:
+            result = _search_impl(
+                session,
+                query,
+                topic_id=topicId,
+                session_key=sessionKey,
+                include_pending=includePending,
+                limit_topics=effective_limit_topics,
+                limit_tasks=effective_limit_tasks,
+                limit_logs=effective_limit_logs,
+                allow_deep_content_scan=allow_deep_content_scan,
+            )
+            duration_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+            meta = dict(result.get("searchMeta") or {})
+            meta.update(
+                {
+                    "degraded": bool(degraded_busy_fallback),
+                    "gateAcquired": bool(acquired),
+                    "gateWaitMs": float(gate_wait_ms),
+                    "durationMs": float(duration_ms),
+                    "allowDeepContentScan": bool(allow_deep_content_scan),
+                    "effectiveLimits": {
+                        "topics": int(effective_limit_topics),
+                        "tasks": int(effective_limit_tasks),
+                        "logs": int(effective_limit_logs),
+                    },
+                }
+            )
+            enriched = dict(result)
+            enriched["searchMeta"] = meta
+            if degraded_busy_fallback:
+                mode = str(enriched.get("mode") or "")
+                enriched["mode"] = f"{mode}+busy-fallback" if mode else "busy-fallback"
+                enriched["degraded"] = True
+                return enriched
+            return enriched
+    finally:
+        if acquired:
+            _SEARCH_QUERY_GATE.release()
 
 
 @app.post("/api/reindex", dependencies=[Depends(require_token)], tags=["classifier"])

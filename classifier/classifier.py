@@ -1444,9 +1444,24 @@ def _derive_task_title(window: list[dict]) -> str | None:
     if not _looks_actionable(base_text):
         return None
     title = _concise_summary(base_text)
+    title = _normalize_task_title(title) or _normalize_task_title(base_text) or title
     if len(title) < 8:
         return None
     return title[:120]
+
+
+def _normalize_task_title(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    pretty = _humanize_topic_name(text)
+    if pretty:
+        return pretty[:120]
+    clean = _strip_transport_noise(text).replace("_", " ")
+    clean = re.sub(r"\s+", " ", clean).strip("`* .,:;!?")
+    if not clean:
+        return None
+    return clean[:120]
 
 
 def _window_has_task_intent(window: list[dict], fallback_text: str | None = None) -> bool:
@@ -4276,7 +4291,7 @@ def classify_session(session_key: str):
         task_from_continuity = True
 
     if isinstance(task_result, dict):
-        task_title = task_result.get("title")
+        task_title = _normalize_task_title(task_result.get("title") if isinstance(task_result.get("title"), str) else None)
         create_task = bool(task_result.get("create"))
         proposed_task_id = task_result.get("id")
 
@@ -4468,7 +4483,10 @@ def classify_session(session_key: str):
             target_task_id = locked_task_id
         elif locked_kind == "topic":
             target_topic_id = locked_topic_id or target_topic_id
-            target_task_id = None
+            # Topic lock keeps routing inside the selected topic, but task inference is still allowed.
+        has_locked_scope = locked_kind in {"topic", "task"}
+        filtered_topic_id = target_topic_id if has_locked_scope else None
+        filtered_task_id = target_task_id if has_locked_scope else None
         if _is_cron_event(e):
             patch_log(
                 e["id"],
@@ -4487,8 +4505,8 @@ def classify_session(session_key: str):
             patch_log(
                 e["id"],
                 {
-                    "topicId": target_topic_id,
-                    "taskId": target_task_id,
+                    "topicId": filtered_topic_id,
+                    "taskId": filtered_task_id,
                     "classificationStatus": "classified",
                     "classificationAttempts": attempts + 1,
                     "classificationError": "filtered_command",
@@ -4500,8 +4518,8 @@ def classify_session(session_key: str):
             patch_log(
                 e["id"],
                 {
-                    "topicId": target_topic_id,
-                    "taskId": target_task_id,
+                    "topicId": filtered_topic_id,
+                    "taskId": filtered_task_id,
                     "classificationStatus": "failed",
                     "classificationAttempts": attempts + 1,
                     "classificationError": _noise_error_code(noise_text),
@@ -4513,8 +4531,8 @@ def classify_session(session_key: str):
             patch_log(
                 e["id"],
                 {
-                    "topicId": target_topic_id,
-                    "taskId": target_task_id,
+                    "topicId": filtered_topic_id,
+                    "taskId": filtered_task_id,
                     "classificationStatus": "classified",
                     "classificationAttempts": attempts + 1,
                     "classificationError": "filtered_non_semantic",
@@ -4525,8 +4543,8 @@ def classify_session(session_key: str):
             patch_log(
                 e["id"],
                 {
-                    "topicId": target_topic_id,
-                    "taskId": target_task_id,
+                    "topicId": filtered_topic_id,
+                    "taskId": filtered_task_id,
                     "classificationStatus": "classified",
                     "classificationAttempts": attempts + 1,
                     "classificationError": "filtered_memory_action",

@@ -50,6 +50,12 @@ class ClassifierHeuristicsTests(unittest.TestCase):
         self.assertIsNotNone(title)
         self.assertTrue(c._window_has_task_intent(window))
 
+    def test_normalize_task_title_strips_run_id_tokens_and_underscores(self):
+        title = c._normalize_task_title("need fix login redirect bug Project NIMBUS_LOGIN_C25E70…")
+        self.assertIsNotNone(title)
+        self.assertNotIn("_", title or "")
+        self.assertNotRegex(title or "", r"\\b[A-F0-9]{6,}\\b")
+
     def test_bundle_range_splits_on_new_user_request_after_assistant(self):
         convs = [
             {"id": "1", "type": "conversation", "agentId": "user", "content": "Explain SQLModel inserts."},

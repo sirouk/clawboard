@@ -101,6 +101,58 @@ class VectorSearchHybridTests(unittest.TestCase):
         topic_ids = [row["id"] for row in result.get("topics", [])]
         self.assertIn("topic-sqlmodel", topic_ids)
 
+    def test_semantic_search_multi_term_prefers_sparse_matches(self):
+        topics = [
+            {"id": "topic-insurance", "name": "Insurance", "description": "Coverage and plans"},
+            {"id": "topic-office", "name": "Office", "description": "Facilities and operations"},
+        ]
+        tasks = [
+            {"id": "task-insurance", "topicId": "topic-insurance", "title": "Review health insurance options", "status": "todo"},
+            {"id": "task-office", "topicId": "topic-office", "title": "Order office snacks", "status": "todo"},
+        ]
+        logs = [
+            {
+                "id": "log-insurance",
+                "topicId": "topic-insurance",
+                "taskId": "task-insurance",
+                "type": "conversation",
+                "summary": "Weekly status",
+                "content": "Need to compare health insurance deductible and copay plans.",
+                "raw": "",
+            },
+            {
+                "id": "log-office",
+                "topicId": "topic-office",
+                "taskId": "task-office",
+                "type": "conversation",
+                "summary": "Weekly status",
+                "content": "Need to compare snack vendors for break room.",
+                "raw": "",
+            },
+        ]
+
+        result = vs.semantic_search(
+            "health insurance",
+            topics,
+            tasks,
+            logs,
+            topic_limit=6,
+            task_limit=6,
+            log_limit=12,
+        )
+
+        self.assertTrue(result["topics"], "Expected topic matches")
+        self.assertEqual(result["topics"][0]["id"], "topic-insurance")
+        self.assertGreater(float(result["topics"][0].get("bm25Score") or 0.0), 0.0)
+
+        self.assertTrue(result["tasks"], "Expected task matches")
+        self.assertEqual(result["tasks"][0]["id"], "task-insurance")
+        self.assertGreater(float(result["tasks"][0].get("bm25Score") or 0.0), 0.0)
+
+        self.assertTrue(result["logs"], "Expected log matches")
+        self.assertEqual(result["logs"][0]["id"], "log-insurance")
+        self.assertGreater(float(result["logs"][0].get("bm25Score") or 0.0), 0.0)
+
     def test_semantic_search_reports_qdrant_mode_when_qdrant_backend_serves_vectors(self):
         topics = [{"id": "topic-ops", "name": "Discord Operations", "description": "Retries"}]
         tasks = [{"id": "task-retry", "topicId": "topic-ops", "title": "Fix retry loop", "status": "doing"}]
@@ -185,6 +237,137 @@ class VectorSearchHybridTests(unittest.TestCase):
         log_ids = [row["id"] for row in result["logs"]]
         self.assertIn("log-real", log_ids)
         self.assertNotIn("log-command", log_ids)
+
+    def test_semantic_search_excludes_tool_call_logs_by_default(self):
+        topics = [{"id": "topic-ops", "name": "Discord Ops", "description": "Reliability"}]
+        tasks: list[dict] = []
+        logs = [
+            {
+                "id": "log-tool",
+                "topicId": "topic-ops",
+                "taskId": None,
+                "type": "action",
+                "summary": "Tool call: exec retry diagnostics",
+                "content": "",
+                "raw": "",
+            },
+            {
+                "id": "log-real",
+                "topicId": "topic-ops",
+                "taskId": None,
+                "type": "conversation",
+                "summary": "Retry diagnostics for gateway outage",
+                "content": "Investigate retry diagnostics output from gateway.",
+                "raw": "",
+            },
+        ]
+
+        original = vs.SEARCH_INCLUDE_TOOL_CALL_LOGS
+        vs.SEARCH_INCLUDE_TOOL_CALL_LOGS = False
+        try:
+            result = vs.semantic_search(
+                "retry diagnostics",
+                topics,
+                tasks,
+                logs,
+                topic_limit=3,
+                task_limit=3,
+                log_limit=10,
+            )
+        finally:
+            vs.SEARCH_INCLUDE_TOOL_CALL_LOGS = original
+
+        log_ids = [row["id"] for row in result["logs"]]
+        self.assertIn("log-real", log_ids)
+        self.assertNotIn("log-tool", log_ids)
+
+    def test_semantic_search_can_include_tool_call_logs_with_flag(self):
+        topics = [{"id": "topic-ops", "name": "Discord Ops", "description": "Reliability"}]
+        tasks: list[dict] = []
+        logs = [
+            {
+                "id": "log-tool",
+                "topicId": "topic-ops",
+                "taskId": None,
+                "type": "action",
+                "summary": "Tool call: exec florian diagnostics",
+                "content": "",
+                "raw": "",
+            },
+            {
+                "id": "log-other",
+                "topicId": "topic-ops",
+                "taskId": None,
+                "type": "conversation",
+                "summary": "Unrelated activity",
+                "content": "No overlap with the query tokens.",
+                "raw": "",
+            },
+        ]
+
+        original = vs.SEARCH_INCLUDE_TOOL_CALL_LOGS
+        vs.SEARCH_INCLUDE_TOOL_CALL_LOGS = True
+        try:
+            result = vs.semantic_search(
+                "florian diagnostics",
+                topics,
+                tasks,
+                logs,
+                topic_limit=3,
+                task_limit=3,
+                log_limit=10,
+            )
+        finally:
+            vs.SEARCH_INCLUDE_TOOL_CALL_LOGS = original
+
+        log_ids = [row["id"] for row in result["logs"]]
+        self.assertIn("log-tool", log_ids)
+
+    def test_vector_topk_retries_qdrant_seed_after_backoff(self):
+        original_qdrant_url = vs.QDRANT_URL
+        original_qdrant_topk = vs._qdrant_topk
+        original_seed = vs._qdrant_seed_from_sqlite
+        original_sqlite_topk = vs._sqlite_topk
+        original_time = vs.time.time
+        original_retry_state = dict(vs._QDRANT_SEED_RETRY_STATE)
+        original_base = vs.QDRANT_SEED_RETRY_BASE_SECONDS
+        original_max = vs.QDRANT_SEED_RETRY_MAX_SECONDS
+
+        seed_calls: list[int] = []
+        times = iter([100.0, 105.0, 200.0])
+
+        vs.QDRANT_URL = "http://qdrant.test"
+        vs.QDRANT_SEED_RETRY_BASE_SECONDS = 20.0
+        vs.QDRANT_SEED_RETRY_MAX_SECONDS = 300.0
+        vs._QDRANT_SEED_RETRY_STATE.clear()
+        vs._qdrant_topk = lambda *_args, **_kwargs: {}
+        vs._qdrant_seed_from_sqlite = lambda **_kwargs: (seed_calls.append(1) or False)
+        vs._sqlite_topk = lambda *_args, **_kwargs: {"doc-a": 0.42}
+        vs.time.time = lambda: next(times)
+
+        try:
+            first_scores, first_backend = vs._vector_topk([0.1, 0.2], kind_exact="topic", limit=5)
+            second_scores, second_backend = vs._vector_topk([0.1, 0.2], kind_exact="topic", limit=5)
+            third_scores, third_backend = vs._vector_topk([0.1, 0.2], kind_exact="topic", limit=5)
+        finally:
+            vs.QDRANT_URL = original_qdrant_url
+            vs._qdrant_topk = original_qdrant_topk
+            vs._qdrant_seed_from_sqlite = original_seed
+            vs._sqlite_topk = original_sqlite_topk
+            vs.time.time = original_time
+            vs._QDRANT_SEED_RETRY_STATE.clear()
+            vs._QDRANT_SEED_RETRY_STATE.update(original_retry_state)
+            vs.QDRANT_SEED_RETRY_BASE_SECONDS = original_base
+            vs.QDRANT_SEED_RETRY_MAX_SECONDS = original_max
+
+        self.assertEqual(first_backend, "sqlite")
+        self.assertEqual(second_backend, "sqlite")
+        self.assertEqual(third_backend, "sqlite")
+        self.assertEqual(first_scores.get("doc-a"), 0.42)
+        self.assertEqual(second_scores.get("doc-a"), 0.42)
+        self.assertEqual(third_scores.get("doc-a"), 0.42)
+        # First and third calls trigger seeding; second call is within backoff and skips it.
+        self.assertEqual(len(seed_calls), 2)
 
 
 if __name__ == "__main__":

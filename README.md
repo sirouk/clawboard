@@ -188,9 +188,17 @@ Advanced (optional) knobs (see `.env.example` for comments/defaults):
 - `CLAWBOARD_EVENT_BUFFER` / `CLAWBOARD_EVENT_SUBSCRIBER_QUEUE`: SSE replay buffer + per-subscriber queue depth.
 - `CLAWBOARD_INGEST_MODE` / `CLAWBOARD_QUEUE_*`: async ingest queue mode.
 - `CLAWBOARD_REINDEX_QUEUE_PATH`: reindex queue jsonl path (non-docker/local dev).
+- `CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS`: include/exclude tool call/result/error `action` logs in semantic indexing + retrieval (`0` default).
+- `CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_*` + `CLAWBOARD_SEARCH_WINDOW_*`: hard caps/windowing that keep search from exhausting API memory under heavy typing/search workloads.
+- `CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS`: tighter scan cap for one-word queries (improves latency + precision on name lookups).
+- `CLAWBOARD_SEARCH_CONCURRENCY_*`: bound concurrent deep searches and fail fast (`429 search_busy`) under burst traffic.
+- `CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS`: max per-log content bytes scanned for deep query-term matching.
+- `CLAWBOARD_SEARCH_SOURCE_TOPK_*` + `CLAWBOARD_RERANK_CHUNKS_PER_DOC`: candidate-pruning/rerank bounds for hybrid ranking.
+- `CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE`: in-process query-embedding cache size.
 - `CLAWBOARD_DISABLE_SNOOZE_WORKER` / `CLAWBOARD_SNOOZE_POLL_SECONDS`: snooze reactivation worker.
 - `CLAWBOARD_VECTOR_MODEL`: keep in sync with `CLASSIFIER_EMBED_MODEL` if you override embedding models.
 - `CLAWBOARD_WEB_WATCHPACK_POLLING*`: web-dev Docker file watching.
+- `CLAWBOARD_WEB_DEV_PREWARM*`: web-dev startup route prewarm (`/` + `/u`) to reduce first-hit compile delays.
 
 Note: `CLAWBOARD_INTEGRATION_LEVEL` is used by `scripts/bootstrap_openclaw.sh` (installer), not as a standalone API server env default.
 Security: remote/tailnet/domain API reads require token. Setup stores token in browser local storage (masked input) and sends it on all API reads/writes.
@@ -376,6 +384,8 @@ Run this once after upgrading classifier/search filtering rules to remove stale/
 ```bash
 python3 scripts/one_time_vector_cleanup.py
 ```
+
+This is also recommended after changing `CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS` so embeddings match the new ingestion policy.
 
 Preview only:
 

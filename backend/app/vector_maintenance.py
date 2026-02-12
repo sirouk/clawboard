@@ -9,6 +9,13 @@ from datetime import datetime, timezone
 from urllib import error as url_error
 from urllib import request as url_request
 
+SEARCH_INCLUDE_TOOL_CALL_LOGS = str(os.getenv("CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS", "0") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 SLASH_COMMANDS = {
     "/new",
     "/topic",
@@ -86,6 +93,13 @@ def _is_memory_action_log(log_type: str, summary: str, content: str, raw: str) -
     return False
 
 
+def _is_tool_call_log(log_type: str, summary: str, content: str, raw: str) -> bool:
+    if log_type != "action":
+        return False
+    combined = " ".join(part for part in [summary, content, raw] if part).lower()
+    return "tool call:" in combined or "tool result:" in combined or "tool error:" in combined
+
+
 def _is_command_conversation(log_type: str, summary: str, content: str, raw: str) -> bool:
     if log_type != "conversation":
         return False
@@ -100,6 +114,8 @@ def _is_command_conversation(log_type: str, summary: str, content: str, raw: str
 
 def _log_embedding_text(log_type: str, summary: str, content: str, raw: str) -> str:
     if log_type in ("system", "import"):
+        return ""
+    if not SEARCH_INCLUDE_TOOL_CALL_LOGS and _is_tool_call_log(log_type, summary, content, raw):
         return ""
     if _is_memory_action_log(log_type, summary, content, raw):
         return ""

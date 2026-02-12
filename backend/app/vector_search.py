@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 import heapq
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass
 from typing import Iterable
 from urllib import error as url_error
@@ -38,19 +38,38 @@ QDRANT_DIM = int(os.getenv("CLAWBOARD_QDRANT_DIM", os.getenv("QDRANT_DIM", "384"
 QDRANT_TIMEOUT = float(os.getenv("CLAWBOARD_QDRANT_TIMEOUT", "2.6"))
 QDRANT_API_KEY = os.getenv("CLAWBOARD_QDRANT_API_KEY") or os.getenv("QDRANT_API_KEY")
 QDRANT_SEED_MAX = int(os.getenv("CLAWBOARD_QDRANT_SEED_MAX", "10000"))
+QDRANT_SEED_RETRY_BASE_SECONDS = float(os.getenv("CLAWBOARD_QDRANT_SEED_RETRY_BASE_SECONDS", "20") or "20")
+QDRANT_SEED_RETRY_MAX_SECONDS = float(os.getenv("CLAWBOARD_QDRANT_SEED_RETRY_MAX_SECONDS", "900") or "900")
 
 RRF_K = int(os.getenv("CLAWBOARD_RRF_K", "60"))
-RERANK_TOP_N = int(os.getenv("CLAWBOARD_RERANK_TOP_N", "84"))
+RERANK_TOP_N = int(os.getenv("CLAWBOARD_RERANK_TOP_N", "64"))
 CHUNK_WORDS = int(os.getenv("CLAWBOARD_CHUNK_WORDS", "72"))
 CHUNK_OVERLAP = int(os.getenv("CLAWBOARD_CHUNK_OVERLAP", "18"))
 MAX_CHUNKS_PER_DOC = int(os.getenv("CLAWBOARD_MAX_CHUNKS_PER_DOC", "18"))
+SEARCH_INCLUDE_TOOL_CALL_LOGS = str(os.getenv("CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS", "0") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+RERANK_CHUNKS_PER_DOC = int(os.getenv("CLAWBOARD_RERANK_CHUNKS_PER_DOC", "6") or "6")
+SEARCH_SOURCE_TOPK_MULTIPLIER = int(os.getenv("CLAWBOARD_SEARCH_SOURCE_TOPK_MULTIPLIER", "6") or "6")
+SEARCH_SOURCE_TOPK_MIN = int(os.getenv("CLAWBOARD_SEARCH_SOURCE_TOPK_MIN", "120") or "120")
+SEARCH_SOURCE_TOPK_MAX = int(os.getenv("CLAWBOARD_SEARCH_SOURCE_TOPK_MAX", "960") or "960")
+EMBED_QUERY_CACHE_SIZE = int(os.getenv("CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE", "256") or "256")
+EMBED_TEXT_CACHE_SIZE = int(os.getenv("CLAWBOARD_SEARCH_EMBED_TEXT_CACHE_SIZE", "4096") or "4096")
+VECTOR_PREWARM = str(os.getenv("CLAWBOARD_VECTOR_PREWARM", "1") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 _MODEL = None
 _MODEL_LOCK = threading.Lock()
 _MODEL_LOADING = False
 _MODEL_LAST_FAILURE_AT = 0.0
-_QDRANT_SEED_ATTEMPTED: set[str] = set()
+_QDRANT_SEED_RETRY_STATE: dict[str, dict[str, float]] = {}
 _QDRANT_COLLECTION_READY = False
+_EMBED_QUERY_CACHE_LOCK = threading.Lock()
+_EMBED_QUERY_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
+_EMBED_TEXT_CACHE_LOCK = threading.Lock()
+_EMBED_TEXT_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
 # NOTE: Avoid caching all SQLite embedding rows in memory. It can easily exhaust RAM and
 # deadlock the API process on real instances. If we must fall back to SQLite (no Qdrant),
 # we stream rows and keep only a tiny top-k working set in memory.
@@ -122,6 +141,7 @@ class SearchDocument:
     kind: str
     text: str
     tokens: tuple[str, ...]
+    token_set: frozenset[str]
     chunks: tuple[ChunkRecord, ...]
 
 
@@ -153,9 +173,32 @@ def _token_set(value: str) -> set[str]:
     return {token for token in tokens if len(token) > 2 and token not in STOP_WORDS}
 
 
+def _hybrid_component_weights(query_token_count: int, *, sparse_available: bool) -> dict[str, float]:
+    # Multi-token queries are usually higher intent and benefit from stronger sparse signals.
+    if query_token_count >= 2 and sparse_available:
+        return {
+            "rrf": 0.33,
+            "dense": 0.14,
+            "bm25": 0.27,
+            "lexical": 0.14,
+            "phrase": 0.12,
+        }
+    return {
+        "rrf": 0.46,
+        "dense": 0.24,
+        "bm25": 0.22,
+        "lexical": 0.08,
+        "phrase": 0.0,
+    }
+
+
 def lexical_similarity(query: str, text: str) -> float:
     q_tokens = _token_set(query)
     d_tokens = _token_set(text)
+    return _lexical_similarity_tokens(q_tokens, d_tokens)
+
+
+def _lexical_similarity_tokens(q_tokens: set[str] | frozenset[str], d_tokens: set[str] | frozenset[str]) -> float:
     if not q_tokens or not d_tokens:
         return 0.0
 
@@ -181,6 +224,44 @@ def lexical_similarity(query: str, text: str) -> float:
     if union <= 0:
         return 0.0
     return inter / float(union)
+
+
+def _top_k_scores(scores: dict[str, float], limit: int) -> dict[str, float]:
+    if not scores:
+        return {}
+    k = max(1, int(limit))
+    if len(scores) <= k:
+        return scores
+    return {item_id: float(score) for item_id, score in heapq.nlargest(k, scores.items(), key=lambda item: float(item[1]))}
+
+
+def _source_topk_limit(limit: int, corpus_size: int) -> int:
+    dynamic = max(SEARCH_SOURCE_TOPK_MIN, int(limit) * max(2, SEARCH_SOURCE_TOPK_MULTIPLIER))
+    if SEARCH_SOURCE_TOPK_MAX > 0:
+        dynamic = min(dynamic, SEARCH_SOURCE_TOPK_MAX)
+    if corpus_size > 0:
+        dynamic = min(dynamic, corpus_size)
+    return max(1, dynamic)
+
+
+def _rerank_top_n_for_query(query_token_count: int) -> int:
+    base = max(8, int(RERANK_TOP_N))
+    if query_token_count <= 1:
+        return min(base, 28)
+    if query_token_count == 2:
+        return min(base, 44)
+    if query_token_count == 3:
+        return min(base, 56)
+    return base
+
+
+def _rerank_chunks_per_doc_for_query(query_token_count: int) -> int:
+    base = max(2, int(RERANK_CHUNKS_PER_DOC))
+    if query_token_count <= 1:
+        return min(base, 3)
+    if query_token_count == 2:
+        return min(base, 4)
+    return base
 
 
 def _split_words_with_offsets(text: str) -> list[tuple[str, int, int]]:
@@ -259,6 +340,21 @@ def _log_text(log: dict) -> str:
     return _clip(" ".join(part for part in [summary, content, raw] if part), 1200)
 
 
+def _is_tool_call_log(log: dict) -> bool:
+    if str(log.get("type") or "") != "action":
+        return False
+    combined = " ".join(
+        part
+        for part in [
+            str(log.get("summary") or ""),
+            str(log.get("content") or ""),
+            str(log.get("raw") or ""),
+        ]
+        if part
+    ).lower()
+    return "tool call:" in combined or "tool result:" in combined or "tool error:" in combined
+
+
 def _is_memory_action_log(log: dict) -> bool:
     if str(log.get("type") or "") != "action":
         return False
@@ -304,12 +400,14 @@ def _prepare_docs(kind: str, rows: Iterable[dict], text_builder, *, chunk: bool 
         tokens = tuple(_tokenize(text))
         if not tokens:
             continue
+        token_set = frozenset(token for token in tokens if len(token) > 2 and token not in STOP_WORDS)
         docs.append(
             SearchDocument(
                 id=item_id,
                 kind=kind,
                 text=text,
                 tokens=tokens,
+                token_set=token_set,
                 chunks=tuple(chunks),
             )
         )
@@ -424,11 +522,21 @@ def _ensure_model_loading_async() -> None:
 
 
 def _embed_query(text: str):
+    normalized = _normalize_text(text)
+    if not normalized:
+        return None
+    if np is not None and EMBED_QUERY_CACHE_SIZE > 0:
+        with _EMBED_QUERY_CACHE_LOCK:
+            cached = _EMBED_QUERY_CACHE.get(normalized)
+            if cached is not None:
+                _EMBED_QUERY_CACHE.move_to_end(normalized)
+                return cached
+
     model = _get_model()
     if model is None:
         return None
     try:
-        vec = next(model.embed([text]), None)
+        vec = next(model.embed([normalized]), None)
     except Exception:
         return None
     if vec is None:
@@ -436,6 +544,12 @@ def _embed_query(text: str):
     arr = np.asarray(vec, dtype=np.float32)
     if arr.size == 0:
         return None
+    if EMBED_QUERY_CACHE_SIZE > 0:
+        with _EMBED_QUERY_CACHE_LOCK:
+            _EMBED_QUERY_CACHE[normalized] = arr
+            _EMBED_QUERY_CACHE.move_to_end(normalized)
+            while len(_EMBED_QUERY_CACHE) > EMBED_QUERY_CACHE_SIZE:
+                _EMBED_QUERY_CACHE.popitem(last=False)
     return arr
 
 
@@ -446,17 +560,37 @@ def _embed_many(texts: list[str]) -> dict[str, "np.ndarray"]:
     unique_texts = [text for text in dict.fromkeys(texts) if text]
     if not unique_texts:
         return {}
-    try:
-        vectors = list(model.embed(unique_texts))
-    except Exception:
-        return {}
-
     embedded: dict[str, "np.ndarray"] = {}
-    for text, vec in zip(unique_texts, vectors):
+    pending: list[str] = []
+    if EMBED_TEXT_CACHE_SIZE > 0:
+        with _EMBED_TEXT_CACHE_LOCK:
+            for text in unique_texts:
+                cached = _EMBED_TEXT_CACHE.get(text)
+                if cached is not None:
+                    _EMBED_TEXT_CACHE.move_to_end(text)
+                    embedded[text] = cached
+                else:
+                    pending.append(text)
+    else:
+        pending = unique_texts
+    if not pending:
+        return embedded
+    try:
+        vectors = list(model.embed(pending))
+    except Exception:
+        return embedded
+    for text, vec in zip(pending, vectors):
         arr = np.asarray(vec, dtype=np.float32)
         if arr.size == 0:
             continue
         embedded[text] = arr
+    if EMBED_TEXT_CACHE_SIZE > 0 and embedded:
+        with _EMBED_TEXT_CACHE_LOCK:
+            for text, arr in embedded.items():
+                _EMBED_TEXT_CACHE[text] = arr
+                _EMBED_TEXT_CACHE.move_to_end(text)
+            while len(_EMBED_TEXT_CACHE) > EMBED_TEXT_CACHE_SIZE:
+                _EMBED_TEXT_CACHE.popitem(last=False)
     return embedded
 
 
@@ -745,15 +879,28 @@ def _vector_topk(query_vec, *, kind_exact: str | None = None, kind_prefix: str |
     if QDRANT_URL:
         qdrant_scores = _qdrant_topk(query_vec, kind_exact=kind_exact, kind_prefix=kind_prefix, limit=limit)
         if qdrant_scores:
+            namespace = kind_exact or (f"{kind_prefix}*" if kind_prefix else "all")
+            _QDRANT_SEED_RETRY_STATE.pop(namespace, None)
             return qdrant_scores, "qdrant"
         namespace = kind_exact or (f"{kind_prefix}*" if kind_prefix else "all")
-        if namespace not in _QDRANT_SEED_ATTEMPTED:
-            _QDRANT_SEED_ATTEMPTED.add(namespace)
+        now = time.time()
+        retry_state = _QDRANT_SEED_RETRY_STATE.get(namespace) or {}
+        next_retry_at = float(retry_state.get("nextRetryAt") or 0.0)
+        if now >= next_retry_at:
             seeded = _qdrant_seed_from_sqlite(kind_exact=kind_exact, kind_prefix=kind_prefix)
             if seeded:
+                _QDRANT_SEED_RETRY_STATE.pop(namespace, None)
                 retry_scores = _qdrant_topk(query_vec, kind_exact=kind_exact, kind_prefix=kind_prefix, limit=limit)
                 if retry_scores:
                     return retry_scores, "qdrant"
+            failures = int(retry_state.get("failures") or 0) + 1
+            base_delay = max(5.0, float(QDRANT_SEED_RETRY_BASE_SECONDS))
+            max_delay = max(base_delay, float(QDRANT_SEED_RETRY_MAX_SECONDS))
+            retry_delay = min(max_delay, base_delay * (2 ** max(0, failures - 1)))
+            _QDRANT_SEED_RETRY_STATE[namespace] = {
+                "failures": float(failures),
+                "nextRetryAt": now + retry_delay,
+            }
     sqlite_scores = _sqlite_topk(query_vec, kind_exact=kind_exact, kind_prefix=kind_prefix, limit=limit)
     if sqlite_scores:
         return sqlite_scores, "sqlite"
@@ -767,6 +914,9 @@ def _late_interaction_rerank(
     docs_by_id: dict[str, SearchDocument],
     candidate_ids: list[str],
     chunk_bm25_scores: dict[str, float],
+    *,
+    rerank_top_n: int,
+    max_chunks_per_doc: int,
 ) -> tuple[dict[str, float], dict[str, dict[str, object]]]:
     if not candidate_ids:
         return {}, {}
@@ -784,14 +934,15 @@ def _late_interaction_rerank(
         return computed
 
     # Keep reranking bounded and focused.
-    selected_ids = candidate_ids[: max(1, RERANK_TOP_N)]
+    selected_ids = candidate_ids[: max(1, int(rerank_top_n))]
+    max_chunks_per_doc = max(2, int(max_chunks_per_doc))
     selected_chunks: list[ChunkRecord] = []
     for doc_id in selected_ids:
         doc = docs_by_id.get(doc_id)
         if not doc:
             continue
         chunks = doc_chunks(doc)
-        selected_chunks.extend(chunks[: min(8, len(chunks))])
+        selected_chunks.extend(chunks[: min(max_chunks_per_doc, len(chunks))])
 
     chunk_norm = _normalize_scores(chunk_bm25_scores)
     chunk_vectors: dict[str, "np.ndarray"] = {}
@@ -821,7 +972,8 @@ def _late_interaction_rerank(
             continue
         best_score = 0.0
         best_chunk: ChunkRecord | None = None
-        for chunk in doc_chunks(doc):
+        chunks = doc_chunks(doc)
+        for chunk in chunks[: min(max_chunks_per_doc, len(chunks))]:
             chunk_token_set = set(chunk.tokens)
             token_coverage = (len(query_tokens & chunk_token_set) / max(1, len(query_tokens))) if query_tokens else 0.0
             phrase_bonus = 1.0 if query_lower and query_lower in chunk.text.lower() else 0.0
@@ -841,7 +993,10 @@ def _late_interaction_rerank(
                     if denom > 0:
                         dense_score = max(0.0, float(np.dot(query_arr, vec_arr) / denom))
 
-            score = (dense_score * 0.58) + (bm25_chunk * 0.2) + (token_coverage * 0.17) + (phrase_bonus * 0.05)
+            if len(query_tokens) >= 2:
+                score = (dense_score * 0.46) + (bm25_chunk * 0.23) + (token_coverage * 0.23) + (phrase_bonus * 0.08)
+            else:
+                score = (dense_score * 0.58) + (bm25_chunk * 0.2) + (token_coverage * 0.17) + (phrase_bonus * 0.05)
             if score > best_score:
                 best_score = score
                 best_chunk = chunk
@@ -868,33 +1023,95 @@ def _hybrid_rank(
 ) -> tuple[list[dict], dict[str, dict[str, object]]]:
     if not docs:
         return [], {}
-    query_tokens = _tokenize(query)
-    if not query_tokens:
+    query_tokens_list = _tokenize(query)
+    if not query_tokens_list:
         return [], {}
+    query_tokens = set(query_tokens_list)
+    query_token_count = len(query_tokens)
+    query_lower = _normalize_text(query).lower()
 
     docs_by_id = {doc.id: doc for doc in docs}
+    source_limit = _source_topk_limit(limit, len(docs))
+    # Ignore dense hits for docs that aren't part of this ranking corpus
+    # (e.g., filtered-out log kinds), otherwise score normalization gets skewed.
+    dense_scores = {item_id: float(score) for item_id, score in dense_scores.items() if item_id in docs_by_id}
+    dense_scores = _top_k_scores(dense_scores, source_limit)
     doc_token_map = {doc.id: doc.tokens for doc in docs}
-    doc_bm25_scores = _bm25_scores(query_tokens, doc_token_map)
-    lexical_scores = {doc.id: lexical_similarity(query, doc.text) for doc in docs if doc.text}
-    lexical_scores = {key: score for key, score in lexical_scores.items() if score > 0}
+    doc_bm25_scores = _bm25_scores(query_tokens_list, doc_token_map)
+    doc_bm25_scores = _top_k_scores(doc_bm25_scores, source_limit)
 
+    query_token_set = {token for token in query_tokens if len(token) > 2 and token not in STOP_WORDS}
+    lexical_scores: dict[str, float] = {}
+    lexical_floor = 0.05 if query_token_count >= 2 else 0.0
+    if query_token_set:
+        for doc in docs:
+            if not doc.token_set:
+                continue
+            score = _lexical_similarity_tokens(query_token_set, doc.token_set)
+            if score > lexical_floor:
+                lexical_scores[doc.id] = score
+    lexical_scores = _top_k_scores(lexical_scores, source_limit)
+
+    phrase_scores: dict[str, float] = {}
+    if query_lower and query_token_count >= 2:
+        phrase_candidates = set(dense_scores.keys()) | set(doc_bm25_scores.keys()) | set(lexical_scores.keys())
+        if not phrase_candidates:
+            for doc in docs:
+                if len(phrase_candidates) >= source_limit:
+                    break
+                if query_tokens & doc.token_set:
+                    phrase_candidates.add(doc.id)
+        for doc_id in phrase_candidates:
+            doc = docs_by_id.get(doc_id)
+            if not doc:
+                continue
+            text_lower = doc.text.lower()
+            if query_lower in text_lower:
+                phrase_scores[doc.id] = 1.0
+                continue
+            overlap = len(query_tokens & doc.token_set)
+            if overlap >= query_token_count and query_token_count > 0:
+                phrase_scores[doc.id] = 0.35
+            elif query_token_count >= 3 and overlap >= 2:
+                phrase_scores[doc.id] = 0.15
+    phrase_scores = _top_k_scores(phrase_scores, source_limit)
+
+    rrf_sources = [dense_scores, doc_bm25_scores, lexical_scores]
+    rrf_weights = [1.0, 0.98, 0.62]
+    if phrase_scores:
+        rrf_sources.append(phrase_scores)
+        rrf_weights.append(0.66)
     rrf_scores = _rrf_fuse(
-        [dense_scores, doc_bm25_scores, lexical_scores],
-        weights=[1.0, 0.98, 0.62],
+        rrf_sources,
+        weights=rrf_weights,
     )
+    rrf_scores = _top_k_scores(rrf_scores, source_limit)
 
     dense_norm = _normalize_scores(dense_scores)
     bm25_norm = _normalize_scores(doc_bm25_scores)
     lexical_norm = _normalize_scores(lexical_scores)
+    phrase_norm = _normalize_scores(phrase_scores)
     rrf_norm = _normalize_scores(rrf_scores)
+    component_weights = _hybrid_component_weights(
+        query_token_count,
+        sparse_available=bool(doc_bm25_scores or lexical_scores or phrase_scores),
+    )
 
     base_scores: dict[str, float] = {}
-    for item_id in set(docs_by_id.keys()) | set(dense_scores.keys()) | set(doc_bm25_scores.keys()) | set(rrf_scores.keys()):
+    candidate_ids = (
+        set(dense_scores.keys())
+        | set(doc_bm25_scores.keys())
+        | set(lexical_scores.keys())
+        | set(phrase_scores.keys())
+        | set(rrf_scores.keys())
+    )
+    for item_id in candidate_ids:
         score = (
-            (rrf_norm.get(item_id, 0.0) * 0.46)
-            + (dense_norm.get(item_id, 0.0) * 0.24)
-            + (bm25_norm.get(item_id, 0.0) * 0.22)
-            + (lexical_norm.get(item_id, 0.0) * 0.08)
+            (rrf_norm.get(item_id, 0.0) * component_weights["rrf"])
+            + (dense_norm.get(item_id, 0.0) * component_weights["dense"])
+            + (bm25_norm.get(item_id, 0.0) * component_weights["bm25"])
+            + (lexical_norm.get(item_id, 0.0) * component_weights["lexical"])
+            + (phrase_norm.get(item_id, 0.0) * component_weights["phrase"])
         )
         if score > 0:
             base_scores[item_id] = score
@@ -902,10 +1119,13 @@ def _hybrid_rank(
     ranked_ids = [item_id for item_id, _ in sorted(base_scores.items(), key=lambda item: item[1], reverse=True)]
     if not ranked_ids:
         return [], {}
+    ranked_ids = ranked_ids[:source_limit]
 
     # Chunk BM25 is expensive at corpus scale. Compute it only for the rerank candidates
     # so search stays fast even with thousands of log rows.
-    selected_ids = ranked_ids[: max(1, RERANK_TOP_N)]
+    rerank_top_n = _rerank_top_n_for_query(query_token_count)
+    max_chunks_per_doc = _rerank_chunks_per_doc_for_query(query_token_count)
+    selected_ids = ranked_ids[: max(1, rerank_top_n)]
     lazy_chunks: dict[str, tuple[ChunkRecord, ...]] = {}
 
     def doc_chunks(doc: SearchDocument) -> tuple[ChunkRecord, ...]:
@@ -925,10 +1145,10 @@ def _hybrid_rank(
         if not doc:
             continue
         chunks = doc_chunks(doc)
-        for chunk in chunks[: min(8, len(chunks))]:
+        for chunk in chunks[: min(max_chunks_per_doc, len(chunks))]:
             chunk_token_map[chunk.id] = chunk.tokens
             chunk_parent_map[chunk.id] = doc_id
-    chunk_bm25 = _bm25_scores(query_tokens, chunk_token_map)
+    chunk_bm25 = _bm25_scores(query_tokens_list, chunk_token_map)
     parent_chunk_scores: dict[str, float] = {}
     for chunk_id, score in chunk_bm25.items():
         parent_id = chunk_parent_map.get(chunk_id)
@@ -938,11 +1158,13 @@ def _hybrid_rank(
 
     rerank_scores, best_chunk_map = _late_interaction_rerank(
         query=query,
-        query_tokens=set(query_tokens),
+        query_tokens=query_tokens,
         query_vec=query_vec,
         docs_by_id=docs_by_id,
         candidate_ids=ranked_ids,
         chunk_bm25_scores=chunk_bm25,
+        rerank_top_n=rerank_top_n,
+        max_chunks_per_doc=max_chunks_per_doc,
     )
     rerank_norm = _normalize_scores(rerank_scores)
 
@@ -964,6 +1186,7 @@ def _hybrid_rank(
                 "vectorScore": round(dense_scores.get(item_id, 0.0), 6),
                 "bm25Score": round(doc_bm25_scores.get(item_id, 0.0), 6),
                 "lexicalScore": round(lexical_scores.get(item_id, 0.0), 6),
+                "phraseScore": round(phrase_scores.get(item_id, 0.0), 6),
                 "chunkScore": round(parent_chunk_scores.get(item_id, 0.0), 6),
                 "rerankScore": round(rerank_scores.get(item_id, 0.0), 6),
             }
@@ -996,19 +1219,20 @@ def semantic_search(
     topic_docs = _prepare_docs(
         "topic",
         topics,
-        lambda row: f"{row.get('name') or ''}\n{row.get('description') or ''}",
+        lambda row: f"{row.get('name') or ''}\n{row.get('description') or ''}\n{row.get('searchText') or ''}",
         chunk=False,
     )
     task_docs = _prepare_docs(
         "task",
         tasks,
-        lambda row: f"{row.get('title') or ''}\n{row.get('status') or ''}",
+        lambda row: f"{row.get('title') or ''}\n{row.get('status') or ''}\n{row.get('searchText') or ''}",
         chunk=False,
     )
     filtered_logs = [
         row
         for row in logs
         if str(row.get("type") or "") not in ("system", "import")
+        and (SEARCH_INCLUDE_TOOL_CALL_LOGS or not _is_tool_call_log(row))
         and not _is_memory_action_log(row)
         and not _is_command_log(row)
     ]
@@ -1078,3 +1302,7 @@ def semantic_search(
         "tasks": task_rows,
         "logs": log_rows,
     }
+
+
+if VECTOR_PREWARM:
+    _ensure_model_loading_async()

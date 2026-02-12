@@ -44,7 +44,12 @@ class BoardSessionClassificationTests(unittest.TestCase):
                 "classificationStatus": "pending",
                 "classificationAttempts": 0,
                 "createdAt": "2026-02-09T09:10:00.000Z",
-                "source": {"sessionKey": session_key},
+                "source": {
+                    "sessionKey": session_key,
+                    "boardScopeTopicId": "topic-abc",
+                    "boardScopeKind": "topic",
+                    "boardScopeLock": True,
+                },
             },
             {
                 "id": "log-2",
@@ -54,7 +59,12 @@ class BoardSessionClassificationTests(unittest.TestCase):
                 "classificationStatus": "pending",
                 "classificationAttempts": 0,
                 "createdAt": "2026-02-09T09:10:01.000Z",
-                "source": {"sessionKey": session_key},
+                "source": {
+                    "sessionKey": session_key,
+                    "boardScopeTopicId": "topic-abc",
+                    "boardScopeKind": "topic",
+                    "boardScopeLock": True,
+                },
             },
         ]
 
@@ -201,6 +211,83 @@ class BoardSessionClassificationTests(unittest.TestCase):
         self.assertEqual(by_id["log-1"].get("taskId"), "task-xyz")
         self.assertEqual(by_id["log-2"].get("topicId"), "topic-abc")
         self.assertEqual(by_id["log-2"].get("taskId"), "task-xyz")
+
+    def test_unlocked_command_logs_do_not_inherit_topic_scope(self):
+        session_key = "channel:classifier-test:commands"
+        logs = [
+            {
+                "id": "log-1",
+                "type": "conversation",
+                "agentId": "user",
+                "content": "Fix the OAuth callback in login flow.",
+                "classificationStatus": "pending",
+                "classificationAttempts": 0,
+                "createdAt": "2026-02-11T10:00:00.000Z",
+                "source": {"sessionKey": session_key, "channel": "classifier-test"},
+            },
+            {
+                "id": "log-2",
+                "type": "conversation",
+                "agentId": "assistant",
+                "content": "I'll patch and test it.",
+                "classificationStatus": "pending",
+                "classificationAttempts": 0,
+                "createdAt": "2026-02-11T10:00:01.000Z",
+                "source": {"sessionKey": session_key, "channel": "classifier-test"},
+            },
+            {
+                "id": "log-3",
+                "type": "conversation",
+                "agentId": "user",
+                "content": "/new",
+                "classificationStatus": "pending",
+                "classificationAttempts": 0,
+                "createdAt": "2026-02-11T10:00:02.000Z",
+                "source": {"sessionKey": session_key, "channel": "classifier-test"},
+            },
+        ]
+
+        patched: list[tuple[str, dict]] = []
+
+        def fake_list_logs_by_session(_sk: str, **kwargs):
+            self.assertEqual(_sk, session_key)
+            if kwargs.get("classificationStatus") == "pending":
+                return logs
+            return logs
+
+        def fake_patch_log(log_id: str, payload: dict):
+            patched.append((log_id, payload))
+
+        def fake_call_classifier(window, pending_ids, candidate_topics, candidate_tasks, *_args, **_kwargs):
+            return {
+                "topic": {"id": "topic-abc", "name": "Auth", "create": False},
+                "task": None,
+                "summaries": [{"id": sid, "summary": "Fix OAuth callback"} for sid in pending_ids],
+            }
+
+        with (
+            patch.object(c, "list_logs_by_session", side_effect=fake_list_logs_by_session),
+            patch.object(c, "patch_log", side_effect=fake_patch_log),
+            patch.object(c, "_llm_enabled", return_value=True),
+            patch.object(c, "call_classifier", side_effect=fake_call_classifier),
+            patch.object(c, "_window_has_task_intent", return_value=False),
+            patch.object(c, "build_notes_index", return_value={}),
+            patch.object(c, "list_topics", return_value=[{"id": "topic-abc", "name": "Auth"}]),
+            patch.object(c, "list_logs_by_topic", return_value=[]),
+            patch.object(c, "list_logs_by_task", return_value=[]),
+            patch.object(c, "memory_snippets", return_value=[]),
+            patch.object(c, "task_candidates", return_value=[]),
+            patch.object(c, "list_tasks", return_value=[]),
+        ):
+            c.classify_session(session_key)
+
+        by_id = {lid: payload for lid, payload in patched}
+        self.assertIn("log-3", by_id)
+        command_payload = by_id["log-3"]
+        self.assertEqual(command_payload.get("classificationStatus"), "classified")
+        self.assertEqual(command_payload.get("classificationError"), "filtered_command")
+        self.assertIsNone(command_payload.get("topicId"))
+        self.assertIsNone(command_payload.get("taskId"))
 
 
 if __name__ == "__main__":

@@ -108,6 +108,8 @@ Back-compat fallback (older servers without `/api/context`):
   - `GET /api/log?sessionKey=<key>&type=conversation&limit=80&offset=0`
 - Hybrid semantic + lexical lookup (includes pending, so it can be useful before the classifier finishes):
   - `GET /api/search?q=<query>&sessionKey=<key>&includePending=1`
+  - by default, `action` logs that are tool call/result/error traces are excluded from semantic indexing and recall
+    (`CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS=0`)
   - limits used by the plugin are derived from `contextTopicLimit/contextTaskLimit/contextLogLimit`:
     - `limitTopics = max(12, contextTopicLimit*4)`
     - `limitTasks = max(24, contextTaskLimit*5)`
@@ -173,6 +175,13 @@ Two separate protections exist to keep injected context from poisoning logs, emb
 2. **Classifier noise filtering**
    - `classifier/classifier.py` detects injected context artifacts via `_is_injected_context_artifact(...)`
    - those entries are treated as noise (`context_injection_noise`) and excluded from semantic context and bundling logic
+
+3. **Tool activity filtering for semantic retrieval**
+   - API indexing/search excludes `action` logs that are tool call/result/error traces by default
+   - opt-in switch: `CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS=1`
+   - Clawgraph memory map excludes tool call/result/error `action` logs unconditionally
+   - burst protection: bounded search gate (`CLAWBOARD_SEARCH_CONCURRENCY_*`) keeps `/api/search` responsive under rapid typing by failing fast with `429 search_busy`
+   - efficiency tuning: `CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS`, `CLAWBOARD_SEARCH_SOURCE_TOPK_*`, `CLAWBOARD_RERANK_CHUNKS_PER_DOC`, and `CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE`
 
 Additional guardrail:
 - The plugin ignores internal classifier sessions by default via `DEFAULT_IGNORE_SESSION_PREFIXES = ["internal:clawboard-classifier:"]`

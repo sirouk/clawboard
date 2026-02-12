@@ -126,6 +126,44 @@ class ClawgraphBuildTests(unittest.TestCase):
         casey_entities = [node for node in entity_nodes if str(node.get("meta", {}).get("entityKey")) == "casey"]
         self.assertEqual(len(casey_entities), 1)
 
+    def test_tool_call_action_logs_are_excluded_from_graph_mapping(self):
+        topics = [SimpleNamespace(id="topic-1", name="Ops", description="", pinned=False)]
+        tasks = [SimpleNamespace(id="task-1", topicId="topic-1", title="Triage", status="todo", pinned=False)]
+        logs = [
+            SimpleNamespace(
+                id="log-tool",
+                topicId="topic-1",
+                taskId="task-1",
+                type="action",
+                summary="Tool call: memory.search",
+                content="Florian Health Insurance OpenClaw",
+                raw="",
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                relatedLogId=None,
+                classificationStatus="classified",
+                createdAt="2026-02-06T00:00:00.000Z",
+            ),
+            SimpleNamespace(
+                id="log-conv",
+                topicId="topic-1",
+                taskId="task-1",
+                type="conversation",
+                summary="all clear",
+                content="all clear",
+                raw="",
+                agentId="user",
+                agentLabel="User",
+                relatedLogId=None,
+                classificationStatus="classified",
+                createdAt="2026-02-06T00:01:00.000Z",
+            ),
+        ]
+
+        graph = build_clawgraph(topics, tasks, logs, max_entities=40, max_nodes=120, min_edge_weight=0.0)
+        entity_nodes = [node for node in graph["nodes"] if node["type"] == "entity"]
+        self.assertFalse(entity_nodes, "Tool-call action logs should not create entity nodes in clawgraph")
+
 
 if __name__ == "__main__":
     unittest.main()
