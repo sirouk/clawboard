@@ -10,6 +10,7 @@ coverage
 
 data
 .venv*
+_purge-archive
 
 .DS_Store
 *.log

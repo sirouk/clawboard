@@ -104,19 +104,7 @@ services:
       - "3010:3000"
     working_dir: /app
     command: >
-      sh -lc "
-        set -e
-        LOCK_HASH_FILE=node_modules/.clawboard-lockfile-sha256
-        LOCK_HASH=$$(sha256sum package-lock.json 2>/dev/null | awk '{print $$1}' || true)
-        INSTALLED_HASH=$$(cat \"$$LOCK_HASH_FILE\" 2>/dev/null || true)
-        if [ ! -d node_modules/.bin ] || [ -z \"$$LOCK_HASH\" ] || [ \"$$LOCK_HASH\" != \"$$INSTALLED_HASH\" ]; then
-          npm ci
-          if [ -n \"$$LOCK_HASH\" ]; then
-            echo \"$$LOCK_HASH\" > \"$$LOCK_HASH_FILE\"
-          fi
-        fi
-        npm run dev -- -H 0.0.0.0 -p 3000
-      "
+      sh -lc "./scripts/web-dev-entrypoint.sh"
     volumes:
       - .:/app
       - clawboard_web_node_modules:/app/node_modules

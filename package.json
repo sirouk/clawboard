@@ -16,12 +16,16 @@
     "test:all": "npm run lint && npm run test:backend && npm run test:classifier && npm run test:logger && npm run test:scripts && npm run build && npm run test:e2e"
   },
   "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "clsx": "^2.1.1",
     "next": "16.1.6",
+    "prisma": "^5.22.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-markdown": "^10.1.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.4.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

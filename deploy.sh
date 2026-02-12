@@ -324,15 +324,23 @@ restart() {
 
 reset_data() {
   local force=false
+  local project_name=""
+  local api_db_volume=""
   if [ "${1:-}" = "--yes" ]; then
     force=true
   fi
-  confirm_or_abort "This will delete local Clawboard data under data/. Continue?" "$force"
+  confirm_or_abort "This will delete local Clawboard data under data/ and reset Docker DB volume(s). Continue?" "$force"
   down
 
-  rm -f "$DATA_DIR/clawboard.db" "$DATA_DIR/clawboard.db-shm" "$DATA_DIR/clawboard.db-wal"
-  rm -f "$DATA_DIR/classifier_embeddings.db" "$DATA_DIR/classifier.lock" "$DATA_DIR/reindex-queue.jsonl"
-  rm -rf "$DATA_DIR/qdrant" "$DATA_DIR/postgres"
+  # API DB defaults to sqlite:////db/clawboard.db on the named Docker volume.
+  # Remove that volume here so reset-data truly starts from a blank database.
+  project_name="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT_DIR")}"
+  for api_db_volume in "${project_name}_clawboard_api_db" "clawboard_api_db"; do
+    docker volume rm -f "$api_db_volume" >/dev/null 2>&1 || true
+  done
+
+  # Wipe all local bind-mounted state (vectors, queues, locks, attachments, etc.).
+  rm -rf "$DATA_DIR"
   mkdir -p "$DATA_DIR/qdrant" "$DATA_DIR/postgres"
   echo "Local data reset complete."
 }
