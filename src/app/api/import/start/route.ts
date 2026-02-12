@@ -23,14 +23,20 @@ export async function POST(req: NextRequest) {
       finishedAt
     });
     return NextResponse.json({ job: updated });
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message =
+      typeof err === "object" &&
+      err !== null &&
+      "message" in err &&
+      typeof (err as { message?: unknown }).message === "string"
+        ? (err as { message: string }).message
+        : "Import failed";
     const finishedAt = new Date().toISOString();
     const updated = await updateImportJob(job.id, {
       status: "failed",
-      error: err?.message ?? "Import failed",
+      error: message,
       finishedAt
     });
     return NextResponse.json({ job: updated }, { status: 500 });
   }
 }
-

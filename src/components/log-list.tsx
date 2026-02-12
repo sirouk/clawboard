@@ -241,7 +241,7 @@ export function LogList({
   const [laneFilter, setLaneFilter] = useState<LaneFilter>(initialLaneFilter || "all");
   const [search, setSearch] = useState(initialSearch || "");
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
-  const [localShowRawAll, setLocalShowRawAll] = useState(false);
+  const [localShowRawAll, setLocalShowRawAll] = useState(true);
   const [localMessageDensity, setLocalMessageDensity] = useState<MessageDensity>("comfortable");
   const [groupByDay, setGroupByDay] = useState(variant !== "chat");
   const loadMoreEnabled = Boolean(initialVisibleCount && initialVisibleCount > 0 && loadMoreStep && loadMoreStep > 0);
@@ -438,9 +438,9 @@ export function LogList({
     query: normalizedSearch,
     topicId: topicFilter !== "all" ? topicFilter : undefined,
     includePending: true,
-    limitTopics: Math.min(Math.max(topics.length, 120), 500),
-    limitTasks: Math.min(Math.max(Math.ceil(logs.length / 2), 240), 1200),
-    limitLogs: Math.min(Math.max(logs.length, 800), 4000),
+    limitTopics: Math.min(Math.max(topics.length, 60), 120),
+    limitTasks: Math.min(Math.max(Math.ceil(logs.length / 3), 120), 240),
+    limitLogs: Math.min(Math.max(logs.length, 160), 320),
     refreshKey: semanticRefreshKey,
   });
 

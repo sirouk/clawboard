@@ -28,6 +28,48 @@ test("board topics panel can search topics and navigate into unified view select
   await expect(page.locator("div[role='button']").filter({ hasText: topicName }).first()).toHaveAttribute("aria-expanded", "true");
 });
 
+test("creating a task in topic view auto-expands task chat and focuses task composer", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-create-task-${suffix}`;
+  const topicName = `Create Task Topic ${suffix}`;
+  const taskTitle = `Task from topic ${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  await page.goto(`/u/topic/${topicId}`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const topicCard = page.locator(`[data-topic-card-id='${topicId}']`).first();
+  await expect(topicCard).toBeVisible();
+
+  const addTaskInput = topicCard.getByPlaceholder("Add a task…");
+  if (!(await addTaskInput.isVisible())) {
+    await topicCard.getByTitle("Expand").click();
+  }
+  await expect(addTaskInput).toBeVisible();
+
+  const createTaskRequest = page.waitForResponse((resp) => {
+    return resp.url().includes("/api/tasks") && resp.request().method() === "POST";
+  });
+
+  await addTaskInput.fill(taskTitle);
+  await addTaskInput.press("Enter");
+  await createTaskRequest;
+
+  const taskCard = page.locator("[data-task-card-id]").filter({ hasText: taskTitle }).first();
+  await expect(taskCard).toBeVisible();
+  const taskId = await taskCard.getAttribute("data-task-card-id");
+  expect(taskId).toBeTruthy();
+
+  const taskComposer = page.getByTestId(`task-chat-composer-${taskId}`);
+  await expect(taskComposer).toBeVisible();
+  await expect(taskComposer.getByRole("textbox")).toBeFocused();
+});
+
 test("topic chat send is instant and task promotion auto-expands task composer", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
   const suffix = Date.now();

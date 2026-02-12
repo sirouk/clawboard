@@ -14,6 +14,7 @@ type SemanticSearchParams = {
   limitLogs?: number;
   enabled?: boolean;
   debounceMs?: number;
+  minQueryLength?: number;
   refreshKey?: string | number | null;
 };
 
@@ -29,11 +30,12 @@ export function useSemanticSearch({
   topicId,
   sessionKey,
   includePending = true,
-  limitTopics = 120,
-  limitTasks = 240,
-  limitLogs = 1000,
+  limitTopics = 80,
+  limitTasks = 160,
+  limitLogs = 240,
   enabled = true,
-  debounceMs = 220,
+  debounceMs = 380,
+  minQueryLength = 2,
   refreshKey = null,
 }: SemanticSearchParams): SemanticSearchState {
   const trimmedQuery = query.trim();
@@ -45,17 +47,20 @@ export function useSemanticSearch({
   });
 
   const requestUrl = useMemo(() => {
-    if (!enabled || trimmedQuery.length < 1) return "";
+    if (!enabled || trimmedQuery.length < Math.max(1, minQueryLength)) return "";
+    const topicsValue = Math.min(Math.max(1, limitTopics), 120);
+    const tasksValue = Math.min(Math.max(1, limitTasks), 240);
+    const logsValue = Math.min(Math.max(10, limitLogs), 320);
     const params = new URLSearchParams();
     params.set("q", trimmedQuery);
     params.set("includePending", includePending ? "true" : "false");
-    params.set("limitTopics", String(Math.max(1, limitTopics)));
-    params.set("limitTasks", String(Math.max(1, limitTasks)));
-    params.set("limitLogs", String(Math.max(10, limitLogs)));
+    params.set("limitTopics", String(topicsValue));
+    params.set("limitTasks", String(tasksValue));
+    params.set("limitLogs", String(logsValue));
     if (topicId) params.set("topicId", topicId);
     if (sessionKey) params.set("sessionKey", sessionKey);
     return `/api/search?${params.toString()}`;
-  }, [enabled, includePending, limitLogs, limitTasks, limitTopics, sessionKey, topicId, trimmedQuery]);
+  }, [enabled, includePending, limitLogs, limitTasks, limitTopics, minQueryLength, sessionKey, topicId, trimmedQuery]);
 
   useEffect(() => {
     if (!requestUrl) {
@@ -70,14 +75,27 @@ export function useSemanticSearch({
     const timer = window.setTimeout(async () => {
       setState((prev) => ({ ...prev, loading: true, error: null, query: trimmedQuery }));
       try {
-        const res = await apiFetch(requestUrl, {
-          cache: "no-store",
-          signal: controller.signal,
-        });
-        if (!res.ok) {
-          throw new Error(`search_failed_${res.status}`);
+        let payload: SemanticSearchResponse | null = null;
+        const maxAttempts = 2;
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+          const res = await apiFetch(requestUrl, {
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (res.ok) {
+            payload = (await res.json()) as SemanticSearchResponse;
+            break;
+          }
+          if (res.status !== 429 || attempt >= maxAttempts - 1) {
+            throw new Error(`search_failed_${res.status}`);
+          }
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 180 + attempt * 120);
+          });
         }
-        const payload = (await res.json()) as SemanticSearchResponse;
+        if (!payload) {
+          throw new Error("search_failed");
+        }
         if (controller.signal.aborted) return;
         setState({
           data: payload,

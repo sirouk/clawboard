@@ -135,6 +135,12 @@ function cleanText(value: string) {
   return text.trim();
 }
 
+function isToolCallLog(log: LogEntry) {
+  if (log.type !== "action") return false;
+  const combined = `${log.summary ?? ""} ${log.content ?? ""} ${log.raw ?? ""}`.toLowerCase();
+  return combined.includes("tool call:") || combined.includes("tool result:") || combined.includes("tool error:");
+}
+
 function words(value: string) {
   const normalized = value.toLowerCase().replace(/[^a-z0-9\s]+/g, " ");
   return new Set(
@@ -292,6 +298,7 @@ export function buildClawgraphFromData(
 
   for (const log of logs) {
     if (log.type === "note") continue;
+    if (isToolCallLog(log)) continue;
     const combined = [log.summary || "", log.content || "", (log.raw || "").slice(0, 900), ...(notesByRelated.get(log.id) ?? [])]
       .join("\n")
       .trim();

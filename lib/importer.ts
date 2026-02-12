@@ -148,6 +148,7 @@ type CursorState = {
   filePath: string;
   lineIndex: number;
 };
+type JsonRecord = Record<string, unknown>;
 
 const parseCursor = (cursor?: string | null): CursorState | null => {
   if (!cursor) return null;
@@ -163,32 +164,47 @@ const parseCursor = (cursor?: string | null): CursorState | null => {
 const serializeCursor = (state: CursorState | null) =>
   state ? JSON.stringify(state) : null;
 
-const extractMessageContent = (payload: any): string => {
+const asRecord = (value: unknown): JsonRecord | null => {
+  if (typeof value !== "object" || value === null) return null;
+  return value as JsonRecord;
+};
+
+const readString = (value: unknown): string | null => {
+  return typeof value === "string" ? value : null;
+};
+
+const extractMessageContent = (payload: unknown): string => {
   if (!payload) return "";
   if (typeof payload === "string") return payload;
   if (Array.isArray(payload)) {
     return payload
       .map((part) => {
         if (typeof part === "string") return part;
-        if (part?.type === "text") return part.text ?? "";
-        if (typeof part?.text === "string") return part.text;
+        const record = asRecord(part);
+        if (!record) return "";
+        if (record.type === "text") return readString(record.text) ?? "";
+        if (typeof record.text === "string") return record.text;
         return "";
       })
       .filter(Boolean)
       .join("\n");
   }
-  if (typeof payload?.text === "string") return payload.text;
+  const record = asRecord(payload);
+  if (record && typeof record.text === "string") return record.text;
   return "";
 };
 
-const extractToolCalls = (payload: any) => {
-  if (!Array.isArray(payload)) return [] as any[];
-  return payload.filter((part) => part?.type === "toolCall" || part?.type === "toolResult");
+const extractToolCalls = (payload: unknown): JsonRecord[] => {
+  if (!Array.isArray(payload)) return [];
+  return payload
+    .map((part) => asRecord(part))
+    .filter((part): part is JsonRecord => Boolean(part))
+    .filter((part) => part.type === "toolCall" || part.type === "toolResult");
 };
 
-const formatToolContent = (toolCall: any) => {
-  const name = toolCall?.name ?? toolCall?.toolName ?? "tool";
-  const args = toolCall?.arguments ?? toolCall?.input ?? null;
+const formatToolContent = (toolCall: JsonRecord) => {
+  const name = readString(toolCall.name) ?? readString(toolCall.toolName) ?? "tool";
+  const args = toolCall.arguments ?? toolCall.input ?? null;
   if (args === null || args === undefined) return `tool:${name}`;
   try {
     return `tool:${name} ${JSON.stringify(args)}`;
@@ -197,12 +213,16 @@ const formatToolContent = (toolCall: any) => {
   }
 };
 
-const parseSessionTimestamp = (record: any) => {
-  if (record?.message?.timestamp) {
-    return new Date(record.message.timestamp).toISOString();
+const parseSessionTimestamp = (record: unknown) => {
+  const root = asRecord(record);
+  const message = asRecord(root?.message);
+  const messageTs = readString(message?.timestamp);
+  if (messageTs) {
+    return new Date(messageTs).toISOString();
   }
-  if (record?.timestamp) {
-    return new Date(record.timestamp).toISOString();
+  const rootTs = readString(root?.timestamp);
+  if (rootTs) {
+    return new Date(rootTs).toISOString();
   }
   return new Date().toISOString();
 };
@@ -222,7 +242,6 @@ export const importMemory = async (options?: {
   let failed = 0;
   let uncategorized = 0;
   let processedEntries = 0;
-  let processedSources = 0;
   let lastCursorState: CursorState | null = null;
   let cursorState = parseCursor(options?.cursor ?? null);
 
@@ -232,8 +251,6 @@ export const importMemory = async (options?: {
         continue;
       }
     }
-
-    processedSources += 1;
 
     if (source.sourceType === "memory") {
       try {
@@ -290,21 +307,27 @@ export const importMemory = async (options?: {
           const lineNumber = index + 1;
           if (cursorState && lineNumber <= cursorState.lineIndex) continue;
 
-          let record: any;
+          let record: JsonRecord | null = null;
           try {
-            record = JSON.parse(lines[index]);
+            record = asRecord(JSON.parse(lines[index]));
           } catch {
             failed += 1;
             continue;
           }
+          if (!record) {
+            failed += 1;
+            continue;
+          }
 
-          if (record?.type !== "message") continue;
-          const role = record?.message?.role;
+          if (record.type !== "message") continue;
+          const message = asRecord(record.message);
+          const role = readString(message?.role);
+          const recordId = readString(record.id) ?? String(record.id ?? lineNumber);
 
-          const content = extractMessageContent(record?.message?.content);
+          const content = extractMessageContent(message?.content);
           if (role === "user" || role === "assistant") {
             if (content) {
-              const sourceId = hashId(`${source.filePath}|${record?.id ?? lineNumber}`);
+              const sourceId = hashId(`${source.filePath}|${recordId}`);
               const topicId = inferTopicId(content);
               const type = role === "user" ? "conversation.user" : "conversation.assistant";
 
@@ -319,7 +342,7 @@ export const importMemory = async (options?: {
                   source: "session",
                   filePath: source.filePath,
                   lineNumber,
-                  cursor: record?.id
+                  cursor: recordId
                 },
                 sourceId
               });
@@ -329,11 +352,12 @@ export const importMemory = async (options?: {
             }
           }
 
-          const toolCalls = extractToolCalls(record?.message?.content);
+          const toolCalls = extractToolCalls(message?.content);
           for (const toolCall of toolCalls) {
             const toolContent = formatToolContent(toolCall);
+            const toolKey = readString(toolCall.id) ?? readString(toolCall.name) ?? "tool";
             const toolSourceId = hashId(
-              `${source.filePath}|${record?.id ?? lineNumber}|${toolCall?.id ?? toolCall?.name ?? "tool"}`
+              `${source.filePath}|${recordId}|${toolKey}`
             );
             const toolTopicId = inferTopicId(toolContent);
 
@@ -348,7 +372,7 @@ export const importMemory = async (options?: {
                 source: "session",
                 filePath: source.filePath,
                 lineNumber,
-                cursor: `${record?.id ?? "line"}:${toolCall?.id ?? toolCall?.name ?? "tool"}`
+                cursor: `${recordId}:${toolKey}`
               },
               sourceId: toolSourceId
             });

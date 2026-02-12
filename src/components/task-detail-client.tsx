@@ -19,7 +19,7 @@ export function TaskDetailClient({
   logs: LogEntry[];
   topics: Topic[];
 }) {
-  const [showRaw, setShowRaw] = useState(false);
+  const [showRaw, setShowRaw] = useState(true);
 
   return (
     <div className="space-y-6">

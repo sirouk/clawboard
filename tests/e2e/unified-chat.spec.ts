@@ -80,16 +80,22 @@ test("unified chat renders natural bubbles and topic-only chat entries", async (
   await expect(assistantBubble).toHaveAttribute("data-agent-side", "left");
   await expect(userBubble).toHaveAttribute("data-agent-side", "right");
 
-  await expect(page.getByText(`assistant-tail-${suffix}`)).toHaveCount(0);
-  await expect(page.getByText(`user-tail-${suffix}`)).toHaveCount(0);
+  const optionsToggle = page.getByRole("button", { name: /View options|Hide options/i });
+  await expect(optionsToggle).toBeVisible();
+  const optionsLabel = ((await optionsToggle.textContent()) || "").toLowerCase();
+  if (optionsLabel.includes("view")) {
+    await optionsToggle.click();
+  }
+  const fullMessagesToggle = page.getByRole("button", { name: /Show full messages|Hide full messages/i });
+  await expect(fullMessagesToggle).toBeVisible();
+  const fullMessagesLabel = ((await fullMessagesToggle.textContent()) || "").toLowerCase();
+  if (fullMessagesLabel.includes("show")) {
+    await fullMessagesToggle.click();
+  }
 
-  await assistantBubble.getByRole("button", { name: "Expand message" }).click();
   await expect(page.getByText(`assistant-tail-${suffix}`)).toBeVisible();
-  await expect(page.getByText(`user-tail-${suffix}`)).toHaveCount(0);
-
-  await page.getByRole("button", { name: "View options" }).click();
-  await page.getByRole("button", { name: "Show full messages" }).click();
   await expect(page.getByText(`user-tail-${suffix}`)).toBeVisible();
+
   await expect(page.getByText("TASK CHAT")).toBeVisible();
 
   await expect(page.getByText("TOPIC CHAT")).toBeVisible();

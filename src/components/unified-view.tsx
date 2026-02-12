@@ -99,7 +99,7 @@ const TASK_FALLBACK_COLORS = ["#4EA1FF", "#59C3A6", "#F4B55F", "#9A8BFF", "#F089
 const chatKeyForTopic = (topicId: string) => `topic:${topicId}`;
 const chatKeyForTask = (taskId: string) => `task:${taskId}`;
 
-const TOPIC_ACTION_REVEAL_PX = 248;
+const TOPIC_ACTION_REVEAL_PX = 272;
 // New Topics/Tasks should float to the very top immediately after creation.
 // Keep that priority for a long window so "something else happening" displaces it,
 // instead of the item unexpectedly dropping due to time passing mid-session.
@@ -258,7 +258,7 @@ function SwipeRevealRow({
     <div className="relative overflow-x-hidden overflow-y-visible rounded-[var(--radius-lg)]">
       {showActions ? (
         <div
-          className="absolute inset-0 flex items-stretch justify-end gap-1 bg-[rgba(10,12,16,0.18)] p-2 transition-opacity"
+          className="absolute inset-0 flex items-stretch justify-end gap-2 bg-[rgba(10,12,16,0.18)] p-1 transition-opacity"
           style={{ opacity: actionsOpacity }}
         >
           {actions}
@@ -476,7 +476,7 @@ type UrlState = {
 
 function getInitialUrlState(basePath: string): UrlState {
   if (typeof window === "undefined") {
-    return { search: "", raw: false, density: "compact", done: false, status: "all", page: 1, topics: [], tasks: [] };
+    return { search: "", raw: true, density: "compact", done: false, status: "all", page: 1, topics: [], tasks: [] };
   }
   const url = new URL(window.location.href);
   const params = url.searchParams;
@@ -517,7 +517,7 @@ function getInitialUrlState(basePath: string): UrlState {
   const density: MessageDensity = densityParam === "comfortable" ? "comfortable" : "compact";
   return {
     search: params.get("q") ?? "",
-    raw: params.get("raw") === "1",
+    raw: params.get("raw") !== "0",
     density,
     done: params.get("done") === "1",
     status: params.get("status") ?? "all",
@@ -763,6 +763,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     };
   }, [positionStatusMenu, statusMenuTaskId]);
   const recentBoardSendAtRef = useRef<Map<string, number>>(new Map());
+  const chatHistoryLoadedOlderRef = useRef<Set<string>>(new Set());
 
   const scheduleScrollChatToBottom = useCallback(
     (key: string, attempts = 8) => {
@@ -792,6 +793,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const has = Object.prototype.hasOwnProperty.call(state, key);
     const raw = has ? Number(state[key]) : len - initialLimit;
     const value = Number.isFinite(raw) ? Math.floor(raw) : 0;
+    if (has && value <= 0 && len > initialLimit && !chatHistoryLoadedOlderRef.current.has(key)) {
+      return clamp(len - initialLimit, 0, maxStart);
+    }
     return clamp(value, 0, maxStart);
   };
 
@@ -800,6 +804,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (typeof window === "undefined") return;
       const key = (chatKey ?? "").trim();
       if (!key) return;
+      chatHistoryLoadedOlderRef.current.add(key);
       const scroller = chatScrollers.current.get(key) ?? null;
       const beforeTop = scroller?.scrollTop ?? 0;
       const beforeHeight = scroller?.scrollHeight ?? 0;
@@ -1462,7 +1467,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   useLayoutEffect(() => {
     if (normalizedSearch) return;
 
-    for (const [key, scroller] of chatScrollers.current.entries()) {
+    for (const [key] of chatScrollers.current.entries()) {
       const lastId = getChatLastLogId(key);
       if (!lastId) continue;
 
@@ -1486,9 +1491,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const semanticLimits = useMemo(
     () => ({
-      topics: Math.min(Math.max(topics.length, 120), 500),
-      tasks: Math.min(Math.max(tasks.length, 240), 1200),
-      logs: Math.min(Math.max(visibleLogs.length, 800), 4000),
+      topics: Math.min(Math.max(topics.length, 60), 120),
+      tasks: Math.min(Math.max(tasks.length, 120), 240),
+      logs: Math.min(Math.max(visibleLogs.length, 180), 320),
     }),
     [topics.length, tasks.length, visibleLogs.length]
   );
@@ -2331,19 +2336,28 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (!res.ok) return;
       const created = (await res.json().catch(() => null)) as Task | null;
       if (!created?.id) return;
+      const resolvedTopicId = (created.topicId ?? scopeTopicId ?? "").trim();
       setTasks((prev) => (prev.some((item) => item.id === created.id) ? prev : [created, ...prev]));
       markBumped("task", created.id);
 
       setExpandedTopics((prev) => {
         const next = new Set(prev);
-        next.add(scopeTopicId ?? "unassigned");
+        next.add(resolvedTopicId || "unassigned");
         return next;
       });
-      setExpandedTopicChats((prev) => {
+      setExpandedTasks((prev) => {
         const next = new Set(prev);
-        if (scopeTopicId) next.add(scopeTopicId);
+        next.add(created.id);
         return next;
       });
+      const nextTopics = new Set(expandedTopicsSafe);
+      nextTopics.add(resolvedTopicId || "unassigned");
+      const nextTasks = new Set(expandedTasksSafe);
+      nextTasks.add(created.id);
+      pushUrl({ topics: Array.from(nextTopics), tasks: Array.from(nextTasks), page: "1" }, "replace");
+      if (resolvedTopicId) {
+        setAutoFocusTask({ topicId: resolvedTopicId, taskId: created.id });
+      }
 
       setNewTaskDraftByTopicId((prev) => ({ ...prev, [draftKey]: "" }));
       newTaskDraftEditedAtRef.current.delete(draftKey);
@@ -2792,6 +2806,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         const key = chatKeyForTask(taskId);
         if (Object.prototype.hasOwnProperty.call(prev, key)) continue;
         const all = logsByTaskAll.get(taskId) ?? [];
+        if (all.length <= TASK_TIMELINE_LIMIT) continue;
         const start = Math.max(0, all.length - TASK_TIMELINE_LIMIT);
         next[key] = start;
         changed = true;
@@ -2802,6 +2817,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         if (Object.prototype.hasOwnProperty.call(prev, key)) continue;
         const allTopic = logsByTopicAll.get(topicId) ?? [];
         const all = allTopic.filter((entry) => !entry.taskId);
+        if (all.length <= TOPIC_TIMELINE_LIMIT) continue;
         const start = Math.max(0, all.length - TOPIC_TIMELINE_LIMIT);
         next[key] = start;
         changed = true;
@@ -3306,7 +3322,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                }}
 	                disabled={readOnly}
 	                className={cn(
-	                  "min-w-[72px] rounded-[var(--radius-sm)] border px-3 text-xs font-semibold transition",
+	                  "inline-flex h-full min-w-[80px] items-center justify-center whitespace-nowrap rounded-[var(--radius-sm)] border px-3.5 py-2 text-xs font-semibold leading-none tracking-[0.04em] transition",
 	                  "border-[rgba(77,171,158,0.55)] text-[rgb(var(--claw-accent-2))] hover:bg-[rgba(77,171,158,0.14)]",
                   readOnly ? "opacity-60" : ""
                 )}
@@ -3328,7 +3344,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 }}
                 disabled={readOnly}
                 className={cn(
-                  "min-w-[72px] rounded-[var(--radius-sm)] border px-3 text-xs font-semibold transition",
+                  "inline-flex h-full min-w-[80px] items-center justify-center whitespace-nowrap rounded-[var(--radius-sm)] border px-3.5 py-2 text-xs font-semibold leading-none tracking-[0.04em] transition",
                   "border-[rgba(234,179,8,0.55)] text-[rgb(var(--claw-warning))] hover:bg-[rgba(234,179,8,0.14)]",
                   readOnly ? "opacity-60" : ""
                 )}
@@ -3348,7 +3364,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 }}
                 disabled={readOnly}
                 className={cn(
-                  "min-w-[72px] rounded-[var(--radius-sm)] border px-3 text-xs font-semibold transition",
+                  "inline-flex h-full min-w-[80px] items-center justify-center whitespace-nowrap rounded-[var(--radius-sm)] border px-3.5 py-2 text-xs font-semibold leading-none tracking-[0.04em] transition",
                   "border-[rgba(239,68,68,0.6)] text-[rgb(var(--claw-danger))] hover:bg-[rgba(239,68,68,0.12)]",
                   readOnly ? "opacity-60" : ""
                 )}
@@ -3785,7 +3801,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                            }}
 	                            disabled={readOnly}
 	                            className={cn(
-	                              "min-w-[72px] rounded-[var(--radius-sm)] border px-3 text-xs font-semibold transition",
+	                              "inline-flex h-full min-w-[80px] items-center justify-center whitespace-nowrap rounded-[var(--radius-sm)] border px-3.5 py-2 text-xs font-semibold leading-none tracking-[0.04em] transition",
 	                              "border-[rgba(77,171,158,0.55)] text-[rgb(var(--claw-accent-2))] hover:bg-[rgba(77,171,158,0.14)]",
                               readOnly ? "opacity-60" : ""
                             )}
@@ -3803,7 +3819,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             }}
                             disabled={readOnly}
                             className={cn(
-                              "min-w-[72px] rounded-[var(--radius-sm)] border px-3 text-xs font-semibold transition",
+                              "inline-flex h-full min-w-[80px] items-center justify-center whitespace-nowrap rounded-[var(--radius-sm)] border px-3.5 py-2 text-xs font-semibold leading-none tracking-[0.04em] transition",
                               "border-[rgba(234,179,8,0.55)] text-[rgb(var(--claw-warning))] hover:bg-[rgba(234,179,8,0.14)]",
                               readOnly ? "opacity-60" : ""
                             )}
@@ -3823,7 +3839,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             }}
                             disabled={readOnly}
                             className={cn(
-                              "min-w-[72px] rounded-[var(--radius-sm)] border px-3 text-xs font-semibold transition",
+                              "inline-flex h-full min-w-[80px] items-center justify-center whitespace-nowrap rounded-[var(--radius-sm)] border px-3.5 py-2 text-xs font-semibold leading-none tracking-[0.04em] transition",
                               "border-[rgba(239,68,68,0.6)] text-[rgb(var(--claw-danger))] hover:bg-[rgba(239,68,68,0.12)]",
                               readOnly ? "opacity-60" : ""
                             )}
@@ -4430,6 +4446,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                                      const prevTop = chatLastScrollTopRef.current.get(key) ?? node.scrollTop;
 	                                      const delta = node.scrollTop - prevTop;
 	                                      chatLastScrollTopRef.current.set(key, node.scrollTop);
+                                      const hasScrollableOverflow = node.scrollHeight > node.clientHeight + 2;
 
 	                                      // UX: hide the jump-to-latest button while the user scrolls UP (reading history).
 	                                      // Only show it again when scrolling DOWN and not at bottom.
@@ -4440,7 +4457,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                                      setChatTopFade((prev) =>
 	                                        prev[key] === showTop ? prev : { ...prev, [key]: showTop }
 	                                      );
-	                                      if (!normalizedSearch && truncated && node.scrollTop <= 28) {
+	                                      if (!normalizedSearch && truncated && hasScrollableOverflow && delta < 0 && node.scrollTop <= 28) {
 	                                        const now = Date.now();
 	                                        const last = chatLoadOlderCooldownRef.current.get(key) ?? 0;
 	                                        if (now - last > 350) {
@@ -4563,9 +4580,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                      prev?.kind === "task" && prev.taskId === task.id ? null : prev
 			                                    )
 			                                  }
-			                                  autoFocus={autoFocusTask?.taskId === task.id}
+			                                  autoFocus={autoFocusTask?.topicId === topicId && autoFocusTask?.taskId === task.id}
 			                                  onAutoFocusApplied={() =>
-			                                    setAutoFocusTask((prev) => (prev?.taskId === task.id ? null : prev))
+			                                    setAutoFocusTask((prev) =>
+			                                      prev?.topicId === topicId && prev?.taskId === task.id ? null : prev
+			                                    )
 			                                  }
 			                                  onSendUpdate={(event) => {
 			                                    if (!event) return;
@@ -4748,9 +4767,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
 			                                chatAtBottomRef.current.set(key, atBottom);
 
-			                                const prevTop = chatLastScrollTopRef.current.get(key) ?? node.scrollTop;
-			                                const delta = node.scrollTop - prevTop;
-			                                chatLastScrollTopRef.current.set(key, node.scrollTop);
+			                                  const prevTop = chatLastScrollTopRef.current.get(key) ?? node.scrollTop;
+			                                  const delta = node.scrollTop - prevTop;
+			                                  chatLastScrollTopRef.current.set(key, node.scrollTop);
+                                          const hasScrollableOverflow = node.scrollHeight > node.clientHeight + 2;
 
 			                                // UX: hide the jump-to-latest button while the user scrolls UP (reading history).
 			                                // Only show it again when scrolling DOWN and not at bottom.
@@ -4761,11 +4781,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                setChatTopFade((prev) =>
 			                                  prev[key] === showTop ? prev : { ...prev, [key]: showTop }
 			                                );
-			                                if (!normalizedSearch && topicChatTruncated && node.scrollTop <= 28) {
-			                                  const now = Date.now();
-			                                  const last = chatLoadOlderCooldownRef.current.get(key) ?? 0;
-			                                  if (now - last > 350) {
-		                                    chatLoadOlderCooldownRef.current.set(key, now);
+			                                  if (!normalizedSearch && topicChatTruncated && hasScrollableOverflow && delta < 0 && node.scrollTop <= 28) {
+			                                    const now = Date.now();
+			                                    const last = chatLoadOlderCooldownRef.current.get(key) ?? 0;
+			                                    if (now - last > 350) {
+			                                      chatLoadOlderCooldownRef.current.set(key, now);
 		                                    loadOlderChat(key, TOPIC_TIMELINE_LIMIT, topicChatAllLogs.length, TOPIC_TIMELINE_LIMIT);
 		                                  }
 		                                }

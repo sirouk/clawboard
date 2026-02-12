@@ -4,6 +4,11 @@ import { requireToken } from "../../../../../lib/auth";
 import { z } from "zod";
 
 const StatusSchema = z.enum(["todo", "doing", "blocked", "done"]);
+const errorCode = (err: unknown): string | null => {
+  if (typeof err !== "object" || err === null || !("code" in err)) return null;
+  const value = (err as { code?: unknown }).code;
+  return typeof value === "string" ? value : null;
+};
 const PatchTaskSchema = z
   .object({
     title: z.string().min(1).max(500).optional(),
@@ -39,11 +44,11 @@ export async function PATCH(
     return NextResponse.json({ error: "No fields to update" }, { status: 400 });
   }
 
-  let updated: any;
+  let updated: Awaited<ReturnType<typeof patchTask>> = null;
   try {
     updated = await patchTask(id, parsed.data);
-  } catch (err: any) {
-    const code = err?.code;
+  } catch (err: unknown) {
+    const code = errorCode(err);
     if (code === "P2003") {
       return NextResponse.json({ error: "Invalid topicId" }, { status: 400 });
     }
@@ -66,8 +71,8 @@ export async function DELETE(
   try {
     await deleteTask(id);
     return NextResponse.json({ ok: true });
-  } catch (err: any) {
-    const code = err?.code;
+  } catch (err: unknown) {
+    const code = errorCode(err);
     if (code === "P2025") {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }

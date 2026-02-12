@@ -4,6 +4,11 @@ import { requireToken } from "../../../../lib/auth";
 import { z } from "zod";
 
 const StatusSchema = z.enum(["todo", "doing", "blocked", "done"]);
+const errorCode = (err: unknown): string | null => {
+  if (typeof err !== "object" || err === null || !("code" in err)) return null;
+  const value = (err as { code?: unknown }).code;
+  return typeof value === "string" ? value : null;
+};
 
 const CreateTaskSchema = z
   .object({
@@ -60,9 +65,9 @@ export async function POST(req: NextRequest) {
   try {
     const task = await createTask(parsed.data);
     return NextResponse.json({ task }, { status: 201 });
-  } catch (err: any) {
+  } catch (err: unknown) {
     // Prisma FK violation, etc.
-    const code = err?.code;
+    const code = errorCode(err);
     if (code === "P2003") {
       return NextResponse.json({ error: "Invalid topicId" }, { status: 400 });
     }

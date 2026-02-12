@@ -3,9 +3,13 @@ import { test, expect } from "@playwright/test";
 test("home loads unified view", async ({ page }) => {
   await page.goto("/u");
   await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "View options" })).toBeVisible();
-  await page.getByRole("button", { name: "View options" }).click();
-  await expect(page.getByRole("button", { name: "Show full messages" })).toBeVisible();
+  const optionsToggle = page.getByRole("button", { name: /View options|Hide options/i });
+  await expect(optionsToggle).toBeVisible();
+  const optionsLabel = ((await optionsToggle.textContent()) || "").toLowerCase();
+  if (optionsLabel.includes("view")) {
+    await optionsToggle.click();
+  }
+  await expect(page.getByRole("button", { name: /Show full messages|Hide full messages/i })).toBeVisible();
 });
 
 test("dashboard route loads legacy dashboard widgets", async ({ page }) => {

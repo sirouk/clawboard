@@ -1,6 +1,7 @@
 "use client";
 
-import { apiUrlWithToken } from "@/lib/api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { apiFetch } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
 export type AttachmentLike = {
@@ -35,11 +36,6 @@ function fileBadge(att: AttachmentLike) {
   return "FILE";
 }
 
-function attachmentUrl(att: AttachmentLike) {
-  if (!att.id) return "";
-  return apiUrlWithToken(`/api/attachments/${encodeURIComponent(att.id)}`);
-}
-
 export function AttachmentStrip({
   attachments,
   onRemove,
@@ -49,14 +45,92 @@ export function AttachmentStrip({
   onRemove?: (index: number) => void;
   className?: string;
 }) {
-  if (!attachments || attachments.length === 0) return null;
+  const safeAttachments = useMemo(() => attachments ?? [], [attachments]);
+  const [blobUrls, setBlobUrls] = useState<Record<string, string>>({});
+  const blobUrlsRef = useRef<Record<string, string>>({});
+
+  useEffect(() => {
+    blobUrlsRef.current = blobUrls;
+  }, [blobUrls]);
+
+  useEffect(() => {
+    return () => {
+      for (const url of Object.values(blobUrlsRef.current)) {
+        URL.revokeObjectURL(url);
+      }
+      blobUrlsRef.current = {};
+    };
+  }, []);
+
+  const attachmentSignature = useMemo(
+    () =>
+      safeAttachments
+        .map((att) => `${att.id ?? "local"}:${att.fileName}:${att.mimeType}:${att.sizeBytes}:${att.previewUrl ?? ""}`)
+        .join("|"),
+    [safeAttachments]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const controllers: AbortController[] = [];
+    const previous = blobUrlsRef.current;
+    const next: Record<string, string> = {};
+
+    const downloadMissing = async () => {
+      for (const att of safeAttachments) {
+        if (!att.id || att.previewUrl) continue;
+        const key = att.id;
+        if (previous[key]) {
+          next[key] = previous[key];
+          continue;
+        }
+        const controller = new AbortController();
+        controllers.push(controller);
+        try {
+          const res = await apiFetch(`/api/attachments/${encodeURIComponent(att.id)}`, { signal: controller.signal });
+          if (!res.ok) continue;
+          const blob = await res.blob();
+          if (cancelled) {
+            continue;
+          }
+          next[key] = URL.createObjectURL(blob);
+        } catch {
+          // Keep attachment visible even if secure fetch fails.
+        }
+      }
+    };
+
+    void downloadMissing().then(() => {
+      if (cancelled) {
+        for (const key of Object.keys(next)) {
+          if (!previous[key]) URL.revokeObjectURL(next[key]);
+        }
+        return;
+      }
+      for (const key of Object.keys(previous)) {
+        if (!next[key]) URL.revokeObjectURL(previous[key]);
+      }
+      blobUrlsRef.current = next;
+      setBlobUrls(next);
+    });
+
+    return () => {
+      cancelled = true;
+      for (const controller of controllers) {
+        controller.abort();
+      }
+    };
+  }, [attachmentSignature, safeAttachments]);
+
+  if (safeAttachments.length === 0) return null;
 
   return (
     <div className={cn("mt-3 flex flex-wrap gap-2", className)}>
-      {attachments.map((att, idx) => {
+      {safeAttachments.map((att, idx) => {
         const image = isImageAttachment(att);
-        const previewSrc = att.previewUrl || (image ? attachmentUrl(att) : "");
-        const href = att.id ? attachmentUrl(att) : "";
+        const fetchedUrl = att.id ? blobUrls[att.id] : "";
+        const previewSrc = att.previewUrl || fetchedUrl || "";
+        const href = fetchedUrl || "";
         const title = `${att.fileName || "attachment"} (${att.mimeType || "unknown"})`;
 
         return (
@@ -95,6 +169,7 @@ export function AttachmentStrip({
                 href={href || undefined}
                 target={href ? "_blank" : undefined}
                 rel={href ? "noreferrer" : undefined}
+                download={href ? att.fileName || undefined : undefined}
                 className={cn(
                   "flex h-24 w-40 flex-col justify-between p-3 text-left transition",
                   href ? "hover:bg-[rgba(255,255,255,0.04)]" : ""

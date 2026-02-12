@@ -123,9 +123,7 @@ export function apiFetch(path: string, init: RequestInit = {}, tokenOverride?: s
 }
 
 export function apiUrlWithToken(path: string, tokenOverride?: string) {
-  const token = (tokenOverride ?? getApiToken()).trim();
-  const url = apiUrl(path);
-  if (!token) return url;
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}token=${encodeURIComponent(token)}`;
+  void tokenOverride;
+  // Header-only auth: URL query tokens are intentionally not used.
+  return apiUrl(path);
 }

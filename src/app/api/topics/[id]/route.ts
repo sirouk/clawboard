@@ -11,6 +11,11 @@ const PatchTopicSchema = z
     tags: z.array(z.string().min(1).max(64)).max(50).optional()
   })
   .strict();
+const errorCode = (err: unknown): string | null => {
+  if (typeof err !== "object" || err === null || !("code" in err)) return null;
+  const value = (err as { code?: unknown }).code;
+  return typeof value === "string" ? value : null;
+};
 
 export async function GET(
   req: NextRequest,
@@ -56,7 +61,7 @@ export async function PATCH(
     return NextResponse.json({ error: "No fields to update" }, { status: 400 });
   }
 
-  let updated: any;
+  let updated: Awaited<ReturnType<typeof patchTopic>> = null;
   try {
     updated = await patchTopic(id, {
       name: parsed.data.name,
@@ -64,8 +69,8 @@ export async function PATCH(
       parentId: parsed.data.parentId,
       tags: parsed.data.tags
     });
-  } catch (err: any) {
-    const code = err?.code;
+  } catch (err: unknown) {
+    const code = errorCode(err);
     if (code === "P2003") {
       return NextResponse.json({ error: "Invalid parentId" }, { status: 400 });
     }
@@ -88,8 +93,8 @@ export async function DELETE(
   try {
     await deleteTopic(id);
     return NextResponse.json({ ok: true });
-  } catch (err: any) {
-    const code = err?.code;
+  } catch (err: unknown) {
+    const code = errorCode(err);
     if (code === "P2025") {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }

@@ -4,6 +4,11 @@ import { requireToken } from "../../../../../lib/auth";
 import { z } from "zod";
 
 const StatusSchema = z.enum(["todo", "doing", "blocked", "done"]);
+const errorCode = (err: unknown): string | null => {
+  if (typeof err !== "object" || err === null || !("code" in err)) return null;
+  const value = (err as { code?: unknown }).code;
+  return typeof value === "string" ? value : null;
+};
 
 const UpsertTaskSchema = z
   .object({
@@ -36,8 +41,8 @@ export async function POST(req: NextRequest) {
       { task: result.task, created: result.created },
       { status: result.created ? 201 : 200 }
     );
-  } catch (err: any) {
-    const code = err?.code;
+  } catch (err: unknown) {
+    const code = errorCode(err);
     if (code === "P2003") {
       return NextResponse.json({ error: "Invalid topicId" }, { status: 400 });
     }

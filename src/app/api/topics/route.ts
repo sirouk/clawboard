@@ -11,6 +11,11 @@ const CreateTopicSchema = z
     tags: z.array(z.string().min(1).max(64)).max(50).optional()
   })
   .strict();
+const errorCode = (err: unknown): string | null => {
+  if (typeof err !== "object" || err === null || !("code" in err)) return null;
+  const value = (err as { code?: unknown }).code;
+  return typeof value === "string" ? value : null;
+};
 
 export async function GET(req: NextRequest) {
   const authError = requireToken(req);
@@ -43,8 +48,8 @@ export async function POST(req: NextRequest) {
       tags: parsed.data.tags
     });
     return NextResponse.json({ topic }, { status: 201 });
-  } catch (err: any) {
-    const code = err?.code;
+  } catch (err: unknown) {
+    const code = errorCode(err);
     if (code === "P2003") {
       return NextResponse.json({ error: "Invalid parentId" }, { status: 400 });
     }

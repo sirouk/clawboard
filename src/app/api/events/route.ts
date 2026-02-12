@@ -11,6 +11,7 @@ const EventTypeSchema = z.enum([
 ]);
 
 const LimitSchema = z.coerce.number().int().min(1).max(500);
+type EventType = z.infer<typeof EventTypeSchema>;
 
 export async function GET(req: NextRequest) {
   const authError = requireToken(req);
@@ -32,7 +33,7 @@ export async function GET(req: NextRequest) {
     limit = parsedLimit.data;
   }
 
-  let parsedType: any = null;
+  let parsedType: EventType | null = null;
   if (type) {
     const parsed = EventTypeSchema.safeParse(type);
     if (!parsed.success) {

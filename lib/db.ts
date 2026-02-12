@@ -111,8 +111,9 @@ const parseDate = (value?: string | Date | null) =>
 
 const toIso = (value?: Date | null) => (value ? value.toISOString() : undefined);
 
-const parseJson = <T,>(value: string | null | undefined, fallback: T): T => {
-  if (!value) return fallback;
+const parseJson = <T,>(value: unknown, fallback: T): T => {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value !== "string") return value as T;
   try {
     return JSON.parse(value) as T;
   } catch {
@@ -120,8 +121,9 @@ const parseJson = <T,>(value: string | null | undefined, fallback: T): T => {
   }
 };
 
-const parseJsonOptional = <T,>(value: string | null | undefined): T | undefined => {
-  if (!value) return undefined;
+const parseJsonOptional = <T,>(value: unknown): T | undefined => {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== "string") return value as T;
   try {
     return JSON.parse(value) as T;
   } catch {
@@ -146,8 +148,15 @@ const readJson = async (): Promise<PortalData | null> => {
   try {
     const raw = await fs.readFile(DATA_PATH, "utf8");
     return JSON.parse(raw) as PortalData;
-  } catch (err: any) {
-    if (err?.code === "ENOENT") return null;
+  } catch (err: unknown) {
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      (err as { code?: unknown }).code === "ENOENT"
+    ) {
+      return null;
+    }
     return null;
   }
 };
@@ -157,7 +166,7 @@ const serializeTopic = (topic: {
   name: string;
   description: string | null;
   parentId: string | null;
-  tags: any;
+  tags: unknown;
   createdAt: Date;
   updatedAt: Date;
 }): Topic => ({
@@ -216,7 +225,7 @@ const serializeEvent = (event: {
   topicId: string | null;
   agentId: string | null;
   agentLabel: string | null;
-  source: any;
+  source: unknown;
   sourceId: string;
   createdAt: Date;
   updatedAt: Date;
@@ -238,7 +247,7 @@ const serializeImportJob = (job: {
   id: string;
   status: string;
   cursor: string | null;
-  summary: any;
+  summary: unknown;
   error: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -781,15 +790,15 @@ export const listEvents = async (filters: {
   limit?: number;
 }) => {
   await ensureSeeded();
-  const where: any = {};
+  const where: { topicId?: string; type?: Event["type"] } = {};
   if (filters.topicId) where.topicId = filters.topicId;
   if (filters.type) where.type = filters.type;
 
-  const events = await prisma.event.findMany({
+  const events = (await prisma.event.findMany({
     where,
     orderBy: { timestamp: "desc" },
     take: filters.limit && filters.limit > 0 ? filters.limit : undefined
-  });
+  })) as Array<Parameters<typeof serializeEvent>[0]>;
 
   const query = filters.query?.toLowerCase().trim();
   const filtered = events.filter((event) => {
