@@ -40,7 +40,8 @@ export async function GET(req: NextRequest) {
   // Newest updated first by default
   tasks = tasks.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 
-  return NextResponse.json({ tasks });
+  // Match FastAPI contract: return the task list directly.
+  return NextResponse.json(tasks);
 }
 
 export async function POST(req: NextRequest) {
@@ -64,7 +65,8 @@ export async function POST(req: NextRequest) {
 
   try {
     const task = await createTask(parsed.data);
-    return NextResponse.json({ task }, { status: 201 });
+    // Match FastAPI contract: return the created task object directly.
+    return NextResponse.json(task, { status: 201 });
   } catch (err: unknown) {
     // Prisma FK violation, etc.
     const code = errorCode(err);

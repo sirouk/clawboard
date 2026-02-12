@@ -321,7 +321,12 @@ export function LogList({
       const url = topicId ? `/api/tasks?topicId=${encodeURIComponent(topicId)}` : "/api/tasks";
       const res = await apiFetch(url, { cache: "no-store" });
       if (!res.ok) return;
-      const payload = (await res.json().catch(() => null)) as Task[] | null;
+      const raw = await res.json().catch(() => null);
+      const payload = Array.isArray(raw)
+        ? (raw as Task[])
+        : raw && typeof raw === "object" && Array.isArray((raw as { tasks?: unknown }).tasks)
+          ? ((raw as { tasks: Task[] }).tasks ?? [])
+          : null;
       if (!payload || !Array.isArray(payload)) return;
       const next = topicId ? payload : payload.filter((task) => task.topicId == null);
       setTasksCache((prev) => ({ ...prev, [key]: next }));

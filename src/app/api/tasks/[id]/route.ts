@@ -57,7 +57,8 @@ export async function PATCH(
   if (!updated) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  return NextResponse.json({ task: updated });
+  // Match FastAPI contract: return the updated task object directly.
+  return NextResponse.json(updated);
 }
 
 export async function DELETE(
@@ -70,7 +71,7 @@ export async function DELETE(
   const { id } = await params;
   try {
     await deleteTask(id);
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, deleted: true });
   } catch (err: unknown) {
     const code = errorCode(err);
     if (code === "P2025") {

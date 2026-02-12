@@ -22,7 +22,8 @@ export async function GET(req: NextRequest) {
   if (authError) return authError;
 
   const data = await getData();
-  return NextResponse.json({ topics: data.topics });
+  // Match FastAPI contract: return the topic list directly.
+  return NextResponse.json(data.topics);
 }
 
 export async function POST(req: NextRequest) {
@@ -47,7 +48,8 @@ export async function POST(req: NextRequest) {
       parentId: parsed.data.parentId ?? null,
       tags: parsed.data.tags
     });
-    return NextResponse.json({ topic }, { status: 201 });
+    // Match FastAPI contract: return the created topic object directly.
+    return NextResponse.json(topic, { status: 201 });
   } catch (err: unknown) {
     const code = errorCode(err);
     if (code === "P2003") {

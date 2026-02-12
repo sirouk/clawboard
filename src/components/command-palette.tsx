@@ -34,7 +34,11 @@ export function CommandPalette() {
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data)) {
-          setTopics(data);
+          setTopics(data as Topic[]);
+          return;
+        }
+        if (data && typeof data === "object" && Array.isArray((data as { topics?: unknown }).topics)) {
+          setTopics((data as { topics: Topic[] }).topics);
         }
       })
       .catch(() => null);

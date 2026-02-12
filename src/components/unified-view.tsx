@@ -474,6 +474,28 @@ type UrlState = {
   tasks: string[];
 };
 
+function parseTopicPayload(value: unknown): Topic | null {
+  if (!value || typeof value !== "object") return null;
+  const direct = value as Partial<Topic>;
+  if (typeof direct.id === "string" && direct.id.trim()) return direct as Topic;
+  const nested = (value as { topic?: unknown }).topic;
+  if (!nested || typeof nested !== "object") return null;
+  const topic = nested as Partial<Topic>;
+  if (typeof topic.id !== "string" || !topic.id.trim()) return null;
+  return topic as Topic;
+}
+
+function parseTaskPayload(value: unknown): Task | null {
+  if (!value || typeof value !== "object") return null;
+  const direct = value as Partial<Task>;
+  if (typeof direct.id === "string" && direct.id.trim()) return direct as Task;
+  const nested = (value as { task?: unknown }).task;
+  if (!nested || typeof nested !== "object") return null;
+  const task = nested as Partial<Task>;
+  if (typeof task.id !== "string" || !task.id.trim()) return null;
+  return task as Task;
+}
+
 function getInitialUrlState(basePath: string): UrlState {
   if (typeof window === "undefined") {
     return { search: "", raw: true, density: "compact", done: false, status: "all", page: 1, topics: [], tasks: [] };
@@ -1757,7 +1779,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       return;
     }
 
-    const updated = (await res.json().catch(() => null)) as Task | null;
+    const updated = parseTaskPayload(await res.json().catch(() => null));
     setTasks((prev) =>
       prev.map((task) =>
         task.id === taskId
@@ -2047,7 +2069,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         setRenameError(renameKey, "Failed to rename topic.");
         return;
       }
-      const updated = (await res.json().catch(() => null)) as Topic | null;
+      const updated = parseTopicPayload(await res.json().catch(() => null));
       if (updated?.id) {
         // Treat the rename endpoint as a partial update; keep local pinned/status metadata stable.
         setTopics((prev) =>
@@ -2159,7 +2181,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         setRenameError(renameKey, "Failed to rename task.");
         return;
       }
-      const updated = (await res.json().catch(() => null)) as Task | null;
+      const updated = parseTaskPayload(await res.json().catch(() => null));
       if (updated?.id) {
         // Treat the rename endpoint as a partial update; keep local pinned/status metadata stable.
         setTasks((prev) =>
@@ -2334,7 +2356,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         token
       );
       if (!res.ok) return;
-      const created = (await res.json().catch(() => null)) as Task | null;
+      const created = parseTaskPayload(await res.json().catch(() => null));
       if (!created?.id) return;
       const resolvedTopicId = (created.topicId ?? scopeTopicId ?? "").trim();
       setTasks((prev) => (prev.some((item) => item.id === created.id) ? prev : [created, ...prev]));
@@ -2387,7 +2409,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           token
         );
         if (!res.ok) throw new Error(`Failed to update topic (${res.status}).`);
-        const updated = (await res.json().catch(() => null)) as Topic | null;
+        const updated = parseTopicPayload(await res.json().catch(() => null));
         if (updated?.id) {
           setTopics((prev) => prev.map((row) => (row.id === updated.id ? { ...row, ...updated } : row)));
         }
@@ -2917,7 +2939,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         setNewTopicError("Failed to create topic.");
         return null;
       }
-      const created = (await res.json().catch(() => null)) as Topic | null;
+      const created = parseTopicPayload(await res.json().catch(() => null));
       if (!created?.id) {
         setNewTopicError("Failed to create topic.");
         return null;
