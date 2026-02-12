@@ -9,6 +9,7 @@ set -euo pipefail
 # Option B support:
 # - Always backs up curated workspace text (MEMORY.md, memory/*.md, SOUL/USER/etc.)
 # - Optionally backs up selected OpenClaw files (openclaw.json*, skills/) based on config flags.
+# - Optionally exports full Clawboard state (config/topics/tasks/logs + optional attachments).
 #
 # Config is read from:
 #   $HOME/.openclaw/credentials/clawboard-memory-backup.json
@@ -25,6 +26,8 @@ die() { say "ERROR: $*" >&2; exit 2; }
 OPENCLAW_DIR="${OPENCLAW_DIR:-$HOME/.openclaw}"
 CRED_JSON="$OPENCLAW_DIR/credentials/clawboard-memory-backup.json"
 CRED_ENV="$OPENCLAW_DIR/credentials/clawboard-memory-backup.env"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXPORT_CLAWBOARD_HELPER="$SCRIPT_DIR/export_clawboard_backup.py"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
@@ -64,6 +67,27 @@ load_env_file() {
   set -a; source "$f"; set +a
 }
 
+read_env_value() {
+  local file_path="$1"
+  local key="$2"
+  local line
+  [[ -f "$file_path" ]] || return 1
+  line="$(awk -v key="$key" '
+    $0 ~ "^[[:space:]]*" key "=" {
+      print substr($0, index($0, "=") + 1)
+    }
+  ' "$file_path" | tail -n1)"
+  line="${line//$'\r'/}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  line="${line%\"}"
+  line="${line#\"}"
+  line="${line%\'}"
+  line="${line#\'}"
+  [[ -n "$line" ]] || return 1
+  printf "%s" "$line"
+}
+
 # --- Load config ---
 if [[ -f "$CRED_JSON" ]]; then
   WORKSPACE_PATH="$(json_get "$CRED_JSON" '.workspacePath')"
@@ -78,6 +102,12 @@ if [[ -f "$CRED_JSON" ]]; then
   BRANCH="$(json_get "$CRED_JSON" '.branch')"
   INCLUDE_OPENCLAW_CONFIG="$(json_get "$CRED_JSON" '.includeOpenclawConfig')"
   INCLUDE_OPENCLAW_SKILLS="$(json_get "$CRED_JSON" '.includeOpenclawSkills')"
+  INCLUDE_CLAWBOARD_STATE="$(json_get "$CRED_JSON" '.includeClawboardState')"
+  CLAWBOARD_DIR="$(json_get "$CRED_JSON" '.clawboardDir')"
+  CLAWBOARD_API_URL="$(json_get "$CRED_JSON" '.clawboardApiUrl')"
+  INCLUDE_CLAWBOARD_ATTACHMENTS="$(json_get "$CRED_JSON" '.includeClawboardAttachments')"
+  INCLUDE_CLAWBOARD_ENV="$(json_get "$CRED_JSON" '.includeClawboardEnv')"
+  CLAWBOARD_TOKEN="$(json_get "$CRED_JSON" '.clawboardToken')"
 else
   load_env_file "$CRED_ENV"
   WORKSPACE_PATH="${WORKSPACE_PATH:-}"
@@ -92,11 +122,24 @@ else
   BRANCH="${BRANCH:-}"
   INCLUDE_OPENCLAW_CONFIG="${INCLUDE_OPENCLAW_CONFIG:-}"
   INCLUDE_OPENCLAW_SKILLS="${INCLUDE_OPENCLAW_SKILLS:-}"
+  INCLUDE_CLAWBOARD_STATE="${INCLUDE_CLAWBOARD_STATE:-}"
+  CLAWBOARD_DIR="${CLAWBOARD_DIR:-}"
+  CLAWBOARD_API_URL="${CLAWBOARD_API_URL:-}"
+  INCLUDE_CLAWBOARD_ATTACHMENTS="${INCLUDE_CLAWBOARD_ATTACHMENTS:-}"
+  INCLUDE_CLAWBOARD_ENV="${INCLUDE_CLAWBOARD_ENV:-}"
+  CLAWBOARD_TOKEN="${CLAWBOARD_BACKUP_TOKEN:-${CLAWBOARD_TOKEN:-}}"
 fi
+
+# Env file values override JSON for secrets/runtime configuration.
+load_env_file "$CRED_ENV"
+CLAWBOARD_TOKEN="${CLAWBOARD_BACKUP_TOKEN:-${CLAWBOARD_TOKEN:-}}"
+CLAWBOARD_API_URL="${CLAWBOARD_BACKUP_API_URL:-${CLAWBOARD_API_URL:-}}"
+CLAWBOARD_DIR="${CLAWBOARD_BACKUP_DIR:-${CLAWBOARD_DIR:-}}"
 
 REMOTE_NAME="${REMOTE_NAME:-origin}"
 BRANCH="${BRANCH:-main}"
 AUTH_METHOD="${AUTH_METHOD:-ssh}"
+CLAWBOARD_API_URL="${CLAWBOARD_API_URL:-http://localhost:8010}"
 
 # bash 3.2 compatibility (macOS default /bin/bash): no ${var,,}
 lc() { tr '[:upper:]' '[:lower:]' <<<"${1:-}"; }
@@ -137,8 +180,22 @@ need_cmd git
 need_cmd rsync
 need_cmd mktemp
 need_cmd date
+need_cmd python3
 
 mkdir -p "$BACKUP_DIR"
+
+# Avoid overlapping cron runs. If another backup is active, exit quietly.
+LOCK_DIR="$BACKUP_DIR/.backup-lock"
+if ! mkdir "$LOCK_DIR" >/dev/null 2>&1; then
+  lock_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  if [[ -n "${lock_pid:-}" ]] && kill -0 "$lock_pid" >/dev/null 2>&1; then
+    exit 0
+  fi
+  rm -rf "$LOCK_DIR" >/dev/null 2>&1 || true
+  mkdir "$LOCK_DIR" >/dev/null 2>&1 || exit 0
+fi
+printf "%s\n" "$$" > "$LOCK_DIR/pid"
+trap 'rm -rf "$LOCK_DIR" >/dev/null 2>&1 || true' EXIT
 
 # Ensure backup repo exists
 if [[ ! -d "$BACKUP_DIR/.git" ]]; then
@@ -157,6 +214,14 @@ if ! (cd "$BACKUP_DIR" && git remote get-url "$REMOTE_NAME" >/dev/null 2>&1); th
   (cd "$BACKUP_DIR" && git remote add "$REMOTE_NAME" "$REMOTE_URL")
 else
   (cd "$BACKUP_DIR" && git remote set-url "$REMOTE_NAME" "$REMOTE_URL")
+fi
+
+# Ensure commits can be created in clean environments without global git identity.
+if [[ -z "$(git -C "$BACKUP_DIR" config --get user.name || true)" ]]; then
+  git -C "$BACKUP_DIR" config user.name "Clawboard Backup Bot"
+fi
+if [[ -z "$(git -C "$BACKUP_DIR" config --get user.email || true)" ]]; then
+  git -C "$BACKUP_DIR" config user.email "clawboard-backup@localhost"
 fi
 
 # Make a staging subdir so we can delete removed files cleanly without nuking .git
@@ -223,6 +288,66 @@ if as_bool "${INCLUDE_OPENCLAW_SKILLS:-}"; then
   fi
 fi
 
+# --- C) Full Clawboard state backup (optional) ---
+if as_bool "${INCLUDE_CLAWBOARD_STATE:-}"; then
+  [[ -f "$EXPORT_CLAWBOARD_HELPER" ]] || die "Missing exporter helper: $EXPORT_CLAWBOARD_HELPER"
+
+  if [[ -n "${CLAWBOARD_DIR:-}" ]]; then
+    # Expand "~" in a POSIX-safe way.
+    case "$CLAWBOARD_DIR" in
+      "~/"*) CLAWBOARD_DIR="$HOME/${CLAWBOARD_DIR#~/}" ;;
+    esac
+    [[ -d "$CLAWBOARD_DIR" ]] || die "clawboardDir does not exist: $CLAWBOARD_DIR"
+  fi
+
+  if [[ -z "${CLAWBOARD_TOKEN:-}" && -n "${CLAWBOARD_DIR:-}" && -f "$CLAWBOARD_DIR/.env" ]]; then
+    CLAWBOARD_TOKEN="$(read_env_value "$CLAWBOARD_DIR/.env" "CLAWBOARD_TOKEN" || true)"
+  fi
+  [[ -n "${CLAWBOARD_TOKEN:-}" ]] || die "Clawboard token missing. Set CLAWBOARD_TOKEN in $CLAWBOARD_DIR/.env or CLAWBOARD_BACKUP_TOKEN in $CRED_ENV."
+
+  CLAWBOARD_EXPORT_DIR="$STAGE_DIR/clawboard/export"
+  mkdir -p "$CLAWBOARD_EXPORT_DIR"
+  python3 "$EXPORT_CLAWBOARD_HELPER" \
+    --api-base "$CLAWBOARD_API_URL" \
+    --token "$CLAWBOARD_TOKEN" \
+    --out-dir "$CLAWBOARD_EXPORT_DIR" \
+    --include-raw \
+    >/dev/null
+
+  if as_bool "${INCLUDE_CLAWBOARD_ATTACHMENTS:-}"; then
+    attachments_path=""
+    if [[ -n "${CLAWBOARD_ATTACHMENTS_DIR:-}" ]]; then
+      attachments_path="$CLAWBOARD_ATTACHMENTS_DIR"
+    elif [[ -n "${CLAWBOARD_DIR:-}" && -f "$CLAWBOARD_DIR/.env" ]]; then
+      attachments_path="$(read_env_value "$CLAWBOARD_DIR/.env" "CLAWBOARD_ATTACHMENTS_DIR" || true)"
+    fi
+    if [[ -z "$attachments_path" && -n "${CLAWBOARD_DIR:-}" ]]; then
+      attachments_path="$CLAWBOARD_DIR/data/attachments"
+    fi
+    if [[ -n "$attachments_path" ]]; then
+      case "$attachments_path" in
+        "~/"*) attachments_path="$HOME/${attachments_path#~/}" ;;
+      esac
+      if [[ "${attachments_path#/}" == "$attachments_path" && -n "${CLAWBOARD_DIR:-}" ]]; then
+        attachments_path="$CLAWBOARD_DIR/$attachments_path"
+      fi
+      if [[ -d "$attachments_path" ]]; then
+        mkdir -p "$STAGE_DIR/clawboard/attachments"
+        rsync -a --delete --prune-empty-dirs \
+          --exclude ".DS_Store" \
+          "$attachments_path/" \
+          "$STAGE_DIR/clawboard/attachments/" \
+          >/dev/null
+      fi
+    fi
+  fi
+
+  if as_bool "${INCLUDE_CLAWBOARD_ENV:-}" && [[ -n "${CLAWBOARD_DIR:-}" ]] && [[ -f "$CLAWBOARD_DIR/.env" ]]; then
+    mkdir -p "$STAGE_DIR/clawboard"
+    rsync -a "$CLAWBOARD_DIR/.env" "$STAGE_DIR/clawboard/" >/dev/null
+  fi
+fi
+
 # Replace tracked content (keep .git)
 rsync -a --delete --prune-empty-dirs \
   --exclude ".git" \
@@ -243,8 +368,17 @@ fi
 git add -A
 
 ts="$(date -u +"%Y-%m-%d %H:%M:%SZ")"
-msg="Clawboard: auto backup OpenClaw continuity (curated + selected) ($ts)"
-git commit -m "$msg" >/dev/null || true
+scope="OpenClaw continuity (curated + selected)"
+if as_bool "${INCLUDE_CLAWBOARD_STATE:-}"; then
+  scope="$scope + Clawboard state"
+fi
+msg="Clawboard: auto backup $scope ($ts)"
+if ! git commit -m "$msg" >/dev/null 2>&1; then
+  if [[ -z "$(git status --porcelain)" ]]; then
+    exit 0
+  fi
+  die "git commit failed"
+fi
 
 # Ensure branch exists locally
 if ! git rev-parse --verify "$BRANCH" >/dev/null 2>&1; then

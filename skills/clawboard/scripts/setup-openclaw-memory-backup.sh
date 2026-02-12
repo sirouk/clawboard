@@ -11,6 +11,7 @@ set -euo pipefail
 #   - Prints instructions to add it as a Deploy Key (WRITE access reminder)
 #   - Saves key path in ~/.openclaw/credentials/clawboard-memory-backup.env
 # - Writes config to ~/.openclaw/credentials/clawboard-memory-backup.json (0600)
+# - Optionally includes full Clawboard state export + attachment files in each backup run
 # - Optionally installs an OpenClaw cron job (agentTurn) to run backup every 15m
 
 say() { printf "%s\n" "$*"; }
@@ -45,6 +46,51 @@ try:
 except Exception:
   print('')
 PY
+}
+
+read_env_value() {
+  local file_path="$1"
+  local key="$2"
+  local line
+  [[ -f "$file_path" ]] || return 1
+  line="$(awk -v key="$key" '
+    $0 ~ "^[[:space:]]*" key "=" {
+      print substr($0, index($0, "=") + 1)
+    }
+  ' "$file_path" | tail -n1)"
+  line="${line//$'\r'/}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  line="${line%\"}"
+  line="${line#\"}"
+  line="${line%\'}"
+  line="${line#\'}"
+  [[ -n "$line" ]] || return 1
+  printf "%s" "$line"
+}
+
+detect_clawboard_dir() {
+  local script_dir candidate
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  candidate="$(cd "$script_dir/../../.." >/dev/null 2>&1 && pwd || true)"
+  if [[ -n "$candidate" && -f "$candidate/deploy.sh" && -f "$candidate/docker-compose.yaml" ]]; then
+    printf "%s" "$candidate"
+    return 0
+  fi
+
+  for candidate in \
+    "${CLAWBOARD_DIR:-}" \
+    "$WORKSPACE_PATH/projects/clawboard" \
+    "$WORKSPACE_PATH/project/clawboard" \
+    "$HOME/clawboard"
+  do
+    [[ -n "$candidate" ]] || continue
+    if [[ -f "$candidate/deploy.sh" && -f "$candidate/docker-compose.yaml" ]]; then
+      printf "%s" "$candidate"
+      return 0
+    fi
+  done
+  return 1
 }
 
 prompt() {
@@ -203,6 +249,50 @@ case "$(lc "${INCLUDE_OPENCLAW_CONFIG:-}")" in n|no) INCLUDE_OPENCLAW_CONFIG=fal
 case "$(lc "${INCLUDE_OPENCLAW_SKILLS:-}")" in n|no) INCLUDE_OPENCLAW_SKILLS=false ;; *) INCLUDE_OPENCLAW_SKILLS=true ;; esac
 
 say ""
+say "Step 4: Clawboard state backup"
+say "Recommended: include full Clawboard state export (config/topics/tasks/logs)."
+prompt INCLUDE_CLAWBOARD_STATE "Include Clawboard state export? [Y/n]: "
+case "$(lc "${INCLUDE_CLAWBOARD_STATE:-}")" in
+  n|no)
+    INCLUDE_CLAWBOARD_STATE=false
+    CLAWBOARD_DIR=""
+    CLAWBOARD_API_URL=""
+    INCLUDE_CLAWBOARD_ATTACHMENTS=false
+    INCLUDE_CLAWBOARD_ENV=false
+    CLAWBOARD_BACKUP_TOKEN=""
+    ;;
+  *)
+    INCLUDE_CLAWBOARD_STATE=true
+    DETECTED_CLAWBOARD_DIR="$(detect_clawboard_dir || true)"
+    if [[ -n "$DETECTED_CLAWBOARD_DIR" ]]; then
+      prompt CLAWBOARD_DIR "Clawboard install path [default: $DETECTED_CLAWBOARD_DIR]: "
+      CLAWBOARD_DIR="${CLAWBOARD_DIR:-$DETECTED_CLAWBOARD_DIR}"
+    else
+      prompt CLAWBOARD_DIR "Clawboard install path (contains deploy.sh): "
+    fi
+    [[ -d "$CLAWBOARD_DIR" ]] || die "Clawboard path does not exist: $CLAWBOARD_DIR"
+    [[ -f "$CLAWBOARD_DIR/deploy.sh" ]] || die "Clawboard path does not look valid (missing deploy.sh): $CLAWBOARD_DIR"
+
+    DEFAULT_CLAWBOARD_API_URL="http://localhost:8010"
+    if [[ -f "$CLAWBOARD_DIR/.env" ]]; then
+      DEFAULT_CLAWBOARD_API_URL="$(read_env_value "$CLAWBOARD_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" || true)"
+      if [[ -z "$DEFAULT_CLAWBOARD_API_URL" ]]; then
+        DEFAULT_CLAWBOARD_API_URL="http://localhost:8010"
+      fi
+    fi
+    prompt CLAWBOARD_API_URL "Clawboard API base URL [default: $DEFAULT_CLAWBOARD_API_URL]: "
+    CLAWBOARD_API_URL="${CLAWBOARD_API_URL:-$DEFAULT_CLAWBOARD_API_URL}"
+
+    prompt INCLUDE_CLAWBOARD_ATTACHMENTS "Include Clawboard attachment files? [Y/n]: "
+    prompt INCLUDE_CLAWBOARD_ENV "Include Clawboard .env (contains secrets)? [y/N]: "
+    prompt CLAWBOARD_BACKUP_TOKEN "Optional Clawboard token override (hidden, blank=read CLAWBOARD_TOKEN from .env): " 1
+
+    case "$(lc "${INCLUDE_CLAWBOARD_ATTACHMENTS:-}")" in n|no) INCLUDE_CLAWBOARD_ATTACHMENTS=false ;; *) INCLUDE_CLAWBOARD_ATTACHMENTS=true ;; esac
+    case "$(lc "${INCLUDE_CLAWBOARD_ENV:-}")" in y|yes) INCLUDE_CLAWBOARD_ENV=true ;; *) INCLUDE_CLAWBOARD_ENV=false ;; esac
+    ;;
+esac
+
+say ""
 prompt BACKUP_DIR "Local backup repo directory [default: $OPENCLAW_DIR/memory-backup-repo]: "
 BACKUP_DIR="${BACKUP_DIR:-$OPENCLAW_DIR/memory-backup-repo}"
 
@@ -221,6 +311,9 @@ REPO_SSH_URL="$REPO_SSH_URL"
 DEPLOY_KEY_PATH="${DEPLOY_KEY_PATH:-}"
 GITHUB_USER="$GITHUB_USER"
 GITHUB_PAT="$GITHUB_PAT"
+CLAWBOARD_BACKUP_DIR="${CLAWBOARD_DIR}"
+CLAWBOARD_BACKUP_API_URL="${CLAWBOARD_API_URL}"
+CLAWBOARD_BACKUP_TOKEN="${CLAWBOARD_BACKUP_TOKEN:-}"
 ENV
 chmod 600 "$CRED_ENV"
 
@@ -238,7 +331,12 @@ cat >"$CRED_JSON" <<JSON
   "remoteName": "${REMOTE_NAME}",
   "branch": "${BRANCH}",
   "includeOpenclawConfig": ${INCLUDE_OPENCLAW_CONFIG},
-  "includeOpenclawSkills": ${INCLUDE_OPENCLAW_SKILLS}
+  "includeOpenclawSkills": ${INCLUDE_OPENCLAW_SKILLS},
+  "includeClawboardState": ${INCLUDE_CLAWBOARD_STATE},
+  "clawboardDir": "${CLAWBOARD_DIR}",
+  "clawboardApiUrl": "${CLAWBOARD_API_URL}",
+  "includeClawboardAttachments": ${INCLUDE_CLAWBOARD_ATTACHMENTS},
+  "includeClawboardEnv": ${INCLUDE_CLAWBOARD_ENV}
 }
 JSON
 
@@ -264,10 +362,10 @@ case "$(lc "${INSTALL_CRON:-}")" in
     say ""
     say "Creating cron job via OpenClaw CLI..."
 
-    JOB_NAME="Clawboard: backup OpenClaw continuity"
+    JOB_NAME="Clawboard: backup continuity + state"
     JOB_EVERY="15m"
     JOB_SESSION="isolated"
-    JOB_MESSAGE="Run the OpenClaw continuity backup now (automated 15-minute backup). Execute: $HOME/.openclaw/skills/clawboard/scripts/backup_openclaw_curated_memories.sh . IMPORTANT: Only notify me if (a) there were changes pushed, or (b) the backup failed. If there were no changes and the script exited 0 without output, respond with NO_REPLY."
+    JOB_MESSAGE="Run the continuity + Clawboard state backup now (automated 15-minute backup). Execute: $HOME/.openclaw/skills/clawboard/scripts/backup_openclaw_curated_memories.sh . IMPORTANT: Only notify me if (a) there were changes pushed, or (b) the backup failed. If there were no changes and the script exited 0 without output, respond with NO_REPLY."
 
     # Idempotent cron install: update existing job by name (or backup script match); otherwise add.
     existing_id=""
@@ -281,7 +379,7 @@ data = json.load(sys.stdin)
 jobs = data.get("jobs") if isinstance(data, dict) else []
 jobs = jobs or []
 
-name = "Clawboard: backup OpenClaw continuity"
+name = "Clawboard: backup continuity + state"
 needle = "backup_openclaw_curated_memories.sh"
 
 cands = [

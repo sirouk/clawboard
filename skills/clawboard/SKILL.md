@@ -296,6 +296,7 @@ Expect:
     - `$CLAWBOARD_DIR/skills/clawboard/scripts/setup-openclaw-memory-backup.sh`
   - Backup run (safe for automation; commits/pushes only when changed):
     - `$CLAWBOARD_DIR/skills/clawboard/scripts/backup_openclaw_curated_memories.sh`
+  - Includes optional full Clawboard state export (config/topics/tasks/logs + optional attachments).
   - Stores config at:
     - `$HOME/.openclaw/credentials/clawboard-memory-backup.json` (chmod 600)
 - Chutes provider helper:

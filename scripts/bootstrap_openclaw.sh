@@ -142,7 +142,9 @@ CONTEXT_FALLBACK_MODE_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE:-}"
 CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS:-}"
 CONTEXT_TOTAL_BUDGET_MS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS:-}"
 CONTEXT_MAX_CHARS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS:-}"
+SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="${CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS:-}"
 SKILL_INSTALL_MODE="${CLAWBOARD_SKILL_INSTALL_MODE:-symlink}"
+MEMORY_BACKUP_SETUP_MODE="${CLAWBOARD_MEMORY_BACKUP_SETUP:-ask}"
 
 SKIP_DOCKER=false
 SKIP_OPENCLAW=false
@@ -174,6 +176,10 @@ while [ $# -gt 0 ]; do
     --context-fetch-timeout-ms) CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE="$2"; shift 2 ;;
     --context-total-budget-ms) CONTEXT_TOTAL_BUDGET_MS_OVERRIDE="$2"; shift 2 ;;
     --context-max-chars) CONTEXT_MAX_CHARS_OVERRIDE="$2"; shift 2 ;;
+    --include-tool-call-logs) SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="1"; shift ;;
+    --exclude-tool-call-logs) SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="0"; shift ;;
+    --setup-memory-backup) MEMORY_BACKUP_SETUP_MODE="always"; shift ;;
+    --skip-memory-backup-setup) MEMORY_BACKUP_SETUP_MODE="never"; shift ;;
     --skill-copy) SKILL_INSTALL_MODE="copy"; shift ;;
     --skill-symlink) SKILL_INSTALL_MODE="symlink"; shift ;;
     --update) UPDATE_REPO=true; shift ;;
@@ -198,6 +204,8 @@ Environment overrides:
   CLAWBOARD_PARENT_DIR=<path> Install parent directory (repo goes in <path>/clawboard)
   CLAWBOARD_SKILL_INSTALL_MODE=<copy|symlink>
                               Skill install strategy for ~/.openclaw/skills (default: symlink)
+  CLAWBOARD_MEMORY_BACKUP_SETUP=<ask|always|never>
+                              Offer/run memory+Clawboard backup setup during bootstrap (default: ask)
   --api-url <url>      Clawboard API base (default: http://localhost:8010)
   --web-url <url>      Clawboard web URL (default: http://localhost:3010)
   --public-api-base <url>
@@ -222,6 +230,16 @@ Environment overrides:
                        Total budget for before_agent_start context retrieval in the OpenClaw plugin (writes CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS)
   --context-max-chars <n>
                        Hard cap for injected context block size (writes CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS)
+  --include-tool-call-logs
+                       Include tool call/result/error action logs in semantic indexing + retrieval
+                       (writes CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS=1)
+  --exclude-tool-call-logs
+                       Exclude tool call/result/error action logs from semantic indexing + retrieval
+                       (writes CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS=0; default)
+  --setup-memory-backup
+                      Run memory+Clawboard backup setup at the end of bootstrap (interactive)
+  --skip-memory-backup-setup
+                      Skip the memory+Clawboard backup setup prompt
   --skill-copy         Install skill by copying files into ~/.openclaw/skills
   --skill-symlink      Install skill as symlink to repo copy (default; best for local skill development)
   --no-backfill        Shortcut for --integration-level manual
@@ -261,6 +279,14 @@ case "$SKILL_INSTALL_MODE" in
   *)
     log_warn "Invalid skill install mode: $SKILL_INSTALL_MODE (expected copy|symlink). Falling back to symlink."
     SKILL_INSTALL_MODE="symlink"
+    ;;
+esac
+
+case "$(printf "%s" "$MEMORY_BACKUP_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" in
+  ask|always|never) MEMORY_BACKUP_SETUP_MODE="$(printf "%s" "$MEMORY_BACKUP_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" ;;
+  *)
+    log_warn "Invalid memory backup setup mode: $MEMORY_BACKUP_SETUP_MODE (expected ask|always|never). Using ask."
+    MEMORY_BACKUP_SETUP_MODE="ask"
     ;;
 esac
 
@@ -570,6 +596,54 @@ maybe_run_chutes_fast_path() {
   return 0
 }
 
+maybe_offer_memory_backup_setup() {
+  local mode="${1:-ask}"
+  local setup_script=""
+  local answer=""
+  local should_run=false
+
+  case "$mode" in
+    never) return 0 ;;
+    always) should_run=true ;;
+    ask)
+      if [ ! -t 0 ]; then
+        return 0
+      fi
+      printf "\nSet up automated continuity + Clawboard git backups now? [y/N]: "
+      read -r answer
+      case "$answer" in
+        y|Y|yes|YES) should_run=true ;;
+        *) should_run=false ;;
+      esac
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if [ "$should_run" = false ]; then
+    return 0
+  fi
+
+  if [ -f "$HOME/.openclaw/skills/clawboard/scripts/setup-openclaw-memory-backup.sh" ]; then
+    setup_script="$HOME/.openclaw/skills/clawboard/scripts/setup-openclaw-memory-backup.sh"
+  elif [ -f "$INSTALL_DIR/skills/clawboard/scripts/setup-openclaw-memory-backup.sh" ]; then
+    setup_script="$INSTALL_DIR/skills/clawboard/scripts/setup-openclaw-memory-backup.sh"
+  fi
+
+  if [ -z "$setup_script" ]; then
+    log_warn "Memory backup setup script not found. Run manually when available."
+    return 0
+  fi
+
+  log_info "Launching memory + Clawboard backup setup..."
+  if bash "$setup_script"; then
+    log_success "Memory + Clawboard backup setup completed."
+  else
+    log_warn "Memory + Clawboard backup setup did not complete. You can rerun: bash $setup_script"
+  fi
+}
+
 if [ "$PARENT_DIR_SET" = true ]; then
   log_info "Install dir from CLAWBOARD_PARENT_DIR: $INSTALL_DIR"
 elif [ "$DIR_EXPLICIT" = false ] && [ -n "${INSTALL_DIR_REASON:-}" ]; then
@@ -692,6 +766,10 @@ upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_MODE" "$CONTEXT_M
 DEFAULT_CONTEXT_FETCH_TIMEOUT_MS="1200"
 DEFAULT_CONTEXT_TOTAL_BUDGET_MS="2200"
 DEFAULT_CONTEXT_MAX_CHARS="2200"
+DEFAULT_SEARCH_CONCURRENCY_LIMIT="2"
+DEFAULT_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS="900"
+DEFAULT_SEARCH_EMBED_QUERY_CACHE_SIZE="256"
+DEFAULT_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS="2400"
 case "$CONTEXT_MODE_VALUE" in
   full)
     DEFAULT_CONTEXT_FETCH_TIMEOUT_MS="2500"
@@ -756,6 +834,62 @@ fi
 CONTEXT_MAX_CHARS_VALUE="$(clamp_int "$CONTEXT_MAX_CHARS_VALUE" 400 12000 || echo "$DEFAULT_CONTEXT_MAX_CHARS")"
 log_info "Writing CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS=$CONTEXT_MAX_CHARS_VALUE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS" "$CONTEXT_MAX_CHARS_VALUE"
+
+SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE=""
+if [ -n "$SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE" ]; then
+  SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE="$SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS" >/dev/null 2>&1; then
+  SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS" || true)"
+else
+  SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE="0"
+fi
+SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE="$(printf "%s" "$SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+case "$SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE" in
+  1|true|yes|on) SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE="1" ;;
+  *) SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE="0" ;;
+esac
+log_info "Writing CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS=$SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS" "$SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE"
+
+SEARCH_CONCURRENCY_LIMIT_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_CONCURRENCY_LIMIT" >/dev/null 2>&1; then
+  SEARCH_CONCURRENCY_LIMIT_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_CONCURRENCY_LIMIT" || true)"
+else
+  SEARCH_CONCURRENCY_LIMIT_VALUE="$DEFAULT_SEARCH_CONCURRENCY_LIMIT"
+fi
+SEARCH_CONCURRENCY_LIMIT_VALUE="$(clamp_int "$SEARCH_CONCURRENCY_LIMIT_VALUE" 1 8 || echo "$DEFAULT_SEARCH_CONCURRENCY_LIMIT")"
+log_info "Writing CLAWBOARD_SEARCH_CONCURRENCY_LIMIT=$SEARCH_CONCURRENCY_LIMIT_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_CONCURRENCY_LIMIT" "$SEARCH_CONCURRENCY_LIMIT_VALUE"
+
+SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS" >/dev/null 2>&1; then
+  SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS" || true)"
+else
+  SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS_VALUE="$DEFAULT_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS"
+fi
+SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS_VALUE="$(clamp_int "$SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS_VALUE" 200 5000 || echo "$DEFAULT_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS")"
+log_info "Writing CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS=$SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS" "$SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS_VALUE"
+
+SEARCH_EMBED_QUERY_CACHE_SIZE_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE" >/dev/null 2>&1; then
+  SEARCH_EMBED_QUERY_CACHE_SIZE_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE" || true)"
+else
+  SEARCH_EMBED_QUERY_CACHE_SIZE_VALUE="$DEFAULT_SEARCH_EMBED_QUERY_CACHE_SIZE"
+fi
+SEARCH_EMBED_QUERY_CACHE_SIZE_VALUE="$(clamp_int "$SEARCH_EMBED_QUERY_CACHE_SIZE_VALUE" 0 4096 || echo "$DEFAULT_SEARCH_EMBED_QUERY_CACHE_SIZE")"
+log_info "Writing CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE=$SEARCH_EMBED_QUERY_CACHE_SIZE_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE" "$SEARCH_EMBED_QUERY_CACHE_SIZE_VALUE"
+
+SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS" >/dev/null 2>&1; then
+  SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS" || true)"
+else
+  SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS_VALUE="$DEFAULT_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS"
+fi
+SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS_VALUE="$(clamp_int "$SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS_VALUE" 800 50000 || echo "$DEFAULT_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS")"
+log_info "Writing CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS=$SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS" "$SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS_VALUE"
 
 chmod 600 "$INSTALL_DIR/.env" || true
 
@@ -983,6 +1117,8 @@ PY
         log_warn "Unable to restart OpenClaw gateway automatically. Run: openclaw gateway restart"
       fi
     fi
+
+    maybe_offer_memory_backup_setup "$MEMORY_BACKUP_SETUP_MODE"
   fi
 fi
 
@@ -1007,5 +1143,7 @@ echo "               Localhost reads can run tokenless. Keep network ACLs strict
 echo ""
 echo "If OpenClaw was not installed, run this later:"
 echo "  bash scripts/bootstrap_openclaw.sh --skip-docker --update"
+echo "Set up automated continuity + Clawboard backups:"
+echo "  bash ~/.openclaw/skills/clawboard/scripts/setup-openclaw-memory-backup.sh"
 echo "If you want Chutes before Clawboard skill wiring:"
 echo "  tmp=\$(mktemp -t add-chutes.sh.XXXXXX) && curl -fsSL $CHUTES_FAST_PATH_URL -o \"\$tmp\" && bash \"\$tmp\" && rm -f \"\$tmp\""
