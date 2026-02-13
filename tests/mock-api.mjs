@@ -639,6 +639,21 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, entry);
   }
 
+  if (url.pathname.startsWith("/api/log/") && req.method === "DELETE") {
+    const logId = url.pathname.split("/").pop();
+    const toDelete = store.logs.filter((log) => log.id === logId || log.relatedLogId === logId);
+    if (toDelete.length === 0) return sendJson(res, 200, { ok: true, deleted: false, deletedIds: [] });
+
+    const deletedIds = toDelete.map((row) => row.id);
+    store.logs = store.logs.filter((log) => !deletedIds.includes(log.id));
+
+    for (const deletedId of deletedIds) {
+      pushEvent("log.deleted", { id: deletedId, rootId: logId });
+    }
+
+    return sendJson(res, 200, { ok: true, deleted: true, deletedIds });
+  }
+
   return sendJson(res, 404, { error: "Not found" });
 });
 
