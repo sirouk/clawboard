@@ -1,6 +1,16 @@
 "use client";
 
-import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useImperativeHandle, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { Button, TextArea } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { apiFetch } from "@/lib/api";
@@ -106,6 +116,7 @@ type BoardChatComposerProps = {
   placeholder?: string;
   helperText?: string;
   variant?: "panel" | "seamless";
+  dense?: boolean;
   className?: string;
   onFocus?: () => void;
   onBlur?: () => void;
@@ -134,6 +145,24 @@ function PaperclipIcon({ className }: { className?: string }) {
   );
 }
 
+function SendIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={cn("h-4 w-4", className)}
+    >
+      <path d="M22 2L11 13" />
+      <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+    </svg>
+  );
+}
+
 export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatComposerProps>(function BoardChatComposer(
   {
     sessionKey,
@@ -141,6 +170,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     placeholder,
     helperText,
     variant = "panel",
+    dense = false,
     className,
     onFocus,
     onBlur,
@@ -168,10 +198,12 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   const resizeTextarea = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
+    const maxHeight = dense ? 172 : 280;
     // Reset height so shrinking works when deleting text.
     el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  }, []);
+    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+    el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [dense]);
 
   useEffect(() => {
     if (!autoFocus) return;
@@ -358,11 +390,28 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   };
 
   const hardDisabled = Boolean(disabled || sending || readOnly);
+  const sendDisabled = hardDisabled || draft.trim().length === 0;
   const wordCount = useMemo(() => {
     const text = draft.trim();
     if (!text) return 0;
     return text.split(/\s+/).filter(Boolean).length;
   }, [draft]);
+  const handleDensePointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLTextAreaElement>) => {
+      if (!dense) return;
+      const el = textareaRef.current;
+      if (!el) return;
+      if (document.activeElement === el) return;
+      // iOS Safari can auto-scroll focused inputs off-screen; force focus without scrolling.
+      event.preventDefault();
+      try {
+        el.focus({ preventScroll: true });
+      } catch {
+        el.focus();
+      }
+    },
+    [dense]
+  );
 
   return (
     <div
@@ -397,38 +446,104 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
         textareaRef.current?.focus();
       }}
     >
-      <div className="text-[10px] uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Message</div>
-      <div className="mt-2">
-        <TextArea
-          ref={textareaRef}
-          className="min-h-[78px] resize-none overflow-hidden"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder={placeholder ?? (readOnly ? "Add a token in Setup to send messages." : "Type a message…")}
-          disabled={hardDisabled}
-          onFocus={onFocus}
-          onBlur={onBlur}
-          onPaste={(event) => {
-            if (hardDisabled) return;
-            const items = event.clipboardData?.items;
-            if (!items) return;
-            const files: File[] = [];
-            for (const item of Array.from(items)) {
-              if (item.kind !== "file") continue;
-              const file = item.getAsFile();
-              if (file) files.push(file);
-            }
-            if (files.length === 0) return;
-            event.preventDefault();
-            addFiles(files);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              void sendMessage();
-            }
+      <div className={cn("text-[10px] uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]", dense ? "max-md:hidden" : "")}>
+        Message
+      </div>
+      <div className={cn("mt-2", dense ? "max-md:mt-1.5" : "")}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          className="hidden"
+          multiple
+          accept={Array.from(allowedMimeTypes).join(",")}
+          onChange={(event) => {
+            const files = event.target.files;
+            if (files && files.length > 0) addFiles(files);
+            // Allow re-selecting the same file.
+            event.target.value = "";
           }}
         />
+        <div className={cn(dense ? "relative" : "")}>
+          <TextArea
+            ref={textareaRef}
+            className={cn(
+              "resize-none",
+              dense
+                ? "min-h-[58px] max-md:max-h-[172px] max-md:pb-11 max-md:pr-24 md:min-h-[70px]"
+                : "min-h-[78px] overflow-hidden"
+            )}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={placeholder ?? (readOnly ? "Add a token in Setup to send messages." : "Type a message…")}
+            disabled={hardDisabled}
+            onPointerDown={handleDensePointerDown}
+            onFocus={() => {
+              if (dense && typeof window !== "undefined") {
+                window.requestAnimationFrame(() => {
+                  window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+                });
+              }
+              onFocus?.();
+            }}
+            onBlur={onBlur}
+            onPaste={(event) => {
+              if (hardDisabled) return;
+              const items = event.clipboardData?.items;
+              if (!items) return;
+              const files: File[] = [];
+              for (const item of Array.from(items)) {
+                if (item.kind !== "file") continue;
+                const file = item.getAsFile();
+                if (file) files.push(file);
+              }
+              if (files.length === 0) return;
+              event.preventDefault();
+              addFiles(files);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void sendMessage();
+              }
+            }}
+          />
+          {dense ? (
+            <div className="absolute bottom-2.5 right-2.5 z-10 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={hardDisabled}
+                aria-label="Attach files"
+                title="Attach files"
+                className={cn(
+                  "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-muted))] transition",
+                  "border-[rgba(255,255,255,0.14)] bg-[rgba(12,14,18,0.86)] backdrop-blur",
+                  "hover:border-[rgba(255,90,45,0.4)] hover:text-[rgb(var(--claw-text))]",
+                  "disabled:cursor-not-allowed disabled:opacity-50"
+                )}
+              >
+                <PaperclipIcon />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void sendMessage();
+                }}
+                disabled={sendDisabled}
+                aria-label="Send message"
+                title="Send message"
+                className={cn(
+                  "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
+                  "border-[rgba(255,90,45,0.6)] bg-[rgba(255,90,45,0.2)] backdrop-blur",
+                  "hover:bg-[rgba(255,90,45,0.3)]",
+                  "disabled:cursor-not-allowed disabled:border-[rgba(255,255,255,0.14)] disabled:bg-[rgba(255,255,255,0.06)] disabled:text-[rgb(var(--claw-muted))]"
+                )}
+              >
+                <SendIcon />
+              </button>
+            </div>
+          ) : null}
+        </div>
         {attachments.length > 0 ? (
           <AttachmentStrip
             attachments={attachments}
@@ -448,36 +563,38 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
           />
         ) : null}
         {attachError ? <div className="mt-2 text-xs text-[rgb(var(--claw-warning))]">{attachError}</div> : null}
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[rgb(var(--claw-muted))]">
-          <span>{helperText ?? "Enter to send, Shift+Enter for newline."}</span>
-          <div className="flex items-center gap-3">
-            <input
-              ref={fileInputRef}
-              type="file"
-              className="hidden"
-              multiple
-              accept={Array.from(allowedMimeTypes).join(",")}
-              onChange={(event) => {
-                const files = event.target.files;
-                if (files && files.length > 0) addFiles(files);
-                // Allow re-selecting the same file.
-                event.target.value = "";
-              }}
-            />
-            <span>{wordCount > 0 ? `${wordCount} word${wordCount === 1 ? "" : "s"}` : null}</span>
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={hardDisabled}
-              aria-label="Attach files"
-              title="Attach files"
-            >
-              <PaperclipIcon />
-            </Button>
+        {dense ? null : (
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[rgb(var(--claw-muted))]">
+            <span>
+            {helperText ?? "Enter to send, Shift+Enter for newline."}
+            </span>
+            <div className="flex items-center gap-3">
+              <span>{wordCount > 0 ? `${wordCount} word${wordCount === 1 ? "" : "s"}` : null}</span>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={hardDisabled}
+                aria-label="Attach files"
+                title="Attach files"
+              >
+                <PaperclipIcon />
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="primary"
+                onClick={() => {
+                  void sendMessage();
+                }}
+                disabled={sendDisabled}
+              >
+                Send
+              </Button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

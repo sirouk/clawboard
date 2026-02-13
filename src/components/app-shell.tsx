@@ -229,7 +229,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
         ? "Token required for writes."
       : "No token required.";
   const docsHref = `${apiBase || ""}/docs`;
-  const iconSize = collapsed ? 32 : 48;
+  const iconSize = collapsed ? 32 : 40;
 
   const toggleCollapsed = () => {
     setLocalStorageItem("clawboard.navCollapsed", collapsed ? "false" : "true");
@@ -269,6 +269,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 
   const mobilePrimaryItems = NAV_ITEMS.slice(0, 4);
   const mobileOverflowItems = NAV_ITEMS.slice(4);
+
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [pathname]);
 
   const pageHeader = useMemo(() => {
     const cleanPath = pathname.split("?")[0] ?? "";
@@ -639,98 +643,104 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="claw-ambient min-h-screen">
         <div className="flex min-h-screen flex-col lg:flex-row">
-	          <aside
-	            className={cn(
-	              "border-b border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] px-4 py-6 lg:min-h-screen lg:h-screen lg:border-b-0 lg:border-r transition-all lg:sticky lg:top-0 lg:self-start lg:flex lg:flex-col lg:overflow-hidden",
-	              collapsed ? "lg:w-20" : "lg:w-64"
-	            )}
-	          >
-	            <div className="min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
-	              <div className="flex items-center justify-between gap-3 lg:block">
-	                <div className="flex min-w-0 items-center gap-3">
-	                  <Link href="/u" className="flex items-center justify-center">
-	                    <div className={cn("relative transition-all", collapsed ? "h-8 w-8" : "h-12 w-12")}>
-	                      <Image
-	                        src="/clawboard-mark.png"
-	                        alt="Clawboard"
-	                        width={iconSize}
-	                        height={iconSize}
-	                        priority
-	                        className="object-contain"
-	                      />
-	                    </div>
-	                  </Link>
-	                  <div className="min-w-0 lg:hidden">
-	                    <div className="truncate text-sm font-semibold text-[rgb(var(--claw-text))]">{pageHeader.title}</div>
-	                    {pageHeader.subtitle ? (
-	                      <div className="mt-0.5 truncate text-xs text-[rgb(var(--claw-muted))]">{pageHeader.subtitle}</div>
-	                    ) : null}
-	                  </div>
-	                </div>
-	                <div className="lg:hidden">
-	                  <Badge tone={statusTone} title={statusTitle}>
-	                    {status}
-	                  </Badge>
-	                </div>
-	              </div>
-              <nav className="mt-4 grid grid-cols-5 gap-2 lg:hidden">
-                {mobilePrimaryItems.map((item) => {
-                  const active = isItemActive(item.href);
-                  return (
+			          <aside
+                    data-claw-shell-nav="1"
+			            className={cn(
+			              "relative z-[80] border-b border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] px-3 py-2.5 lg:z-auto lg:min-h-screen lg:h-screen lg:border-b-0 lg:border-r lg:px-4 lg:py-6 transition-all lg:sticky lg:top-0 lg:self-start lg:flex lg:flex-col lg:overflow-hidden",
+			              collapsed ? "lg:w-20" : "lg:w-64"
+			            )}
+			          >
+		            <div className="min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
+		              <div className="flex items-center justify-between gap-2.5 lg:block">
+		                <div className="flex min-w-0 items-center gap-2.5">
+		                  <Link href="/u" className="flex items-center justify-center">
+			                    <div className={cn("relative transition-all", collapsed ? "h-8 w-8" : "h-8 w-8 lg:h-12 lg:w-12")}>
+			                      <Image
+			                        src="/clawboard-mark.png"
+			                        alt="Clawboard"
+		                        width={iconSize}
+		                        height={iconSize}
+		                        priority
+		                        className="h-full w-full object-contain"
+		                      />
+		                    </div>
+		                  </Link>
+			                  <div className="min-w-0 lg:hidden">
+			                    <div className="truncate text-xs font-semibold text-[rgb(var(--claw-text))]">{pageHeader.title}</div>
+			                  </div>
+			                </div>
+			                <div className="lg:hidden">
+			                  <Badge tone={statusTone} title={statusTitle} className="px-2 py-0.5 text-[9px] tracking-[0.12em]">
+			                    {status}
+			                  </Badge>
+			                </div>
+			              </div>
+	              <nav className="mt-1.5 grid grid-cols-5 gap-1 lg:hidden">
+	                {mobilePrimaryItems.map((item) => {
+	                  const active = isItemActive(item.href);
+	                  return (
                     <Link
                       key={item.href}
                       href={item.href}
                       onClick={() => setMobileMenuOpen(false)}
-                      className={cn(
-                        "flex flex-col items-center gap-1 rounded-[var(--radius-md)] px-2 py-2 text-[11px] transition",
-                        active
-                          ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.04))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]"
-                          : "text-[rgb(var(--claw-muted))]"
+	                      className={cn(
+	                        "flex h-9 flex-col items-center justify-center gap-0.5 rounded-[var(--radius-sm)] px-1 py-1 text-[9px] transition",
+	                        active
+	                          ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.04))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]"
+	                          : "text-[rgb(var(--claw-muted))]"
                       )}
                       aria-label={item.label}
                       aria-current={active ? "page" : undefined}
                     >
-                      <span className="h-4 w-4 text-current">{ICONS[item.id]}</span>
+                      <span className="h-3.5 w-3.5 text-current">{ICONS[item.id]}</span>
                       <span className="leading-none">{item.label}</span>
                     </Link>
                   );
                 })}
                 <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => setMobileMenuOpen((prev) => !prev)}
-                    className={cn(
-                      "flex h-full w-full flex-col items-center justify-center gap-1 rounded-[var(--radius-md)] px-2 py-2 text-[11px] transition",
-                      mobileMenuOpen ? "text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]" : "text-[rgb(var(--claw-muted))]"
-                    )}
-                    aria-expanded={mobileMenuOpen}
+	                  <button
+	                    type="button"
+	                    onClick={() => setMobileMenuOpen((prev) => !prev)}
+	                    className={cn(
+	                      "flex h-9 w-full flex-col items-center justify-center gap-0.5 rounded-[var(--radius-sm)] px-1 py-1 text-[9px] transition",
+	                      mobileMenuOpen ? "text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]" : "text-[rgb(var(--claw-muted))]"
+	                    )}
+	                    aria-expanded={mobileMenuOpen}
                     aria-label="More navigation"
                   >
                     <span className="text-sm">⋯</span>
                     <span className="leading-none">More</span>
                   </button>
                   {mobileMenuOpen && (
-                    <div className="absolute right-0 top-[108%] z-30 min-w-[170px] rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] p-2 shadow-[0_16px_40px_rgba(0,0,0,0.45)]">
-                      {mobileOverflowItems.map((item) => {
-                        const active = isItemActive(item.href);
-                        return (
-                          <Link
-                            key={item.href}
-                            href={item.href}
-                            onClick={() => setMobileMenuOpen(false)}
-                            className={cn(
-                              "flex items-center gap-2 rounded-[var(--radius-sm)] px-3 py-2 text-xs transition",
-                              active
-                                ? "bg-[rgba(255,90,45,0.15)] text-[rgb(var(--claw-text))]"
-                                : "text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
-                            )}
-                          >
-                            <span className="h-4 w-4 text-current">{ICONS[item.id]}</span>
-                            <span>{item.label}</span>
-                          </Link>
-                        );
-                      })}
-                    </div>
+                    <>
+                      <button
+	                        type="button"
+	                        aria-label="Close more navigation"
+	                        onClick={() => setMobileMenuOpen(false)}
+	                        className="fixed inset-0 z-[85] bg-transparent"
+	                      />
+	                      <div className="absolute right-0 top-[108%] z-[90] min-w-[160px] rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] p-2 shadow-[0_16px_40px_rgba(0,0,0,0.45)]">
+	                        {mobileOverflowItems.map((item) => {
+	                          const active = isItemActive(item.href);
+	                          return (
+                            <Link
+                              key={item.href}
+                              href={item.href}
+                              onClick={() => setMobileMenuOpen(false)}
+                              className={cn(
+                                "flex items-center gap-2 rounded-[var(--radius-sm)] px-3 py-2 text-xs transition",
+                                active
+                                  ? "bg-[rgba(255,90,45,0.15)] text-[rgb(var(--claw-text))]"
+                                  : "text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
+                              )}
+                            >
+                              <span className="h-4 w-4 text-current">{ICONS[item.id]}</span>
+                              <span>{item.label}</span>
+                            </Link>
+                          );
+                        })}
+                      </div>
+                    </>
                   )}
                 </div>
               </nav>
@@ -970,7 +980,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                 </div>
               </div>
             </header>
-	            <main className="mr-auto w-full max-w-[1280px] pl-5 pr-6 py-6 lg:py-8">{children}</main>
+	            <main className="mr-auto w-full max-w-[1280px] px-3 py-3 sm:px-4 sm:py-4 lg:pl-5 lg:pr-6 lg:py-8">{children}</main>
 	          </div>
 	        </div>
 	        <CommandPalette />

@@ -60,13 +60,13 @@ const seedData = (): PortalData => {
     {
       id: "topic-personal",
       name: "Personal",
-      description: "Chris personal tasks and goals.",
+      description: "Personal tasks and goals.",
       createdAt,
       updatedAt: createdAt
     },
     {
-      id: "topic-chris-ops-portal",
-      name: "Chris Ops Portal",
+      id: "topic-ops-portal",
+      name: "Ops Portal",
       description: "The portal itself: backlog, improvements, and backfill work.",
       createdAt,
       updatedAt: createdAt

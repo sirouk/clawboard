@@ -9,6 +9,11 @@ Clawboard is a companion memory system for [OpenClaw](https://openclaw.ai):
 
 Clawboard runs alongside OpenClaw. OpenClaw remains the agent runtime; Clawboard provides durable memory capture, classification, curation, and retrieval context.
 
+## Operating Docs
+
+- Operator runbook: `design/operator-runbook.md`
+- Visual system spec: `design/visual-end-state-spec.md`
+
 ## Stack Snapshot
 
 - OpenClaw runtime + `clawboard-logger` plugin (stage-1 capture + response-time context extension)
@@ -369,6 +374,14 @@ Run E2E:
 
 ```bash
 npm run test:e2e
+```
+
+Public publish safety check:
+
+```bash
+npm run check:publish-safety
+# optional stricter personal-name scan:
+PRIVACY_NAME_REGEX='(<your-first-name>|<your-handle>)' npm run check:publish-safety
 ```
 
 Full npm suite (lint + backend unit + build + e2e):
