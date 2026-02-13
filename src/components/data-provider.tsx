@@ -72,6 +72,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       if (Array.isArray(payload.topics)) setTopics((prev) => mergeById(prev, payload.topics as Topic[]));
       if (Array.isArray(payload.tasks)) setTasks((prev) => mergeById(prev, payload.tasks as Task[]));
       if (Array.isArray(payload.logs)) setLogs((prev) => mergeLogs(prev, payload.logs as LogEntry[]));
+      if (Array.isArray(payload.deletedLogIds) && payload.deletedLogIds.length > 0) {
+        const deleted = new Set(payload.deletedLogIds.map((id: unknown) => String(id ?? "").trim()).filter(Boolean));
+        if (deleted.size > 0) setLogs((prev) => prev.filter((row) => !deleted.has(row.id)));
+      }
       if (Array.isArray(payload.drafts)) {
         setDrafts((prev) => {
           const next = { ...prev };

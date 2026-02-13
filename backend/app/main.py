@@ -30,7 +30,7 @@ from sqlmodel import select
 
 from .auth import ensure_read_access, ensure_write_access, is_token_configured, is_token_required, require_token
 from .db import DATABASE_URL, init_db, get_session
-from .models import InstanceConfig, Topic, Task, LogEntry, SessionRoutingMemory, IngestQueue, Attachment, Draft
+from .models import InstanceConfig, Topic, Task, LogEntry, DeletedLog, SessionRoutingMemory, IngestQueue, Attachment, Draft
 from .schemas import (
     StartFreshReplayRequest,
     InstanceUpdate,
@@ -3457,9 +3457,17 @@ def delete_log(log_id: str):
         for row in to_delete:
             session.delete(row)
         session.commit()
+        stamp = now_iso()
         for deleted_id in deleted_ids:
             enqueue_reindex_request({"op": "delete", "kind": "log", "id": deleted_id})
-        event_ts = now_iso()
+            # Best-effort tombstone insert (ignore if it already exists).
+            try:
+                session.add(DeletedLog(id=deleted_id, deletedAt=stamp))
+                session.commit()
+            except Exception:
+                session.rollback()
+
+        event_ts = stamp
         for deleted_id in deleted_ids:
             event_hub.publish({"type": "log.deleted", "data": {"id": deleted_id, "rootId": log_id}, "eventTs": event_ts})
         return {"ok": True, "deleted": True, "deletedIds": deleted_ids}
@@ -3529,10 +3537,16 @@ def purge_topic_chat(topic_id: str):
             session.delete(row)
         session.commit()
 
+        stamp = now_iso()
         for deleted_id in deleted_ids:
             enqueue_reindex_request({"op": "delete", "kind": "log", "id": deleted_id})
+            try:
+                session.add(DeletedLog(id=deleted_id, deletedAt=stamp))
+                session.commit()
+            except Exception:
+                session.rollback()
 
-        event_ts = now_iso()
+        event_ts = stamp
         for deleted_id in deleted_ids:
             event_hub.publish({"type": "log.deleted", "data": {"id": deleted_id, "rootId": deleted_id}, "eventTs": event_ts})
 
@@ -3622,10 +3636,16 @@ def purge_log_forward(log_id: str):
             session.delete(row)
         session.commit()
 
+        stamp = now_iso()
         for deleted_id in deleted_ids:
             enqueue_reindex_request({"op": "delete", "kind": "log", "id": deleted_id})
+            try:
+                session.add(DeletedLog(id=deleted_id, deletedAt=stamp))
+                session.commit()
+            except Exception:
+                session.rollback()
 
-        event_ts = now_iso()
+        event_ts = stamp
         for deleted_id in deleted_ids:
             event_hub.publish({"type": "log.deleted", "data": {"id": deleted_id, "rootId": anchor_id}, "eventTs": event_ts})
 
@@ -3690,8 +3710,17 @@ def list_changes(
         topics.sort(key=lambda t: t.updatedAt, reverse=True)
         tasks.sort(key=lambda t: t.updatedAt, reverse=True)
         drafts.sort(key=lambda d: d.updatedAt, reverse=True)
+
+        deleted_log_ids: list[str] = []
+        if since:
+            try:
+                deleted_rows = session.exec(select(DeletedLog).where(DeletedLog.deletedAt >= since)).all()
+                deleted_log_ids = [row.id for row in deleted_rows if getattr(row, "id", None)]
+            except Exception:
+                deleted_log_ids = []
+
         # Preserve query ordering for logs (it may include SQLite rowid tiebreaks).
-        return {"topics": topics, "tasks": tasks, "logs": logs, "drafts": drafts}
+        return {"topics": topics, "tasks": tasks, "logs": logs, "drafts": drafts, "deletedLogIds": deleted_log_ids}
 
 
 @app.post(

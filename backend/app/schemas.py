@@ -447,6 +447,11 @@ class ChangesResponse(BaseModel):
     tasks: List[TaskOut] = Field(description="Tasks updated since timestamp.")
     logs: List[LogOutLite] = Field(description="Logs created since timestamp (lightweight, excludes raw).")
     drafts: List[DraftOut] = Field(description="Drafts updated since timestamp.")
+    deletedLogIds: List[str] = Field(
+        default_factory=list,
+        description="Log IDs deleted since timestamp (tombstones for clients that missed SSE).",
+        examples=[["log-123", "log-456"]],
+    )
 
 
 class OpenClawChatRequest(BaseModel):

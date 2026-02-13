@@ -211,6 +211,17 @@ class LogEntry(SQLModel, table=True):
     )
 
 
+class DeletedLog(SQLModel, table=True):
+    """Tombstone rows so clients can learn about deletions via /api/changes.
+
+    SSE is best-effort (connections drop, background tabs throttle). This table provides a
+    durable-ish deletion feed for incremental reconciliation.
+    """
+
+    id: str = Field(primary_key=True, description="Deleted log entry ID.")
+    deletedAt: str = Field(description="ISO timestamp when the log was deleted.")
+
+
 class SessionRoutingMemory(SQLModel, table=True):
     """Small per-session memory to improve routing under low-signal follow-ups.
 
