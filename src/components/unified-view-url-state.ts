@@ -10,6 +10,7 @@ export type UnifiedUrlState = {
   density: UnifiedUrlDensity;
   done: boolean;
   status: string;
+  reveal: boolean;
   page: number;
   topics: string[];
   tasks: string[];
@@ -31,6 +32,7 @@ const DEFAULT_STATE: UnifiedUrlState = {
   density: "compact",
   done: false,
   status: "all",
+  reveal: false,
   page: 1,
   topics: [],
   tasks: [],
@@ -113,6 +115,7 @@ export function parseUnifiedUrlState(url: URL, options: ParseUnifiedUrlStateOpti
     density,
     done: params.get("done") === "1",
     status: params.get("status") ?? "all",
+    reveal: params.get("reveal") === "1",
     page: sanitizePage(Number(params.get("page") ?? 1)),
     topics: nextTopics,
     tasks: nextTasks,

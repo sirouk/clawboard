@@ -14,7 +14,7 @@ import {
   type ClawgraphNodeType,
 } from "@/lib/clawgraph";
 import { cn } from "@/lib/cn";
-import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
+import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam } from "@/lib/url";
 import type { Task, Topic } from "@/lib/types";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 
@@ -30,6 +30,7 @@ const EDGE_COLORS: Record<string, string> = {
 const MIN_ZOOM = 0.38;
 const MAX_ZOOM = 2.6;
 const MAX_NODE_DRAG = 1200;
+const DEFAULT_LAYOUT_STRENGTH = 75;
 
 const NODE_THEME: Record<ClawgraphNodeType, { color: string; glow: string }> = {
   topic: { color: "#FF8A4A", glow: "#FF8A4A" },
@@ -106,6 +107,15 @@ function slug(value: string) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "") || "unknown";
+}
+
+function edgeThresholdAtPercent(edges: ClawgraphEdge[], percent: number) {
+  if (edges.length === 0) return 0;
+  const weights = edges.map((edge) => edge.weight).sort((a, b) => a - b);
+  if (percent <= 0) return weights[0] - 1e-6;
+  if (percent >= 100) return weights[weights.length - 1];
+  const rank = Math.floor((percent / 100) * (weights.length - 1));
+  return weights[rank] ?? weights[weights.length - 1];
 }
 
 export function ClawgraphLive() {
@@ -205,18 +215,15 @@ export function ClawgraphLive() {
     });
   }, [graph.edges, showEntityLinks]);
 
-  const edgeThreshold = useMemo(() => {
-    if (candidateEdges.length === 0) return 0;
-    const weights = candidateEdges.map((edge) => edge.weight).sort((a, b) => a - b);
-    if (strengthPercent <= 0) return weights[0] - 1e-6;
-    if (strengthPercent >= 100) return weights[weights.length - 1];
-    const rank = Math.floor((strengthPercent / 100) * (weights.length - 1));
-    return weights[rank] ?? weights[weights.length - 1];
-  }, [candidateEdges, strengthPercent]);
+  const edgeThreshold = useMemo(() => edgeThresholdAtPercent(candidateEdges, strengthPercent), [candidateEdges, strengthPercent]);
+  const layoutEdgeThreshold = useMemo(() => edgeThresholdAtPercent(candidateEdges, DEFAULT_LAYOUT_STRENGTH), [candidateEdges]);
 
   const filteredEdges = useMemo(() => {
     return candidateEdges.filter((edge) => edge.weight >= edgeThreshold);
   }, [candidateEdges, edgeThreshold]);
+  const layoutEdges = useMemo(() => {
+    return candidateEdges.filter((edge) => edge.weight >= layoutEdgeThreshold);
+  }, [candidateEdges, layoutEdgeThreshold]);
 
   const strongestEdgesAllForSelection = useMemo(() => {
     if (!selectedNodeId) return [] as ClawgraphEdge[];
@@ -247,18 +254,18 @@ export function ClawgraphLive() {
     return next;
   }, [filteredEdges, selectedNodeId, strongestEdgesForSelection]);
 
-  const nodeIdsFromEdges = useMemo(() => {
+  const nodeIdsForLayout = useMemo(() => {
     const ids = new Set<string>();
-    edgesForRender.forEach((edge) => {
+    candidateEdges.forEach((edge) => {
       ids.add(edge.source);
       ids.add(edge.target);
     });
-    // Keep selected node rendered even if filters hide all of its edges.
+    // Keep selected node rendered even if no visible edge points to it.
     if (selectedNodeId) ids.add(selectedNodeId);
     return ids;
-  }, [edgesForRender, selectedNodeId]);
+  }, [candidateEdges, selectedNodeId]);
 
-  const displayNodes = useMemo(() => graph.nodes.filter((node) => nodeIdsFromEdges.has(node.id)), [graph.nodes, nodeIdsFromEdges]);
+  const displayNodes = useMemo(() => graph.nodes.filter((node) => nodeIdsForLayout.has(node.id)), [graph.nodes, nodeIdsForLayout]);
   const displayNodeById = useMemo(() => new Map(displayNodes.map((node) => [node.id, node])), [displayNodes]);
 
   useEffect(() => {
@@ -269,8 +276,8 @@ export function ClawgraphLive() {
   }, [displayNodeById, selectedNodeId]);
 
   const basePositions = useMemo(
-    () => layoutClawgraph(displayNodes, edgesForRender, viewportSize.width, viewportSize.height),
-    [displayNodes, edgesForRender, viewportSize.height, viewportSize.width]
+    () => layoutClawgraph(displayNodes, layoutEdges, viewportSize.width, viewportSize.height),
+    [displayNodes, layoutEdges, viewportSize.height, viewportSize.width]
   );
 
   const positions = useMemo(() => {
@@ -389,8 +396,8 @@ export function ClawgraphLive() {
 
   const selectedTask = useMemo(() => taskFromNode(selectedNode, tasks), [selectedNode, tasks]);
 
-  const selectedTopicUrl = selectedTopic ? buildTopicUrl(selectedTopic, topics) : null;
-  const selectedTaskUrl = selectedTask ? buildTaskUrl(selectedTask, topics) : null;
+  const selectedTopicUrl = selectedTopic ? withRevealParam(buildTopicUrl(selectedTopic, topics)) : null;
+  const selectedTaskUrl = selectedTask ? withRevealParam(buildTaskUrl(selectedTask, topics)) : null;
 
   const connectedEdgeRows = useMemo(() => {
     if (!selectedNodeId || !selectedNode) return [] as Array<{
@@ -405,11 +412,11 @@ export function ClawgraphLive() {
       const oppositeNode = displayNodeById.get(oppositeNodeId) ?? nodeById.get(oppositeNodeId) ?? null;
       const oppositeTopic = topicFromNode(oppositeNode, topics);
       const oppositeTask = taskFromNode(oppositeNode, tasks);
-      let href = UNIFIED_BASE;
+      let href = withRevealParam(UNIFIED_BASE);
       if (oppositeTask) {
-        href = buildTaskUrl(oppositeTask, topics);
+        href = withRevealParam(buildTaskUrl(oppositeTask, topics));
       } else if (oppositeTopic) {
-        href = buildTopicUrl(oppositeTopic, topics);
+        href = withRevealParam(buildTopicUrl(oppositeTopic, topics));
       } else {
         const queryHint = oppositeNode?.label ?? selectedNode.label;
         const base = selectedTask
@@ -417,7 +424,7 @@ export function ClawgraphLive() {
           : selectedTopic
             ? buildTopicUrl(selectedTopic, topics)
             : UNIFIED_BASE;
-        href = queryHint ? `${base}?q=${encodeURIComponent(queryHint)}` : base;
+        href = withRevealParam(queryHint ? `${base}?q=${encodeURIComponent(queryHint)}` : base);
       }
 
       return {

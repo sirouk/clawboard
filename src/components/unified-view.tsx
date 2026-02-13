@@ -584,6 +584,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [messageDensity, setMessageDensity] = useState<MessageDensity>(initialUrlState.density);
   const [search, setSearch] = useState(initialUrlState.search);
   const [showDone, setShowDone] = useState(initialUrlState.done);
+  const [revealSelection, setRevealSelection] = useState(initialUrlState.reveal);
+  const [revealedTopicIds, setRevealedTopicIds] = useState<string[]>(initialUrlState.topics);
+  const [revealedTaskIds, setRevealedTaskIds] = useState<string[]>(initialUrlState.tasks);
   const [statusFilter, setStatusFilter] = useState<TaskStatusFilter>(
     isTaskStatusFilter(initialUrlState.status) ? initialUrlState.status : "all"
   );
@@ -1693,6 +1696,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   );
 
   const matchesTaskSearch = useCallback((task: Task) => {
+    if (revealSelection && revealedTaskIds.includes(task.id)) return true;
     if (!normalizedSearch) return true;
     if (semanticForQuery) {
       if (semanticTaskIds.has(task.id)) return true;
@@ -1702,10 +1706,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (task.title.toLowerCase().includes(normalizedSearch)) return true;
     const logMatches = logsByTask.get(task.id)?.some(matchesLogSearch);
     return Boolean(logMatches);
-  }, [logsByTask, matchesLogSearch, normalizedSearch, semanticForQuery, semanticLogIds, semanticTaskIds]);
+  }, [logsByTask, matchesLogSearch, normalizedSearch, revealSelection, revealedTaskIds, semanticForQuery, semanticLogIds, semanticTaskIds]);
 
   const matchesStatusFilter = useCallback(
     (task: Task) => {
+      if (revealSelection && revealedTaskIds.includes(task.id)) return true;
       if (!normalizedSearch && !showSnoozedTasks) {
         const until = (task.snoozedUntil ?? "").trim();
         if (until) {
@@ -1717,7 +1722,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (!showDone && task.status === "done") return false;
       return true;
     },
-    [normalizedSearch, showDone, showSnoozedTasks, statusFilter]
+    [normalizedSearch, revealSelection, revealedTaskIds, showDone, showSnoozedTasks, statusFilter]
   );
 
   const orderedTopics = useMemo(() => {
@@ -1749,6 +1754,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       });
 
     const filtered = base.filter((topic) => {
+      if (revealSelection && revealedTopicIds.includes(topic.id)) return true;
       const effectiveView: TopicView = normalizedSearch ? "all" : topicView;
       let topicStatus = String(topic.status ?? "active").trim().toLowerCase();
       if (topicStatus === "paused") topicStatus = "snoozed";
@@ -1809,6 +1815,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     semanticLogIds,
     semanticTopicIds,
     semanticTopicScores,
+    revealSelection,
+    revealedTopicIds,
     statusFilter,
     topicView,
     tasksByTopic,
@@ -2980,6 +2988,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const nextStatus = isTaskStatusFilter(nextStatusRaw) ? nextStatusRaw : "all";
     const nextTopics = parsedState.topics;
     const nextTasks = parsedState.tasks;
+    const nextRevealSelection = parsedState.reveal;
 
     setSearch(parsedState.search);
     committedSearch.current = parsedState.search;
@@ -2987,6 +2996,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setMessageDensity(parsedState.density);
     setStatusFilter(nextStatus);
     setShowDone(parsedState.done || nextStatus === "done");
+    setRevealSelection(nextRevealSelection);
+    setRevealedTopicIds(nextTopics);
+    setRevealedTaskIds(nextTasks);
     setPage(parsedState.page);
     setExpandedTopics(new Set(nextTopics));
     setExpandedTasks(new Set(nextTasks));
@@ -3093,6 +3105,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       overrides: Partial<Record<"q" | "raw" | "done" | "status" | "page" | "density", string>> & {
         topics?: string[];
         tasks?: string[];
+        reveal?: string;
       },
       mode: "push" | "replace" = "push"
     ) => {
@@ -3105,6 +3118,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const nextPage = overrides.page ?? String(safePage);
       const nextTopics = overrides.topics ?? Array.from(expandedTopicsSafe);
       const nextTasks = overrides.tasks ?? Array.from(expandedTasksSafe);
+      const nextReveal = overrides.reveal ?? (revealSelection ? "1" : "0");
 
       if (nextSearch) params.set("q", nextSearch);
       if (nextRaw === "1") params.set("raw", "1");
@@ -3113,6 +3127,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (nextDone === "1") params.set("done", "1");
       if (nextStatus !== "all") params.set("status", nextStatus);
       if (nextPage && nextPage !== "1") params.set("page", nextPage);
+      if (nextReveal === "1") params.set("reveal", "1");
       const segments: string[] = [];
       for (const topicId of nextTopics) {
         segments.push("topic", encodeTopicParam(topicId));
@@ -3146,6 +3161,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       safePage,
       search,
       messageDensity,
+      revealSelection,
       showDone,
       showRaw,
       statusFilter,

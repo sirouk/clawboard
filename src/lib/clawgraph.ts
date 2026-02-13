@@ -126,6 +126,13 @@ function slug(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "node";
 }
 
+function shouldExcludeAgentFocus(agentLabel: string) {
+  const key = slug(agentLabel);
+  // OpenClaw is the backbone agent label in many logs, so linking it to every extracted
+  // entity creates an unhelpful global hub in the graph.
+  return key === "openclaw" || key.startsWith("openclaw-");
+}
+
 function cleanText(value: string) {
   let text = (value ?? "").replace(/\r\n?/g, "\n").trim();
   text = text.replace(/^\s*summary\s*[:\-]\s*/gim, "");
@@ -310,7 +317,8 @@ export function buildClawgraphFromData(
     const weight = weightBase * noteBoost;
 
     const agentLabel = (log.agentLabel || log.agentId || "").trim();
-    if (agentLabel) {
+    const excludeAgentFocus = agentLabel ? shouldExcludeAgentFocus(agentLabel) : false;
+    if (agentLabel && !excludeAgentFocus) {
       const agentNode = `agent:${slug(agentLabel)}`;
       if (!nodeMap.has(agentNode)) {
         nodeMap.set(agentNode, {
@@ -336,7 +344,7 @@ export function buildClawgraphFromData(
       entityIds.push(entityId);
       if (log.topicId) bumpInMap(topicEntity, log.topicId, entityId, weight);
       if (log.taskId) bumpInMap(taskEntity, log.taskId, entityId, weight);
-      if (agentLabel) bumpInMap(agentEntity, agentLabel, entityId, weight * 0.85);
+      if (agentLabel && !excludeAgentFocus) bumpInMap(agentEntity, agentLabel, entityId, weight * 0.85);
     });
 
     const uniq = Array.from(new Set(entityIds)).sort();
@@ -552,43 +560,25 @@ export function layoutClawgraph(
   height: number,
   iterations = 160
 ) {
+  if (nodes.length === 0) return new Map<string, GraphLayoutPosition>();
   const safeWidth = Math.max(520, width || 980);
   const safeHeight = Math.max(420, height || 680);
   const centerX = safeWidth / 2;
   const centerY = safeHeight / 2;
 
-  const ring = {
-    topic: Math.min(safeWidth, safeHeight) * 0.24,
-    task: Math.min(safeWidth, safeHeight) * 0.42,
-    entity: Math.min(safeWidth, safeHeight) * 0.62,
-    agent: Math.min(safeWidth, safeHeight) * 0.82,
-  };
-
-  const groups: Record<ClawgraphNodeType, ClawgraphNode[]> = {
+  const typeOrder: ClawgraphNodeType[] = ["topic", "task", "entity", "agent"];
+  const groupedByType: Record<ClawgraphNodeType, ClawgraphNode[]> = {
     topic: [],
     task: [],
     entity: [],
     agent: [],
   };
-  nodes.forEach((node) => groups[node.type].push(node));
+  nodes.forEach((node) => groupedByType[node.type].push(node));
+  const orderedNodes = typeOrder.flatMap((type) => groupedByType[type]);
 
   const indexById = new Map<string, number>();
-  const x = new Float64Array(nodes.length);
-  const y = new Float64Array(nodes.length);
-  const vx = new Float64Array(nodes.length);
-  const vy = new Float64Array(nodes.length);
-
-  let index = 0;
-  (["topic", "task", "entity", "agent"] as ClawgraphNodeType[]).forEach((type) => {
-    const list = groups[type];
-    list.forEach((node, position) => {
-      const angle = (position / Math.max(1, list.length)) * Math.PI * 2;
-      const jitter = ((position % 7) - 3) * 3.4;
-      x[index] = centerX + Math.cos(angle) * ring[type] + jitter;
-      y[index] = centerY + Math.sin(angle) * ring[type] + jitter;
-      indexById.set(node.id, index);
-      index += 1;
-    });
+  orderedNodes.forEach((node, index) => {
+    indexById.set(node.id, index);
   });
 
   const edgePairs = edges
@@ -600,20 +590,126 @@ export function layoutClawgraph(
     })
     .filter((item): item is { source: number; target: number; weight: number; type: ClawgraphEdgeType } => Boolean(item));
 
-  const kRepel = 2600;
-  const damping = 0.82;
-  const centering = 0.0018;
+  const adjacency = Array.from({ length: orderedNodes.length }, () => new Set<number>());
+  edgePairs.forEach((edge) => {
+    adjacency[edge.source]?.add(edge.target);
+    adjacency[edge.target]?.add(edge.source);
+  });
+
+  const componentByIndex = new Int32Array(orderedNodes.length);
+  componentByIndex.fill(-1);
+  const components: number[][] = [];
+
+  for (let i = 0; i < orderedNodes.length; i += 1) {
+    if (componentByIndex[i] !== -1) continue;
+    const componentId = components.length;
+    const stack = [i];
+    const indices: number[] = [];
+    componentByIndex[i] = componentId;
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (current === undefined) continue;
+      indices.push(current);
+      adjacency[current]?.forEach((next) => {
+        if (componentByIndex[next] !== -1) return;
+        componentByIndex[next] = componentId;
+        stack.push(next);
+      });
+    }
+    components.push(indices);
+  }
+
+  const edgeCountByComponent = new Map<number, number>();
+  edgePairs.forEach((edge) => {
+    const sourceComponent = componentByIndex[edge.source];
+    const targetComponent = componentByIndex[edge.target];
+    if (sourceComponent !== targetComponent) return;
+    edgeCountByComponent.set(sourceComponent, (edgeCountByComponent.get(sourceComponent) ?? 0) + 1);
+  });
+
   const boundX = safeWidth * 0.35;
   const boundY = safeHeight * 0.35;
+  const componentAnchors = Array.from({ length: components.length }, () => ({ x: centerX, y: centerY }));
+  const orderedComponents = components
+    .map((indices, id) => ({
+      id,
+      size: indices.length,
+      edgeCount: edgeCountByComponent.get(id) ?? 0,
+    }))
+    .sort((a, b) => {
+      if (a.size !== b.size) return b.size - a.size;
+      if (a.edgeCount !== b.edgeCount) return b.edgeCount - a.edgeCount;
+      return a.id - b.id;
+    });
+
+  const baseSpan = Math.min(safeWidth, safeHeight);
+  const islandStartRadius = baseSpan * 0.34;
+  const islandRadiusStep = baseSpan * 0.17;
+  orderedComponents.forEach((component, orderIndex) => {
+    if (orderIndex === 0) {
+      componentAnchors[component.id] = { x: centerX, y: centerY };
+      return;
+    }
+    const offsetIndex = orderIndex - 1;
+    const angle = offsetIndex * 2.399963229728653;
+    const singletonBoost = component.size <= 1 ? baseSpan * 0.12 : 0;
+    const radius = islandStartRadius + Math.sqrt(offsetIndex + 1) * islandRadiusStep + singletonBoost;
+    const nextX = centerX + Math.cos(angle) * radius;
+    const nextY = centerY + Math.sin(angle) * radius;
+    componentAnchors[component.id] = {
+      x: Math.max(-boundX * 0.55, Math.min(safeWidth + boundX * 0.55, nextX)),
+      y: Math.max(-boundY * 0.55, Math.min(safeHeight + boundY * 0.55, nextY)),
+    };
+  });
+
+  const x = new Float64Array(orderedNodes.length);
+  const y = new Float64Array(orderedNodes.length);
+  const vx = new Float64Array(orderedNodes.length);
+  const vy = new Float64Array(orderedNodes.length);
+  const nodesByComponentType: Array<Record<ClawgraphNodeType, number[]>> = components.map(() => ({
+    topic: [],
+    task: [],
+    entity: [],
+    agent: [],
+  }));
+
+  orderedNodes.forEach((node, index) => {
+    const componentId = componentByIndex[index];
+    nodesByComponentType[componentId]?.[node.type].push(index);
+  });
+
+  components.forEach((indices, componentId) => {
+    const anchor = componentAnchors[componentId] ?? { x: centerX, y: centerY };
+    const componentSize = indices.length;
+    const baseRadius = Math.max(38, Math.min(188, 32 + componentSize * 6));
+    typeOrder.forEach((type) => {
+      const bucket = nodesByComponentType[componentId]?.[type] ?? [];
+      if (bucket.length === 0) return;
+      const scale = type === "topic" ? 0.46 : type === "task" ? 0.74 : type === "entity" ? 1.02 : 1.28;
+      const radius = baseRadius * scale;
+      bucket.forEach((nodeIndex, position) => {
+        const angle = (position / Math.max(1, bucket.length)) * Math.PI * 2 + componentId * 0.29;
+        const jitter = ((position % 5) - 2) * 2.6;
+        x[nodeIndex] = anchor.x + Math.cos(angle) * radius + jitter;
+        y[nodeIndex] = anchor.y + Math.sin(angle) * radius + jitter;
+      });
+    });
+  });
+
+  const kRepel = 2600;
+  const crossComponentRepel = 0.16;
+  const damping = 0.82;
+  const centering = 0.0024;
 
   for (let iter = 0; iter < iterations; iter += 1) {
-    for (let i = 0; i < nodes.length; i += 1) {
-      for (let j = i + 1; j < nodes.length; j += 1) {
+    for (let i = 0; i < orderedNodes.length; i += 1) {
+      for (let j = i + 1; j < orderedNodes.length; j += 1) {
         const dx = x[j] - x[i];
         const dy = y[j] - y[i];
         const dist2 = dx * dx + dy * dy + 24;
         const dist = Math.sqrt(dist2);
-        const force = kRepel / dist2;
+        const sameComponent = componentByIndex[i] === componentByIndex[j];
+        const force = (sameComponent ? kRepel : kRepel * crossComponentRepel) / dist2;
         const nx = dx / dist;
         const ny = dy / dist;
         vx[i] -= nx * force;
@@ -637,9 +733,13 @@ export function layoutClawgraph(
       vy[edge.target] -= ny * spring;
     });
 
-    for (let i = 0; i < nodes.length; i += 1) {
-      vx[i] += (centerX - x[i]) * centering;
-      vy[i] += (centerY - y[i]) * centering;
+    for (let i = 0; i < orderedNodes.length; i += 1) {
+      const componentId = componentByIndex[i];
+      const anchor = componentAnchors[componentId] ?? { x: centerX, y: centerY };
+      const componentSize = components[componentId]?.length ?? 1;
+      const pull = componentSize <= 1 ? centering * 1.5 : centering;
+      vx[i] += (anchor.x - x[i]) * pull;
+      vy[i] += (anchor.y - y[i]) * pull;
       vx[i] *= damping;
       vy[i] *= damping;
       x[i] += vx[i];
@@ -651,7 +751,7 @@ export function layoutClawgraph(
   }
 
   const out = new Map<string, GraphLayoutPosition>();
-  nodes.forEach((node) => {
+  orderedNodes.forEach((node) => {
     const idx = indexById.get(node.id);
     if (idx === undefined) return;
     out.set(node.id, { x: Number(x[idx].toFixed(2)), y: Number(y[idx].toFixed(2)) });

@@ -37,3 +37,17 @@ export function buildTaskUrl(
   }
   return `${UNIFIED_BASE}/task/${encodeTaskSlug({ id: task.id, title: task.title })}`;
 }
+
+export function withRevealParam(href: string, enabled = true) {
+  const [withoutHash, hash = ""] = href.split("#", 2);
+  const [path, query = ""] = withoutHash.split("?", 2);
+  const params = new URLSearchParams(query);
+  if (enabled) {
+    params.set("reveal", "1");
+  } else {
+    params.delete("reveal");
+  }
+  const nextQuery = params.toString();
+  const nextHref = nextQuery ? `${path}?${nextQuery}` : path;
+  return hash ? `${nextHref}#${hash}` : nextHref;
+}
