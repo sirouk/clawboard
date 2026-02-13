@@ -25,14 +25,24 @@
 # clawboard data
 /data
 *.db
+*.sqlite
+*.sqlite3
 __pycache__/
 *.py[cod]
 backend/.venv/
 backend/data/
 
+# local private memory / exports
+/memory/
+/MEMORY.md
+/openclaw-memory-backups/
+*.p12
+*.pfx
+
 # misc
 .DS_Store
 *.pem
+*.key
 
 # debug
 npm-debug.log*
@@ -52,3 +62,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 _purge-archive/
+
+
+/tests/visual/routes.visual.spec.ts-snapshots/*
+/tests/visual/unified-states.visual.spec.ts-snapshots/*

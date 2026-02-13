@@ -24,13 +24,19 @@ import { cn } from "@/lib/cn";
 import { apiFetch } from "@/lib/api";
 import { useDataStore } from "@/components/data-provider";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
-import { BoardChatComposer, type BoardChatComposerHandle } from "@/components/board-chat-composer";
+import {
+  BoardChatComposer,
+  type BoardChatComposerHandle,
+  type BoardChatComposerSendEvent,
+} from "@/components/board-chat-composer";
 import { BOARD_TASK_SESSION_PREFIX, BOARD_TOPIC_SESSION_PREFIX, taskSessionKey, topicSessionKey } from "@/lib/board-session";
 import { Markdown } from "@/components/markdown";
 import { AttachmentStrip, type AttachmentLike } from "@/components/attachments";
 import { queueDraftUpsert, readBestDraftValue, usePersistentDraft } from "@/lib/drafts";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { SnoozeModal } from "@/components/snooze-modal";
+import { useUnifiedExpansionState } from "@/components/unified-view-state";
+import { getInitialUnifiedUrlState, parseUnifiedUrlState } from "@/components/unified-view-url-state";
 
 const STATUS_TONE: Record<string, "muted" | "accent" | "accent2" | "warning" | "success"> = {
   todo: "muted",
@@ -391,11 +397,15 @@ function SwipeRevealRow({
           setSwiping(false);
         }}
         className={cn(
-          "relative will-change-transform",
-          swiping || isOpen ? "z-20" : "z-0",
+          "relative",
+          (swiping || effectiveOffset > 0) ? "will-change-transform" : "",
+          swiping || isOpen ? "z-20" : "",
           swiping ? "" : "transition-transform duration-200 ease-out"
         )}
-        style={{ transform: `translate3d(-${effectiveOffset}px,0,0)`, touchAction: "pan-y" }}
+        style={{
+          ...(effectiveOffset > 0 ? { transform: `translate3d(-${effectiveOffset}px,0,0)` } : {}),
+          touchAction: "pan-y",
+        }}
       >
         {children}
       </div>
@@ -463,16 +473,27 @@ function taskGlowStyle(color: string, index: number, expanded: boolean): CSSProp
   };
 }
 
-type UrlState = {
-  search: string;
-  raw: boolean;
-  density: MessageDensity;
-  done: boolean;
-  status: string;
-  page: number;
-  topics: string[];
-  tasks: string[];
-};
+function mobileOverlaySurfaceStyle(color: string): CSSProperties {
+  return {
+    // Use an opaque base so board content never bleeds through fullscreen chat layers.
+    backgroundColor: "rgb(10,12,16)",
+    backgroundImage: `linear-gradient(180deg, ${rgba(color, 0.3)} 0%, rgba(12,14,18,0.95) 38%, rgba(12,14,18,0.99) 100%)`,
+  };
+}
+
+function mobileOverlayHeaderStyle(color: string): CSSProperties {
+  return {
+    background: `linear-gradient(180deg, ${rgba(color, 0.36)} 0%, rgba(12,14,18,0.9) 76%)`,
+    borderColor: rgba(color, 0.34),
+  };
+}
+
+function mobileOverlayCloseButtonStyle(color: string): CSSProperties {
+  return {
+    background: `linear-gradient(180deg, ${rgba(color, 0.42)} 0%, rgba(14,17,22,0.84) 100%)`,
+    borderColor: rgba(color, 0.48),
+  };
+}
 
 function parseTopicPayload(value: unknown): Topic | null {
   if (!value || typeof value !== "object") return null;
@@ -496,59 +517,6 @@ function parseTaskPayload(value: unknown): Task | null {
   return task as Task;
 }
 
-function getInitialUrlState(basePath: string): UrlState {
-  if (typeof window === "undefined") {
-    return { search: "", raw: true, density: "compact", done: false, status: "all", page: 1, topics: [], tasks: [] };
-  }
-  const url = new URL(window.location.href);
-  const params = url.searchParams;
-  const segments = url.pathname.startsWith(basePath)
-    ? url.pathname.slice(basePath.length).split("/").filter(Boolean)
-    : [];
-  const parsedTopics: string[] = [];
-  const parsedTasks: string[] = [];
-  for (let i = 0; i < segments.length; i += 1) {
-    const key = segments[i];
-    const value = segments[i + 1];
-    if (!value) continue;
-    if (key === "topic") {
-      parsedTopics.push(decodeSlugId(value));
-      i += 1;
-    } else if (key === "task") {
-      parsedTasks.push(decodeSlugId(value));
-      i += 1;
-    }
-  }
-  let nextTopics = parsedTopics;
-  let nextTasks = parsedTasks;
-  if (nextTopics.length === 0) {
-    nextTopics = params.getAll("topic").map((value) => decodeSlugId(value)).filter(Boolean);
-  }
-  if (nextTasks.length === 0) {
-    nextTasks = params.getAll("task").map((value) => decodeSlugId(value)).filter(Boolean);
-  }
-  if (nextTopics.length === 0) {
-    const legacyTopics = params.get("topics")?.split(",").filter(Boolean) ?? [];
-    nextTopics = legacyTopics.map((value) => decodeSlugId(value)).filter(Boolean);
-  }
-  if (nextTasks.length === 0) {
-    const legacyTasks = params.get("tasks")?.split(",").filter(Boolean) ?? [];
-    nextTasks = legacyTasks.map((value) => decodeSlugId(value)).filter(Boolean);
-  }
-  const densityParam = (params.get("density") ?? "").trim().toLowerCase();
-  const density: MessageDensity = densityParam === "comfortable" ? "comfortable" : "compact";
-  return {
-    search: params.get("q") ?? "",
-    raw: params.get("raw") !== "0",
-    density,
-    done: params.get("done") === "1",
-    status: params.get("status") ?? "all",
-    page: Math.max(1, Number(params.get("page") ?? 1)),
-    topics: nextTopics,
-    tasks: nextTasks,
-  };
-}
-
 export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const { token, tokenRequired } = useAppConfig();
   const { topics, tasks, logs, drafts, openclawTyping, hydrated, setTopics, setTasks, setLogs } = useDataStore();
@@ -557,7 +525,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const searchParams = useSearchParams();
   const scrollMemory = useRef<Record<string, number>>({});
   const restoreScrollOnNextSyncRef = useRef(false);
-  const [initialUrlState] = useState(() => getInitialUrlState(basePath));
+  const suppressNextUrlSyncRef = useRef(false);
+  const [initialUrlState] = useState(() => getInitialUnifiedUrlState(basePath));
   const twoColumn = useLocalStorageItem("clawboard.unified.twoColumn") === "true";
   const storedTopicView = (useLocalStorageItem(TOPIC_VIEW_KEY) ?? "").trim().toLowerCase();
   const topicView: TopicView = isTopicView(storedTopicView) ? storedTopicView : "active";
@@ -565,6 +534,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const unsnoozedTopicsRaw = useLocalStorageItem(UNSNOOZED_TOPICS_KEY) ?? "{}";
   const unsnoozedTasksRaw = useLocalStorageItem(UNSNOOZED_TASKS_KEY) ?? "{}";
   const [mdUp, setMdUp] = useState(false);
+  const {
+    state: expansionState,
+    setExpandedTopics,
+    setExpandedTasks,
+    setExpandedTopicChats,
+    setMobileLayer,
+    setMobileChatTarget,
+  } = useUnifiedExpansionState(initialUrlState.topics, initialUrlState.tasks);
+  const { expandedTopics, expandedTasks, expandedTopicChats, mobileLayer, mobileChatTarget } = expansionState;
   const showTwoColumns = twoColumn && mdUp;
   const unsnoozedTopicBadges = useMemo<Record<string, number>>(() => {
     try {
@@ -602,10 +580,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       return {};
     }
   }, [unsnoozedTasksRaw]);
-  const [expandedTopics, setExpandedTopics] = useState<Set<string>>(new Set(initialUrlState.topics));
-  const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set(initialUrlState.tasks));
-  // Topic chat is independent: topics can expand without auto-opening chat.
-  const [expandedTopicChats, setExpandedTopicChats] = useState<Set<string>>(new Set());
   const [showRaw, setShowRaw] = useState(initialUrlState.raw);
   const [messageDensity, setMessageDensity] = useState<MessageDensity>(initialUrlState.density);
   const [search, setSearch] = useState(initialUrlState.search);
@@ -635,6 +609,88 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       return () => mql.removeListener(sync);
     }
   }, []);
+
+  useEffect(() => {
+    if (mdUp) {
+      setMobileLayer("board");
+      setMobileChatTarget(null);
+    }
+  }, [mdUp, setMobileChatTarget, setMobileLayer]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    if (mdUp || mobileLayer !== "chat") return;
+    const root = document.documentElement;
+    const body = document.body;
+    const lockY = window.scrollY;
+    const previousRootOverflow = root.style.overflow;
+    const previousBodyOverflow = body.style.overflow;
+    const previousBodyPosition = body.style.position;
+    const previousBodyTop = body.style.top;
+    const previousBodyLeft = body.style.left;
+    const previousBodyRight = body.style.right;
+    const previousBodyWidth = body.style.width;
+    root.style.overflow = "hidden";
+    body.style.overflow = "hidden";
+    body.style.position = "fixed";
+    body.style.top = `-${lockY}px`;
+    body.style.left = "0";
+    body.style.right = "0";
+    body.style.width = "100%";
+    return () => {
+      root.style.overflow = previousRootOverflow;
+      body.style.overflow = previousBodyOverflow;
+      body.style.position = previousBodyPosition;
+      body.style.top = previousBodyTop;
+      body.style.left = previousBodyLeft;
+      body.style.right = previousBodyRight;
+      body.style.width = previousBodyWidth;
+      window.scrollTo({ top: lockY, left: 0, behavior: "auto" });
+    };
+  }, [mdUp, mobileLayer]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    const root = document.documentElement;
+    if (mdUp || mobileLayer !== "chat") {
+      root.style.removeProperty("--claw-mobile-vh");
+      return;
+    }
+
+    const viewport = window.visualViewport;
+    const syncViewportHeight = () => {
+      const height = viewport?.height ?? window.innerHeight;
+      root.style.setProperty("--claw-mobile-vh", `${Math.round(height)}px`);
+    };
+
+    syncViewportHeight();
+    window.addEventListener("resize", syncViewportHeight);
+    window.addEventListener("orientationchange", syncViewportHeight);
+    viewport?.addEventListener("resize", syncViewportHeight);
+
+    return () => {
+      window.removeEventListener("resize", syncViewportHeight);
+      window.removeEventListener("orientationchange", syncViewportHeight);
+      viewport?.removeEventListener("resize", syncViewportHeight);
+      root.style.removeProperty("--claw-mobile-vh");
+    };
+  }, [mdUp, mobileLayer]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const root = document.documentElement;
+    if (!mdUp && mobileLayer === "chat") {
+      root.setAttribute("data-claw-mobile-layer", "chat");
+      return () => {
+        if (root.getAttribute("data-claw-mobile-layer") === "chat") {
+          root.removeAttribute("data-claw-mobile-layer");
+        }
+      };
+    }
+    if (root.getAttribute("data-claw-mobile-layer") === "chat") {
+      root.removeAttribute("data-claw-mobile-layer");
+    }
+  }, [mdUp, mobileLayer]);
 
   // Per-chat "oldest visible index" into that chat's log list.
   // Keyed by chat scroller keys (e.g. `topic:${topicId}`, `task:${taskId}`).
@@ -681,6 +737,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [topicBumpAt, setTopicBumpAt] = useState<Record<string, number>>({});
   const [taskBumpAt, setTaskBumpAt] = useState<Record<string, number>>({});
   const bumpTimers = useRef<Map<string, number>>(new Map());
+  const mobileDoneCollapseTaskIdRef = useRef<string | null>(null);
   const [activeComposer, setActiveComposer] = useState<
     | { kind: "topic"; topicId: string }
     | { kind: "task"; topicId: string; taskId: string }
@@ -694,7 +751,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const chatLastSeenRef = useRef<Map<string, string>>(new Map());
   const chatScrollers = useRef<Map<string, HTMLElement>>(new Map());
   const chatAtBottomRef = useRef<Map<string, boolean>>(new Map());
-  const chatLoadOlderCooldownRef = useRef<Map<string, number>>(new Map());
   const typingAliasRef = useRef<Map<string, { sourceSessionKey: string; createdAt: number }>>(new Map());
   const [pendingMessages, setPendingMessages] = useState<
     Array<{
@@ -714,7 +770,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [chatJumpToBottom, setChatJumpToBottom] = useState<Record<string, boolean>>({});
   const chatLastScrollTopRef = useRef<Map<string, number>>(new Map());
 
-  const CHAT_AUTO_SCROLL_THRESHOLD_PX = 160;
+  const CHAT_AUTO_SCROLL_THRESHOLD_PX = 24;
   const topicAutosaveTimerRef = useRef<number | null>(null);
   const taskAutosaveTimerRef = useRef<number | null>(null);
   const skipTopicAutosaveRef = useRef(false);
@@ -1199,7 +1255,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (next.size === prev.size) return prev;
       return next;
     });
-  }, [expandedTopicsSafe]);
+  }, [expandedTopicsSafe, setExpandedTopicChats]);
+
+  const taskTopicById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const task of tasks) {
+      map.set(task.id, task.topicId ?? "unassigned");
+    }
+    return map;
+  }, [tasks]);
 
   const tasksByTopic = useMemo(() => {
     const map = new Map<string, Task[]>();
@@ -1320,6 +1384,57 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (now - ts > 10 * 60 * 1000) map.delete(k);
     }
   }, []);
+
+  const handleComposerSendUpdate = useCallback(
+    (event: BoardChatComposerSendEvent | undefined) => {
+      if (!event) return;
+      markRecentBoardSend(event.sessionKey);
+      if (event.phase === "sending") {
+        setAwaitingAssistant((prev) => ({
+          ...prev,
+          [event.sessionKey]: { sentAt: event.createdAt },
+        }));
+        setPendingMessages((prev) => [
+          ...prev.filter((item) => item.localId !== event.localId),
+          {
+            localId: event.localId,
+            sessionKey: event.sessionKey,
+            message: event.message,
+            attachments: event.attachments,
+            createdAt: event.createdAt,
+            status: "sending",
+          },
+        ]);
+      } else if (event.phase === "queued") {
+        setAwaitingAssistant((prev) => ({
+          ...prev,
+          [event.sessionKey]: { sentAt: event.createdAt, requestId: event.requestId },
+        }));
+        setPendingMessages((prev) =>
+          prev.map((item) =>
+            item.localId === event.localId ? { ...item, requestId: event.requestId, status: "sent" } : item
+          )
+        );
+      } else if (event.phase === "failed") {
+        setAwaitingAssistant((prev) => {
+          if (!Object.prototype.hasOwnProperty.call(prev, event.sessionKey)) return prev;
+          const next = { ...prev };
+          delete next[event.sessionKey];
+          return next;
+        });
+        setPendingMessages((prev) =>
+          prev.map((item) => (item.localId === event.localId ? { ...item, status: "failed", error: event.error } : item))
+        );
+      }
+      const chatKey = chatKeyFromSessionKey(event.sessionKey);
+      if (chatKey) {
+        activeChatKeyRef.current = chatKey;
+        activeChatAtBottomRef.current = true;
+        scheduleScrollChatToBottom(chatKey);
+      }
+    },
+    [chatKeyFromSessionKey, markRecentBoardSend, scheduleScrollChatToBottom]
+  );
 
   const getChatLastLogId = useCallback(
     (key: string) => {
@@ -1780,6 +1895,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
 
     const updated = parseTaskPayload(await res.json().catch(() => null));
+    const nextStatus = String(updated?.status ?? updates.status ?? current.status).trim().toLowerCase();
+    const transitionedToDone = nextStatus === "done" && String(current.status ?? "").trim().toLowerCase() !== "done";
     setTasks((prev) =>
       prev.map((task) =>
         task.id === taskId
@@ -1791,6 +1908,20 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           : task
       )
     );
+    if (!mdUp && transitionedToDone) {
+      suppressNextUrlSyncRef.current = true;
+      mobileDoneCollapseTaskIdRef.current = taskId;
+      setExpandedTasks((prev) => {
+        if (!prev.has(taskId)) return prev;
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
+      if (mobileLayer === "chat" && mobileChatTarget?.kind === "task" && mobileChatTarget.taskId === taskId) {
+        setMobileLayer("board");
+        setMobileChatTarget(null);
+      }
+    }
   };
 
   const persistTopicOrder = useCallback(async (orderedIds: string[]) => {
@@ -2569,16 +2700,158 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     pushUrl({ topics: Array.from(next), tasks: Array.from(nextTasks) });
   };
 
-  const toggleTaskExpanded = (taskId: string) => {
+  const openMobileTaskChat = useCallback(
+    (topicId: string, taskId: string) => {
+      setMobileChatTarget({ kind: "task", topicId, taskId });
+      setMobileLayer("chat");
+      setExpandedTopics((prev) => {
+        if (prev.has(topicId)) return prev;
+        const next = new Set(prev);
+        next.add(topicId);
+        return next;
+      });
+      setExpandedTasks((prev) => {
+        if (prev.has(taskId)) return prev;
+        const next = new Set(prev);
+        next.add(taskId);
+        return next;
+      });
+      scheduleScrollChatToBottom(`task:${taskId}`);
+    },
+    [scheduleScrollChatToBottom, setExpandedTasks, setExpandedTopics, setMobileChatTarget, setMobileLayer]
+  );
+
+  const openMobileTopicChat = useCallback(
+    (topicId: string) => {
+      setMobileChatTarget({ kind: "topic", topicId });
+      setMobileLayer("chat");
+      setExpandedTopics((prev) => {
+        if (prev.has(topicId)) return prev;
+        const next = new Set(prev);
+        next.add(topicId);
+        return next;
+      });
+      setExpandedTopicChats((prev) => {
+        if (prev.has(topicId)) return prev;
+        const next = new Set(prev);
+        next.add(topicId);
+        return next;
+      });
+      scheduleScrollChatToBottom(`topic:${topicId}`);
+    },
+    [scheduleScrollChatToBottom, setExpandedTopicChats, setExpandedTopics, setMobileChatTarget, setMobileLayer]
+  );
+
+  const closeMobileChatLayer = useCallback(() => {
+    const target = mobileChatTarget;
+    if (target?.kind === "task") {
+      setExpandedTasks((prev) => {
+        if (!prev.has(target.taskId)) return prev;
+        const next = new Set(prev);
+        next.delete(target.taskId);
+        return next;
+      });
+    } else if (target?.kind === "topic") {
+      setExpandedTopicChats((prev) => {
+        if (!prev.has(target.topicId)) return prev;
+        const next = new Set(prev);
+        next.delete(target.topicId);
+        return next;
+      });
+      setExpandedTopics((prev) => {
+        if (!prev.has(target.topicId)) return prev;
+        const next = new Set(prev);
+        next.delete(target.topicId);
+        return next;
+      });
+    }
+    setMobileLayer("board");
+    setMobileChatTarget(null);
+  }, [
+    mobileChatTarget,
+    setExpandedTasks,
+    setExpandedTopicChats,
+    setExpandedTopics,
+    setMobileChatTarget,
+    setMobileLayer,
+  ]);
+
+  useEffect(() => {
+    if (mdUp) return;
+    if (mobileLayer !== "chat") return;
+    if (!mobileChatTarget) return;
+
+    const topicVisible = orderedTopics.some((topic) => topic.id === mobileChatTarget.topicId);
+    if (mobileChatTarget.kind === "topic") {
+      if (!topicVisible) {
+        closeMobileChatLayer();
+      }
+      return;
+    }
+
+    const activeTask = tasks.find((task) => task.id === mobileChatTarget.taskId);
+    const taskVisible =
+      !!activeTask &&
+      (activeTask.topicId ?? "unassigned") === mobileChatTarget.topicId &&
+      matchesStatusFilter(activeTask) &&
+      matchesTaskSearch(activeTask) &&
+      topicVisible;
+
+    if (taskVisible) return;
+
+    closeMobileChatLayer();
+  }, [
+    closeMobileChatLayer,
+    matchesStatusFilter,
+    matchesTaskSearch,
+    mdUp,
+    mobileChatTarget,
+    mobileLayer,
+    orderedTopics,
+    tasks,
+  ]);
+
+  const toggleTaskExpanded = (topicId: string, taskId: string) => {
+    if (!mdUp) {
+      const isTaskTarget =
+        mobileLayer === "chat" && mobileChatTarget?.kind === "task" && mobileChatTarget.taskId === taskId;
+      if (!isTaskTarget) {
+        setExpandedTopics((prev) => {
+          if (prev.has(topicId)) return prev;
+          const next = new Set(prev);
+          next.add(topicId);
+          return next;
+        });
+        setExpandedTasks((prev) => {
+          if (prev.has(taskId)) return prev;
+          const next = new Set(prev);
+          next.add(taskId);
+          return next;
+        });
+        openMobileTaskChat(topicId, taskId);
+        pushUrl({
+          topics: Array.from(new Set([...expandedTopicsSafe, topicId])),
+          tasks: Array.from(new Set([...expandedTasksSafe, taskId])),
+        });
+        return;
+      }
+    }
+
     const next = new Set(expandedTasksSafe);
+    const nextTopics = new Set(expandedTopicsSafe);
     if (next.has(taskId)) {
       next.delete(taskId);
     } else {
       next.add(taskId);
+      nextTopics.add(topicId);
       scheduleScrollChatToBottom(`task:${taskId}`);
+      if (!mdUp) {
+        openMobileTaskChat(topicId, taskId);
+      }
     }
+    setExpandedTopics(nextTopics);
     setExpandedTasks(next);
-    pushUrl({ tasks: Array.from(next) });
+    pushUrl({ topics: Array.from(nextTopics), tasks: Array.from(next) });
   };
 
   const toggleTopicChatExpanded = (topicId: string) => {
@@ -2588,6 +2861,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     } else {
       next.add(topicId);
       scheduleScrollChatToBottom(`topic:${topicId}`);
+      if (!mdUp) {
+        openMobileTopicChat(topicId);
+      }
     }
     setExpandedTopicChats(next);
   };
@@ -2689,69 +2965,29 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     [tasks]
   );
 
-  const parseSegments = (segments: string[]) => {
-    const topics: string[] = [];
-    const tasks: string[] = [];
-    for (let i = 0; i < segments.length; i += 1) {
-      const key = segments[i];
-      const value = segments[i + 1];
-      if (!value) continue;
-      if (key === "topic") {
-        topics.push(value);
-        i += 1;
-      } else if (key === "task") {
-        tasks.push(value);
-        i += 1;
-      }
-    }
-    return { topics, tasks };
-  };
-
   const syncFromUrl = useCallback(() => {
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     const params = url.searchParams;
-    const segments = url.pathname.startsWith(basePath)
-      ? url.pathname.slice(basePath.length).split("/").filter(Boolean)
-      : [];
-    const parsed = parseSegments(segments);
-    const hasPathSelections = parsed.topics.length > 0 || parsed.tasks.length > 0;
-    const nextSearch = params.get("q") ?? "";
-    const nextRaw = params.get("raw") === "1";
-    const densityParam = (params.get("density") ?? "").trim().toLowerCase();
-    const nextDensity: MessageDensity = densityParam === "comfortable" ? "comfortable" : "compact";
-    const nextShowDone = params.get("done") === "1";
-    const nextStatusRaw = params.get("status") ?? "all";
+    const parsedState = parseUnifiedUrlState(url, {
+      basePath,
+      resolveTopicId,
+      resolveTaskId,
+      rawParseMode: "one-only",
+      taskTopicById,
+    });
+    const nextStatusRaw = parsedState.status ?? "all";
     const nextStatus = isTaskStatusFilter(nextStatusRaw) ? nextStatusRaw : "all";
-    const nextPage = Math.max(1, Number(params.get("page") ?? 1));
-    let nextTopics = hasPathSelections
-      ? parsed.topics.map((value) => resolveTopicId(value)).filter(Boolean)
-      : params
-          .getAll("topic")
-          .map((value) => resolveTopicId(value))
-          .filter(Boolean);
-    let nextTasks = hasPathSelections
-      ? parsed.tasks.map((value) => resolveTaskId(value)).filter(Boolean)
-      : params
-          .getAll("task")
-          .map((value) => resolveTaskId(value))
-          .filter(Boolean);
-    if (nextTopics.length === 0) {
-      const legacyTopics = params.get("topics")?.split(",").filter(Boolean) ?? [];
-      nextTopics = legacyTopics.map((value) => resolveTopicId(value)).filter(Boolean);
-    }
-    if (nextTasks.length === 0) {
-      const legacyTasks = params.get("tasks")?.split(",").filter(Boolean) ?? [];
-      nextTasks = legacyTasks.map((value) => resolveTaskId(value)).filter(Boolean);
-    }
+    const nextTopics = parsedState.topics;
+    const nextTasks = parsedState.tasks;
 
-    setSearch(nextSearch);
-    committedSearch.current = nextSearch;
-    setShowRaw(nextRaw);
-    setMessageDensity(nextDensity);
+    setSearch(parsedState.search);
+    committedSearch.current = parsedState.search;
+    setShowRaw(parsedState.raw);
+    setMessageDensity(parsedState.density);
     setStatusFilter(nextStatus);
-    setShowDone(nextShowDone || nextStatus === "done");
-    setPage(Number.isNaN(nextPage) ? 1 : nextPage);
+    setShowDone(parsedState.done || nextStatus === "done");
+    setPage(parsedState.page);
     setExpandedTopics(new Set(nextTopics));
     setExpandedTasks(new Set(nextTasks));
     // Do not auto-open topic chat from topic expansion/url sync.
@@ -2775,7 +3011,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         });
       }
     }
-  }, [basePath, resolveTaskId, resolveTopicId]);
+  }, [basePath, resolveTaskId, resolveTopicId, setExpandedTasks, setExpandedTopicChats, setExpandedTopics, taskTopicById]);
 
   useEffect(() => {
     const handlePop = () => {
@@ -2789,6 +3025,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   // Next router navigation (router.push / Link) does not trigger popstate.
   // Sync our internal expanded state when pathname/search params change.
   useEffect(() => {
+    if (suppressNextUrlSyncRef.current) {
+      suppressNextUrlSyncRef.current = false;
+      return;
+    }
     syncFromUrl();
   }, [pathname, searchParams, syncFromUrl]);
 
@@ -2912,6 +3152,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       basePath,
     ]
   );
+
+  useEffect(() => {
+    const taskId = mobileDoneCollapseTaskIdRef.current;
+    if (!taskId) return;
+    mobileDoneCollapseTaskIdRef.current = null;
+    const nextTasks = Array.from(expandedTasksSafe).filter((id) => id !== taskId);
+    pushUrl({ tasks: nextTasks }, "replace");
+  }, [expandedTasksSafe, pushUrl]);
 
   const submitNewTopicDraft = useCallback(async () => {
     if (readOnly) return null;
@@ -3044,21 +3292,22 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const nextTopics = Array.from(new Set([...expandedTopicsSafe, promotion.topicId]));
     const nextTasks = Array.from(new Set([...expandedTasksSafe, promotion.taskId]));
     pushUrl({ topics: nextTopics, tasks: nextTasks }, "replace");
-  }, [expandedTasksSafe, expandedTopicsSafe, logs, pushUrl, scheduleScrollChatToBottom]);
+  }, [expandedTasksSafe, expandedTopicsSafe, logs, pushUrl, scheduleScrollChatToBottom, setExpandedTasks, setExpandedTopics]);
 
 
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div
         className={cn(
-          "sticky top-0 z-30 -mx-6 space-y-3 px-6 pb-3 pt-4 transition",
+          "sticky top-0 z-30 -mx-3 space-y-2 px-3 pb-2 pt-2 transition sm:-mx-4 sm:px-4 sm:pb-2.5 sm:pt-2.5 md:-mx-6 md:space-y-3 md:px-6 md:pb-3 md:pt-4",
+          mobileLayer === "chat" ? "max-md:hidden" : "",
           isSticky
             ? "border-b border-[rgb(var(--claw-border))] bg-[rgba(12,14,18,0.9)] backdrop-blur"
             : "bg-transparent"
         )}
       >
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2">
           <Input
             value={search}
             onChange={(event) => {
@@ -3080,11 +3329,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               }
             }}
             placeholder="Search topics, tasks, or messages"
-            className="min-w-[240px] flex-1"
+            className="min-w-0 flex-1 md:min-w-[240px]"
           />
           <Button
             variant="secondary"
             size="sm"
+            className="max-md:h-9 max-md:px-3 max-md:text-xs"
             onClick={() => setShowViewOptions((prev) => !prev)}
             aria-expanded={showViewOptions}
           >
@@ -3092,8 +3342,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           </Button>
         </div>
         {showViewOptions && (
-          <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.92)] p-3">
-            <div className="flex flex-wrap items-center gap-2">
+          <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.92)] p-2.5 md:p-3">
+            <div className="flex flex-wrap items-center gap-1.5 md:gap-2">
               <Button
                 variant="secondary"
                 size="sm"
@@ -3199,7 +3449,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         )}
       </div>
 
-      <div className="space-y-4">
+      <div className="space-y-3 max-md:space-y-2.5">
         {!readOnly && (
           <div className="flex items-center justify-start">
             <Button
@@ -3215,7 +3465,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         )}
         {!readOnly && newTopicDraftOpen && (
           <div
-            className="rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] bg-[linear-gradient(145deg,rgba(28,32,40,0.6),rgba(16,19,24,0.5))] p-4 shadow-[0_0_0_1px_rgba(0,0,0,0.25)] backdrop-blur"
+            className="rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] bg-[linear-gradient(145deg,rgba(28,32,40,0.6),rgba(16,19,24,0.5))] p-3.5 shadow-[0_0_0_1px_rgba(0,0,0,0.25)] backdrop-blur md:p-4"
             onBlur={(event) => {
               const next = event.relatedTarget as HTMLElement | null;
               if (next && event.currentTarget.contains(next)) return;
@@ -3312,10 +3562,24 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	          const topicLogsAll = logsByTopicAll.get(topicId) ?? [];
 	          const topicChatAllLogs = topicLogsAll.filter((entry) => !entry.taskId && matchesLogSearchChat(entry));
 	          const topicChatBlurb = deriveChatHeaderBlurb(topicChatAllLogs);
-          const showTasks = true;
-          const isExpanded = expandedTopicsSafe.has(topicId);
-          const topicChatExpanded = expandedTopicChatsSafe.has(topicId);
-          const topicChatKey = chatKeyForTopic(topicId);
+	          const showTasks = true;
+	          const isExpanded = expandedTopicsSafe.has(topicId);
+	          const topicChatKey = chatKeyForTopic(topicId);
+	          const topicChatFullscreen =
+	            !mdUp &&
+	            mobileLayer === "chat" &&
+	            mobileChatTarget?.kind === "topic" &&
+	            mobileChatTarget.topicId === topicId;
+	          const topicChatExpanded = topicChatFullscreen || expandedTopicChatsSafe.has(topicId);
+	          const mobileChatTopicId =
+	            mobileLayer === "chat"
+              ? mobileChatTarget?.kind === "task"
+                ? mobileChatTarget.topicId
+                : mobileChatTarget?.topicId
+              : null;
+          if (!mdUp && mobileLayer === "chat" && mobileChatTopicId && mobileChatTopicId !== topicId) {
+            return null;
+          }
           const topicChatStart = normalizedSearch
             ? 0
             : computeChatStart(chatHistoryStarts, topicChatKey, topicChatAllLogs.length, TOPIC_TIMELINE_LIMIT);
@@ -3401,26 +3665,31 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               key={topicId}
               data-topic-card-id={topicId}
               className={cn(
-                "rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] p-5 transition-colors duration-300",
+                "border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300 md:p-5",
+                topicChatFullscreen
+                  ? "fixed inset-0 z-[1400] m-0 flex h-[var(--claw-mobile-vh)] flex-col overflow-hidden rounded-none border-0 p-0"
+                  : "relative rounded-[var(--radius-lg)]",
                 // Mobile UX: keep the topic header visible and scroll the expanded body when it would
                 // exceed the viewport.
                 //
                 // NOTE: Don't set overflow/max-height on the outer card; it can make the expanded
                 // state feel like a clipped "box". Constrain the scroll region instead.
-                isExpanded
-                  ? "max-md:sticky max-md:top-[calc(var(--claw-header-h,0px)+12px)] max-md:z-20 max-md:flex max-md:flex-col"
+                isExpanded && !topicChatFullscreen
+                  ? "max-md:sticky max-md:top-[calc(var(--claw-header-h,0px)+8px)] max-md:flex max-md:flex-col"
                   : "",
                 draggingTopicId && topicDropTargetId === topicId ? "border-[rgba(255,90,45,0.55)]" : ""
               )}
-              style={topicGlowStyle(topicColor, topicIndex, isExpanded)}
+              style={topicChatFullscreen ? mobileOverlaySurfaceStyle(topicColor) : topicGlowStyle(topicColor, topicIndex, isExpanded)}
             >
               <div
                 role="button"
                 tabIndex={0}
                 className={cn(
-                  "flex flex-wrap items-start justify-between gap-4 text-left",
-                  isExpanded
-                    ? "max-md:sticky max-md:top-0 max-md:z-10 max-md:-mx-5 max-md:border-b max-md:border-[rgb(var(--claw-border))] max-md:bg-[rgba(12,14,18,0.92)] max-md:px-5 max-md:pb-3 max-md:pt-4 max-md:backdrop-blur"
+                  "flex items-start justify-between gap-3 text-left",
+                  topicChatFullscreen ? "hidden" : "",
+                  editingTopicId === topic.id ? "flex-wrap" : "flex-nowrap",
+                  isExpanded && !topicChatFullscreen
+                    ? "max-md:sticky max-md:top-0 max-md:z-10"
                     : ""
                 )}
                 onClick={(event) => {
@@ -3468,8 +3737,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                }}
 		                aria-expanded={isExpanded}
 		              >
-	                <div>
-	                  <div className="flex items-center gap-2">
+		                <div className="min-w-0">
+		                  <div className="flex min-w-0 items-center gap-2">
 		                    <button
 		                      type="button"
 		                      data-testid={`reorder-topic-${topic.id}`}
@@ -3643,7 +3912,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			              </div>
                     ) : (
                       <>
-                        <h2 className="text-lg font-semibold">{topic.name}</h2>
+	                        <h2 className="truncate text-base font-semibold md:text-lg">{topic.name}</h2>
                         <button
                           type="button"
                           data-testid={`rename-topic-${topic.id}`}
@@ -3699,7 +3968,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     <p className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`topic:${topic.id}`]}</p>
                   )}
                   {isExpanded && <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topic.description}</p>}
-	                  <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-[rgb(var(--claw-muted))]">
+		                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-[rgb(var(--claw-muted))] sm:text-xs">
 	                    <span>{taskList.length} tasks</span>
 	                    <span>{openCount} open</span>
 	                    {isExpanded && <span>{doingCount} doing</span>}
@@ -3729,26 +3998,27 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                    event.stopPropagation();
 	                    toggleTopicExpanded(topicId);
 	                  }}
-	                  className={cn(
-	                    "flex h-9 w-9 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-lg text-[rgb(var(--claw-muted))] transition",
-	                    "hover:border-[rgba(255,90,45,0.3)] hover:text-[rgb(var(--claw-text))]"
-	                  )}
+		                  className={cn(
+		                    "flex h-8 w-8 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-base text-[rgb(var(--claw-muted))] transition",
+		                    "hover:border-[rgba(255,90,45,0.3)] hover:text-[rgb(var(--claw-text))]"
+		                  )}
 	                >
 		                  {isExpanded ? "▾" : "▸"}
 		                </button>
 		              </div>
 	
-	              {isExpanded && showTasks && (
+		              {isExpanded && showTasks && (
 		                <div
                       data-testid={`topic-expanded-body-${topicId}`}
-                      className={cn(
-                        "mt-4 space-y-3",
-                        // Scroll the expanded body on mobile while leaving the header visible.
-                        // The max-height keeps the scroll region within the viewport.
-                        "max-md:flex-1 max-md:min-h-0 max-md:overflow-y-auto max-md:max-h-[calc(100dvh-15rem)] max-md:pb-6"
-                      )}
-                    >
-                      <div className="flex flex-wrap items-center gap-2">
+	                      className={cn(
+		                        topicChatFullscreen
+                              ? "mt-0 flex min-h-0 flex-1 flex-col"
+                              : "mt-3 space-y-3 max-md:pb-2"
+		                      )}
+	                    >
+                      {!topicChatFullscreen ? (
+                        <>
+	                      <div className="flex flex-wrap items-center gap-2">
                         <Input
                           value={newTaskDraftByTopicId[topicId === "unassigned" ? "unassigned" : topicId] ?? ""}
                           onChange={(event) => {
@@ -3794,15 +4064,28 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       return matchesTaskSearch(task);
                     })
                     .map((task, taskIndex) => {
-                      if (normalizedSearch && !matchesTaskSearch(task) && !`${topic.name} ${topic.description ?? ""}`.toLowerCase().includes(normalizedSearch)) {
+                      if (
+                        !mdUp &&
+                        mobileLayer === "chat" &&
+                        mobileChatTarget?.kind === "task" &&
+                        mobileChatTarget.taskId !== task.id
+                      ) {
                         return null;
                       }
-                      const taskLogs = logsByTaskAll.get(task.id) ?? [];
-                      const taskExpanded = expandedTasksSafe.has(task.id);
-                      const taskColor =
-                        taskDisplayColors.get(task.id) ??
-                        normalizeHexColor(task.color) ??
-                        colorFromSeed(`task:${task.id}:${task.title}`, TASK_FALLBACK_COLORS);
+	                      if (normalizedSearch && !matchesTaskSearch(task) && !`${topic.name} ${topic.description ?? ""}`.toLowerCase().includes(normalizedSearch)) {
+	                        return null;
+	                      }
+	                      const taskLogs = logsByTaskAll.get(task.id) ?? [];
+                      const taskChatFullscreen =
+                        !mdUp &&
+                        mobileLayer === "chat" &&
+                        mobileChatTarget?.kind === "task" &&
+                        mobileChatTarget.taskId === task.id;
+                      const taskExpanded = taskChatFullscreen || expandedTasksSafe.has(task.id);
+	                      const taskColor =
+	                        taskDisplayColors.get(task.id) ??
+	                        normalizeHexColor(task.color) ??
+	                        colorFromSeed(`task:${task.id}:${task.title}`, TASK_FALLBACK_COLORS);
 	                      const taskSnoozedUntil = (task.snoozedUntil ?? "").trim();
 	                      const taskSnoozedStamp = taskSnoozedUntil ? Date.parse(taskSnoozedUntil) : Number.NaN;
 	                      const taskIsSnoozed = Number.isFinite(taskSnoozedStamp) && taskSnoozedStamp > Date.now();
@@ -3872,7 +4155,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       );
                       const taskChatAllLogs = taskLogs.filter(matchesLogSearchChat);
                       const taskChatBlurb = deriveChatHeaderBlurb(taskChatAllLogs);
-                      const taskChatKey = chatKeyForTask(task.id);
+	                      const taskChatKey = chatKeyForTask(task.id);
                       const start = normalizedSearch
                         ? 0
                         : computeChatStart(chatHistoryStarts, taskChatKey, taskChatAllLogs.length, TASK_TIMELINE_LIMIT);
@@ -3889,24 +4172,30 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                        <div
                               data-task-card-id={task.id}
 		                          className={cn(
-		                            "relative rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300",
+		                            "border border-[rgb(var(--claw-border))] p-3.5 transition-colors duration-300 sm:p-4",
+                                taskChatFullscreen
+                                  ? "fixed inset-0 z-[1400] m-0 flex h-[var(--claw-mobile-vh)] flex-col overflow-hidden rounded-none border-0 p-0"
+                                  : "relative rounded-[var(--radius-md)]",
 		                            draggingTaskId && taskDropTargetId === task.id ? "border-[rgba(77,171,158,0.55)]" : "",
                                 statusMenuTaskId === task.id ? "z-40" : ""
 		                          )}
-		                          style={taskGlowStyle(taskColor, taskIndex, taskExpanded)}
+		                          style={taskChatFullscreen ? mobileOverlaySurfaceStyle(taskColor) : taskGlowStyle(taskColor, taskIndex, taskExpanded)}
 		                        >
                           <div
                             role="button"
                             tabIndex={0}
                             className={cn(
-                              "flex flex-wrap items-center justify-between gap-3 text-left",
+                              "flex items-center justify-between gap-2.5 text-left",
+                              taskChatFullscreen ? "hidden" : "",
+                              editingTaskId === task.id ? "flex-wrap" : "flex-nowrap",
                               taskExpanded
-                                ? "max-md:sticky max-md:top-0 max-md:z-10 max-md:-mx-4 max-md:border-b max-md:border-[rgb(var(--claw-border))] max-md:bg-[rgba(14,17,22,0.92)] max-md:px-4 max-md:py-3 max-md:backdrop-blur"
+                                ? "max-md:sticky max-md:top-0 max-md:z-10 max-md:-mx-4 max-md:border-b max-md:border-[rgb(var(--claw-border))] max-md:px-4 max-md:py-2.5 max-md:backdrop-blur"
                                 : ""
                             )}
+                            style={!mdUp && taskExpanded ? mobileOverlayHeaderStyle(taskColor) : undefined}
                             onClick={(event) => {
                               if (!allowToggle(event.target as HTMLElement)) return;
-                              toggleTaskExpanded(task.id);
+                              toggleTaskExpanded(topicId, task.id);
                             }}
 		                            onDragEnter={(event) => {
 		                              if (!taskReorderEnabled) return;
@@ -3950,8 +4239,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                            }}
 	                            aria-expanded={taskExpanded}
 	                          >
-	                          <div>
-		                            <div className="flex items-center gap-2 text-sm font-semibold">
+		                          <div className="min-w-0">
+			                            <div className="flex min-w-0 items-center gap-1.5 text-sm font-semibold">
 		                              <button
 		                                type="button"
 		                                data-testid={`reorder-task-${task.id}`}
@@ -4185,7 +4474,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                 </div>
                               ) : (
                                 <>
-                                  <span>{task.title}</span>
+	                                  <span className="truncate">{task.title}</span>
                                   <button
                                     type="button"
                                     data-testid={`rename-task-${task.id}`}
@@ -4372,60 +4661,152 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                              title={taskExpanded ? "Collapse" : "Expand"}
 	                              onClick={(event) => {
 	                                event.stopPropagation();
-	                                toggleTaskExpanded(task.id);
+	                                toggleTaskExpanded(topicId, task.id);
 	                              }}
-	                              className={cn(
-	                                "flex h-9 w-9 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-lg text-[rgb(var(--claw-muted))] transition",
-	                                "hover:border-[rgba(77,171,158,0.45)] hover:text-[rgb(var(--claw-text))]"
-	                              )}
+		                              className={cn(
+		                                "flex h-8 w-8 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-base text-[rgb(var(--claw-muted))] transition",
+		                                "hover:border-[rgba(77,171,158,0.45)] hover:text-[rgb(var(--claw-text))]"
+		                              )}
 	                            >
 	                              {taskExpanded ? "▾" : "▸"}
 	                            </button>
 	                          </div>
 		                        </div>
 			                        {taskExpanded && (
-			                          <div className="mt-4 pt-3">
-				                              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-				                                <div className="flex min-w-0 items-center gap-2">
-				                                  <div className="shrink-0 text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">
-				                                    TASK CHAT
-				                                  </div>
-				                                  {isSessionResponding(taskSessionKey(topicId, task.id)) ? (
-				                                    <TypingDots />
-				                                  ) : null}
-				                                  {taskChatBlurb ? (
-				                                    <>
-				                                      <span className="text-xs text-[rgba(var(--claw-muted),0.55)]">·</span>
-				                                      <div
-				                                        className="min-w-0 max-w-[56ch] truncate text-xs text-[rgba(var(--claw-muted),0.9)]"
-				                                        title={taskChatBlurb.full}
-				                                      >
-				                                        {taskChatBlurb.clipped}
-				                                      </div>
-				                                    </>
-				                                  ) : null}
-				                                </div>
-				                                <div className="flex items-center gap-2">
-				                                  {truncated ? (
-				                                    <Button
-				                                      size="sm"
-			                                      variant="secondary"
-			                                      onClick={() =>
-			                                        loadOlderChat(taskChatKey, TASK_TIMELINE_LIMIT, taskChatAllLogs.length, TASK_TIMELINE_LIMIT)
-			                                      }
-			                                    >
-			                                      Load older
-			                                    </Button>
-			                                  ) : null}
-			                                  <span className="text-xs text-[rgb(var(--claw-muted))]">{taskChatAllLogs.length} entries</span>
-			                                </div>
-			                              </div>
+			                          <div
+                              className={cn(
+                                "mt-2.5 pt-2",
+                                taskChatFullscreen
+                                  ? "mt-0 flex min-h-0 flex-1 flex-col overflow-hidden overscroll-none px-4 pb-5 pt-[calc(env(safe-area-inset-top)+2.7rem)]"
+                                  : ""
+                              )}
+                              style={taskChatFullscreen ? mobileOverlaySurfaceStyle(taskColor) : undefined}
+                            >
+                              {taskChatFullscreen ? (
+                                <button
+                                  type="button"
+	                                  className="absolute left-3 top-[calc(env(safe-area-inset-top)+0.5rem)] z-20 inline-flex h-8 w-8 items-center justify-center rounded-full border text-base text-[rgb(var(--claw-text))] backdrop-blur"
+                                  style={mobileOverlayCloseButtonStyle(taskColor)}
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    closeMobileChatLayer();
+                                  }}
+                                  aria-label="Close chat"
+                                  title="Close chat"
+                                >
+                                  ✕
+                                </button>
+                              ) : null}
+						                              <div
+                                        className={cn(
+                                          taskChatFullscreen
+                                            ? "mb-2 space-y-1"
+                                            : "mb-2.5 flex flex-wrap items-center justify-between gap-2"
+                                        )}
+                                      >
+                                        {taskChatFullscreen ? (
+                                          <div className="flex min-w-0 items-start justify-between gap-2">
+                                            <div data-testid={`task-chat-context-${task.id}`} className="min-w-0 flex-1 pr-2">
+                                              <div className="flex min-w-0 items-center gap-1.5">
+                                                <div className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
+                                                  TASK CHAT
+                                                </div>
+                                                {isSessionResponding(taskSessionKey(topicId, task.id)) ? <TypingDots /> : null}
+                                              </div>
+                                              <nav
+                                                aria-label="Task chat context"
+                                                data-testid={`task-chat-breadcrumb-${task.id}`}
+                                                className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[11px] text-[rgb(var(--claw-muted))]"
+                                              >
+                                                <span className="shrink-0 uppercase tracking-[0.14em]">Topic</span>
+                                                <span className="min-w-0 max-w-[30vw] truncate font-medium text-[rgb(var(--claw-text))]">
+                                                  {topic.name}
+                                                </span>
+                                                <span className="shrink-0 text-[rgba(var(--claw-muted),0.65)]">/</span>
+                                                <span className="shrink-0 uppercase tracking-[0.14em]">Task</span>
+                                                <span className="min-w-0 max-w-[48vw] break-words font-medium leading-tight text-[rgb(var(--claw-text))]">
+                                                  {task.title}
+                                                </span>
+                                              </nav>
+                                            </div>
+                                            <div className="flex min-w-[108px] items-center justify-end">
+                                              <Select
+                                                data-testid={`task-chat-status-${task.id}`}
+                                                value={task.status}
+                                                className="h-8 w-[108px] min-w-[108px] max-w-[108px] shrink-0 rounded-full text-[11px]"
+                                                onClick={(event) => {
+                                                  event.stopPropagation();
+                                                }}
+                                                onChange={(event) => {
+                                                  event.stopPropagation();
+                                                  const nextStatus = event.target.value as Task["status"];
+                                                  if (nextStatus !== task.status) {
+                                                    void updateTask(task.id, { status: nextStatus });
+                                                  }
+                                                }}
+                                              >
+                                                <option value="todo">To Do</option>
+                                                <option value="doing">Doing</option>
+                                                <option value="blocked">Blocked</option>
+                                                <option value="done">Done</option>
+                                              </Select>
+                                            </div>
+                                          </div>
+                                        ) : (
+                                          <div className="flex min-w-0 items-center gap-2">
+                                            <div className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
+                                              TASK CHAT
+                                            </div>
+                                            {isSessionResponding(taskSessionKey(topicId, task.id)) ? <TypingDots /> : null}
+                                            {taskChatBlurb ? (
+                                              <>
+                                                <span className="text-xs text-[rgba(var(--claw-muted),0.55)]">·</span>
+                                                <div
+                                                  className="min-w-0 max-w-[56ch] truncate text-xs text-[rgba(var(--claw-muted),0.9)]"
+                                                  title={taskChatBlurb.full}
+                                                >
+                                                  {taskChatBlurb.clipped}
+                                                </div>
+                                              </>
+                                            ) : null}
+                                          </div>
+                                        )}
+                                        <div
+                                          data-testid={`task-chat-controls-${task.id}`}
+                                          className={cn(
+                                            "flex flex-nowrap items-center gap-2",
+                                            taskChatFullscreen ? "w-full justify-end" : "justify-end"
+                                          )}
+                                        >
+                                          <div className="flex flex-nowrap items-center justify-end gap-2">
+                                            <span
+                                              data-testid={`task-chat-entries-${task.id}`}
+                                              className="shrink-0 whitespace-nowrap text-xs text-[rgb(var(--claw-muted))]"
+                                            >
+                                              {taskChatAllLogs.length} entries
+                                            </span>
+                                            {truncated ? (
+                                              <Button
+                                                size="sm"
+                                                variant="secondary"
+                                                onClick={() =>
+                                                  loadOlderChat(taskChatKey, TASK_TIMELINE_LIMIT, taskChatAllLogs.length, TASK_TIMELINE_LIMIT)
+                                                }
+                                                className="order-last shrink-0 whitespace-nowrap"
+                                              >
+                                                Load older
+                                              </Button>
+                                            ) : null}
+                                          </div>
+                                        </div>
+                                      </div>
 		                              {taskChatAllLogs.length === 0 &&
                               !pendingMessages.some((pending) => pending.sessionKey === taskSessionKey(topicId, task.id)) &&
                               !isSessionResponding(taskSessionKey(topicId, task.id)) ? (
 		                                <p className="mb-3 text-sm text-[rgb(var(--claw-muted))]">No messages yet.</p>
 		                              ) : null}
-	                                <div className="relative">
+	                                <div className={cn("relative", taskChatFullscreen ? "min-h-0 flex flex-1 flex-col" : "")}>
 	                                  <div
 	                                    className={cn(
 	                                      "pointer-events-none absolute left-0 right-0 top-0 z-10 h-8 bg-[linear-gradient(to_bottom,rgb(var(--claw-panel)/0.78),rgb(var(--claw-panel)/0.38)_52%,rgb(var(--claw-panel)/0.0))] shadow-[0_14px_18px_rgba(0,0,0,0.22)] transition-opacity duration-200 ease-out",
@@ -4456,6 +4837,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                                    </button>
 	                                  ) : null}
 		                                  <div
+		                                    data-testid={`task-chat-scroll-${task.id}`}
 		                                    ref={getChatScrollerRef(`task:${task.id}`)}
 		                                    onScroll={(event) => {
 		                                      const key = `task:${task.id}`;
@@ -4468,8 +4850,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                                      const prevTop = chatLastScrollTopRef.current.get(key) ?? node.scrollTop;
 	                                      const delta = node.scrollTop - prevTop;
 	                                      chatLastScrollTopRef.current.set(key, node.scrollTop);
-                                      const hasScrollableOverflow = node.scrollHeight > node.clientHeight + 2;
-
 	                                      // UX: hide the jump-to-latest button while the user scrolls UP (reading history).
 	                                      // Only show it again when scrolling DOWN and not at bottom.
 	                                      const shouldShowJump = !atBottom && delta > 0;
@@ -4479,22 +4859,23 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                                      setChatTopFade((prev) =>
 	                                        prev[key] === showTop ? prev : { ...prev, [key]: showTop }
 	                                      );
-	                                      if (!normalizedSearch && truncated && hasScrollableOverflow && delta < 0 && node.scrollTop <= 28) {
-	                                        const now = Date.now();
-	                                        const last = chatLoadOlderCooldownRef.current.get(key) ?? 0;
-	                                        if (now - last > 350) {
-                                          chatLoadOlderCooldownRef.current.set(key, now);
-                                          loadOlderChat(key, TASK_TIMELINE_LIMIT, taskChatAllLogs.length, TASK_TIMELINE_LIMIT);
-                                        }
-                                      }
-                                      if (activeChatKeyRef.current === key) updateActiveChatAtBottom();
+	                                      if (activeChatKeyRef.current === key) updateActiveChatAtBottom();
                                     }}
-                                    className="overflow-y-auto pr-1"
-                                    style={{
-                                      // Keep the composer visible while allowing long conversations to scroll within the chat pane.
-                                      maxHeight: "max(240px, calc(100dvh - var(--claw-header-h, 0px) - 360px))",
-                                    }}
-                                  >
+                                    className={cn(
+                                      "overflow-y-auto pr-1",
+                                      taskChatFullscreen
+                                        ? "min-h-0 flex-1 overflow-y-auto overscroll-contain"
+                                        : ""
+                                    )}
+                                    style={
+                                      taskChatFullscreen
+                                        ? undefined
+                                        : {
+                                            // Keep the composer visible while allowing long conversations to scroll within the chat pane.
+	                                            maxHeight: "max(240px, calc(100dvh - var(--claw-header-h, 0px) - 300px))",
+	                                          }
+	                                    }
+	                                  >
                                     <LogList
                                       logs={limitedLogs}
                                       topics={topics}
@@ -4571,8 +4952,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                           </div>
                                         </div>
                                       ) : null}
-                                      {/* Spacer so overlay controls never cover the last message. */}
-                                      <div aria-hidden className="h-12" />
+                                      {/* Keep a small tail spacer for chat breathing room without wasting viewport height. */}
+                                      <div aria-hidden className={taskChatFullscreen ? "h-2" : "h-12"} />
 	                                  </div>
 	                                </div>
 					                              {/* Load more moved into the chat header (top-right). */}
@@ -4585,17 +4966,25 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                         else composerHandlesRef.current.delete(key);
                                       }}
 			                                  sessionKey={taskSessionKey(topicId, task.id)}
-			                                  className="mt-4"
+			                                  className={cn(
+                                        "mt-4",
+                                        taskChatFullscreen
+                                          ? "max-md:mt-0.5 max-md:shrink-0 max-md:border-t max-md:border-[rgba(255,255,255,0.08)] max-md:bg-[rgba(11,13,18,0.86)] max-md:px-1 max-md:pb-0 max-md:pt-1 max-md:backdrop-blur"
+                                          : ""
+                                      )}
 			                                  variant="seamless"
+			                                  dense={taskChatFullscreen}
 			                                  placeholder={`Message ${task.title}…`}
 			                                  onFocus={() => {
 			                                    setActiveComposer({ kind: "task", topicId, taskId: task.id });
-			                                    const chatKey = `task:${task.id}`;
-			                                    activeChatAtBottomRef.current = true;
-			                                    scheduleScrollChatToBottom(chatKey);
-			                                    setChatJumpToBottom((prev) =>
-			                                      prev[chatKey] === false ? prev : { ...prev, [chatKey]: false }
-			                                    );
+			                                    if (!taskChatFullscreen) {
+			                                      const chatKey = `task:${task.id}`;
+			                                      activeChatAtBottomRef.current = true;
+			                                      scheduleScrollChatToBottom(chatKey);
+			                                      setChatJumpToBottom((prev) =>
+			                                        prev[chatKey] === false ? prev : { ...prev, [chatKey]: false }
+			                                      );
+			                                    }
 			                                  }}
 			                                  onBlur={() =>
 			                                    setActiveComposer((prev) =>
@@ -4608,59 +4997,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                      prev?.topicId === topicId && prev?.taskId === task.id ? null : prev
 			                                    )
 			                                  }
-			                                  onSendUpdate={(event) => {
-			                                    if (!event) return;
-			                                    markRecentBoardSend(event.sessionKey);
-			                                    if (event.phase === "sending") {
-			                                      setAwaitingAssistant((prev) => ({
-			                                        ...prev,
-			                                        [event.sessionKey]: { sentAt: event.createdAt },
-			                                      }));
-			                                      setPendingMessages((prev) => [
-			                                        ...prev.filter((item) => item.localId !== event.localId),
-			                                        {
-			                                          localId: event.localId,
-			                                          sessionKey: event.sessionKey,
-			                                          message: event.message,
-			                                          attachments: event.attachments,
-			                                          createdAt: event.createdAt,
-			                                          status: "sending",
-			                                        },
-			                                      ]);
-			                                    } else if (event.phase === "queued") {
-			                                      setAwaitingAssistant((prev) => ({
-			                                        ...prev,
-			                                        [event.sessionKey]: { sentAt: event.createdAt, requestId: event.requestId },
-			                                      }));
-			                                      setPendingMessages((prev) =>
-			                                        prev.map((item) =>
-			                                          item.localId === event.localId
-			                                            ? { ...item, requestId: event.requestId, status: "sent" }
-			                                            : item
-			                                        )
-			                                      );
-			                                    } else if (event.phase === "failed") {
-			                                      setAwaitingAssistant((prev) => {
-			                                        if (!Object.prototype.hasOwnProperty.call(prev, event.sessionKey)) return prev;
-			                                        const next = { ...prev };
-			                                        delete next[event.sessionKey];
-			                                        return next;
-			                                      });
-			                                      setPendingMessages((prev) =>
-			                                        prev.map((item) =>
-			                                          item.localId === event.localId
-			                                            ? { ...item, status: "failed", error: event.error }
-			                                            : item
-			                                        )
-			                                      );
-			                                    }
-			                                    const chatKey = chatKeyFromSessionKey(event.sessionKey);
-			                                    if (chatKey) {
-			                                      activeChatKeyRef.current = chatKey;
-			                                      activeChatAtBottomRef.current = true;
-			                                      scheduleScrollChatToBottom(chatKey);
-			                                    }
-			                                  }}
+			                                  onSendUpdate={handleComposerSendUpdate}
 			                                  testId={`task-chat-composer-${task.id}`}
 				                                />
 				                                </>
@@ -4669,19 +5006,29 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                        )}
 			                      </div>
                           </SwipeRevealRow>
-                    );
-                    })}
-	                  {/* Intentionally omit "No tasks match your filters." to keep topic cards visually tight. */}
+	                    );
+	                    })}
+		                  {/* Intentionally omit "No tasks match your filters." to keep topic cards visually tight. */}
+                        </>
+                      ) : null}
 
-                  {!isUnassigned && (
-                    <div
-                      className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300"
-                      style={taskGlowStyle(topicColor, taskList.length, topicChatExpanded)}
-                    >
+	                  {!isUnassigned && (
+	                    <div
+	                      className={cn(
+                          "border border-[rgb(var(--claw-border))] transition-colors duration-300",
+                          topicChatFullscreen
+                            ? "flex min-h-0 flex-1 flex-col rounded-none border-0 p-0"
+                            : "rounded-[var(--radius-md)] p-4"
+                        )}
+	                      style={topicChatFullscreen ? mobileOverlaySurfaceStyle(topicColor) : taskGlowStyle(topicColor, taskList.length, topicChatExpanded)}
+	                    >
                       <div
                         role="button"
                         tabIndex={0}
-	                        className="flex flex-wrap items-center justify-between gap-3 text-left"
+		                        className={cn(
+                          "flex items-center justify-between gap-2.5 text-left",
+                          !mdUp && mobileLayer === "chat" ? "max-md:hidden" : ""
+                        )}
 	                        onClick={(event) => {
 	                          if (!allowToggle(event.target as HTMLElement)) return;
 	                          toggleTopicChatExpanded(topicId);
@@ -4717,38 +5064,96 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                            event.stopPropagation();
 			                            toggleTopicChatExpanded(topicId);
 			                          }}
-			                          className={cn(
-			                            "flex h-9 w-9 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-lg text-[rgb(var(--claw-muted))] transition",
-			                            "hover:border-[rgba(255,90,45,0.3)] hover:text-[rgb(var(--claw-text))]"
-			                          )}
+				                          className={cn(
+				                            "flex h-8 w-8 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-base text-[rgb(var(--claw-muted))] transition",
+				                            "hover:border-[rgba(255,90,45,0.3)] hover:text-[rgb(var(--claw-text))]"
+				                          )}
 			                        >
 			                          {topicChatExpanded ? "▾" : "▸"}
 			                        </button>
 		                      </div>
 		                      {topicChatExpanded && (
-		                        <div className="mt-4 pt-3">
-				                        <div className="mb-3 flex items-center justify-end gap-2">
-				                          {topicChatTruncated ? (
-				                            <Button
-				                              size="sm"
-				                              variant="secondary"
-				                              onClick={(event) => {
-				                                event.stopPropagation();
-				                                event.preventDefault();
-				                                loadOlderChat(topicChatKey, TOPIC_TIMELINE_LIMIT, topicChatAllLogs.length, TOPIC_TIMELINE_LIMIT);
-				                              }}
-				                            >
-				                              Load older
-				                            </Button>
-				                          ) : null}
-								  <span className="text-xs text-[rgb(var(--claw-muted))]">{topicChatAllLogs.length} entries</span>
-				                        </div>
+		                        <div
+                              className={cn(
+                                "mt-2.5 pt-2",
+                                topicChatFullscreen
+                                  ? "mt-0 flex min-h-0 flex-1 flex-col overflow-hidden overscroll-none px-4 pb-5 pt-[calc(env(safe-area-inset-top)+2.7rem)]"
+                                  : ""
+                              )}
+                              style={topicChatFullscreen ? mobileOverlaySurfaceStyle(topicColor) : undefined}
+                            >
+                              {topicChatFullscreen ? (
+                                <button
+                                  type="button"
+	                                  className="absolute left-3 top-[calc(env(safe-area-inset-top)+0.5rem)] z-20 inline-flex h-8 w-8 items-center justify-center rounded-full border text-base text-[rgb(var(--claw-text))] backdrop-blur"
+                                  style={mobileOverlayCloseButtonStyle(topicColor)}
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    closeMobileChatLayer();
+                                  }}
+                                  aria-label="Close chat"
+                                  title="Close chat"
+                                >
+                                  ✕
+                                </button>
+                              ) : null}
+						                        <div className={cn("mb-2", topicChatFullscreen ? "space-y-1" : "flex items-center justify-end gap-2")}>
+                                      {topicChatFullscreen ? (
+                                        <div data-testid={`topic-chat-context-${topicId}`} className="pr-10">
+                                          <div className="flex min-w-0 items-center gap-1.5">
+                                            <div className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
+                                              TOPIC CHAT
+                                            </div>
+                                            {isSessionResponding(topicSessionKey(topicId)) ? <TypingDots /> : null}
+                                          </div>
+                                          <nav
+                                            aria-label="Topic chat context"
+                                            data-testid={`topic-chat-breadcrumb-${topicId}`}
+                                            className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-[rgb(var(--claw-muted))]"
+                                          >
+                                            <span className="shrink-0 uppercase tracking-[0.14em]">Topic</span>
+                                            <span className="min-w-0 max-w-[62vw] truncate font-medium text-[rgb(var(--claw-text))]">
+                                              {topic.name}
+                                            </span>
+                                          </nav>
+                                        </div>
+                                      ) : null}
+                                      <div
+                                        data-testid={`topic-chat-controls-${topicId}`}
+                                        className={cn(
+                                          "flex flex-nowrap items-center gap-2",
+                                          topicChatFullscreen ? "w-full justify-end" : "justify-end"
+                                        )}
+                                      >
+                                        <span
+                                          data-testid={`topic-chat-entries-${topicId}`}
+                                          className="shrink-0 whitespace-nowrap text-xs text-[rgb(var(--claw-muted))]"
+                                        >
+                                          {topicChatAllLogs.length} entries
+                                        </span>
+                                        {topicChatTruncated ? (
+                                          <Button
+                                            size="sm"
+                                            variant="secondary"
+                                            className="order-last shrink-0 whitespace-nowrap"
+                                            onClick={(event) => {
+                                              event.stopPropagation();
+                                              event.preventDefault();
+                                              loadOlderChat(topicChatKey, TOPIC_TIMELINE_LIMIT, topicChatAllLogs.length, TOPIC_TIMELINE_LIMIT);
+                                            }}
+                                          >
+                                            Load older
+                                          </Button>
+                                        ) : null}
+                                      </div>
+					                        </div>
 			                          {topicChatAllLogs.length === 0 &&
                               !pendingMessages.some((pending) => pending.sessionKey === topicSessionKey(topicId)) &&
                               !isSessionResponding(topicSessionKey(topicId)) ? (
 			                            <p className="mb-3 text-sm text-[rgb(var(--claw-muted))]">No messages yet.</p>
 			                          ) : null}
-			                          <div className="relative">
+			                          <div className={cn("relative", topicChatFullscreen ? "min-h-0 flex flex-1 flex-col" : "")}>
 			                            <div
 			                              className={cn(
 			                                // Subtle iMessage-style fade when there is scroll content above/below.
@@ -4780,7 +5185,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                              </button>
 			                            ) : null}
 				                            <div
-				                              ref={getChatScrollerRef(`topic:${topicId}`)}
+				                              data-testid={`topic-chat-scroll-${topicId}`}
+		                              ref={getChatScrollerRef(`topic:${topicId}`)}
 				                              onScroll={(event) => {
 				                                const key = `topic:${topicId}`;
 				                                const node = event.currentTarget;
@@ -4792,9 +5198,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                  const prevTop = chatLastScrollTopRef.current.get(key) ?? node.scrollTop;
 			                                  const delta = node.scrollTop - prevTop;
 			                                  chatLastScrollTopRef.current.set(key, node.scrollTop);
-                                          const hasScrollableOverflow = node.scrollHeight > node.clientHeight + 2;
-
-			                                // UX: hide the jump-to-latest button while the user scrolls UP (reading history).
+    			                                // UX: hide the jump-to-latest button while the user scrolls UP (reading history).
 			                                // Only show it again when scrolling DOWN and not at bottom.
 			                                const shouldShowJump = !atBottom && delta > 0;
 			                                setChatJumpToBottom((prev) =>
@@ -4803,21 +5207,22 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                setChatTopFade((prev) =>
 			                                  prev[key] === showTop ? prev : { ...prev, [key]: showTop }
 			                                );
-			                                  if (!normalizedSearch && topicChatTruncated && hasScrollableOverflow && delta < 0 && node.scrollTop <= 28) {
-			                                    const now = Date.now();
-			                                    const last = chatLoadOlderCooldownRef.current.get(key) ?? 0;
-			                                    if (now - last > 350) {
-			                                      chatLoadOlderCooldownRef.current.set(key, now);
-		                                    loadOlderChat(key, TOPIC_TIMELINE_LIMIT, topicChatAllLogs.length, TOPIC_TIMELINE_LIMIT);
-		                                  }
-		                                }
-		                                if (activeChatKeyRef.current === key) updateActiveChatAtBottom();
+			                                if (activeChatKeyRef.current === key) updateActiveChatAtBottom();
 		                              }}
-		                              className="overflow-y-auto pr-1"
-		                              style={{
-		                                maxHeight: "max(240px, calc(100dvh - var(--claw-header-h, 0px) - 320px))",
-		                              }}
-		                            >
+		                              className={cn(
+		                                "overflow-y-auto pr-1",
+		                                topicChatFullscreen
+		                                  ? "min-h-0 flex-1 overflow-y-auto overscroll-contain"
+		                                  : ""
+		                              )}
+		                              style={
+		                                topicChatFullscreen
+		                                  ? undefined
+		                                  : {
+			                                      maxHeight: "max(240px, calc(100dvh - var(--claw-header-h, 0px) - 280px))",
+			                                    }
+			                              }
+			                            >
 		                              <LogList
 		                                logs={topicChatLogs}
 		                                topics={topics}
@@ -4892,8 +5297,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                           </div>
                                         </div>
                                       ) : null}
-                                      {/* Spacer so overlay controls never cover the last message. */}
-                                      <div aria-hidden className="h-12" />
+                                      {/* Keep a small tail spacer for chat breathing room without wasting viewport height. */}
+                                      <div aria-hidden className={topicChatFullscreen ? "h-2" : "h-12"} />
 			                            </div>
 			                          </div>
 			                          {/* Load more moved into the chat header (top-right). */}
@@ -4904,74 +5309,32 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                   else composerHandlesRef.current.delete(key);
                                 }}
 		                            sessionKey={topicSessionKey(topicId)}
-		                            className="mt-4"
+		                            className={cn(
+                                "mt-4",
+                                topicChatFullscreen
+                                  ? "max-md:mt-0.5 max-md:shrink-0 max-md:border-t max-md:border-[rgba(255,255,255,0.08)] max-md:bg-[rgba(11,13,18,0.86)] max-md:px-1 max-md:pb-0 max-md:pt-1 max-md:backdrop-blur"
+                                  : ""
+                              )}
 		                            variant="seamless"
+		                            dense={topicChatFullscreen}
 		                            placeholder={`Message ${topic.name}…`}
 		                            onFocus={() => {
 		                              setActiveComposer({ kind: "topic", topicId });
-		                              const chatKey = `topic:${topicId}`;
-		                              activeChatAtBottomRef.current = true;
-		                              scheduleScrollChatToBottom(chatKey);
-		                              setChatJumpToBottom((prev) => (prev[chatKey] === false ? prev : { ...prev, [chatKey]: false }));
+		                              if (!topicChatFullscreen) {
+		                                const chatKey = `topic:${topicId}`;
+		                                activeChatAtBottomRef.current = true;
+		                                scheduleScrollChatToBottom(chatKey);
+		                                setChatJumpToBottom((prev) =>
+		                                  prev[chatKey] === false ? prev : { ...prev, [chatKey]: false }
+		                                );
+		                              }
 		                            }}
 		                            onBlur={() =>
 		                              setActiveComposer((prev) =>
 		                                prev?.kind === "topic" && prev.topicId === topicId ? null : prev
 		                              )
 		                            }
-		                            onSendUpdate={(event) => {
-		                              if (!event) return;
-		                              markRecentBoardSend(event.sessionKey);
-		                              if (event.phase === "sending") {
-		                                setAwaitingAssistant((prev) => ({
-		                                  ...prev,
-		                                  [event.sessionKey]: { sentAt: event.createdAt },
-		                                }));
-		                                setPendingMessages((prev) => [
-		                                  ...prev.filter((item) => item.localId !== event.localId),
-		                                  {
-		                                    localId: event.localId,
-		                                    sessionKey: event.sessionKey,
-		                                    message: event.message,
-		                                    attachments: event.attachments,
-		                                    createdAt: event.createdAt,
-		                                    status: "sending",
-		                                  },
-		                                ]);
-		                              } else if (event.phase === "queued") {
-		                                setAwaitingAssistant((prev) => ({
-		                                  ...prev,
-		                                  [event.sessionKey]: { sentAt: event.createdAt, requestId: event.requestId },
-		                                }));
-		                                setPendingMessages((prev) =>
-		                                  prev.map((item) =>
-		                                    item.localId === event.localId
-		                                      ? { ...item, requestId: event.requestId, status: "sent" }
-		                                      : item
-		                                  )
-		                                );
-		                              } else if (event.phase === "failed") {
-		                                setAwaitingAssistant((prev) => {
-		                                  if (!Object.prototype.hasOwnProperty.call(prev, event.sessionKey)) return prev;
-		                                  const next = { ...prev };
-		                                  delete next[event.sessionKey];
-		                                  return next;
-		                                });
-		                                setPendingMessages((prev) =>
-		                                  prev.map((item) =>
-		                                    item.localId === event.localId
-		                                      ? { ...item, status: "failed", error: event.error }
-		                                      : item
-		                                  )
-		                                );
-		                              }
-		                              const chatKey = chatKeyFromSessionKey(event.sessionKey);
-		                              if (chatKey) {
-		                                activeChatKeyRef.current = chatKey;
-		                                activeChatAtBottomRef.current = true;
-		                                scheduleScrollChatToBottom(chatKey);
-		                              }
-		                            }}
+		                            onSendUpdate={handleComposerSendUpdate}
 		                            autoFocus={autoFocusTopicId === topicId}
 		                            onAutoFocusApplied={() =>
 		                              setAutoFocusTopicId((prev) => (prev === topicId ? null : prev))

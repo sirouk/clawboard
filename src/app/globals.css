@@ -12,6 +12,7 @@
   --claw-success: 80 200 120;
   --claw-warning: 234 179 8;
   --claw-danger: 239 68 68;
+  --claw-mobile-vh: 100dvh;
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
@@ -102,6 +103,13 @@ body {
     linear-gradient(160deg, rgba(255, 90, 45, 0.06), rgba(255, 90, 45, 0.018) 30%, transparent 66%),
     radial-gradient(1100px circle at 82% 18%, rgba(255, 90, 45, 0.052), transparent 58%),
     rgb(var(--claw-bg));
+}
+
+@media (max-width: 1023px) {
+  :root[data-claw-mobile-layer="chat"] [data-claw-shell-nav="1"] {
+    opacity: 0;
+    pointer-events: none;
+  }
 }
 
 body::before {

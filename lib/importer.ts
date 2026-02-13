@@ -5,7 +5,7 @@ import os from "os";
 import { upsertEvent, updateImportJob } from "./db";
 import { Event } from "./types";
 
-const MEMORY_ROOT = "/Users/chris/clawd";
+const MEMORY_ROOT = process.env.CLAWD_ROOT?.trim() || path.join(os.homedir(), "clawd");
 const MEMORY_DIR = path.join(MEMORY_ROOT, "memory");
 const MEMORY_FILE = path.join(MEMORY_ROOT, "MEMORY.md");
 const AGENTS_ROOT = path.join(os.homedir(), ".openclaw", "agents");
@@ -54,8 +54,8 @@ const inferTopicId = (content: string): string | null => {
     text.includes("ingredients")
   )
     return "topic-legacy-clients";
-  if (text.includes("personal") || text.includes("chris todo")) return "topic-personal";
-  if (text.includes("clawboard") || text.includes("portal")) return "topic-chris-ops-portal";
+  if (text.includes("personal") || text.includes("personal todo")) return "topic-personal";
+  if (text.includes("clawboard") || text.includes("portal")) return "topic-ops-portal";
   if (text.includes("meta")) return "topic-meta";
   return null;
 };
