@@ -208,17 +208,25 @@ function SwipeRevealRow({
   setOpenId,
   actions,
   children,
+  disabled = false,
 }: {
   rowId: string;
   openId: string | null;
   setOpenId: (id: string | null) => void;
   actions: ReactNode;
   children: ReactNode;
+  disabled?: boolean;
 }) {
-  const isOpen = openId === rowId;
-  const gesture = useRef<{ startX: number; startY: number; startOffset: number; pointerType: string } | null>(
-    null,
-  );
+  const allowSwipe = !disabled;
+  const isOpen = allowSwipe && openId === rowId;
+  const gesture = useRef<{
+    startX: number;
+    startY: number;
+    startOffset: number;
+    pointerType: string;
+    pointerId: number;
+    captureNode: HTMLElement | null;
+  } | null>(null);
   const [swiping, setSwiping] = useState(false);
   // Keep swipe state in a ref so pointer events remain correct even if React state
   // hasn't re-rendered between pointermove and pointerup (fast swipes, test dispatch).
@@ -230,9 +238,9 @@ function SwipeRevealRow({
   const wheelEndTimerRef = useRef<number | null>(null);
   const wheelWasOpenRef = useRef(false);
 
-  const effectiveOffset = swiping ? dragOffset : isOpen ? TOPIC_ACTION_REVEAL_PX : 0;
+  const effectiveOffset = !allowSwipe ? 0 : swiping ? dragOffset : isOpen ? TOPIC_ACTION_REVEAL_PX : 0;
   const actionsOpacity = clamp(effectiveOffset / TOPIC_ACTION_REVEAL_PX, 0, 1);
-  const showActions = actionsOpacity > 0.01;
+  const showActions = allowSwipe && actionsOpacity > 0.01;
 
   const scheduleOffset = (next: number) => {
     dragOffsetRef.current = next;
@@ -245,6 +253,7 @@ function SwipeRevealRow({
   };
 
   const settleSwipe = useCallback(() => {
+    if (!allowSwipe) return;
     if (rafRef.current != null) {
       window.cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -258,10 +267,124 @@ function SwipeRevealRow({
     pendingOffsetRef.current = 0;
     setSwiping(false);
     swipingRef.current = false;
-  }, [rowId, setOpenId]);
+  }, [allowSwipe, rowId, setOpenId]);
+
+  const handlePointerDown = allowSwipe
+    ? (event: React.PointerEvent<HTMLDivElement>) => {
+        if ("button" in event && event.button !== 0) return;
+        const target = event.target as HTMLElement | null;
+
+        // Desktop clicks should never feel like swipes. For mouse pointers we only
+        // support swipe actions via horizontal trackpad scroll (wheel deltaX).
+        if (event.pointerType === "mouse") return;
+
+        // When the row is closed, ignore gesture starts on interactive controls.
+        // When it's open, allow the user to begin a swipe-to-close even if their thumb
+        // is on the action buttons (as long as they actually swipe).
+        if (!isOpen && target?.closest("button, a, input, textarea, select, [data-no-swipe='true']")) return;
+
+        // Prevent nested SwipeRevealRow parents (topic row) from starting a competing gesture
+        // when we start on a child row (task row).
+        event.stopPropagation();
+
+        setSwiping(false);
+        swipingRef.current = false;
+        gesture.current = {
+          startX: event.clientX,
+          startY: event.clientY,
+          startOffset: isOpen ? TOPIC_ACTION_REVEAL_PX : 0,
+          pointerType: event.pointerType,
+          pointerId: event.pointerId,
+          captureNode: event.currentTarget as HTMLElement,
+        };
+      }
+    : undefined;
+
+  const handlePointerMove = allowSwipe
+    ? (event: React.PointerEvent<HTMLDivElement>) => {
+        const g = gesture.current;
+        if (!g) return;
+        if (g.pointerType === "mouse") return;
+        const dx = event.clientX - g.startX;
+        const dy = event.clientY - g.startY;
+        if (!swipingRef.current) {
+          if (Math.abs(dx) < 12) return;
+          if (Math.abs(dx) < Math.abs(dy) * 1.25) return;
+          swipingRef.current = true;
+          setSwiping(true);
+          if (openId !== rowId) setOpenId(rowId);
+          // Prevent nested SwipeRevealRow parents from starting a competing gesture.
+          event.stopPropagation();
+          // Capture the pointer once we know it's a swipe so we keep receiving move/up.
+          try {
+            g.captureNode?.setPointerCapture(g.pointerId);
+          } catch {
+            // ok
+          }
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        const next = clamp(g.startOffset - dx, 0, TOPIC_ACTION_REVEAL_PX);
+        scheduleOffset(next);
+      }
+    : undefined;
+
+  const handlePointerUp = allowSwipe
+    ? (event: React.PointerEvent<HTMLDivElement>) => {
+        const g = gesture.current;
+        gesture.current = null;
+        const wasSwiping = swipingRef.current;
+        swipingRef.current = false;
+        try {
+          (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+        } catch {
+          // ok
+        }
+        if (rafRef.current != null) {
+          window.cancelAnimationFrame(rafRef.current);
+          rafRef.current = null;
+        }
+        if (!g) return;
+        if (!wasSwiping) return;
+        // If actions were already open, require only a small swipe-back to close them.
+        const threshold = g.startOffset > 0 ? TOPIC_ACTION_REVEAL_PX * 0.9 : TOPIC_ACTION_REVEAL_PX * 0.35;
+        const shouldOpen = dragOffsetRef.current > threshold;
+        setOpenId(shouldOpen ? rowId : null);
+        setDragOffset(0);
+        dragOffsetRef.current = 0;
+        pendingOffsetRef.current = 0;
+        setSwiping(false);
+      }
+    : undefined;
+
+  const handlePointerCancel = allowSwipe
+    ? () => {
+        gesture.current = null;
+        swipingRef.current = false;
+        if (rafRef.current != null) {
+          window.cancelAnimationFrame(rafRef.current);
+          rafRef.current = null;
+        }
+        if (wheelEndTimerRef.current != null) {
+          window.clearTimeout(wheelEndTimerRef.current);
+          wheelEndTimerRef.current = null;
+        }
+        setDragOffset(0);
+        dragOffsetRef.current = 0;
+        pendingOffsetRef.current = 0;
+        setSwiping(false);
+      }
+    : undefined;
 
   return (
-    <div className="relative overflow-x-hidden overflow-y-visible rounded-[var(--radius-lg)]">
+    <div
+      className="relative overflow-x-hidden overflow-y-visible rounded-[var(--radius-lg)]"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      style={{ touchAction: allowSwipe ? "pan-y" : "auto" }}
+    >
       {showActions ? (
         <div
           className="absolute inset-0 flex items-stretch justify-end gap-2 bg-[rgba(10,12,16,0.18)] p-1 transition-opacity"
@@ -271,140 +394,66 @@ function SwipeRevealRow({
         </div>
       ) : null}
       <div
-        onClickCapture={(event) => {
-          if (swiping || effectiveOffset > 8) {
-            event.preventDefault();
-            event.stopPropagation();
-          }
-          if (isOpen && !swiping) {
-            // Gmail-style: a tap closes the actions, but does not trigger the underlying click handler.
-            setOpenId(null);
-            event.preventDefault();
-            event.stopPropagation();
-          }
-        }}
-        onWheel={(event) => {
-          // Enable swipe-to-reveal on trackpads via horizontal wheel deltas.
-          // Gate on pixel-based deltas so mouse wheels (line/page deltas) don't accidentally open rows.
-          if (event.deltaMode !== 0) return;
+        onClickCapture={
+          allowSwipe
+            ? (event) => {
+                if (swiping || effectiveOffset > 8) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }
+                if (isOpen && !swiping) {
+                  // Gmail-style: a tap closes the actions, but does not trigger the underlying click handler.
+                  setOpenId(null);
+                  event.preventDefault();
+                  event.stopPropagation();
+                }
+              }
+            : undefined
+        }
+        onWheel={
+          allowSwipe
+            ? (event) => {
+                // Enable swipe-to-reveal on trackpads via horizontal wheel deltas.
+                // Gate on pixel-based deltas so mouse wheels (line/page deltas) don't accidentally open rows.
+                if (event.deltaMode !== 0) return;
 
-          const target = event.target as HTMLElement | null;
-          if (target?.closest("button, a, input, textarea, select, [data-no-swipe='true']")) return;
-          const dx = event.deltaX;
-          const dy = event.deltaY;
-          if (Math.abs(dx) < 10) return;
-          if (Math.abs(dx) < Math.abs(dy) * 1.35) return;
-          event.preventDefault();
-          event.stopPropagation();
+                const target = event.target as HTMLElement | null;
+                if (target?.closest("button, a, input, textarea, select, [data-no-swipe='true']")) return;
+                const dx = event.deltaX;
+                const dy = event.deltaY;
+                if (Math.abs(dx) < 10) return;
+                if (Math.abs(dx) < Math.abs(dy) * 1.35) return;
+                event.preventDefault();
+                event.stopPropagation();
 
-          // deltaX > 0 corresponds to a leftward finger swipe on macOS trackpads in most cases.
-          const current = swipingRef.current ? dragOffsetRef.current : isOpen ? TOPIC_ACTION_REVEAL_PX : 0;
-          const next = clamp(current + dx, 0, TOPIC_ACTION_REVEAL_PX);
-          if (!swipingRef.current) {
-            wheelWasOpenRef.current = isOpen;
-            swipingRef.current = true;
-            setSwiping(true);
-            if (openId !== rowId) setOpenId(rowId);
-          }
-          scheduleOffset(next);
+                // deltaX > 0 corresponds to a leftward finger swipe on macOS trackpads in most cases.
+                const current = swipingRef.current ? dragOffsetRef.current : isOpen ? TOPIC_ACTION_REVEAL_PX : 0;
+                const next = clamp(current + dx, 0, TOPIC_ACTION_REVEAL_PX);
+                if (!swipingRef.current) {
+                  wheelWasOpenRef.current = isOpen;
+                  swipingRef.current = true;
+                  setSwiping(true);
+                  if (openId !== rowId) setOpenId(rowId);
+                }
+                scheduleOffset(next);
 
-          if (wheelEndTimerRef.current != null) window.clearTimeout(wheelEndTimerRef.current);
-          wheelEndTimerRef.current = window.setTimeout(() => {
-            wheelEndTimerRef.current = null;
-            settleSwipe();
-          }, 120);
-        }}
-        onPointerDown={(event) => {
-          if ("button" in event && event.button !== 0) return;
-          const target = event.target as HTMLElement | null;
-          if (target?.closest("button, a, input, textarea, select, [data-no-swipe='true']")) return;
-          // Desktop clicks should never feel like swipes. For mouse pointers we only
-          // support swipe actions via horizontal trackpad scroll (wheel deltaX).
-          if (event.pointerType === "mouse") return;
-          // Prevent nested SwipeRevealRow parents from starting a competing gesture.
-          event.stopPropagation();
-          setSwiping(false);
-          swipingRef.current = false;
-          gesture.current = {
-            startX: event.clientX,
-            startY: event.clientY,
-            startOffset: isOpen ? TOPIC_ACTION_REVEAL_PX : 0,
-            pointerType: event.pointerType,
-          };
-          try {
-            (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-          } catch {
-            // ok
-          }
-        }}
-        onPointerMove={(event) => {
-          const g = gesture.current;
-          if (!g) return;
-          if (g.pointerType === "mouse") return;
-          const dx = event.clientX - g.startX;
-          const dy = event.clientY - g.startY;
-          if (!swipingRef.current) {
-            if (Math.abs(dx) < 12) return;
-            if (Math.abs(dx) < Math.abs(dy) * 1.25) return;
-            swipingRef.current = true;
-            setSwiping(true);
-            if (openId !== rowId) setOpenId(rowId);
-          }
-          event.preventDefault();
-          event.stopPropagation();
-          const next = clamp(g.startOffset - dx, 0, TOPIC_ACTION_REVEAL_PX);
-          scheduleOffset(next);
-        }}
-        onPointerUp={(event) => {
-          const g = gesture.current;
-          gesture.current = null;
-          const wasSwiping = swipingRef.current;
-          swipingRef.current = false;
-          try {
-            (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
-          } catch {
-            // ok
-          }
-          if (rafRef.current != null) {
-            window.cancelAnimationFrame(rafRef.current);
-            rafRef.current = null;
-          }
-          if (!g) return;
-          if (!wasSwiping) return;
-          // If actions were already open, require only a small swipe-back to close them.
-          const threshold = g.startOffset > 0 ? TOPIC_ACTION_REVEAL_PX * 0.9 : TOPIC_ACTION_REVEAL_PX * 0.35;
-          const shouldOpen = dragOffsetRef.current > threshold;
-          setOpenId(shouldOpen ? rowId : null);
-          setDragOffset(0);
-          dragOffsetRef.current = 0;
-          pendingOffsetRef.current = 0;
-          setSwiping(false);
-        }}
-        onPointerCancel={() => {
-          gesture.current = null;
-          swipingRef.current = false;
-          if (rafRef.current != null) {
-            window.cancelAnimationFrame(rafRef.current);
-            rafRef.current = null;
-          }
-          if (wheelEndTimerRef.current != null) {
-            window.clearTimeout(wheelEndTimerRef.current);
-            wheelEndTimerRef.current = null;
-          }
-          setDragOffset(0);
-          dragOffsetRef.current = 0;
-          pendingOffsetRef.current = 0;
-          setSwiping(false);
-        }}
+                if (wheelEndTimerRef.current != null) window.clearTimeout(wheelEndTimerRef.current);
+                wheelEndTimerRef.current = window.setTimeout(() => {
+                  wheelEndTimerRef.current = null;
+                  settleSwipe();
+                }, 120);
+              }
+            : undefined
+        }
         className={cn(
           "relative",
-          (swiping || effectiveOffset > 0) ? "will-change-transform" : "",
-          swiping || isOpen ? "z-20" : "",
-          swiping ? "" : "transition-transform duration-200 ease-out"
+          allowSwipe && (swiping || effectiveOffset > 0) ? "will-change-transform" : "",
+          allowSwipe && (swiping || isOpen) ? "z-20" : "",
+          allowSwipe && swiping ? "" : "transition-transform duration-200 ease-out"
         )}
         style={{
           ...(effectiveOffset > 0 ? { transform: `translate3d(-${effectiveOffset}px,0,0)` } : {}),
-          touchAction: "pan-y",
+          touchAction: allowSwipe ? "pan-y" : "auto",
         }}
       >
         {children}
@@ -758,6 +807,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const chatScrollers = useRef<Map<string, HTMLElement>>(new Map());
   const chatAtBottomRef = useRef<Map<string, boolean>>(new Map());
   const typingAliasRef = useRef<Map<string, { sourceSessionKey: string; createdAt: number }>>(new Map());
+  const chatRespondingRef = useRef<Map<string, boolean>>(new Map());
   const [pendingMessages, setPendingMessages] = useState<
     Array<{
       localId: string;
@@ -1285,6 +1335,27 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return map;
   }, [tasks]);
 
+  const sessionKeyForChatKey = useCallback(
+    (chatKey: string) => {
+      const key = String(chatKey ?? "").trim();
+      if (!key) return "";
+      if (key.startsWith("topic:")) {
+        const topicId = key.slice("topic:".length).trim();
+        if (!topicId || topicId === "unassigned") return "";
+        return topicSessionKey(topicId);
+      }
+      if (key.startsWith("task:")) {
+        const taskId = key.slice("task:".length).trim();
+        if (!taskId) return "";
+        const topicId = taskTopicById.get(taskId) ?? "";
+        if (!topicId || topicId === "unassigned") return "";
+        return taskSessionKey(topicId, taskId);
+      }
+      return "";
+    },
+    [taskTopicById]
+  );
+
   const tasksByTopic = useMemo(() => {
     const map = new Map<string, Task[]>();
     for (const task of tasks) {
@@ -1645,6 +1716,35 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       setChatJumpToBottom((prev) => (prev[key] === false ? prev : { ...prev, [key]: false }));
     }
   }, [getChatLastLogId, logs, normalizedSearch, scheduleScrollChatToBottom]);
+
+  useLayoutEffect(() => {
+    if (normalizedSearch) return;
+
+    // Typing/response indicators are not part of `logs`, so they can appear at the bottom
+    // without triggering the log-based auto-scroll effect above. Keep the chat pinned when
+    // the user is already at the bottom so new indicators never require manual scrolling.
+    const prev = chatRespondingRef.current;
+    const next = new Map<string, boolean>();
+
+    for (const chatKey of chatScrollers.current.keys()) {
+      const sessionKey = sessionKeyForChatKey(chatKey);
+      const responding = sessionKey ? isSessionResponding(sessionKey) : false;
+      next.set(chatKey, responding);
+
+      const wasResponding = prev.get(chatKey) ?? false;
+      if (!responding || wasResponding) continue;
+
+      const atBottom = chatAtBottomRef.current.get(chatKey) ?? false;
+      if (!atBottom) continue;
+
+      activeChatAtBottomRef.current = true;
+      scheduleScrollChatToBottom(chatKey);
+      chatAtBottomRef.current.set(chatKey, true);
+      setChatJumpToBottom((state) => (state[chatKey] === false ? state : { ...state, [chatKey]: false }));
+    }
+
+    chatRespondingRef.current = next;
+  }, [isSessionResponding, normalizedSearch, scheduleScrollChatToBottom, sessionKeyForChatKey]);
 
   const semanticLimits = useMemo(
     () => ({
@@ -2748,6 +2848,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const openMobileTopicChat = useCallback(
     (topicId: string) => {
+      // Topic chat open does not currently mutate the URL, so create an explicit history frame.
+      // That way the mobile browser back gesture can cleanly close fullscreen chat (like ✕)
+      // without navigating away from the board.
+      if (typeof window !== "undefined") {
+        window.history.pushState({ clawboard: true, mobileLayer: "chat" }, "", window.location.href);
+      }
+
       setMobileChatTarget({ kind: "topic", topicId });
       setMobileLayer("chat");
       setExpandedTopics((prev) => {
@@ -3046,12 +3153,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   useEffect(() => {
     const handlePop = () => {
+      // Mobile UX: if we're in the fullscreen chat layer, browser back should behave like tapping ✕.
+      // This prevents iOS back-swipe / Android back gestures from navigating the browser history
+      // in a way that leaves the app in a broken intermediate URL/state.
+      if (!mdUp && mobileLayer === "chat") {
+        closeMobileChatLayer();
+        return;
+      }
       restoreScrollOnNextSyncRef.current = true;
       syncFromUrl();
     };
     window.addEventListener("popstate", handlePop);
     return () => window.removeEventListener("popstate", handlePop);
-  }, [syncFromUrl]);
+  }, [closeMobileChatLayer, mdUp, mobileLayer, syncFromUrl]);
 
   // Next router navigation (router.push / Link) does not trigger popstate.
   // Sync our internal expanded state when pathname/search params change.
@@ -4209,6 +4323,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             openId={taskSwipeOpenId}
                             setOpenId={setTaskSwipeOpenId}
                             actions={taskSwipeActions}
+                            disabled={!mdUp && mobileLayer === "chat"}
                           >
 		                        <div
                               data-task-card-id={task.id}
@@ -4982,13 +5097,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       {!isUnassigned && isSessionResponding(taskSessionKey(topicId, task.id)) ? (
                                         <div className="py-1">
                                           <div className="flex justify-start">
-                                            <div className="w-full max-w-[78%]">
-                                              <div className="rounded-[20px] border border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] px-4 py-3 text-sm text-[rgb(var(--claw-text))]">
-                                                <div className="flex items-center gap-2">
-                                                  <span className="text-xs text-[rgba(148,163,184,0.9)]">OpenClaw</span>
-                                                  <TypingDots />
-                                                </div>
-                                              </div>
+                                            <div className="w-full max-w-[78%] px-4 py-2" title="OpenClaw responding">
+                                              <TypingDots />
                                             </div>
                                           </div>
                                         </div>
@@ -5327,13 +5437,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       {isSessionResponding(topicSessionKey(topicId)) ? (
                                         <div className="py-1">
                                           <div className="flex justify-start">
-                                            <div className="w-full max-w-[78%]">
-                                              <div className="rounded-[20px] border border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] px-4 py-3 text-sm text-[rgb(var(--claw-text))]">
-                                                <div className="flex items-center gap-2">
-                                                  <span className="text-xs text-[rgba(148,163,184,0.9)]">OpenClaw</span>
-                                                  <TypingDots />
-                                                </div>
-                                              </div>
+                                            <div className="w-full max-w-[78%] px-4 py-2" title="OpenClaw responding">
+                                              <TypingDots />
                                             </div>
                                           </div>
                                         </div>
@@ -5399,6 +5504,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               openId={topicSwipeOpenId}
               setOpenId={setTopicSwipeOpenId}
               actions={swipeActions}
+              disabled={!mdUp && mobileLayer === "chat"}
             >
               {card}
             </SwipeRevealRow>
