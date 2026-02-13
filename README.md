@@ -81,7 +81,7 @@ docker compose up -d --build
 Recommended bootstrap:
 
 ```bash
-bash scripts/bootstrap_openclaw.sh
+curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/scripts/bootstrap_openclaw.sh | bash
 ```
 
 This can configure token + URLs, install skill/plugin, and wire logger behavior for end-to-end flow.
@@ -89,7 +89,7 @@ This can configure token + URLs, install skill/plugin, and wire logger behavior 
 If OpenClaw is not installed and you want Chutes first:
 
 ```bash
-bash inference-providers/add_chutes.sh
+curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh | bash
 ```
 
 ## Security Model
