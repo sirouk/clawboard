@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Task, TaskStatus, Topic } from "@/lib/types";
-import { Button, Input, Select, StatusPill } from "@/components/ui";
+import { Button, SearchInput, Select, StatusPill } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { formatRelativeTime } from "@/lib/format";
 import { buildTaskUrl } from "@/lib/url";
@@ -116,9 +116,10 @@ export function TaskList({
       )}
       {showFilters && (
         <div className="flex flex-wrap items-center gap-3">
-          <Input
+          <SearchInput
             value={search}
             onChange={(event) => setSearch(event.target.value)}
+            onClear={() => setSearch("")}
             placeholder="Search tasks"
             className="max-w-sm"
           />

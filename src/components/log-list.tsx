@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { LogEntry, Task, Topic } from "@/lib/types";
-import { Badge, Button, Input, Select, TextArea } from "@/components/ui";
+import { Badge, Button, Input, SearchInput, Select, TextArea } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
 import { useAppConfig } from "@/components/providers";
@@ -626,7 +626,13 @@ export function LogList({
       {showFilters && (
         <div className="space-y-3">
           <div className="flex flex-wrap gap-3">
-            <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search messages" className="min-w-[220px] flex-1" />
+            <SearchInput
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              onClear={() => setSearch("")}
+              placeholder="Search messages"
+              className="min-w-[220px] flex-1"
+            />
             <Select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} className="max-w-[180px]">
               <option value="all">All types</option>
               {Object.entries(TYPE_LABELS).map(([value, label]) => (

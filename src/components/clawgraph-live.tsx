@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Badge, Button, Card, CardHeader, Input } from "@/components/ui";
+import { Badge, Button, Card, CardHeader, SearchInput } from "@/components/ui";
 import { useDataStore } from "@/components/data-provider";
 import { apiFetch } from "@/lib/api";
 import {
@@ -31,6 +31,23 @@ const MIN_ZOOM = 0.38;
 const MAX_ZOOM = 2.6;
 const MAX_NODE_DRAG = 1200;
 const DEFAULT_LAYOUT_STRENGTH = 75;
+const INITIAL_REMOTE_WAIT_MS = 900;
+const REMOTE_REFRESH_DEBOUNCE_MS = 320;
+
+const EMPTY_GRAPH: ClawgraphData = {
+  generatedAt: "",
+  stats: {
+    nodeCount: 0,
+    edgeCount: 0,
+    topicCount: 0,
+    taskCount: 0,
+    entityCount: 0,
+    agentCount: 0,
+    density: 0,
+  },
+  nodes: [],
+  edges: [],
+};
 
 const NODE_THEME: Record<ClawgraphNodeType, { color: string; glow: string }> = {
   topic: { color: "#FF8A4A", glow: "#FF8A4A" },
@@ -129,6 +146,7 @@ export function ClawgraphLive() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [remoteGraph, setRemoteGraph] = useState<ClawgraphData | null>(null);
   const [isFetching, setIsFetching] = useState(false);
+  const [graphMode, setGraphMode] = useState<"pending" | "local" | "remote">("pending");
   const [isMapFullScreen, setIsMapFullScreen] = useState(false);
   const [nodeOffsets, setNodeOffsets] = useState<Record<string, { x: number; y: number }>>({});
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -149,37 +167,74 @@ export function ClawgraphLive() {
     [logs, tasks, topics]
   );
 
+  const fetchRemoteGraph = useCallback(async () => {
+    const params = new URLSearchParams({
+      maxEntities: "140",
+      maxNodes: "320",
+      minEdgeWeight: "0.08",
+      limitLogs: "3200",
+      includePending: "true",
+    });
+    const res = await apiFetch(`/api/clawgraph?${params.toString()}`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`status_${res.status}`);
+    const payload = (await res.json()) as ClawgraphData;
+    if (!payload || !Array.isArray(payload.nodes) || !Array.isArray(payload.edges)) throw new Error("invalid_graph");
+    return payload;
+  }, []);
+
   useEffect(() => {
+    if (graphMode !== "pending") return;
     let alive = true;
-    const timer = setTimeout(async () => {
-      setIsFetching(true);
+    setIsFetching(true);
+    const fallbackTimer = window.setTimeout(() => {
+      if (!alive) return;
+      setGraphMode("local");
+      setIsFetching(false);
+    }, INITIAL_REMOTE_WAIT_MS);
+
+    void (async () => {
       try {
-        const params = new URLSearchParams({
-          maxEntities: "140",
-          maxNodes: "320",
-          minEdgeWeight: "0.08",
-          limitLogs: "3200",
-          includePending: "true",
-        });
-        const res = await apiFetch(`/api/clawgraph?${params.toString()}`, { cache: "no-store" });
-        if (!res.ok) throw new Error(`status_${res.status}`);
-        const payload = (await res.json()) as ClawgraphData;
-        if (!payload || !Array.isArray(payload.nodes) || !Array.isArray(payload.edges)) throw new Error("invalid_graph");
+        const payload = await fetchRemoteGraph();
         if (!alive) return;
+        clearTimeout(fallbackTimer);
         setRemoteGraph(payload);
+        setGraphMode("remote");
       } catch {
         if (!alive) return;
-        setRemoteGraph(null);
+        clearTimeout(fallbackTimer);
+        setGraphMode("local");
       } finally {
         if (alive) setIsFetching(false);
       }
-    }, 320);
+    })();
+
+    return () => {
+      alive = false;
+      clearTimeout(fallbackTimer);
+    };
+  }, [fetchRemoteGraph, graphMode]);
+
+  useEffect(() => {
+    if (graphMode !== "remote") return;
+    let alive = true;
+    const timer = window.setTimeout(async () => {
+      setIsFetching(true);
+      try {
+        const payload = await fetchRemoteGraph();
+        if (!alive) return;
+        setRemoteGraph(payload);
+      } catch {
+        // Keep current remote graph on refresh failures to avoid jarring fallbacks.
+      } finally {
+        if (alive) setIsFetching(false);
+      }
+    }, REMOTE_REFRESH_DEBOUNCE_MS);
 
     return () => {
       alive = false;
       clearTimeout(timer);
     };
-  }, [topics.length, tasks.length, logs.length]);
+  }, [fetchRemoteGraph, graphMode, topics.length, tasks.length, logs.length]);
 
   useEffect(() => {
     const node = containerRef.current;
@@ -205,7 +260,7 @@ export function ClawgraphLive() {
     };
   }, [isMapFullScreen]);
 
-  const graph = remoteGraph ?? localGraph;
+  const graph = graphMode === "remote" && remoteGraph ? remoteGraph : graphMode === "local" ? localGraph : EMPTY_GRAPH;
   const nodeById = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph.nodes]);
 
   const candidateEdges = useMemo(() => {
@@ -621,7 +676,12 @@ export function ClawgraphLive() {
           <Badge tone={isFetching ? "warning" : "muted"}>{isFetching ? "Refreshing graph" : "Stable"}</Badge>
         </CardHeader>
         <div className="grid gap-3 md:grid-cols-[1.4fr_auto]">
-          <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search entity, topic, task, or agent" />
+          <SearchInput
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onClear={() => setQuery("")}
+            placeholder="Search entity, topic, task, or agent"
+          />
           <div className="flex items-center gap-2 justify-self-start">
             <Button size="sm" variant="secondary" onClick={fitToGraph}>
               Fit

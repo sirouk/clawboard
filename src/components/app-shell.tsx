@@ -4,7 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Input } from "@/components/ui";
+import { SearchInput } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { cn } from "@/lib/cn";
 import { CommandPalette } from "@/components/command-palette";
@@ -846,15 +846,17 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 		                      {navLink}
 		                      {expanded && isBoardItem && (
 		                        <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.18)] p-3">
-		                          <div className="flex items-center gap-2">
-		                            <Input
+	                          <div className="flex items-center gap-2">
+	                            <SearchInput
 		                              value={topicPanelSearch}
 		                              onChange={(e) => {
 		                                const next = e.target.value;
 		                                setLocalStorageItem(BOARD_TOPICS_SEARCH_KEY, next);
 		                              }}
+                                  onClear={() => setLocalStorageItem(BOARD_TOPICS_SEARCH_KEY, "")}
 	                              placeholder="Search tasks, topics…"
-	                              className="h-9 text-xs"
+                                  className="flex-1"
+	                              inputClassName="h-9 text-xs"
 	                            />
 	                          </div>
 	                          <div className="mt-2 flex items-center justify-between text-[11px] text-[rgb(var(--claw-muted))]">

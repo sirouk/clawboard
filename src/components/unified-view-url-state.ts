@@ -23,6 +23,7 @@ type ParseUnifiedUrlStateOptions = {
   resolveTopicId?: (value: string) => string;
   resolveTaskId?: (value: string) => string;
   rawParseMode?: RawParseMode;
+  rawDefaultWhenMissing?: boolean;
   taskTopicById?: Map<string, string>;
 };
 
@@ -57,9 +58,11 @@ function parsePathSelections(pathname: string, basePath: string) {
   return { topics, tasks };
 }
 
-function parseRawParam(params: URLSearchParams, mode: RawParseMode) {
-  if (mode === "one-only") return params.get("raw") === "1";
-  return params.get("raw") !== "0";
+function parseRawParam(params: URLSearchParams, mode: RawParseMode, defaultWhenMissing: boolean) {
+  const rawParam = params.get("raw");
+  if (rawParam === null) return defaultWhenMissing;
+  if (mode === "one-only") return rawParam === "1";
+  return rawParam !== "0";
 }
 
 function sanitizePage(raw: number) {
@@ -76,6 +79,7 @@ export function parseUnifiedUrlState(url: URL, options: ParseUnifiedUrlStateOpti
   const resolveTopicId = options.resolveTopicId ?? decodeSlugId;
   const resolveTaskId = options.resolveTaskId ?? decodeSlugId;
   const rawParseMode = options.rawParseMode ?? "not-zero";
+  const rawDefaultWhenMissing = options.rawDefaultWhenMissing ?? false;
 
   const params = url.searchParams;
   const pathSelections = parsePathSelections(url.pathname, options.basePath);
@@ -111,7 +115,7 @@ export function parseUnifiedUrlState(url: URL, options: ParseUnifiedUrlStateOpti
 
   return {
     search: params.get("q") ?? "",
-    raw: parseRawParam(params, rawParseMode),
+    raw: parseRawParam(params, rawParseMode, rawDefaultWhenMissing),
     density,
     done: params.get("done") === "1",
     status: params.get("status") ?? "all",
@@ -124,5 +128,10 @@ export function parseUnifiedUrlState(url: URL, options: ParseUnifiedUrlStateOpti
 
 export function getInitialUnifiedUrlState(basePath: string): UnifiedUrlState {
   if (typeof window === "undefined") return DEFAULT_STATE;
-  return parseUnifiedUrlState(new URL(window.location.href), { basePath, rawParseMode: "not-zero" });
+  const rawDefaultWhenMissing = window.matchMedia("(min-width: 768px)").matches;
+  return parseUnifiedUrlState(new URL(window.location.href), {
+    basePath,
+    rawParseMode: "not-zero",
+    rawDefaultWhenMissing,
+  });
 }

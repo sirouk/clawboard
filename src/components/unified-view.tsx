@@ -13,7 +13,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { LogEntry, Task, Topic } from "@/lib/types";
-import { Button, Input, Select, StatusPill } from "@/components/ui";
+import { Button, Input, SearchInput, Select, StatusPill } from "@/components/ui";
 import { LogList } from "@/components/log-list";
 import { formatRelativeTime } from "@/lib/format";
 import { useAppConfig } from "@/components/providers";
@@ -533,7 +533,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const showSnoozedTasks = useLocalStorageItem(SHOW_SNOOZED_TASKS_KEY) === "true";
   const unsnoozedTopicsRaw = useLocalStorageItem(UNSNOOZED_TOPICS_KEY) ?? "{}";
   const unsnoozedTasksRaw = useLocalStorageItem(UNSNOOZED_TASKS_KEY) ?? "{}";
-  const [mdUp, setMdUp] = useState(false);
+  const [mdUp, setMdUp] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia("(min-width: 768px)").matches;
+  });
   const {
     state: expansionState,
     setExpandedTopics,
@@ -1000,12 +1003,26 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const setChatScroller = useCallback((key: string, node: HTMLElement | null) => {
     if (!key) return;
     if (node) {
+      const firstAttach = !chatScrollers.current.has(key);
       chatScrollers.current.set(key, node);
       const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
       const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
       chatAtBottomRef.current.set(key, atBottom);
       setChatJumpToBottom((prev) => (prev[key] === !atBottom ? prev : { ...prev, [key]: !atBottom }));
       chatLastScrollTopRef.current.set(key, node.scrollTop);
+
+      // Desktop + mobile parity: when a chat pane mounts, start at the latest message
+      // so new incoming messages stay in-view without requiring a manual page scroll.
+      if (firstAttach) {
+        window.requestAnimationFrame(() => {
+          const current = chatScrollers.current.get(key);
+          if (!current) return;
+          current.scrollTo({ top: current.scrollHeight, behavior: "auto" });
+          chatAtBottomRef.current.set(key, true);
+          chatLastScrollTopRef.current.set(key, current.scrollTop);
+          setChatJumpToBottom((prev) => (prev[key] === false ? prev : { ...prev, [key]: false }));
+        });
+      }
       return;
     }
     chatScrollers.current.delete(key);
@@ -2977,11 +2994,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     const params = url.searchParams;
+    const rawDefaultWhenMissing = window.matchMedia("(min-width: 768px)").matches;
     const parsedState = parseUnifiedUrlState(url, {
       basePath,
       resolveTopicId,
       resolveTaskId,
       rawParseMode: "one-only",
+      rawDefaultWhenMissing,
       taskTopicById,
     });
     const nextStatusRaw = parsedState.status ?? "all";
@@ -3324,13 +3343,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         )}
       >
         <div className="flex flex-wrap items-center gap-2">
-          <Input
+          <SearchInput
             value={search}
             onChange={(event) => {
               const value = event.target.value;
               setSearch(value);
               setPage(1);
               pushUrl({ q: value, page: "1" }, "replace");
+            }}
+            onClear={() => {
+              setSearch("");
+              setPage(1);
+              committedSearch.current = "";
+              pushUrl({ q: "", page: "1" }, "replace");
             }}
             onBlur={() => {
               if (committedSearch.current !== search) {

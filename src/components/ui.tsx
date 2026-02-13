@@ -1,5 +1,5 @@
 import { cn } from "@/lib/cn";
-import type { ComponentProps } from "react";
+import type { ChangeEvent, ComponentProps } from "react";
 
 // iOS Safari zooms the page when focusing inputs with font-size < 16px.
 // Default to 16px on small screens, and keep the denser `text-sm` on desktop.
@@ -115,6 +115,55 @@ export function Input({ className, ...props }: ComponentProps<"input">) {
       )}
       {...props}
     />
+  );
+}
+
+type SearchInputProps = Omit<ComponentProps<"input">, "type" | "className"> & {
+  className?: string;
+  inputClassName?: string;
+  onClear?: () => void;
+};
+
+export function SearchInput({ className, inputClassName, onClear, value, onChange, ...props }: SearchInputProps) {
+  const hasValue = typeof value === "string" ? value.length > 0 : false;
+
+  const handleClear = () => {
+    if (onClear) {
+      onClear();
+      return;
+    }
+    if (typeof onChange === "function") {
+      const syntheticEvent = { target: { value: "" } } as ChangeEvent<HTMLInputElement>;
+      onChange(syntheticEvent);
+    }
+  };
+
+  return (
+    <div className={cn("relative", className)}>
+      <Input
+        type="search"
+        value={value}
+        onChange={onChange}
+        className={cn(
+          "w-full pr-10 [&::-webkit-search-cancel-button]:appearance-none [&::-webkit-search-decoration]:appearance-none",
+          inputClassName
+        )}
+        {...props}
+      />
+      {hasValue ? (
+        <button
+          type="button"
+          onClick={handleClear}
+          aria-label="Clear search"
+          className="absolute right-2 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.94)] text-[rgb(var(--claw-muted))] transition hover:border-[rgba(255,90,45,0.45)] hover:text-[rgb(var(--claw-text))]"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </svg>
+        </button>
+      ) : null}
+    </div>
   );
 }
 
