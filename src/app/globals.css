@@ -148,6 +148,11 @@ button {
   font-family: inherit;
 }
 
+[data-topic-card-id] [role="button"],
+[data-task-card-id] [role="button"] {
+  cursor: pointer;
+}
+
 .claw-scrollbar-none {
   scrollbar-width: none;
   -ms-overflow-style: none;

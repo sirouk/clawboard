@@ -257,6 +257,62 @@ openclaw gateway restart`;
                 </p>
               )}
             </div>
+            <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
+              <div className="text-sm font-semibold">Connectivity indicators</div>
+              <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
+                The header now shows icon-only status. Hover/tap for details.
+              </p>
+              <div className="mt-3 grid gap-2">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="inline-grid h-7 w-7 place-items-center rounded-full border border-[rgba(80,200,120,0.45)] bg-[rgba(80,200,120,0.12)] text-[rgb(var(--claw-success))]">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                      <path d="M13 2 5 13h6l-1 9 9-11h-6z" />
+                    </svg>
+                  </span>
+                  <span>Token accepted. Read/write active.</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="inline-grid h-7 w-7 place-items-center rounded-full border border-[rgba(239,68,68,0.5)] bg-[rgba(239,68,68,0.12)] text-[rgb(var(--claw-danger))]">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.85" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                      <circle cx="12" cy="12" r="8.8" />
+                      <path d="m9 9 6 6" />
+                      <path d="m15 9-6 6" />
+                    </svg>
+                  </span>
+                  <span>Token provided but rejected by API.</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="inline-grid h-7 w-7 place-items-center rounded-full border border-[rgba(234,179,8,0.46)] bg-[rgba(234,179,8,0.12)] text-[rgb(var(--claw-warning))]">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                      <circle cx="8.5" cy="12" r="3.5" />
+                      <path d="M12 12h9" />
+                      <path d="M18 12v3" />
+                      <path d="M21 12v2" />
+                    </svg>
+                  </span>
+                  <span>Token saved locally, but server-side token config is missing.</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="inline-grid h-7 w-7 place-items-center rounded-full border border-[rgba(234,179,8,0.46)] bg-[rgba(234,179,8,0.12)] text-[rgb(var(--claw-warning))]">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                      <rect x="4" y="11" width="16" height="10" rx="2.2" />
+                      <path d="M8 11V8a4 4 0 1 1 8 0v3" />
+                    </svg>
+                  </span>
+                  <span>Reads are allowed, but writes are blocked until token/auth passes.</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="inline-grid h-7 w-7 place-items-center rounded-full border border-[rgba(77,171,158,0.46)] bg-[rgba(77,171,158,0.12)] text-[rgb(var(--claw-accent-2))]">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                      <path d="M4 12h5" />
+                      <path d="M15 12h5" />
+                      <circle cx="12" cy="12" r="3" />
+                    </svg>
+                  </span>
+                  <span>No token is required on this server.</span>
+                </div>
+              </div>
+            </div>
             <div className="flex flex-wrap items-center gap-3">
               <Button onClick={handleTokenSave}>Save token locally</Button>
               <Button variant="secondary" onClick={() => setStep(3)} disabled={tokenRequired && token.trim().length === 0}>

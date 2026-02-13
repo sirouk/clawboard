@@ -4,7 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Badge, Input, type BadgeTone } from "@/components/ui";
+import { Input } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { cn } from "@/lib/cn";
 import { CommandPalette } from "@/components/command-palette";
@@ -85,7 +85,7 @@ function GripIcon({ className }: { className?: string }) {
 
 const NAV_ITEMS = [
   { href: "/u", label: "Board", id: "home" },
-  { href: "/graph", label: "Clawgraph", id: "graph" },
+  { href: "/graph", label: "Graph", id: "graph" },
   { href: "/log", label: "Logs", id: "log" },
   { href: "/stats", label: "Stats", id: "stats" },
   { href: "/providers", label: "Providers", id: "providers" },
@@ -97,6 +97,64 @@ const BOARD_TOPICS_SEARCH_KEY = "clawboard.board.topics.search";
 const HEADER_COMPACT_KEY = "clawboard.header.compact";
 const NAV_SEARCH_TASKS_LIMIT = 5;
 const NAV_SEARCH_TOPICS_LIMIT = 5;
+
+function statusIconColor(status: string) {
+  switch (status) {
+    case "CONNECTED":
+      return "text-[rgb(var(--claw-success))] drop-shadow-[0_0_12px_rgba(80,200,120,0.45)]";
+    case "AUTH FAIL":
+      return "text-[rgb(var(--claw-danger))] drop-shadow-[0_0_10px_rgba(239,68,68,0.35)]";
+    case "TOKEN SET":
+    case "READ-ONLY":
+      return "text-[rgb(var(--claw-warning))] drop-shadow-[0_0_9px_rgba(234,179,8,0.3)]";
+    default:
+      return "text-[rgb(var(--claw-accent-2))] drop-shadow-[0_0_9px_rgba(77,171,158,0.32)]";
+  }
+}
+
+function StatusGlyph({ status, className }: { status: string; className?: string }) {
+  if (status === "CONNECTED") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className={className}>
+        <path d="M13 2 5 13h6l-1 9 9-11h-6z" />
+      </svg>
+    );
+  }
+  if (status === "AUTH FAIL") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.85" strokeLinecap="round" strokeLinejoin="round" className={className}>
+        <circle cx="12" cy="12" r="8.8" />
+        <path d="m9 9 6 6" />
+        <path d="m15 9-6 6" />
+      </svg>
+    );
+  }
+  if (status === "TOKEN SET") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
+        <circle cx="8.5" cy="12" r="3.5" />
+        <path d="M12 12h9" />
+        <path d="M18 12v3" />
+        <path d="M21 12v2" />
+      </svg>
+    );
+  }
+  if (status === "READ-ONLY") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
+        <rect x="4" y="11" width="16" height="10" rx="2.2" />
+        <path d="M8 11V8a4 4 0 1 1 8 0v3" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M4 12h5" />
+      <path d="M15 12h5" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
 
 function TopicNavRow({
   topic,
@@ -206,17 +264,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
       : tokenRequired
         ? "READ-ONLY"
         : "OPEN";
-  const statusTone: BadgeTone = hasToken
-    ? remoteReadLocked
-      ? "warning"
-      : tokenConfigured
-        ? "success"
-        : "warning"
-    : remoteReadLocked
-      ? "warning"
-      : tokenRequired
-        ? "warning"
-        : "accent2";
   const statusTitle = hasToken
     ? remoteReadLocked
       ? "Token was provided but rejected by API. Paste raw CLAWBOARD_TOKEN value."
@@ -226,8 +273,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     : remoteReadLocked
       ? "Non-localhost reads require a token. Add token in Setup."
       : tokenRequired
-        ? "Token required for writes."
+      ? "Token required for writes."
       : "No token required.";
+  const statusIconClass = statusIconColor(status);
+  const statusTooltip = statusTitle;
   const docsHref = `${apiBase || ""}/docs`;
   const iconSize = collapsed ? 32 : 40;
 
@@ -668,13 +717,17 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                  <div className="min-w-0 lg:hidden">
 			                    <div className="truncate text-xs font-semibold text-[rgb(var(--claw-text))]">{pageHeader.title}</div>
 			                  </div>
-			                </div>
-			                <div className="lg:hidden">
-			                  <Badge tone={statusTone} title={statusTitle} className="px-2 py-0.5 text-[9px] tracking-[0.12em]">
-			                    {status}
-			                  </Badge>
-			                </div>
-			              </div>
+				                </div>
+				                <div className="lg:hidden">
+                          <span
+                            className="inline-flex h-8 w-8 items-center justify-center"
+                            title={statusTooltip}
+                            aria-label={statusTitle}
+                          >
+                            <StatusGlyph status={status} className={cn("h-5 w-5", statusIconClass)} />
+                          </span>
+				                </div>
+				              </div>
 	              <nav className="mt-1.5 grid grid-cols-5 gap-1 lg:hidden">
 	                {mobilePrimaryItems.map((item) => {
 	                  const active = isItemActive(item.href);
@@ -957,28 +1010,27 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                       <path d="M6 12h12" />
                       <path d="M6 16h12" />
                     </svg>
-                  </button>
-                  <div className={cn("hidden items-center gap-3 lg:flex", compactHeader ? "" : "")}>
-                    <Badge tone={statusTone} title={statusTitle}>
-                      {status}
-                    </Badge>
-                  </div>
-                  <div className={cn("lg:hidden", compactHeader ? "" : "hidden")}>
-                    <span
-                      className={cn(
-                        "inline-block h-2.5 w-2.5 rounded-full",
-                        statusTone === "success"
-                          ? "bg-[rgba(34,197,94,0.9)]"
-                          : statusTone === "warning"
-                            ? "bg-[rgba(234,179,8,0.9)]"
-                            : "bg-[rgba(77,171,158,0.9)]"
-                      )}
-                      title={statusTitle}
-                      aria-label={status}
-                    />
-                  </div>
-                </div>
-              </div>
+	                  </button>
+	                  <div className={cn("hidden items-center gap-3 lg:flex", compactHeader ? "" : "")}>
+                        <span
+                          className="inline-flex h-9 w-9 items-center justify-center"
+                          title={statusTooltip}
+                          aria-label={statusTitle}
+                        >
+                          <StatusGlyph status={status} className={cn("h-6 w-6", statusIconClass)} />
+                        </span>
+	                  </div>
+	                  <div className={cn("lg:hidden", compactHeader ? "" : "hidden")}>
+	                    <span
+	                      className="inline-flex h-8 w-8 items-center justify-center"
+	                      title={statusTooltip}
+	                      aria-label={statusTitle}
+	                    >
+	                        <StatusGlyph status={status} className={cn("h-5 w-5", statusIconClass)} />
+	                      </span>
+	                  </div>
+	                </div>
+	              </div>
             </header>
 	            <main className="mr-auto w-full max-w-[1280px] px-3 py-3 sm:px-4 sm:py-4 lg:pl-5 lg:pr-6 lg:py-8">{children}</main>
 	          </div>

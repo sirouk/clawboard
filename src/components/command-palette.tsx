@@ -15,7 +15,7 @@ type ActionItem = {
 
 const BASE_ACTIONS: ActionItem[] = [
   { label: "Board (Unified)", href: UNIFIED_BASE },
-  { label: "Clawgraph", href: "/graph" },
+  { label: "Graph", href: "/graph" },
   { label: "Dashboard (Legacy)", href: "/dashboard" },
   { label: "Stats", href: "/stats" },
   { label: "Providers", href: "/providers" },
