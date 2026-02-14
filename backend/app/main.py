@@ -1438,7 +1438,7 @@ def _run_openclaw_chat(
                 {
                     "sessionKey": session_key,
                     "message": message,
-                    "attachments": ws_attachments or None,
+                    "attachments": ws_attachments if ws_attachments else [],
                     "timeoutMs": int(float(os.getenv("OPENCLAW_CHAT_TIMEOUT_SECONDS", "120")) * 1000),
                     "idempotencyKey": request_id,
                 },

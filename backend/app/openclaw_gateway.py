@@ -64,10 +64,10 @@ async def gateway_rpc(
                 "minProtocol": 3,
                 "maxProtocol": 3,
                 "client": {
-                    "id": "clawboard",
+                    "id": "gateway-client",
                     "version": "0.0.0",
                     "platform": "server",
-                    "mode": "operator",
+                    "mode": "backend",
                 },
                 "role": "operator",
                 "scopes": scopes or ["operator.read"],
