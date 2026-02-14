@@ -5,7 +5,7 @@ import Link from "next/link";
 import { Card, CardHeader, Badge } from "@/components/ui";
 import { NowPanel } from "@/components/now-panel";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
-import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
+import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam } from "@/lib/url";
 import type { LogEntry } from "@/lib/types";
 import { useDataStore } from "@/components/data-provider";
 
@@ -22,12 +22,12 @@ export function DashboardLive() {
   const buildLogUrl = (entry: LogEntry) => {
     if (entry.taskId) {
       const task = tasks.find((item) => item.id === entry.taskId);
-      if (task) return buildTaskUrl(task, topics);
+      if (task) return withRevealParam(buildTaskUrl(task, topics));
       return `${UNIFIED_BASE}/task/${encodeURIComponent(entry.taskId)}`;
     }
     if (entry.topicId) {
       const topic = topics.find((item) => item.id === entry.topicId);
-      if (topic) return buildTopicUrl(topic, topics);
+      if (topic) return withRevealParam(buildTopicUrl(topic, topics));
       return `${UNIFIED_BASE}/topic/${encodeURIComponent(entry.topicId)}`;
     }
     return UNIFIED_BASE;
@@ -116,7 +116,7 @@ export function DashboardLive() {
             {sortedTopics.slice(0, 6).map((topic) => (
               <Link
                 key={topic.id}
-                href={buildTopicUrl(topic, topics)}
+                href={withRevealParam(buildTopicUrl(topic, topics))}
                 className="flex items-center justify-between rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-sm"
               >
                 <span>{topic.name}</span>

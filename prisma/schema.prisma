@@ -20,6 +20,7 @@ model Topic {
   description String?
   parentId    String?
   tags        String?
+  color       String?
   createdAt   DateTime
   updatedAt   DateTime
 
@@ -33,6 +34,7 @@ model Task {
   topicId   String
   title     String
   status    String
+  color     String?
   createdAt DateTime
   updatedAt DateTime
 

@@ -6,6 +6,7 @@ export type Topic = {
   description?: string;
   parentId?: string | null;
   tags?: string[];
+  color?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -15,6 +16,7 @@ export type Task = {
   topicId: string;
   title: string;
   status: Status;
+  color?: string;
   createdAt: string;
   updatedAt: string;
 };

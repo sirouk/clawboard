@@ -4,6 +4,7 @@ cd $HOME/openclaw
 git checkout main
 git pull
 
+pnpm self-update
 pnpm install
 pnpm ui:build
 pnpm build

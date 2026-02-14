@@ -31,13 +31,13 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-function pushEvent(type, data) {
+function pushEvent(type, data, eventTs) {
   nextEventId += 1;
   const payload = {
     type,
     data,
     eventId: String(nextEventId),
-    eventTs: data?.updatedAt || data?.createdAt || nowIso(),
+    eventTs: eventTs || data?.updatedAt || data?.createdAt || nowIso(),
   };
   const record = { id: nextEventId, payload };
   eventBuffer.push(record);
@@ -550,8 +550,8 @@ const server = http.createServer(async (req, res) => {
       const topic = store.topics.find((t) => t.id === id);
       if (!topic) continue;
       topic.sortIndex = i;
-      topic.updatedAt = now;
-      pushEvent("topic.upserted", topic);
+      // Reordering is not a meaningful content update; do not touch updatedAt.
+      pushEvent("topic.upserted", topic, now);
     }
     return sendJson(res, 200, { ok: true, count: order.length, changed: unique.length });
   }

@@ -8,7 +8,8 @@ const PatchTopicSchema = z
     name: z.string().min(1).max(200).optional(),
     description: z.string().max(5000).optional().nullable(),
     parentId: z.string().min(1).optional().nullable(),
-    tags: z.array(z.string().min(1).max(64)).max(50).optional()
+    tags: z.array(z.string().min(1).max(64)).max(50).optional(),
+    color: z.string().optional().nullable()
   })
   .strict();
 const errorCode = (err: unknown): string | null => {
@@ -57,7 +58,8 @@ export async function PATCH(
     parsed.data.name === undefined &&
     parsed.data.description === undefined &&
     parsed.data.parentId === undefined &&
-    parsed.data.tags === undefined
+    parsed.data.tags === undefined &&
+    parsed.data.color === undefined
   ) {
     return NextResponse.json({ error: "No fields to update" }, { status: 400 });
   }
@@ -68,7 +70,8 @@ export async function PATCH(
       name: parsed.data.name,
       description: parsed.data.description ?? undefined,
       parentId: parsed.data.parentId,
-      tags: parsed.data.tags
+      tags: parsed.data.tags,
+      color: parsed.data.color ?? undefined
     });
   } catch (err: unknown) {
     const code = errorCode(err);

@@ -13,7 +13,8 @@ const PatchTaskSchema = z
   .object({
     title: z.string().min(1).max(500).optional(),
     status: StatusSchema.optional(),
-    topicId: z.string().min(1).optional()
+    topicId: z.string().min(1).optional(),
+    color: z.string().optional().nullable()
   })
   .strict();
 
@@ -39,14 +40,18 @@ export async function PATCH(
   if (
     parsed.data.title === undefined &&
     parsed.data.status === undefined &&
-    parsed.data.topicId === undefined
+    parsed.data.topicId === undefined &&
+    parsed.data.color === undefined
   ) {
     return NextResponse.json({ error: "No fields to update" }, { status: 400 });
   }
 
   let updated: Awaited<ReturnType<typeof patchTask>> = null;
   try {
-    updated = await patchTask(id, parsed.data);
+    updated = await patchTask(id, {
+      ...parsed.data,
+      color: parsed.data.color ?? undefined
+    });
   } catch (err: unknown) {
     const code = errorCode(err);
     if (code === "P2003") {

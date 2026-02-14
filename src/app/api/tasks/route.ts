@@ -14,7 +14,8 @@ const CreateTaskSchema = z
   .object({
     topicId: z.string().min(1),
     title: z.string().min(1).max(500),
-    status: StatusSchema.optional()
+    status: StatusSchema.optional(),
+    color: z.string().optional().nullable()
   })
   .strict();
 
@@ -64,7 +65,12 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const task = await createTask(parsed.data);
+    const task = await createTask({
+      topicId: parsed.data.topicId,
+      title: parsed.data.title,
+      status: parsed.data.status,
+      color: parsed.data.color ?? undefined
+    });
     // Match FastAPI contract: return the created task object directly.
     return NextResponse.json(task, { status: 201 });
   } catch (err: unknown) {

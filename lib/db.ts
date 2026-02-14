@@ -11,6 +11,7 @@ import {
   Topic
 } from "./types";
 import { prisma } from "./prisma";
+import { deriveTaskColor, normalizeHexColor, pickTopicColor } from "./color";
 
 const DATA_PATH =
   process.env.PORTAL_DATA_PATH ?? path.join(process.cwd(), "data", "portal.json");
@@ -167,11 +168,13 @@ const serializeTopic = (topic: {
   description: string | null;
   parentId: string | null;
   tags: unknown;
+  color: string | null;
   createdAt: Date;
   updatedAt: Date;
 }): Topic => ({
   id: topic.id,
   name: topic.name,
+  color: topic.color ?? undefined,
   description: topic.description ?? undefined,
   parentId: topic.parentId ?? null,
   tags: normalizeTags(topic.tags),
@@ -184,12 +187,14 @@ const serializeTask = (task: {
   topicId: string;
   title: string;
   status: string;
+  color: string | null;
   createdAt: Date;
   updatedAt: Date;
 }): Task => ({
   id: task.id,
   topicId: task.topicId,
   title: task.title,
+  color: task.color ?? undefined,
   status: task.status as Status,
   createdAt: task.createdAt.toISOString(),
   updatedAt: task.updatedAt.toISOString()
@@ -459,11 +464,17 @@ export const createTopic = async (input: {
   description?: string;
   parentId?: string | null;
   tags?: string[];
+  color?: string;
   id?: string;
 }) => {
   await ensureSeeded();
   const id = input.id ?? `topic-${crypto.randomUUID()}`;
   const createdAt = new Date();
+  const existingColors = await prisma.topic.findMany({ select: { color: true } });
+  const pickedColor =
+    normalizeHexColor(input.color) ??
+    pickTopicColor(`topic:${id}:${input.name}`, existingColors.map((row) => row.color));
+
   const topic = await prisma.topic.create({
     data: {
       id,
@@ -471,6 +482,7 @@ export const createTopic = async (input: {
       description: input.description ?? null,
       parentId: input.parentId ?? null,
       tags: JSON.stringify(input.tags ?? []),
+      color: pickedColor,
       createdAt,
       updatedAt: createdAt
     }
@@ -484,6 +496,7 @@ export const ensureTopic = async (input: {
   description?: string;
   parentId?: string | null;
   tags?: string[];
+  color?: string;
 }) => {
   await ensureSeeded();
   const match = input.id
@@ -498,6 +511,7 @@ export const ensureTopic = async (input: {
         description: input.description ?? match.description,
         parentId: input.parentId ?? match.parentId,
         tags: JSON.stringify(input.tags ?? normalizeTags(match.tags)),
+        color: normalizeHexColor(input.color) ?? match.color,
         updatedAt: new Date()
       }
     });
@@ -511,6 +525,7 @@ export const ensureTopic = async (input: {
       description: input.description ?? null,
       parentId: input.parentId ?? null,
       tags: JSON.stringify(input.tags ?? []),
+      color: normalizeHexColor(input.color) ?? null,
       createdAt: new Date(),
       updatedAt: new Date()
     }
@@ -521,7 +536,7 @@ export const ensureTopic = async (input: {
 
 export const patchTopic = async (
   id: string,
-  input: Partial<Pick<Topic, "name" | "description" | "parentId" | "tags">>
+  input: Partial<Pick<Topic, "name" | "description" | "parentId" | "tags" | "color">>
 ) => {
   await ensureSeeded();
   const existing = await prisma.topic.findUnique({ where: { id } });
@@ -534,6 +549,7 @@ export const patchTopic = async (
       description: input.description ?? existing.description,
       parentId: input.parentId ?? existing.parentId,
       tags: JSON.stringify(input.tags ?? normalizeTags(existing.tags)),
+      color: normalizeHexColor(input.color) ?? existing.color,
       updatedAt: new Date()
     }
   });
@@ -555,17 +571,25 @@ export const createTask = async (input: {
   topicId: string;
   title: string;
   status?: Status;
+  color?: string;
   id?: string;
 }) => {
   await ensureSeeded();
   const id = input.id ?? `task-${crypto.randomUUID()}`;
   const createdAt = new Date();
+  const topic = await prisma.topic.findUnique({ where: { id: input.topicId }, select: { color: true, name: true } });
+  const topicColor = normalizeHexColor(topic?.color) ?? pickTopicColor(`topic:${input.topicId}:${topic?.name ?? ""}`, []);
+  const pickedColor =
+    normalizeHexColor(input.color) ??
+    deriveTaskColor(topicColor, `task:${id}:${input.title}`);
+
   const task = await prisma.task.create({
     data: {
       id,
       topicId: input.topicId,
       title: input.title,
       status: input.status ?? "todo",
+      color: pickedColor,
       createdAt,
       updatedAt: createdAt
     }
@@ -578,6 +602,7 @@ export const upsertTask = async (input: {
   topicId: string;
   title: string;
   status?: Status;
+  color?: string;
 }) => {
   await ensureSeeded();
   if (input.id) {
@@ -589,6 +614,7 @@ export const upsertTask = async (input: {
           topicId: input.topicId ?? existing.topicId,
           title: input.title ?? existing.title,
           status: input.status ?? (existing.status as Status),
+          color: normalizeHexColor(input.color) ?? existing.color,
           updatedAt: new Date()
         }
       });
@@ -600,14 +626,15 @@ export const upsertTask = async (input: {
     id: input.id,
     topicId: input.topicId,
     title: input.title,
-    status: input.status
+    status: input.status,
+    color: input.color
   });
   return { task, created: true };
 };
 
 export const patchTask = async (
   id: string,
-  input: Partial<Pick<Task, "title" | "status" | "topicId">>
+  input: Partial<Pick<Task, "title" | "status" | "topicId" | "color">>
 ) => {
   await ensureSeeded();
   const existing = await prisma.task.findUnique({ where: { id } });
@@ -619,6 +646,7 @@ export const patchTask = async (
       title: input.title ?? existing.title,
       status: input.status ?? (existing.status as Status),
       topicId: input.topicId ?? existing.topicId,
+      color: normalizeHexColor(input.color) ?? existing.color,
       updatedAt: new Date()
     }
   });

@@ -62,6 +62,8 @@ from .schemas import (
     ClassifierReplayRequest,
     ClassifierReplayResponse,
 )
+from .schemas_openclaw_skills import OpenClawSkillsResponse
+from .openclaw_gateway import gateway_rpc
 from .events import event_hub
 from .clawgraph import build_clawgraph
 from .vector_search import semantic_search
@@ -1376,111 +1378,13 @@ def _run_openclaw_chat(
     message: str,
     attachments: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Dispatch a message to OpenClaw Gateway via OpenResponses (POST /v1/responses).
+    """Dispatch a message to OpenClaw via the Gateway WebSocket (chat.send).
 
-    Using OpenResponses keeps message handling consistent and enables file + vision inputs.
+    Clawboard is an external client of the OpenClaw Gateway.
     """
-    url = f"{base_url.rstrip('/')}/v1/responses"
-    timeout_seconds_raw = os.getenv("OPENCLAW_CHAT_TIMEOUT_SECONDS", "120").strip()
-    try:
-        timeout_seconds = float(timeout_seconds_raw)
-        timeout_seconds = max(5.0, min(600.0, timeout_seconds))
-    except Exception:
-        timeout_seconds = 120.0
 
-    parts: list[dict[str, Any]] = [{"type": "input_text", "text": message}]
-    if attachments:
-        root = _attachments_root()
-        for att in attachments:
-            att_id = str(att.get("id") or "").strip()
-            if not att_id:
-                continue
-            storage_path = str(att.get("storagePath") or att_id).strip()
-            path = root / storage_path
-            if not path.exists():
-                _log_openclaw_chat_error(
-                    session_key=session_key,
-                    request_id=request_id,
-                    detail=f"OpenClaw chat failed: attachment missing on disk ({att_id}). requestId={request_id}",
-                )
-                return
-            try:
-                data_bytes = path.read_bytes()
-            except Exception as exc:
-                _log_openclaw_chat_error(
-                    session_key=session_key,
-                    request_id=request_id,
-                    detail=f"OpenClaw chat failed: unable to read attachment ({att_id}). requestId={request_id}",
-                    raw=str(exc),
-                )
-                return
-
-            mime_type = _normalize_mime_type(str(att.get("mimeType") or "application/octet-stream"))
-            filename = _sanitize_attachment_filename(str(att.get("fileName") or "attachment"))
-            if mime_type in ATTACHMENT_IMAGE_MIME_TYPES:
-                b64 = base64.b64encode(data_bytes).decode("ascii")
-                parts.append(
-                    {
-                        "type": "input_image",
-                        "source": {"type": "base64", "media_type": mime_type, "data": b64},
-                    }
-                )
-                continue
-
-            if mime_type in ATTACHMENT_TEXT_MIME_TYPES or mime_type.startswith("text/"):
-                extracted = _decode_text_attachment(data_bytes)
-                if extracted:
-                    parts.append(
-                        {
-                            "type": "input_text",
-                            "text": f"[Attachment: {filename} ({mime_type})]\n\n{extracted}",
-                        }
-                    )
-                    continue
-
-            if mime_type == "application/pdf":
-                extracted = _extract_pdf_text(data_bytes)
-                if extracted:
-                    parts.append(
-                        {
-                            "type": "input_text",
-                            "text": f"[Attachment: {filename} (extracted PDF text)]\n\n{extracted}",
-                        }
-                    )
-                    continue
-
-            b64 = base64.b64encode(data_bytes).decode("ascii")
-            parts.append(
-                {
-                    "type": "input_file",
-                    "source": {
-                        "type": "base64",
-                        "media_type": mime_type,
-                        "data": b64,
-                        "filename": filename,
-                    },
-                }
-            )
-
-    body = {
-        "model": "openclaw",
-        "input": [{"type": "message", "role": "user", "content": parts}],
-        "stream": False,
-    }
-    data = json.dumps(body).encode("utf-8")
-
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "x-openclaw-agent-id": agent_id,
-            "x-openclaw-session-key": session_key,
-        },
-    )
-
+    # NOTE: We intentionally do not use OpenResponses here; we speak directly to
+    # the Gateway WS and call the same RPC method used by WebChat clients.
     try:
         event_hub.publish(
             {
@@ -1489,106 +1393,72 @@ def _run_openclaw_chat(
                 "eventTs": now_iso(),
             }
         )
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-            # We don't need the response body; OpenClaw logs the conversation via plugins.
-            resp.read()
-        _schedule_openclaw_assistant_log_check(session_key=session_key, request_id=request_id, sent_at=sent_at)
-    except urllib.error.HTTPError as exc:
-        raw = ""
-        try:
-            raw = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            raw = str(exc)
-        # If OpenResponses is disabled but this is a text-only send, fall back to chat/completions
-        # so Clawboard remains usable even when gateway config drifts.
-        if not attachments and exc.code in {404, 405}:
-            fallback_url = f"{base_url.rstrip('/')}/v1/chat/completions"
-            fallback_body = {
-                "model": "openclaw",
-                "messages": [{"role": "user", "content": message}],
-            }
-            fallback_req = urllib.request.Request(
-                fallback_url,
-                data=json.dumps(fallback_body).encode("utf-8"),
-                method="POST",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                    "x-openclaw-agent-id": agent_id,
-                    "x-openclaw-session-key": session_key,
-                },
-            )
-            try:
-                with urllib.request.urlopen(fallback_req, timeout=timeout_seconds) as resp:
-                    resp.read()
-                _schedule_openclaw_assistant_log_check(session_key=session_key, request_id=request_id, sent_at=sent_at)
-                return
-            except Exception as fallback_exc:
-                raw = str(fallback_exc)
-                if not raw:
-                    raw = f"{type(fallback_exc).__name__}"
-                _log_openclaw_chat_error(
-                    session_key=session_key,
-                    request_id=request_id,
-                    detail=f"OpenClaw chat failed (fallback). requestId={request_id}",
-                    raw=raw,
-                )
-                return
 
-        if attachments and exc.code in {404, 405}:
-            _log_openclaw_chat_error(
-                session_key=session_key,
-                request_id=request_id,
-                detail=(
-                    "OpenClaw chat failed: OpenResponses endpoint disabled. "
-                    "Run: openclaw config set gateway.http.endpoints.responses.enabled --json true "
-                    "then: openclaw gateway restart"
-                    f" (requestId={request_id})"
-                ),
-                raw=raw,
+        ws_attachments: list[dict[str, Any]] = []
+        if attachments:
+            root = _attachments_root()
+            for att in attachments:
+                att_id = str(att.get("id") or "").strip()
+                if not att_id:
+                    continue
+                storage_path = str(att.get("storagePath") or att_id).strip()
+                path = root / storage_path
+                if not path.exists():
+                    _log_openclaw_chat_error(
+                        session_key=session_key,
+                        request_id=request_id,
+                        detail=f"OpenClaw chat failed: attachment missing on disk ({att_id}). requestId={request_id}",
+                    )
+                    return
+                try:
+                    data_bytes = path.read_bytes()
+                except Exception as exc:
+                    _log_openclaw_chat_error(
+                        session_key=session_key,
+                        request_id=request_id,
+                        detail=f"OpenClaw chat failed: unable to read attachment ({att_id}). requestId={request_id}",
+                        raw=str(exc),
+                    )
+                    return
+
+                mime_type = _normalize_mime_type(str(att.get("mimeType") or "application/octet-stream"))
+                filename = _sanitize_attachment_filename(str(att.get("fileName") or "attachment"))
+                b64 = base64.b64encode(data_bytes).decode("ascii")
+                ws_attachments.append(
+                    {
+                        "mimeType": mime_type,
+                        "fileName": filename,
+                        "content": b64,
+                    }
+                )
+
+        payload = asyncio.run(
+            gateway_rpc(
+                "chat.send",
+                {
+                    "sessionKey": session_key,
+                    "message": message,
+                    "attachments": ws_attachments or None,
+                    "timeoutMs": int(float(os.getenv("OPENCLAW_CHAT_TIMEOUT_SECONDS", "120")) * 1000),
+                    "idempotencyKey": request_id,
+                },
+                scopes=["operator.write"],
             )
-            return
-        _log_openclaw_chat_error(
-            session_key=session_key,
-            request_id=request_id,
-            detail=f"OpenClaw chat failed (HTTP {exc.code}). requestId={request_id}",
-            raw=raw,
         )
+        # We don't need the response body; OpenClaw logs the conversation via plugins.
+        _ = payload
+        _schedule_openclaw_assistant_log_check(session_key=session_key, request_id=request_id, sent_at=sent_at)
     except Exception as exc:
         raw = str(exc)
         if not raw:
             raw = f"{type(exc).__name__}"
         detail = f"OpenClaw chat failed. requestId={request_id}"
-        try:
-            if isinstance(exc, TimeoutError):
-                detail = f"OpenClaw chat failed: timed out contacting gateway at {base_url}. requestId={request_id}"
-            elif isinstance(exc, urllib.error.URLError):
-                reason = getattr(exc, "reason", None)
-                if reason:
-                    detail = (
-                        f"OpenClaw chat failed: unable to reach gateway at {base_url} ({reason}). requestId={request_id}"
-                    )
-                else:
-                    detail = f"OpenClaw chat failed: unable to reach gateway at {base_url}. requestId={request_id}"
-        except Exception:
-            pass
         _log_openclaw_chat_error(
             session_key=session_key,
             request_id=request_id,
             detail=detail,
             raw=raw,
         )
-    finally:
-        try:
-            event_hub.publish(
-                {
-                    "type": "openclaw.typing",
-                    "data": {"sessionKey": session_key, "requestId": request_id, "typing": False},
-                    "eventTs": now_iso(),
-                }
-            )
-        except Exception:
-            pass
 
 
 def _openclaw_chat_assistant_log_grace_seconds() -> float:
@@ -1852,6 +1722,54 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
         attachments=attachments_task,
     )
     return {"queued": True, "requestId": request_id}
+
+
+@app.get(
+    "/api/openclaw/skills",
+    dependencies=[Depends(require_token)],
+    response_model=OpenClawSkillsResponse,
+    tags=["openclaw"],
+)
+async def openclaw_skills(agentId: str = Query(default="main", description="OpenClaw agent id")):
+    """Fetch live OpenClaw skill directory via gateway RPC (skills.status)."""
+    agent_id = (agentId or "main").strip() or "main"
+    try:
+        payload = await gateway_rpc("skills.status", {"agentId": agent_id})
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to fetch skills from OpenClaw gateway: {exc}",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=503, detail="Invalid skills response from OpenClaw gateway")
+
+    # Reduce payload size + keep schema stable for the UI.
+    skills_raw = payload.get("skills")
+    skills = []
+    if isinstance(skills_raw, list):
+        for row in skills_raw:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            skills.append(
+                {
+                    "name": name,
+                    "description": str(row.get("description") or "").strip() or None,
+                    "emoji": str(row.get("emoji") or "").strip() or None,
+                    "eligible": bool(row.get("eligible")) if row.get("eligible") is not None else None,
+                    "disabled": bool(row.get("disabled")) if row.get("disabled") is not None else None,
+                    "always": bool(row.get("always")) if row.get("always") is not None else None,
+                    "source": str(row.get("source") or "").strip() or None,
+                }
+            )
+
+    return {
+        "agentId": agent_id,
+        "workspaceDir": str(payload.get("workspaceDir") or "").strip() or None,
+        "skills": skills,
+    }
 
 
 @app.get("/api/stream")
@@ -2234,7 +2152,8 @@ def reorder_topics(payload: TopicReorderRequest):
 
         topics_by_id = {topic.id: topic for topic in topics}
         before_sort = {topic.id: int(getattr(topic, "sortIndex", 0) or 0) for topic in topics}
-        timestamp = now_iso()
+        # Reordering is not a meaningful content update; do not touch updatedAt.
+        event_ts = now_iso()
         changed: list[str] = []
         for idx, topic_id in enumerate(final_ids):
             topic = topics_by_id.get(topic_id)
@@ -2243,7 +2162,6 @@ def reorder_topics(payload: TopicReorderRequest):
             prior = before_sort.get(topic_id)
             if prior != idx:
                 topic.sortIndex = idx
-                topic.updatedAt = timestamp
                 session.add(topic)
                 changed.append(topic_id)
         session.commit()
@@ -2251,7 +2169,7 @@ def reorder_topics(payload: TopicReorderRequest):
             topic = topics_by_id.get(topic_id)
             if not topic:
                 continue
-            event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
+            event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": event_ts})
         return {"ok": True, "count": len(final_ids), "changed": len(changed)}
 
 
@@ -2654,20 +2572,20 @@ def reorder_tasks(payload: TaskReorderRequest):
             raise HTTPException(status_code=400, detail=detail)
 
         tasks_by_id = {task.id: task for task in scope_tasks}
-        timestamp = now_iso()
+        # Reordering is not a meaningful content update; do not touch updatedAt.
+        event_ts = now_iso()
         for idx, task_id in enumerate(ordered_ids):
             task = tasks_by_id.get(task_id)
             if not task:
                 continue
             task.sortIndex = idx
-            task.updatedAt = timestamp
             session.add(task)
         session.commit()
         for task_id in ordered_ids:
             task = tasks_by_id.get(task_id)
             if not task:
                 continue
-            event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
+            event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": event_ts})
         return {"ok": True, "count": len(ordered_ids)}
 
 

@@ -15,7 +15,8 @@ const UpsertTaskSchema = z
     id: z.string().min(1).optional(),
     topicId: z.string().min(1),
     title: z.string().min(1).max(500),
-    status: StatusSchema.optional()
+    status: StatusSchema.optional(),
+    color: z.string().optional().nullable()
   })
   .strict();
 
@@ -36,7 +37,10 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = await upsertTask(parsed.data);
+    const result = await upsertTask({
+      ...parsed.data,
+      color: parsed.data.color ?? undefined
+    });
     return NextResponse.json(
       { task: result.task, created: result.created },
       { status: result.created ? 201 : 200 }

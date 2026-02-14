@@ -484,22 +484,58 @@ function rgba(hex: string, alpha: number) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function colorFromSeed(seed: string, palette: string[]) {
+function hashString(seed: string) {
   let hash = 0;
   for (let i = 0; i < seed.length; i += 1) {
     hash = (hash << 5) - hash + seed.charCodeAt(i);
     hash |= 0;
   }
-  const index = Math.abs(hash) % palette.length;
+  return hash;
+}
+
+function colorFromSeed(seed: string, palette: string[]) {
+  const index = Math.abs(hashString(seed)) % palette.length;
   return palette[index];
 }
 
-function pickAlternatingColor(base: string, previous: string | null, index: number, palette: string[]) {
-  const normalized = normalizeHexColor(base) ?? palette[index % palette.length];
-  if (!previous || normalized !== previous) return normalized;
-  const start = palette.indexOf(normalized);
-  const nextIndex = start >= 0 ? (start + 1) % palette.length : (index + 1) % palette.length;
-  return palette[nextIndex];
+function pickTopicColor(seed: string, existingColors: string[], palette: string[]) {
+  const used = new Set(existingColors.map((c) => normalizeHexColor(c)).filter(Boolean) as string[]);
+  const preferred = normalizeHexColor(colorFromSeed(seed, palette)) ?? palette[0];
+  if (!used.has(preferred)) return preferred;
+
+  const step = 1 + (Math.abs(hashString(`step:${seed}`)) % (palette.length - 1));
+  let idx = palette.indexOf(preferred);
+  for (let i = 0; i < palette.length; i += 1) {
+    idx = (idx + step) % palette.length;
+    const candidate = normalizeHexColor(palette[idx]) ?? palette[idx];
+    if (!used.has(candidate)) return candidate;
+  }
+
+  return preferred;
+}
+
+function deriveTaskColor(topicColor: string, seed: string) {
+  const base = hexToRgb(topicColor);
+  const h = hashString(seed);
+  const towardWhite = (h & 1) === 0;
+  const target = towardWhite ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
+  const t = 0.22 + (Math.abs(h) % 18) / 100;
+  const mix = {
+    r: base.r + (target.r - base.r) * t,
+    g: base.g + (target.g - base.g) * t,
+    b: base.b + (target.b - base.b) * t,
+  };
+  const toHex = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+  const derived = `#${toHex(mix.r)}${toHex(mix.g)}${toHex(mix.b)}`.toUpperCase();
+  const normalizedBase = normalizeHexColor(topicColor) ?? topicColor.toUpperCase();
+  if (derived !== normalizedBase) return derived;
+  const t2 = Math.min(0.6, t + 0.15);
+  const mix2 = {
+    r: base.r + (target.r - base.r) * t2,
+    g: base.g + (target.g - base.g) * t2,
+    b: base.b + (target.b - base.b) * t2,
+  };
+  return `#${toHex(mix2.r)}${toHex(mix2.g)}${toHex(mix2.b)}`.toUpperCase();
 }
 
 function topicGlowStyle(color: string, index: number, expanded: boolean): CSSProperties {
@@ -793,6 +829,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [taskBumpAt, setTaskBumpAt] = useState<Record<string, number>>({});
   const bumpTimers = useRef<Map<string, number>>(new Map());
   const mobileDoneCollapseTaskIdRef = useRef<string | null>(null);
+  const patchedTopicColorsRef = useRef<Set<string>>(new Set());
+  const patchedTaskColorsRef = useRef<Set<string>>(new Set());
   const [activeComposer, setActiveComposer] = useState<
     | { kind: "topic"; topicId: string }
     | { kind: "task"; topicId: string; taskId: string }
@@ -818,6 +856,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       createdAt: string;
       status: "sending" | "sent" | "failed";
       error?: string;
+      debugHint?: string;
     }>
   >([]);
   const composerHandlesRef = useRef<Map<string, BoardChatComposerHandle>>(new Map());
@@ -1945,31 +1984,41 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const pagedTopics = pageCount > 1 ? orderedTopics.slice((safePage - 1) * pageSize, safePage * pageSize) : orderedTopics;
 
   const topicDisplayColors = useMemo(() => {
+    // IMPORTANT: Colors should not change when the user drags/reorders.
+    // If we "fix collisions" based on list adjacency, dragging will reshuffle colors.
+    // So we assign deterministically using a stable ordering (topic.id).
     const map = new Map<string, string>();
-    let previous: string | null = null;
-    pagedTopics.forEach((topic, index) => {
-      const seedColor = normalizeHexColor(topic.color) ?? colorFromSeed(`topic:${topic.id}:${topic.name}`, TOPIC_FALLBACK_COLORS);
-      const color = pickAlternatingColor(seedColor, previous, index, TOPIC_FALLBACK_COLORS);
+    const stableTopics = topics.slice().sort((a, b) => a.id.localeCompare(b.id));
+    const assigned: string[] = [];
+    for (const topic of stableTopics) {
+      const stored = normalizeHexColor(topic.color);
+      const color =
+        stored ??
+        pickTopicColor(`topic:${topic.id}:${topic.name}`, assigned, TOPIC_FALLBACK_COLORS);
       map.set(topic.id, color);
-      previous = color;
-    });
+      assigned.push(color);
+    }
     return map;
-  }, [pagedTopics]);
+  }, [topics]);
 
   const taskDisplayColors = useMemo(() => {
     const map = new Map<string, string>();
-    pagedTopics.forEach((topic) => {
-      const taskList = tasksByTopic.get(topic.id) ?? [];
-      let previous: string | null = null;
-      taskList.forEach((task, index) => {
-        const seedColor = normalizeHexColor(task.color) ?? colorFromSeed(`task:${task.id}:${task.title}`, TASK_FALLBACK_COLORS);
-        const color = pickAlternatingColor(seedColor, previous, index, TASK_FALLBACK_COLORS);
-        map.set(task.id, color);
-        previous = color;
-      });
-    });
+    const stableTasks = tasks.slice().sort((a, b) => a.id.localeCompare(b.id));
+    for (const task of stableTasks) {
+      const stored = normalizeHexColor(task.color);
+      if (stored) {
+        map.set(task.id, stored);
+        continue;
+      }
+      const topicColor = task.topicId ? topicDisplayColors.get(task.topicId) : null;
+      if (topicColor) {
+        map.set(task.id, deriveTaskColor(topicColor, `task:${task.id}:${task.title}`));
+        continue;
+      }
+      map.set(task.id, colorFromSeed(`task:${task.id}:${task.title}`, TASK_FALLBACK_COLORS));
+    }
     return map;
-  }, [pagedTopics, tasksByTopic]);
+  }, [tasks, topicDisplayColors]);
 
   const writeHeaders = useMemo(() => ({ "Content-Type": "application/json" }), []);
 
@@ -2676,6 +2725,32 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     },
     [readOnly, setTopics, token, topics, writeHeaders]
   );
+
+  // Persist computed colors exactly once for topics/tasks missing explicit colors.
+  // This makes colors stable across drag/drop reorder and across sessions.
+  useEffect(() => {
+    if (readOnly) return;
+    for (const topic of topics) {
+      if (normalizeHexColor(topic.color)) continue;
+      const color = topicDisplayColors.get(topic.id);
+      if (!color) continue;
+      if (patchedTopicColorsRef.current.has(topic.id)) continue;
+      patchedTopicColorsRef.current.add(topic.id);
+      void patchTopic(topic.id, { color });
+    }
+  }, [patchTopic, readOnly, topicDisplayColors, topics]);
+
+  useEffect(() => {
+    if (readOnly) return;
+    for (const task of tasks) {
+      if (normalizeHexColor(task.color)) continue;
+      const color = taskDisplayColors.get(task.id);
+      if (!color) continue;
+      if (patchedTaskColorsRef.current.has(task.id)) continue;
+      patchedTaskColorsRef.current.add(task.id);
+      void updateTask(task.id, { color });
+    }
+  }, [readOnly, taskDisplayColors, tasks, updateTask]);
 
   const deleteUnassignedTasks = async () => {
     if (readOnly) return;
@@ -4858,7 +4933,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                         className={cn(
                                           taskChatFullscreen
                                             ? "mb-2 space-y-1"
-                                            : "mb-2.5 flex flex-wrap items-center justify-between gap-2"
+                                            : "mb-2.5 flex items-start justify-between gap-2"
                                         )}
                                       >
                                         {taskChatFullscreen ? (
@@ -4910,7 +4985,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                             </div>
                                           </div>
                                         ) : (
-                                          <div className="flex min-w-0 items-center gap-2">
+                                          <div className="flex min-w-0 flex-1 items-center gap-2">
                                             <div className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
                                               TASK CHAT
                                             </div>
@@ -4932,7 +5007,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                           data-testid={`task-chat-controls-${task.id}`}
                                           className={cn(
                                             "flex flex-nowrap items-center gap-2",
-                                            taskChatFullscreen ? "w-full justify-end" : "justify-end"
+                                            taskChatFullscreen ? "w-full justify-end" : "ml-auto shrink-0 justify-end"
                                           )}
                                         >
                                           <div className="flex flex-nowrap items-center justify-end gap-2">
@@ -5088,6 +5163,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                                               ? pending.error
                                                               : "Failed to send."}
                                                       </span>
+                                                      {pending.debugHint ? (
+                                                        <span className="ml-2 text-[10px] text-[rgba(148,163,184,0.65)]">
+                                                          {pending.debugHint}
+                                                        </span>
+                                                      ) : null}
                                                     </div>
                                                   </div>
                                                 </div>
@@ -5429,6 +5509,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                                           ? pending.error
                                                           : "Failed to send."}
                                                   </span>
+                                                  {pending.debugHint ? (
+                                                    <span className="ml-2 text-[10px] text-[rgba(148,163,184,0.65)]">{pending.debugHint}</span>
+                                                  ) : null}
                                                 </div>
                                               </div>
                                             </div>

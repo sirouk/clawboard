@@ -106,9 +106,9 @@ export type BoardChatComposerHandle = {
 };
 
 export type BoardChatComposerSendEvent =
-  | { phase: "sending"; localId: string; sessionKey: string; message: string; createdAt: string; attachments?: AttachmentLike[] }
-  | { phase: "queued"; localId: string; requestId: string; sessionKey: string; message: string; createdAt: string; attachments?: AttachmentLike[] }
-  | { phase: "failed"; localId: string; sessionKey: string; message: string; createdAt: string; error: string; attachments?: AttachmentLike[] };
+  | { phase: "sending"; localId: string; sessionKey: string; message: string; createdAt: string; attachments?: AttachmentLike[]; debugHint?: string }
+  | { phase: "queued"; localId: string; requestId: string; sessionKey: string; message: string; createdAt: string; attachments?: AttachmentLike[]; debugHint?: string }
+  | { phase: "failed"; localId: string; sessionKey: string; message: string; createdAt: string; error: string; attachments?: AttachmentLike[]; debugHint?: string };
 
 type BoardChatComposerProps = {
   sessionKey: string;
@@ -193,6 +193,37 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   const [attachError, setAttachError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const BUILTIN_SLASH_COMMANDS = useMemo(
+    () =>
+      [
+        { name: "help", description: "Show available commands", kind: "cmd" },
+        { name: "commands", description: "List all slash commands", kind: "cmd" },
+        { name: "status", description: "Show current status", kind: "cmd" },
+        { name: "whoami", description: "Show your sender id", kind: "cmd" },
+        { name: "id", description: "Alias for /whoami", kind: "cmd" },
+        { name: "context", description: "Explain how context is built and used", kind: "cmd" },
+        { name: "subagents", description: "List/stop/log/info subagent runs", kind: "cmd" },
+        { name: "usage", description: "Usage footer or cost summary", kind: "cmd" },
+        { name: "model", description: "Show or set the model", kind: "cmd" },
+        { name: "models", description: "List models/providers", kind: "cmd" },
+        { name: "think", description: "Set thinking level", kind: "cmd" },
+        { name: "verbose", description: "Toggle verbose mode", kind: "cmd" },
+        { name: "reasoning", description: "Toggle reasoning visibility", kind: "cmd" },
+        { name: "elevated", description: "Toggle elevated mode", kind: "cmd" },
+        { name: "exec", description: "Set exec defaults for this session", kind: "cmd" },
+        { name: "reset", description: "Reset the current session", kind: "cmd" },
+        { name: "new", description: "Start a new session", kind: "cmd" },
+        { name: "stop", description: "Stop the current run", kind: "cmd" },
+        // Note: /bash, /config, /debug, /restart are config-gated in OpenClaw.
+      ] as Array<{ name: string; description: string; kind: string }>,
+    []
+  );
+
+  const [slashCommands, setSlashCommands] = useState<Array<{ name: string; description: string; kind: string }>>(
+    () => BUILTIN_SLASH_COMMANDS
+  );
+  const [slashCommandsLoadedAt, setSlashCommandsLoadedAt] = useState<number>(() => Date.now());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const resizeTextarea = useCallback(() => {
@@ -223,6 +254,44 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
       alive = false;
     };
   }, [attachmentPolicy]);
+
+  useEffect(() => {
+    let alive = true;
+    const now = Date.now();
+    // Refresh at most every 60s (good enough for local dev where skills change).
+    if (now - slashCommandsLoadedAt < 60_000) return () => undefined;
+    if (readOnly) return () => undefined;
+
+    void apiFetch(
+      `/api/openclaw/skills?agentId=${encodeURIComponent(agentId)}`,
+      { cache: "no-store" },
+      token
+    )
+      .then(async (res) => {
+        if (!alive) return;
+        if (!res.ok) return;
+        const payload = (await res.json().catch(() => null)) as { skills?: unknown } | null;
+        const skills = Array.isArray(payload?.skills) ? payload?.skills : [];
+        const normalized = skills
+          .map((entry) => {
+            const name = String((entry as any)?.name ?? "").trim();
+            const description = String((entry as any)?.description ?? "").trim();
+            return name ? { name, description, kind: "skill" } : null;
+          })
+          .filter(Boolean) as Array<{ name: string; description: string; kind: string }>;
+        // Merge built-ins + skills (skills win on name collisions).
+        const merged = new Map<string, { name: string; description: string; kind: string }>();
+        for (const cmd of BUILTIN_SLASH_COMMANDS) merged.set(cmd.name.toLowerCase(), cmd);
+        for (const cmd of normalized) merged.set(cmd.name.toLowerCase(), cmd);
+        setSlashCommands(Array.from(merged.values()));
+        setSlashCommandsLoadedAt(Date.now());
+      })
+      .catch(() => null);
+
+    return () => {
+      alive = false;
+    };
+  }, [agentId, readOnly, slashCommands.length, slashCommandsLoadedAt, token, BUILTIN_SLASH_COMMANDS]);
 
   useLayoutEffect(() => {
     resizeTextarea();
@@ -305,7 +374,9 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
       sizeBytes: att.sizeBytes,
       previewUrl: att.previewUrl,
     }));
-    onSendUpdate?.({ phase: "sending", localId, sessionKey, message, createdAt, attachments: pendingAttachments });
+    const isDev = process.env.NODE_ENV !== "production";
+    const debugHint = isDev ? "Sent via OpenClaw Gateway WS (chat.send)" : undefined;
+    onSendUpdate?.({ phase: "sending", localId, sessionKey, message, createdAt, attachments: pendingAttachments, debugHint });
     setDraft("");
     setSending(true);
     setAttachError(null);
@@ -341,6 +412,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
             createdAt,
             error: msg,
             attachments: pendingAttachments,
+            debugHint,
           });
           setAttachError(msg);
           return;
@@ -369,20 +441,20 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
         const msg = typeof detail?.detail === "string" ? detail.detail : `Failed to send (${res.status}).`;
         setDraft(message);
         setAttachments(attachmentsSnapshot);
-        onSendUpdate?.({ phase: "failed", localId, sessionKey, message, createdAt, error: msg, attachments: pendingAttachments });
+        onSendUpdate?.({ phase: "failed", localId, sessionKey, message, createdAt, error: msg, attachments: pendingAttachments, debugHint });
         setAttachError(msg);
         return;
       }
       const payload = (await res.json().catch(() => null)) as { requestId?: string } | null;
       const requestId = String(payload?.requestId ?? "").trim();
       if (requestId) {
-        onSendUpdate?.({ phase: "queued", localId, requestId, sessionKey, message, createdAt, attachments: pendingAttachments });
+        onSendUpdate?.({ phase: "queued", localId, requestId, sessionKey, message, createdAt, attachments: pendingAttachments, debugHint });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to send.";
       setDraft(message);
       setAttachments(attachmentsSnapshot);
-      onSendUpdate?.({ phase: "failed", localId, sessionKey, message, createdAt, error: msg, attachments: pendingAttachments });
+      onSendUpdate?.({ phase: "failed", localId, sessionKey, message, createdAt, error: msg, attachments: pendingAttachments, debugHint });
       setAttachError(msg);
     } finally {
       setSending(false);
@@ -396,6 +468,23 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     if (!text) return 0;
     return text.split(/\s+/).filter(Boolean).length;
   }, [draft]);
+
+  const slashMenu = useMemo(() => {
+    const trimmed = draft.trimStart();
+    if (!trimmed.startsWith("/")) return null;
+    // Only show for first-line command entry.
+    const firstLine = trimmed.split("\n")[0] ?? "";
+    // If the user already started args, don't pop the menu.
+    if (/^\/\S+\s+/.test(firstLine)) return null;
+    const tokenPart = firstLine.slice(1);
+    const namePrefix = tokenPart.split(/\s+/)[0] ?? "";
+    const prefix = namePrefix.toLowerCase();
+    const matches = slashCommands
+      .filter((cmd) => !prefix || cmd.name.toLowerCase().startsWith(prefix))
+      .slice(0, 10);
+    if (matches.length === 0) return null;
+    return { prefix: namePrefix, matches };
+  }, [draft, slashCommands]);
   const handleDensePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLTextAreaElement>) => {
       if (!dense) return;
@@ -463,7 +552,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
             event.target.value = "";
           }}
         />
-        <div className={cn(dense ? "relative" : "")}>
+        <div className={cn("relative", dense ? "" : "")}>
           <TextArea
             ref={textareaRef}
             className={cn(
@@ -507,6 +596,45 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
               }
             }}
           />
+          {slashMenu ? (
+            <div
+              className={cn(
+                "absolute left-2 right-2 top-2 z-20 overflow-hidden rounded-[var(--radius-md)] border",
+                "border-[rgba(255,255,255,0.14)] bg-[rgba(8,10,14,0.96)] shadow-lg backdrop-blur"
+              )}
+            >
+              <div className="px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">
+                Slash commands
+              </div>
+              <div className="max-h-56 overflow-auto">
+                {slashMenu.matches.map((cmd) => (
+                  <button
+                    key={cmd.name}
+                    type="button"
+                    className={cn(
+                      "flex w-full items-start gap-3 px-3 py-2 text-left text-sm transition",
+                      "hover:bg-[rgba(255,255,255,0.06)]"
+                    )}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      setDraft(cmd.kind === "skill" ? `/skill ${cmd.name} ` : `/${cmd.name} `);
+                      textareaRef.current?.focus();
+                    }}
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="font-mono text-[rgb(var(--claw-text))]">/{cmd.name}</span>
+                      {cmd.description ? (
+                        <span className="ml-2 text-xs text-[rgb(var(--claw-muted))]">{cmd.description}</span>
+                      ) : null}
+                    </span>
+                    <span className="text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
+                      {cmd.kind === "skill" ? "skill" : "cmd"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           {dense ? (
             <div className="absolute bottom-2.5 right-2.5 z-10 flex items-center gap-2">
               <button

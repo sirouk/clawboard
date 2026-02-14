@@ -8,7 +8,8 @@ const CreateTopicSchema = z
     name: z.string().min(1).max(200),
     description: z.string().max(5000).optional().nullable(),
     parentId: z.string().min(1).optional().nullable(),
-    tags: z.array(z.string().min(1).max(64)).max(50).optional()
+    tags: z.array(z.string().min(1).max(64)).max(50).optional(),
+    color: z.string().optional().nullable()
   })
   .strict();
 const errorCode = (err: unknown): string | null => {
@@ -46,7 +47,8 @@ export async function POST(req: NextRequest) {
       name: parsed.data.name,
       description: parsed.data.description ?? undefined,
       parentId: parsed.data.parentId ?? null,
-      tags: parsed.data.tags
+      tags: parsed.data.tags,
+      color: parsed.data.color ?? undefined
     });
     // Match FastAPI contract: return the created topic object directly.
     return NextResponse.json(topic, { status: 201 });

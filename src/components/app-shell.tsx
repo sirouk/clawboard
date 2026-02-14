@@ -12,7 +12,7 @@ import { DataProvider, useDataStore } from "@/components/data-provider";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { formatRelativeTime } from "@/lib/format";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
-import { buildTaskUrl, buildTopicUrl } from "@/lib/url";
+import { buildTaskUrl, buildTopicUrl, withRevealParam } from "@/lib/url";
 import { apiFetch, getApiBase } from "@/lib/api";
 import type { Task, Topic } from "@/lib/types";
 
@@ -94,6 +94,7 @@ const NAV_ITEMS = [
 
 const BOARD_TOPICS_EXPANDED_KEY = "clawboard.board.topics.navExpanded";
 const BOARD_TOPICS_SEARCH_KEY = "clawboard.board.topics.search";
+const BOARD_TOPICS_TASKS_EXPANDED_KEY = "clawboard.board.topics.tasksExpanded";
 const HEADER_COMPACT_KEY = "clawboard.header.compact";
 const NAV_SEARCH_TASKS_LIMIT = 5;
 const NAV_SEARCH_TOPICS_LIMIT = 5;
@@ -156,10 +157,40 @@ function StatusGlyph({ status, className }: { status: string; className?: string
   );
 }
 
+function TaskNavRow({
+  task,
+  selected,
+  onGo,
+}: {
+  task: Task;
+  selected: boolean;
+  onGo: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onGo}
+      className={cn(
+        // Indent via padding (not margin) so we don't overflow the nav panel width.
+        "w-full rounded-[var(--radius-sm)] border px-3 py-2 pl-7 text-left text-xs transition",
+        selected
+          ? "border-[rgba(77,171,158,0.5)] bg-[rgba(77,171,158,0.16)] text-[rgb(var(--claw-text))]"
+          : "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="truncate">{task.title}</div>
+        <div className="shrink-0 text-[10px]">{(task.status ?? "todo").toUpperCase()}</div>
+      </div>
+    </button>
+  );
+}
+
 function TopicNavRow({
   topic,
   selected,
   onGo,
+  onDoubleClick,
   reorderEnabled,
   dropActive,
   onReorderPointerDown,
@@ -167,6 +198,7 @@ function TopicNavRow({
   topic: Topic;
   selected: boolean;
   onGo: () => void;
+  onDoubleClick?: () => void;
   reorderEnabled: boolean;
   dropActive: boolean;
   onReorderPointerDown: (topicId: string, event: React.PointerEvent) => void;
@@ -183,6 +215,7 @@ function TopicNavRow({
       <button
         type="button"
         onClick={onGo}
+        onDoubleClick={onDoubleClick}
         className={cn(
           "flex w-full items-stretch gap-2 bg-transparent px-3 py-2 text-left text-xs",
           selected
@@ -241,6 +274,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const collapsed = useLocalStorageItem("clawboard.navCollapsed") === "true";
   const boardTopicsExpanded = useLocalStorageItem(BOARD_TOPICS_EXPANDED_KEY) === "true";
   const topicPanelSearch = useLocalStorageItem(BOARD_TOPICS_SEARCH_KEY) ?? "";
+  const topicTasksExpandedRaw = useLocalStorageItem(BOARD_TOPICS_TASKS_EXPANDED_KEY) ?? "";
   const compactHeader = useLocalStorageItem(HEADER_COMPACT_KEY) === "true";
   useLocalStorageItem("clawboard.apiBase");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -408,6 +442,34 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   }, [pathname, tasks, topics]);
 
   const normalizedTopicSearch = topicPanelSearch.trim().toLowerCase();
+
+  const expandedTopicIds = useMemo((): string[] => {
+    const raw = topicTasksExpandedRaw.trim();
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map((id) => String(id)).filter(Boolean);
+      return [];
+    } catch {
+      return [];
+    }
+  }, [topicTasksExpandedRaw]);
+
+  const setExpandedTopicIds = useCallback((next: string[]) => {
+    setLocalStorageItem(BOARD_TOPICS_TASKS_EXPANDED_KEY, JSON.stringify(next));
+  }, []);
+
+  const toggleTopicExpanded = useCallback(
+    (topicId: string) => {
+      if (!topicId) return;
+      const set = new Set(expandedTopicIds);
+      if (set.has(topicId)) set.delete(topicId);
+      else set.add(topicId);
+      setExpandedTopicIds(Array.from(set));
+    },
+    [expandedTopicIds, setExpandedTopicIds]
+  );
+
   const topicsById = useMemo(() => new Map(topics.map((t) => [t.id, t])), [topics]);
   const tasksById = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
@@ -452,7 +514,11 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	      return b.updatedAt.localeCompare(a.updatedAt);
 	    });
       if (!query) {
-        return base.filter((topic) => (topic.status ?? "active") !== "archived");
+        // Default nav should focus on active topics; snoozed topics only surface via search.
+        return base.filter((topic) => {
+          const status = topic.status ?? "active";
+          return status !== "archived" && status !== "snoozed";
+        });
       }
 
       if (topicSemanticForQuery) {
@@ -483,6 +549,47 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 
   const boardTopicReorderEnabled = showBoardTopics && !readOnly && normalizedTopicSearch.length === 0;
 
+  const visibleTasksByTopicId = useMemo(() => {
+    const byTopic = new Map<string, Task[]>();
+    if (normalizedTopicSearch.length > 0) return byTopic;
+
+    for (const task of tasks) {
+      const topicId = task.topicId;
+      if (!topicId) continue;
+      if (task.status === "done") continue;
+      if (task.snoozedUntil) continue;
+      const existing = byTopic.get(topicId);
+      if (existing) existing.push(task);
+      else byTopic.set(topicId, [task]);
+    }
+
+    const rank = (status: Task["status"]) => {
+      switch (status) {
+        case "doing":
+          return 0;
+        case "blocked":
+          return 1;
+        case "todo":
+          return 2;
+        case "done":
+          return 3;
+        default:
+          return 9;
+      }
+    };
+
+    for (const [topicId, list] of byTopic.entries()) {
+      list.sort((a, b) => {
+        const rs = rank(a.status) - rank(b.status);
+        if (rs !== 0) return rs;
+        return (b.updatedAt || "").localeCompare(a.updatedAt || "");
+      });
+      byTopic.set(topicId, list.slice(0, 8));
+    }
+
+    return byTopic;
+  }, [normalizedTopicSearch.length, tasks]);
+
   const boardTopicsForNav = useMemo(() => {
     if (boardTopicReorderEnabled) return filteredTopics;
     if (normalizedTopicSearch.length > 0) return filteredTopics.slice(0, NAV_SEARCH_TOPICS_LIMIT);
@@ -493,6 +600,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const [boardTopicDropTargetId, setBoardTopicDropTargetId] = useState<string | null>(null);
   const draggingBoardTopicIdRef = useRef<string | null>(null);
   const boardTopicDropTargetIdRef = useRef<string | null>(null);
+  const topicClickTimersRef = useRef<Map<string, number>>(new Map());
 
   const moveInArray = useCallback(<T,>(items: T[], from: number, to: number) => {
     if (from === to) return items;
@@ -879,11 +987,15 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                                {filteredTasksForSearch.map((task) => {
 	                                  const selected = task.id === activeBoardIds.taskId;
 	                                  const href = buildTaskUrl(task, topics);
+	                                  const destination = withRevealParam(href, true);
 	                                  return (
 	                                    <button
 	                                      key={task.id}
 	                                      type="button"
-	                                      onClick={() => router.push(href)}
+	                                      onClick={() => {
+	                                        // Keep the nav search query intact so users can click multiple results.
+	                                        router.push(destination);
+	                                      }}
 	                                      className={cn(
 	                                        "w-full rounded-[var(--radius-sm)] border px-3 py-2 text-left text-xs transition",
 	                                        selected
@@ -914,23 +1026,65 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                                const chatHref = href.includes("?") ? `${href}&chat=1` : `${href}?chat=1`;
 			                                const chatFocusHref = chatHref.includes("?") ? `${chatHref}&focus=1` : `${chatHref}?focus=1`;
 			                                const recentTask = mostRecentTaskByTopicId.get(topic.id) ?? null;
+			                                const expanded = normalizedTopicSearch.length === 0 && expandedTopicIds.includes(topic.id);
+			                                const visibleTasks = expanded ? (visibleTasksByTopicId.get(topic.id) ?? []) : [];
+
 			                                const go = () => {
-			                                  // Prefer topic chat to continue the conversation where the user left off.
-			                                  // If we want "latest open task" behavior, we can bring it back as an option.
-			                                  void recentTask; // keep the computed value available for future UX tweaks
-			                                  router.push(chatFocusHref);
+			                                  // Search mode: unchanged (single click navigates + reveals).
+			                                  if (normalizedTopicSearch.length > 0) {
+			                                    router.push(withRevealParam(href, true));
+			                                    return;
+			                                  }
+
+			                                  // Non-search mode: single click navigates, double click expands.
+			                                  const timers = topicClickTimersRef.current;
+			                                  const existing = timers.get(topic.id);
+			                                  if (existing) window.clearTimeout(existing);
+			                                  const handle = window.setTimeout(() => {
+			                                    timers.delete(topic.id);
+			                                    void recentTask; // keep computed value available for future UX tweaks
+			                                    router.push(chatFocusHref);
+			                                  }, 250);
+			                                  timers.set(topic.id, handle);
+			                                };
+
+			                                const onDoubleClick = () => {
+			                                  if (normalizedTopicSearch.length > 0) return;
+			                                  const timers = topicClickTimersRef.current;
+			                                  const existing = timers.get(topic.id);
+			                                  if (existing) window.clearTimeout(existing);
+			                                  timers.delete(topic.id);
+			                                  toggleTopicExpanded(topic.id);
 			                                };
 			                                const dropActive = Boolean(draggingBoardTopicId) && boardTopicDropTargetId === topic.id;
 			                                return (
-			                                  <TopicNavRow
-			                                    key={topic.id}
-			                                    topic={topic}
-			                                    selected={selected}
-			                                    onGo={go}
-			                                    reorderEnabled={boardTopicReorderEnabled}
-			                                    dropActive={dropActive}
-			                                    onReorderPointerDown={beginPointerTopicReorder}
-			                                  />
+			                                  <div key={topic.id} className="space-y-1">
+			                                    <TopicNavRow
+			                                      topic={topic}
+			                                      selected={selected}
+			                                      onGo={go}
+			                                      onDoubleClick={onDoubleClick}
+			                                      reorderEnabled={boardTopicReorderEnabled}
+			                                      dropActive={dropActive}
+			                                      onReorderPointerDown={beginPointerTopicReorder}
+			                                    />
+			                                    {expanded && visibleTasks.length > 0 ? (
+			                                      <div className="space-y-1">
+			                                        {visibleTasks.map((task) => {
+			                                          const taskSelected = task.id === activeBoardIds.taskId;
+			                                          const taskHref = withRevealParam(buildTaskUrl(task, topics), true);
+			                                          return (
+			                                            <TaskNavRow
+			                                              key={task.id}
+			                                              task={task}
+			                                              selected={taskSelected}
+			                                              onGo={() => router.push(taskHref)}
+			                                            />
+			                                          );
+			                                        })}
+			                                      </div>
+			                                    ) : null}
+			                                  </div>
 			                                );
 			                              })
 			                            )}

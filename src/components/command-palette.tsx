@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Input } from "@/components/ui";
 import type { Topic } from "@/lib/types";
-import { buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
+import { buildTopicUrl, UNIFIED_BASE, withRevealParam } from "@/lib/url";
 import { apiFetch } from "@/lib/api";
 
 type ActionItem = {
@@ -48,7 +48,8 @@ export function CommandPalette() {
     const normalized = query.trim().toLowerCase();
     const topicActions = topics.map((topic) => ({
       label: `Topic: ${topic.name}`,
-      href: buildTopicUrl(topic, topics),
+      href: withRevealParam(buildTopicUrl(topic, topics)),
+
       meta: "topic",
     }));
     const all = [...BASE_ACTIONS, ...topicActions];
