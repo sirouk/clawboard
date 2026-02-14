@@ -8,3 +8,9 @@ pnpm self-update
 pnpm install
 pnpm ui:build
 pnpm build
+
+autoload -Uz compinit
+compinit
+
+openclaw doctor --non-interactive --fix
+openclaw gateway restart
