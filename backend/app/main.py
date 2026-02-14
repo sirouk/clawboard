@@ -1543,13 +1543,14 @@ class _OpenClawAssistantLogWatchdog:
                     return
 
                 # If any assistant log shows up for this session after the send, the logger plugin is working.
+                # Match exact session key, thread variant, OR session keys containing the base key (OpenClaw may add prefixes like agent:main:).
                 query = select(LogEntry.id)
                 if DATABASE_URL.startswith("sqlite"):
                     query = query.where(
                         text(
-                            "(json_extract(source, '$.sessionKey') = :base_key OR json_extract(source, '$.sessionKey') LIKE :like_key)"
+                            "(json_extract(source, '$.sessionKey') = :base_key OR json_extract(source, '$.sessionKey') LIKE :like_key OR json_extract(source, '$.sessionKey') LIKE :contains_key)"
                         )
-                    ).params(base_key=base_key, like_key=f"{base_key}|%")
+                    ).params(base_key=base_key, like_key=f"{base_key}|%", contains_key=f"%:clawboard:topic:{base_key.split(':')[-1]}")
                 else:
                     expr = LogEntry.source["sessionKey"].as_string()
                     query = query.where(or_(expr == base_key, expr.like(f"{base_key}|%")))
