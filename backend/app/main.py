@@ -885,36 +885,68 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
 
     # Idempotency guard: if the source messageId is present, avoid duplicating
     # logs when the logger retries / replays its queue.
+    # OpenClaw also uses requestId as an authoritative per-send identifier, and plugin rows can
+    # arrive with that identifier in `source.messageId`, so treat them as the same operation.
     # NOTE: When an idempotency key is present (header or payload), the unique index on
     # LogEntry.idempotencyKey is the canonical dedupe mechanism. The source.messageId
     # fallback is only needed for legacy senders that omit idempotency keys.
     if not idempotency_key and payload.source and isinstance(payload.source, dict):
-        msg_id = payload.source.get("messageId")
-        if msg_id and payload.type == "conversation":
-            msg_id_text = str(msg_id).strip()
-            if msg_id_text:
-                channel = payload.source.get("channel")
-                channel_text = str(channel).strip().lower() if channel else ""
-                agent_id = (payload.agentId or "").strip()
+        msg_id_text = str(payload.source.get("messageId") or "").strip()
+        request_id_text = str(payload.source.get("requestId") or "").strip()
+        identifiers = [value for value in [msg_id_text, request_id_text] if value]
+        if identifiers and payload.type == "conversation":
+            channel = payload.source.get("channel")
+            channel_text = str(channel).strip().lower() if isinstance(channel, str) else ""
+            agent_id = (payload.agentId or "").strip()
+            unique_identifiers = list(dict.fromkeys(identifiers))
 
-                query = select(LogEntry).where(LogEntry.type == payload.type)
-                if agent_id:
-                    query = query.where(LogEntry.agentId == agent_id)
+            query = select(LogEntry).where(LogEntry.type == payload.type)
+            if agent_id:
+                query = query.where(LogEntry.agentId == agent_id)
 
-                if DATABASE_URL.startswith("sqlite"):
-                    query = query.where(text("json_extract(source, '$.messageId') = :msg_id")).params(msg_id=msg_id_text)
+            if DATABASE_URL.startswith("sqlite"):
+                # Query matches either legacy messageId or OpenClaw requestId sent as messageId.
+                query_text_parts: list[str] = []
+                query_params = {}
+                for idx, identifier in enumerate(unique_identifiers):
+                    key = f"did_{idx}"
+                    scope = "(1=1)"
                     if channel_text:
-                        query = query.where(text("json_extract(source, '$.channel') = :channel")).params(
-                            channel=channel_text
+                        query_params["channel"] = channel_text
+                        scope = "(" + " OR ".join(
+                            [
+                                f"json_extract(source, '$.channel') = :channel",
+                                "json_extract(source, '$.channel') IS NULL",
+                                "lower(json_extract(source, '$.channel')) = 'openclaw'",
+                            ]
+                        ) + ")"
+                    query_text_parts.append(
+                        f"((json_extract(source, '$.messageId') = :{key} OR "
+                        f"json_extract(source, '$.requestId') = :{key}) AND {scope})"
+                    )
+                    query_params[key] = identifier
+                query = query.where(text(" OR ".join(query_text_parts))).params(**query_params)
+            else:
+                # Query matches either messageId or requestId by identifier.
+                message_matches = []
+                for identifier in unique_identifiers:
+                    msg_cond = LogEntry.source["messageId"].as_string() == identifier
+                    req_cond = LogEntry.source["requestId"].as_string() == identifier
+                    if channel_text:
+                        channel_filter = or_(
+                            func.lower(LogEntry.source["channel"].as_string()) == channel_text,
+                            LogEntry.source["channel"].is_(None),
+                            func.lower(LogEntry.source["channel"].as_string()) == "openclaw",
                         )
-                else:
-                    query = query.where(LogEntry.source["messageId"].as_string() == msg_id_text)
-                    if channel_text:
-                        query = query.where(LogEntry.source["channel"].as_string() == channel_text)
+                        msg_cond = and_(msg_cond, channel_filter)
+                        req_cond = and_(req_cond, channel_filter)
+                    message_matches.append(or_(msg_cond, req_cond))
+                if message_matches:
+                    query = query.where(or_(*message_matches))
 
-                existing = session.exec(query).first()
-                if existing:
-                    return existing
+            existing = session.exec(query).first()
+            if existing:
+                return existing
 
     source_meta = payload.source.copy() if isinstance(payload.source, dict) else None
     topic_id = payload.topicId
@@ -1745,7 +1777,7 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
             createdAt=created_at,
             agentId="user",
             agentLabel="User",
-            source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id, "messageId": request_id},
             attachments=attachments_meta,
             classificationStatus="pending",
         )
