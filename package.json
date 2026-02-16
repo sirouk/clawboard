@@ -9,7 +9,7 @@
     "lint": "eslint",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:backend": "python3 -m unittest discover -s backend/tests -p \"test_*.py\"",
-    "test:classifier": "python3 -m unittest discover -s classifier/tests -p \"test_*.py\"",
+    "test:classifier": "python3 -m unittest discover -s classifier/tests -p \"test_*.py\" && python3 -m unittest discover -s tests/classifier -p \"test_*.py\"",
     "test:logger": "node --test extensions/clawboard-logger/*.test.mjs",
     "test:scripts": "node --test tests/scripts/*.test.mjs",
     "test": "playwright test",
