@@ -1,0 +1,12 @@
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+declare function normalizeBaseUrl(url: string): string;
+declare function sanitizeMessageContent(content: string): string;
+declare function summarize(content: string): string;
+declare function dedupeFingerprint(content: string): string;
+declare function truncateRaw(content: string): string;
+declare function clip(text: string, limit: number): string;
+declare function normalizeWhitespace(value: string): string;
+declare function tokenSet(value: string): Set<string>;
+declare function lexicalSimilarity(a: string, b: string): number;
+export default function register(api: OpenClawPluginApi): void;
+export { normalizeBaseUrl, sanitizeMessageContent, summarize, dedupeFingerprint, truncateRaw, clip, normalizeWhitespace, tokenSet, lexicalSimilarity };

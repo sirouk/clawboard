@@ -91,3 +91,6 @@ completion_log/
 coverage/
 .nyc_output/
 htmlcov/
+screenshots/retry_u_page_v3.png
+screenshots/retry_u_page.png
+screenshots/unified_view_loaded.png
