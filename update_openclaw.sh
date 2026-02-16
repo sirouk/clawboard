@@ -1,6 +1,7 @@
 !#/bin/bash
 
 cd $HOME/openclaw
+git checkout package.json
 git checkout main
 git pull
 
