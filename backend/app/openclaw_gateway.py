@@ -1,18 +1,37 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
+import subprocess
+import tempfile
+import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import websockets
+
+
+@dataclass(frozen=True)
+class OpenClawDeviceAuth:
+    device_id: str
+    public_key: str
+    private_key: str
 
 
 @dataclass
 class OpenClawGatewayConfig:
     ws_url: str
     token: str
+    client_id: str
+    client_version: str
+    client_mode: str
+    client_platform: str
+    default_scopes: list[str]
+    host_header: str
+    identity: OpenClawDeviceAuth | None
 
 
 def _derive_ws_url(http_base: str) -> str:
@@ -23,8 +42,170 @@ def _derive_ws_url(http_base: str) -> str:
         return "ws://" + base.removeprefix("http://")
     if base.startswith("ws://") or base.startswith("wss://"):
         return base
-    # Best effort.
     return "ws://" + base
+
+
+def _normalize_scopes(raw_scopes: str) -> list[str]:
+    values: list[str] = []
+    for scope in (raw_scopes or "").split(","):
+        value = scope.strip()
+        if value:
+            values.append(value)
+    return values
+
+
+def _dedupe_scopes(values: list[str]) -> list[str]:
+    seen = set[str]()
+    unique: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            unique.append(value)
+    return unique
+
+
+def _read_json_file(path: str) -> dict[str, Any] | None:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _base64_url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _load_device_auth() -> OpenClawDeviceAuth | None:
+    if os.getenv("OPENCLAW_GATEWAY_USE_DEVICE_AUTH", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return None
+
+    identity_dir = (os.getenv("OPENCLAW_GATEWAY_IDENTITY_DIR") or os.path.expanduser("~")).strip()
+    if not identity_dir:
+        return None
+    root = Path(identity_dir).expanduser()
+
+    device_path = Path(
+        os.getenv("OPENCLAW_DEVICE_PATH") or str(root / "identity" / "device.json")
+    ).expanduser()
+    auth_path = Path(
+        os.getenv("OPENCLAW_DEVICE_AUTH_PATH") or str(root / "identity" / "device-auth.json")
+    ).expanduser()
+
+    device_payload = _read_json_file(str(device_path))
+    auth_payload = _read_json_file(str(auth_path))
+    if not isinstance(device_payload, dict) or not isinstance(auth_payload, dict):
+        return None
+
+    if auth_payload.get("version") != 1:
+        return None
+    device_id = str(device_payload.get("deviceId") or "").strip()
+    public_key = str(device_payload.get("publicKeyPem") or device_payload.get("publicKey") or "").strip()
+    private_key = str(device_payload.get("privateKeyPem") or device_payload.get("privateKey") or "").strip()
+    if not (device_id and public_key and private_key):
+        return None
+    if auth_payload.get("deviceId") and str(auth_payload.get("deviceId")).strip() != device_id:
+        return None
+
+    operator_token = auth_payload.get("tokens", {}).get("operator") if isinstance(auth_payload.get("tokens"), dict) else None
+    if not (isinstance(operator_token, dict) and str(operator_token.get("token") or "").strip()):
+        return None
+
+    return OpenClawDeviceAuth(device_id=device_id, public_key=public_key, private_key=private_key)
+
+
+def _resolve_connect_nonce(message: dict[str, Any]) -> str:
+    if not isinstance(message, dict):
+        return ""
+    if message.get("type") != "event" or message.get("event") != "connect.challenge":
+        return ""
+    payload = message.get("payload")
+    if isinstance(payload, dict):
+        candidate = str(payload.get("nonce") or "").strip()
+        if candidate:
+            return candidate
+    candidate = str(message.get("nonce") or "").strip()
+    return candidate
+
+
+def _normalize_device_public_key(value: str) -> str:
+    value = (value or "").strip()
+    return value
+
+
+def _sign_device_payload(private_key_pem: str, payload: str) -> str:
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False)
+    payload_tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".bin", delete=False)
+    key_path = Path(tmp.name)
+    payload_path = Path(payload_tmp.name)
+    process: subprocess.CompletedProcess[bytes]
+    try:
+        tmp.write(private_key_pem)
+        tmp.flush()
+        tmp.close()
+        payload_tmp.write(payload.encode("utf-8"))
+        payload_tmp.flush()
+        payload_tmp.close()
+
+        # Use file-based input for signing. On newer OpenSSL builds, streaming stdin with -rawin
+        # can fail with ED25519 keys; `-in` is stable across environments.
+        command = ["openssl", "pkeyutl", "-sign", "-inkey", str(key_path), "-in", str(payload_path), "-rawin"]
+        process = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"openclaw signing failed: {exc}") from exc
+    finally:
+        try:
+            key_path.unlink()
+        except Exception:
+            pass
+        try:
+            payload_path.unlink()
+        except Exception:
+            pass
+
+    if process.returncode != 0:
+        stderr_text = process.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"openclaw signing failed: {stderr_text or 'openssl sign failed'}")
+    return _base64_url(process.stdout)
+
+
+def _build_device_auth_payload(
+    *,
+    identity: OpenClawDeviceAuth,
+    client_id: str,
+    client_mode: str,
+    role: str,
+    scopes: list[str],
+    signed_at_ms: int,
+    token: str,
+    nonce: str | None,
+) -> dict[str, Any]:
+    payload_parts = [
+        "v2" if nonce else "v1",
+        identity.device_id,
+        client_id,
+        client_mode,
+        role,
+        ",".join(scopes),
+        str(signed_at_ms),
+        token,
+    ]
+    if nonce:
+        payload_parts.append(nonce)
+    payload = "|".join(payload_parts)
+    return {
+        "id": identity.device_id,
+        "publicKey": _normalize_device_public_key(identity.public_key),
+        "signature": _sign_device_payload(identity.private_key, payload),
+        "signedAt": signed_at_ms,
+        "nonce": nonce,
+    }
 
 
 def load_openclaw_gateway_config() -> OpenClawGatewayConfig:
@@ -32,8 +213,23 @@ def load_openclaw_gateway_config() -> OpenClawGatewayConfig:
     token = (os.getenv("OPENCLAW_GATEWAY_TOKEN") or "").strip()
     if not token:
         raise RuntimeError("OPENCLAW_GATEWAY_TOKEN is required")
+
     ws_url = os.getenv("OPENCLAW_WS_URL", "").strip() or _derive_ws_url(http_base)
-    return OpenClawGatewayConfig(ws_url=ws_url, token=token)
+    scopes = _dedupe_scopes(_normalize_scopes(os.getenv("OPENCLAW_GATEWAY_SCOPES", "operator.read,operator.write")))
+    if not scopes:
+        scopes = ["operator.read", "operator.write"]
+
+    return OpenClawGatewayConfig(
+        ws_url=ws_url,
+        token=token,
+        client_id=(os.getenv("OPENCLAW_GATEWAY_CLIENT_ID") or "gateway-client").strip() or "gateway-client",
+        client_version=(os.getenv("OPENCLAW_GATEWAY_CLIENT_VERSION") or "0.1.0").strip() or "0.1.0",
+        client_mode=(os.getenv("OPENCLAW_GATEWAY_CLIENT_MODE") or "backend").strip() or "backend",
+        client_platform=(os.getenv("OPENCLAW_GATEWAY_CLIENT_PLATFORM") or "server").strip() or "server",
+        default_scopes=scopes,
+        host_header=(os.getenv("OPENCLAW_GATEWAY_HOST_HEADER") or "127.0.0.1").strip() or "127.0.0.1",
+        identity=_load_device_auth(),
+    )
 
 
 async def gateway_rpc(
@@ -44,19 +240,41 @@ async def gateway_rpc(
 ) -> Any:
     cfg = load_openclaw_gateway_config()
 
-    async with websockets.connect(cfg.ws_url, max_size=8_000_000) as ws:
-        # 1) Wait for connect.challenge event.
-        first = await ws.recv()
-        try:
-            msg = json.loads(first)
-        except Exception as exc:  # pragma: no cover
-            raise RuntimeError(f"invalid gateway message: {first!r}") from exc
-        if msg.get("type") != "event" or msg.get("event") != "connect.challenge":
-            raise RuntimeError(f"expected connect.challenge, got: {msg}")
+    effective_scopes = _dedupe_scopes(list(scopes) if scopes is not None else list(cfg.default_scopes))
+    if not effective_scopes:
+        effective_scopes = ["operator.read", "operator.write"]
 
-        # 2) Send connect req.
+    headers = {"Host": cfg.host_header}
+
+    async with websockets.connect(cfg.ws_url, max_size=8_000_000, extra_headers=headers) as ws:
+        first_raw = await ws.recv()
+        try:
+            first = json.loads(first_raw)
+        except Exception as exc:
+            raise RuntimeError(f"invalid gateway message: {first_raw!r}") from exc
+        if first.get("type") != "event" or first.get("event") != "connect.challenge":
+            raise RuntimeError(f"expected connect.challenge, got: {first}")
+
+        challenge_nonce = _resolve_connect_nonce(first)
+
+        device = None
+        if cfg.identity is not None:
+            try:
+                device = _build_device_auth_payload(
+                    identity=cfg.identity,
+                    client_id=cfg.client_id,
+                    client_mode=cfg.client_mode,
+                    role="operator",
+                    scopes=effective_scopes,
+                    signed_at_ms=int(time.time() * 1000),
+                    token=cfg.token,
+                    nonce=challenge_nonce or None,
+                )
+            except Exception:
+                device = None
+
         connect_id = str(uuid.uuid4())
-        connect_req = {
+        connect_params = {
             "type": "req",
             "id": connect_id,
             "method": "connect",
@@ -64,49 +282,57 @@ async def gateway_rpc(
                 "minProtocol": 3,
                 "maxProtocol": 3,
                 "client": {
-                    "id": "gateway-client",
-                    "version": "0.0.0",
-                    "platform": "server",
-                    "mode": "backend",
+                    "id": cfg.client_id,
+                    "version": cfg.client_version,
+                    "platform": cfg.client_platform,
+                    "mode": cfg.client_mode,
                 },
                 "role": "operator",
-                "scopes": scopes or ["operator.read"],
+                "scopes": effective_scopes,
                 "caps": [],
                 "commands": [],
                 "permissions": {},
                 "auth": {"token": cfg.token},
                 "locale": "en-US",
-                "userAgent": "clawboard/0.0.0",
+                "userAgent": "clawboard/0.1.0",
             },
         }
-        await ws.send(json.dumps(connect_req))
+        if device is not None:
+            connect_params["params"]["device"] = device
+        await ws.send(json.dumps(connect_params))
 
-        # 3) Await connect response.
+        connect_response_raw = None
         while True:
-            raw = await ws.recv()
-            res = json.loads(raw)
-            if res.get("type") != "res" or res.get("id") != connect_id:
+            connect_response_raw = await ws.recv()
+            connect_response = json.loads(connect_response_raw)
+            if connect_response.get("type") != "res" or connect_response.get("id") != connect_id:
                 continue
-            if not res.get("ok"):
-                raise RuntimeError(f"gateway connect failed: {res.get('error')}")
+            if not connect_response.get("ok"):
+                raise RuntimeError(f"gateway connect failed: {connect_response.get('error')}")
             break
 
-        # 4) Send RPC request.
         req_id = str(uuid.uuid4())
-        req = {
-            "type": "req",
-            "id": req_id,
-            "method": method,
-            "params": params or {},
-        }
-        await ws.send(json.dumps(req))
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "req",
+                    "id": req_id,
+                    "method": method,
+                    "params": params or {},
+                }
+            )
+        )
 
-        # 5) Await response.
         while True:
             raw = await ws.recv()
-            res = json.loads(raw)
-            if res.get("type") != "res" or res.get("id") != req_id:
+            response = json.loads(raw)
+            if response.get("type") != "res" or response.get("id") != req_id:
                 continue
-            if not res.get("ok"):
-                raise RuntimeError(str(res.get("error") or "Gateway request failed"))
-            return res.get("payload")
+            if not response.get("ok"):
+                error = response.get("error")
+                if isinstance(error, dict):
+                    message = error.get("message") or "Gateway request failed"
+                else:
+                    message = str(error or "Gateway request failed")
+                raise RuntimeError(message)
+            return response.get("payload")

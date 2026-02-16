@@ -107,22 +107,16 @@ def _parse_board_session_key(session_key: str) -> tuple[str | None, str | None]:
     if not base:
         return (None, None)
 
-    if base.startswith(BOARD_TOPIC_SESSION_PREFIX):
-        topic_id = base[len(BOARD_TOPIC_SESSION_PREFIX) :].strip()
-        return (topic_id or None, None)
+    # Robust matching: handles agent: prefixes and other wrappers.
+    # Topic format: clawboard:topic:<topic-id>
+    topic_match = re.search(r"clawboard:topic:(topic-[a-zA-Z0-9-]+)", base)
+    if topic_match:
+        return (topic_match.group(1), None)
 
-    if base.startswith(BOARD_TASK_SESSION_PREFIX):
-        rest = base[len(BOARD_TASK_SESSION_PREFIX) :].strip()
-        if not rest:
-            return (None, None)
-        parts = rest.split(":", 1)
-        if len(parts) != 2:
-            return (None, None)
-        topic_id = (parts[0] or "").strip()
-        task_id = (parts[1] or "").strip()
-        if not topic_id or not task_id:
-            return (None, None)
-        return (topic_id, task_id)
+    # Task format: clawboard:task:<topic-id>:<task-id>
+    task_match = re.search(r"clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)", base)
+    if task_match:
+        return (task_match.group(1), task_match.group(2))
 
     return (None, None)
 

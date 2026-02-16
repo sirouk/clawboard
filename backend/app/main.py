@@ -81,9 +81,25 @@ allowed_origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
 if not allowed_origins:
     allowed_origins = ["*"]
 
+# In development, be permissive with local and Tailscale origins
+if os.getenv("CLAWBOARD_WEB_HOT_RELOAD") == "1" or "*" in allowed_origins:
+    allowed_origins = ["*"]
+else:
+    # Ensure both local and Tailscale origins are allowed
+    extra_origins = [
+        "http://localhost:3010",
+        "http://100.91.119.30:3010",
+        "http://localhost:3000",
+        "http://127.0.0.1:3010",
+        "http://127.0.0.1:3000",
+    ]
+    for origin in extra_origins:
+        if origin not in allowed_origins:
+            allowed_origins.append(origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=["*"] if "*" in allowed_origins else allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1146,6 +1162,19 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
 
     # raw payloads can be large; keep log events lightweight for SSE + in-memory buffer safety.
     event_hub.publish({"type": "log.appended", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
+    # If this is an assistant log entry, publish a stop typing event to clear the typing indicator
+    if entry.agentId and entry.agentId.lower() == "assistant" and entry.source:
+        session_key = entry.source.get("sessionKey") if isinstance(entry.source, dict) else None
+        if session_key:
+            event_hub.publish({
+                "type": "openclaw.typing",
+                "data": {
+                    "sessionKey": session_key,
+                    "typing": False,
+                    "requestId": entry.source.get("requestId") if isinstance(entry.source, dict) else None
+                },
+                "eventTs": entry.updatedAt
+            })
     _enqueue_log_reindex(entry)
     return entry
 
@@ -1175,23 +1204,27 @@ BOARD_TASK_SESSION_PREFIX = "clawboard:task:"
 
 
 def _parse_board_session_key(session_key: str) -> tuple[str | None, str | None]:
-    key = (session_key or "").strip()
-    # OpenClaw may attach a thread suffix (`|thread:...`) for some providers; strip it
-    # so board routing remains stable.
-    key = (key.split("|", 1)[0] or "").strip()
-    if key.startswith(BOARD_TOPIC_SESSION_PREFIX):
-        topic_id = key[len(BOARD_TOPIC_SESSION_PREFIX) :].strip()
-        return (topic_id or None, None)
-    if key.startswith(BOARD_TASK_SESSION_PREFIX):
-        rest = key[len(BOARD_TASK_SESSION_PREFIX) :].strip()
-        if not rest:
-            return (None, None)
-        parts = rest.split(":", 1)
-        if len(parts) != 2:
-            return (None, None)
-        topic_id = parts[0].strip()
-        task_id = parts[1].strip()
-        return (topic_id or None, task_id or None)
+    key = str(session_key or "").strip()
+    if not key:
+        return (None, None)
+
+    # OpenClaw may attach thread suffixes (`|thread:...`). Strip those for routing.
+    base = (key.split("|", 1)[0] or "").strip()
+    if not base:
+        return (None, None)
+
+    # Robust matching: handles agent: prefixes and other wrappers.
+    # Task format must be checked before topic format, because `clawboard:task:...`
+    # contains a `clawboard:topic:` substring and would otherwise be misclassified.
+    task_match = re.search(r"clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)", base)
+    if task_match:
+        return (task_match.group(1), task_match.group(2))
+
+    # Topic format: clawboard:topic:<topic-id>
+    topic_match = re.search(r"clawboard:topic:(topic-[a-zA-Z0-9-]+)", base)
+    if topic_match:
+        return (topic_match.group(1), None)
+
     return (None, None)
 
 
@@ -1459,6 +1492,16 @@ def _run_openclaw_chat(
             detail=detail,
             raw=raw,
         )
+    finally:
+        # Reliable termination: always broadcast typing: False once the gateway call returns or fails.
+        # This is now in the outer finally block to ensure it runs regardless of early returns or exceptions.
+        event_hub.publish(
+            {
+                "type": "openclaw.typing",
+                "data": {"sessionKey": session_key, "requestId": request_id, "typing": False},
+                "eventTs": now_iso(),
+            }
+        )
 
 
 def _openclaw_chat_assistant_log_grace_seconds() -> float:
@@ -1543,17 +1586,37 @@ class _OpenClawAssistantLogWatchdog:
                     return
 
                 # If any assistant log shows up for this session after the send, the logger plugin is working.
-                # Match exact session key, thread variant, OR session keys containing the base key (OpenClaw may add prefixes like agent:main:).
+                # Match exact session key, thread variant, and known board task/topic patterns.
+                topic_id, task_id = _parse_board_session_key(base_key)
                 query = select(LogEntry.id)
                 if DATABASE_URL.startswith("sqlite"):
+                    conditions = [
+                        "json_extract(source, '$.sessionKey') = :base_key",
+                        "json_extract(source, '$.sessionKey') LIKE :like_key",
+                    ]
+                    query_params = {
+                        "base_key": base_key,
+                        "like_key": f"{base_key}|%",
+                    }
+                    if topic_id:
+                        condition = "json_extract(source, '$.sessionKey') LIKE :contains_topic_key"
+                        conditions.append(condition)
+                        query_params["contains_topic_key"] = f"%:clawboard:topic:{topic_id}%"
+                    if task_id:
+                        condition = "json_extract(source, '$.sessionKey') LIKE :contains_task_key"
+                        conditions.append(condition)
+                        query_params["contains_task_key"] = f"%:clawboard:task:{topic_id}:{task_id}%"
                     query = query.where(
-                        text(
-                            "(json_extract(source, '$.sessionKey') = :base_key OR json_extract(source, '$.sessionKey') LIKE :like_key OR json_extract(source, '$.sessionKey') LIKE :contains_key)"
-                        )
-                    ).params(base_key=base_key, like_key=f"{base_key}|%", contains_key=f"%:clawboard:topic:{base_key.split(':')[-1]}")
+                        text(f"({' OR '.join(conditions)})")
+                    ).params(**query_params)
                 else:
                     expr = LogEntry.source["sessionKey"].as_string()
-                    query = query.where(or_(expr == base_key, expr.like(f"{base_key}|%")))
+                    exprs = [expr == base_key, expr.like(f"{base_key}|%")]
+                    if topic_id:
+                        exprs.append(expr.like(f"%:clawboard:topic:{topic_id}%"))
+                    if task_id:
+                        exprs.append(expr.like(f"%:clawboard:task:{topic_id}:{task_id}%"))
+                    query = query.where(or_(*exprs))
                 query = (
                     query.where(func.lower(LogEntry.agentId) == "assistant")
                     .where(LogEntry.createdAt >= sent_at)
@@ -3171,12 +3234,9 @@ def list_logs(
             (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
         ).offset(offset).limit(limit)
         rows = session.exec(query).all()
-        if not includeRaw:
-            # Avoid DetachedInstanceError when response serialization touches deferred columns
-            # after the session is closed.
-            for row in rows:
-                row.raw = None
-        return rows
+        # Detach from session to avoid DetachedInstanceError during serialization.
+        # This is especially important when columns are deferred (like 'raw').
+        return [LogOut.model_validate(row) for row in rows]
 
 
 @app.get("/api/log/{log_id}", response_model=LogOut, tags=["logs"])
@@ -3196,9 +3256,9 @@ def get_log(
         entry = session.exec(query).first()
         if not entry:
             raise HTTPException(status_code=404, detail="Log not found")
-        if not includeRaw:
-            entry.raw = None
-        return entry
+        if not entry:
+            raise HTTPException(status_code=404, detail="Log not found")
+        return LogOut.model_validate(entry)
 
 
 @app.post("/api/log", dependencies=[Depends(require_token)], response_model=LogOut, tags=["logs"])
