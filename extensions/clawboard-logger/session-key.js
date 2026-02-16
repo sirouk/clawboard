@@ -6,7 +6,7 @@ export function computeEffectiveSessionKey(meta, ctx) {
   const ctxSession = typeof ctx?.sessionKey === "string" ? String(ctx.sessionKey).trim() : "";
   const threadId = typeof meta?.threadId === "string" ? String(meta.threadId).trim() : "";
 
-  const isBoard = (value) => Boolean(parseBoardSessionKey(value));
+  const isBoard = (value) => isBoardSessionKey(value);
 
   // Board sessions are explicitly chosen by Clawboard (Topic/Task chat). When present, they must
   // win even if OpenClaw supplies an unrelated conversationId, otherwise logs get mis-attributed
@@ -45,27 +45,29 @@ function isEntityId(prefix, value) {
   return /^[a-zA-Z0-9][a-zA-Z0-9-]{2,200}$/.test(trimmed);
 }
 
+function isBoardSessionKey(sessionKey) {
+  if (typeof sessionKey !== "string") return false;
+  return /clawboard:(topic|task):topic-/.test(sessionKey);
+}
+
 export function parseBoardSessionKey(sessionKey) {
   if (typeof sessionKey !== "string") return null;
   const trimmed = sessionKey.trim();
   if (!trimmed) return null;
 
   const base = trimmed.split("|", 1)[0] ?? trimmed;
-  const parts = base.split(":");
-  if (parts.length < 3) return null;
-  if (parts[0] !== "clawboard") return null;
-  const kind = parts[1];
-  if (kind === "topic" && parts.length === 3) {
-    const topicId = parts[2] ?? "";
-    if (!isEntityId("topic", topicId)) return null;
-    return { kind: "topic", topicId };
+  const taskMatch = base.match(/(?:^|:)clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)$/);
+  if (taskMatch && taskMatch[1] && taskMatch[2]) {
+    if (!isEntityId("topic", taskMatch[1])) return null;
+    if (!isEntityId("task", taskMatch[2])) return null;
+    return { kind: "task", topicId: taskMatch[1], taskId: taskMatch[2] };
   }
-  if (kind === "task" && parts.length === 4) {
-    const topicId = parts[2] ?? "";
-    const taskId = parts[3] ?? "";
-    if (!isEntityId("topic", topicId)) return null;
-    if (!isEntityId("task", taskId)) return null;
-    return { kind: "task", topicId, taskId };
+
+  const topicMatch = base.match(/(?:^|:)clawboard:topic:(topic-[a-zA-Z0-9-]+)$/);
+  if (topicMatch && topicMatch[1]) {
+    if (!isEntityId("topic", topicMatch[1])) return null;
+    return { kind: "topic", topicId: topicMatch[1] };
   }
+
   return null;
 }

@@ -8,7 +8,11 @@ import path from "node:path";
 import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
 
-import { computeEffectiveSessionKey, parseBoardSessionKey } from "./session-key";
+import {
+  computeEffectiveSessionKey,
+  isBoardSessionKey,
+  parseBoardSessionKey,
+} from "./session-key";
 import { getIgnoreSessionPrefixesFromEnv, shouldIgnoreSessionKey } from "./ignore-session";
 
 type HookEvent = {
@@ -26,6 +30,7 @@ type PluginHookMessageReceivedEvent = HookEvent & {
     sessionKey?: string;
     [key: string]: unknown;
   };
+  sessionKey?: string;
 };
 
 type PluginHookMessageSentEvent = HookEvent & {
@@ -34,6 +39,7 @@ type PluginHookMessageSentEvent = HookEvent & {
     sessionKey?: string;
     [key: string]: unknown;
   };
+  sessionKey?: string;
 };
 
 type PluginHookBeforeToolCallEvent = HookEvent & {
@@ -1872,25 +1878,63 @@ export default function register(api: OpenClawPluginApi) {
     return computeEffectiveSessionKey(metaObj, ctx2);
   };
 
+  const normalizeEventMeta = (
+    meta: Record<string, unknown> | undefined,
+    topLevelSessionKey: unknown,
+  ): { sessionKey?: string; [key: string]: unknown } => {
+    const merged: Record<string, unknown> = {
+      ...(meta && typeof meta === "object" ? meta : {}),
+    };
+    const top = typeof topLevelSessionKey === "string" ? topLevelSessionKey.trim() : "";
+    if (!top) return merged as { sessionKey?: string; [key: string]: unknown };
+    const mergedSessionKey =
+      typeof merged.sessionKey === "string" ? merged.sessionKey.trim() : "";
+    if (!mergedSessionKey || (isBoardSessionKey(top) && !isBoardSessionKey(mergedSessionKey))) {
+      merged.sessionKey = top;
+    }
+    return merged as { sessionKey?: string; [key: string]: unknown };
+  };
+
 	  api.on("message_received", async (event: PluginHookMessageReceivedEvent, ctx: PluginHookMessageContext) => {
 	    const createdAt = new Date().toISOString();
 	    const raw = event.content ?? "";
 	    const cleanRaw = sanitizeMessageContent(raw);
 	    if (isClassifierPayloadText(cleanRaw)) return;
 	    if (!cleanRaw) return;
-	    const meta = (event.metadata as Record<string, unknown> | undefined) ?? undefined;
+    const meta = normalizeEventMeta(
+      event.metadata as Record<string, unknown> | undefined,
+      (event as { sessionKey?: unknown }).sessionKey,
+    );
 	    const effectiveSessionKey = resolveSessionKey(meta as { sessionKey?: string } | undefined, ctx);
 	    if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
-	    const directBoardScope = boardScopeFromSessionKey(effectiveSessionKey ?? ctx?.sessionKey);
-	    if (directBoardScope) {
-	      rememberBoardScope(directBoardScope, {
-	        sessionKeys: [effectiveSessionKey, ctx.sessionKey],
-	        agentIds: [ctx.agentId, parseSubagentSession(ctx.sessionKey)?.ownerAgentId],
-	      });
-	      // Clawboard UI messages (board sessions) are already persisted immediately by the backend
-	      // (`/api/openclaw/chat`). Avoid double-logging if OpenClaw emits message_received for them.
-	      return;
-	    }
+    const directBoardScope = boardScopeFromSessionKey(effectiveSessionKey ?? ctx?.sessionKey);
+    if (directBoardScope) {
+      rememberBoardScope(directBoardScope, {
+        sessionKeys: [effectiveSessionKey, ctx.sessionKey],
+        agentIds: [ctx.agentId, parseSubagentSession(ctx.sessionKey)?.ownerAgentId],
+      });
+      lastChannelId = ctx.channelId;
+      lastEffectiveSessionKey = effectiveSessionKey;
+      lastMessageAt = Date.now();
+      const ctxSessionKey = (ctx as unknown as { sessionKey?: string })?.sessionKey ?? effectiveSessionKey;
+      if (ctxSessionKey) {
+        inboundBySession.set(ctxSessionKey, {
+          ts: lastMessageAt,
+          channelId: ctx.channelId,
+          sessionKey: effectiveSessionKey,
+        });
+      }
+      if (effectiveSessionKey && effectiveSessionKey !== ctxSessionKey) {
+        inboundBySession.set(effectiveSessionKey, {
+          ts: lastMessageAt,
+          channelId: ctx.channelId,
+          sessionKey: effectiveSessionKey,
+        });
+      }
+      // Clawboard UI messages (board sessions) are already persisted immediately by the backend
+      // (`/api/openclaw/chat`). Avoid double-logging if OpenClaw emits message_received for them.
+      return;
+    }
 	    lastChannelId = ctx.channelId;
 	    lastEffectiveSessionKey = effectiveSessionKey;
 	    lastMessageAt = Date.now();
@@ -1972,7 +2016,7 @@ export default function register(api: OpenClawPluginApi) {
     const cleanRaw = sanitizeMessageContent(raw);
     if (isClassifierPayloadText(cleanRaw)) return;
     if (!cleanRaw) return;
-    const meta = sendEvent.metadata ?? undefined;
+    const meta = normalizeEventMeta(sendEvent.metadata as Record<string, unknown> | undefined, sendEvent.sessionKey);
     const effectiveSessionKey = resolveSessionKey(meta as { sessionKey?: string } | undefined, ctx);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
     const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
@@ -1981,7 +2025,7 @@ export default function register(api: OpenClawPluginApi) {
 
     // Outbound message content is always assistant-side.
     const agentId = "assistant";
-    const agentLabel = resolveAgentLabel(ctx.agentId, (meta?.sessionKey as string | undefined) ?? (ctx as unknown as { sessionKey?: string })?.sessionKey);
+    const agentLabel = resolveAgentLabel(ctx.agentId, meta?.sessionKey ?? (ctx as unknown as { sessionKey?: string })?.sessionKey);
 
     const metaSummary = meta?.summary;
     const summary =
@@ -2023,8 +2067,11 @@ export default function register(api: OpenClawPluginApi) {
     // Avoid double-logging the actual message content; we log it at message_sending.
     // This hook is kept for future delivery status tracking.
     const raw = sanitizeMessageContent(event.content ?? "");
-    const meta = (event as unknown as Record<string, unknown>) ?? {};
-    const sessionKey = (meta?.sessionKey as string | undefined) ?? (ctx as unknown as { sessionKey?: string })?.sessionKey;
+    const meta = normalizeEventMeta(
+      (event as unknown as { metadata?: Record<string, unknown> }).metadata as Record<string, unknown> | undefined,
+      (event as unknown as { sessionKey?: unknown }).sessionKey,
+    );
+    const sessionKey = meta?.sessionKey ?? (ctx as unknown as { sessionKey?: string })?.sessionKey;
     const effectiveSessionKey = sessionKey ?? (ctx.channelId ? `channel:${ctx.channelId}` : undefined);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
     const dedupeKey = `sending:${ctx.channelId ?? "nochannel"}:${effectiveSessionKey ?? ""}:${dedupeFingerprint(raw)}`;
@@ -2343,3 +2390,17 @@ export default function register(api: OpenClawPluginApi) {
     }
   });
 }
+
+
+// Export utility functions for testing
+export {
+  normalizeBaseUrl,
+  sanitizeMessageContent,
+  summarize,
+  dedupeFingerprint,
+  truncateRaw,
+  clip,
+  normalizeWhitespace,
+  tokenSet,
+  lexicalSimilarity
+};

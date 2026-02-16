@@ -32,3 +32,28 @@ test("shouldIgnoreSessionKey supports custom prefixes", () => {
   assert.equal(shouldIgnoreSessionKey("agent:main:internal:foo:bar", ["internal:foo:"]), true);
   assert.equal(shouldIgnoreSessionKey("internal:foo:bar", ["internal:bar:"]), false);
 });
+
+// Additional tests for edge cases
+test("parseIgnoreSessionPrefixes handles null and whitespace-only inputs", () => {
+  assert.deepEqual(parseIgnoreSessionPrefixes(null), [...DEFAULT_IGNORE_SESSION_PREFIXES]);
+  assert.deepEqual(parseIgnoreSessionPrefixes(" "), [...DEFAULT_IGNORE_SESSION_PREFIXES]);
+  assert.deepEqual(parseIgnoreSessionPrefixes("\t\n"), [...DEFAULT_IGNORE_SESSION_PREFIXES]);
+});
+
+test("shouldIgnoreSessionKey handles empty and null inputs", () => {
+  assert.equal(shouldIgnoreSessionKey(null), false);
+  assert.equal(shouldIgnoreSessionKey(undefined), false);
+  assert.equal(shouldIgnoreSessionKey(""), false);
+  assert.equal(shouldIgnoreSessionKey("   "), false);
+});
+
+test("shouldIgnoreSessionKey handles empty prefix list", () => {
+  assert.equal(shouldIgnoreSessionKey("internal:clawboard-classifier:test", []), false);
+  assert.equal(shouldIgnoreSessionKey("any:key", []), false);
+});
+
+test("shouldIgnoreSessionKey handles malformed prefixes", () => {
+  assert.equal(shouldIgnoreSessionKey("test:key", [""]), false);
+  assert.equal(shouldIgnoreSessionKey("test:key", [null]), false);
+  assert.equal(shouldIgnoreSessionKey("test:key", [undefined]), false);
+});

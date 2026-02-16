@@ -15,6 +15,15 @@ function isEntityId(prefix: "topic" | "task", value: string) {
   return /^[a-zA-Z0-9][a-zA-Z0-9-]{2,200}$/.test(trimmed);
 }
 
+/**
+ * Returns true if the session key is an explicit Clawboard UI session (Topic or Task chat).
+ * Handles wrapped keys (e.g. agent:main:clawboard:topic:...).
+ */
+export function isBoardSessionKey(sessionKey: string | undefined | null): boolean {
+  if (typeof sessionKey !== "string") return false;
+  return /clawboard:(topic|task):topic-/.test(sessionKey);
+}
+
 export function parseBoardSessionKey(sessionKey: string | undefined | null): BoardSessionRoute | null {
   if (typeof sessionKey !== "string") return null;
   const trimmed = sessionKey.trim();
@@ -22,22 +31,20 @@ export function parseBoardSessionKey(sessionKey: string | undefined | null): Boa
 
   // Strip OpenClaw's optional thread suffix (`|thread:...`) if present.
   const base = trimmed.split("|", 1)[0] ?? trimmed;
-  const parts = base.split(":");
-  if (parts.length < 3) return null;
-  if (parts[0] !== "clawboard") return null;
-  const kind = parts[1];
-  if (kind === "topic" && parts.length === 3) {
-    const topicId = parts[2] ?? "";
-    if (!isEntityId("topic", topicId)) return null;
-    return { kind: "topic", topicId };
+  
+  // Robust matching: handles agent: prefixes and other wrappers.
+  // Task format: clawboard:task:<topic-id>:<task-id>
+  const taskMatch = base.match(/clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)/);
+  if (taskMatch && taskMatch[1] && taskMatch[2]) {
+    return { kind: "task", topicId: taskMatch[1], taskId: taskMatch[2] };
   }
-  if (kind === "task" && parts.length === 4) {
-    const topicId = parts[2] ?? "";
-    const taskId = parts[3] ?? "";
-    if (!isEntityId("topic", topicId)) return null;
-    if (!isEntityId("task", taskId)) return null;
-    return { kind: "task", topicId, taskId };
+
+  // Topic format: clawboard:topic:<topic-id>
+  const topicMatch = base.match(/clawboard:topic:(topic-[a-zA-Z0-9-]+)/);
+  if (topicMatch && topicMatch[1]) {
+    return { kind: "topic", topicId: topicMatch[1] };
   }
+
   return null;
 }
 
@@ -59,7 +66,7 @@ export function computeEffectiveSessionKey(
       ? String((meta as { threadId?: unknown }).threadId).trim()
       : "";
 
-  const isBoard = (value: string) => Boolean(parseBoardSessionKey(value));
+  const isBoard = (value: string) => isBoardSessionKey(value);
 
   // Board sessions are explicitly chosen by Clawboard (Topic/Task chat). When present, they must
   // win even if OpenClaw supplies an unrelated conversationId, otherwise logs get mis-attributed

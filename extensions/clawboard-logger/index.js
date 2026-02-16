@@ -4,9 +4,9 @@ import path from "node:path";
 import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
 
-import { computeEffectiveSessionKey, parseBoardSessionKey } from "./session-key.js";
+import { computeEffectiveSessionKey, isBoardSessionKey, parseBoardSessionKey } from "./session-key.js";
 import { getIgnoreSessionPrefixesFromEnv, shouldIgnoreSessionKey } from "./ignore-session.js";
-export { computeEffectiveSessionKey, parseBoardSessionKey };
+export { computeEffectiveSessionKey, isBoardSessionKey, parseBoardSessionKey };
 
 const DEFAULT_QUEUE = path.join(os.homedir(), ".openclaw", "clawboard-queue.sqlite");
 const SUMMARY_MAX = 72;
@@ -1537,6 +1537,18 @@ export default function register(api) {
   const resolveSessionKey = (meta, ctx2) => {
     return computeEffectiveSessionKey(meta, ctx2);
   };
+  const normalizeEventMeta = (meta, topLevelSessionKey) => {
+    const merged = {
+      ...(meta && typeof meta === "object" ? meta : {})
+    };
+    const top = typeof topLevelSessionKey === "string" ? topLevelSessionKey.trim() : "";
+    if (!top) return merged;
+    const mergedSessionKey = typeof merged.sessionKey === "string" ? merged.sessionKey.trim() : "";
+    if (!mergedSessionKey || isBoardSessionKey(top) && !isBoardSessionKey(mergedSessionKey)) {
+      merged.sessionKey = top;
+    }
+    return merged;
+  };
 
   api.on("message_received", async (event, ctx) => {
     const createdAt = new Date().toISOString();
@@ -1546,7 +1558,7 @@ export default function register(api) {
       return;
     if (!cleanRaw)
       return;
-    const meta = event.metadata ?? void 0;
+    const meta = normalizeEventMeta(event.metadata ?? void 0, event.sessionKey);
     const effectiveSessionKey = resolveSessionKey(meta, ctx);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
       return;
@@ -1556,6 +1568,24 @@ export default function register(api) {
         sessionKeys: [effectiveSessionKey, ctx.sessionKey],
         agentIds: [ctx.agentId, parseSubagentSession(ctx.sessionKey)?.ownerAgentId]
       });
+      lastChannelId = ctx.channelId;
+      lastEffectiveSessionKey = effectiveSessionKey;
+      lastMessageAt = Date.now();
+      const ctxSessionKey = (ctx === null || ctx === void 0 ? void 0 : ctx.sessionKey) ?? effectiveSessionKey;
+      if (ctxSessionKey) {
+        inboundBySession.set(ctxSessionKey, {
+          ts: lastMessageAt,
+          channelId: ctx.channelId,
+          sessionKey: effectiveSessionKey
+        });
+      }
+      if (effectiveSessionKey && effectiveSessionKey !== ctxSessionKey) {
+        inboundBySession.set(effectiveSessionKey, {
+          ts: lastMessageAt,
+          channelId: ctx.channelId,
+          sessionKey: effectiveSessionKey
+        });
+      }
       return;
     }
     lastChannelId = ctx.channelId;
@@ -1634,7 +1664,7 @@ export default function register(api) {
       return;
     if (!cleanRaw)
       return;
-    const meta = event.metadata ?? void 0;
+    const meta = normalizeEventMeta(event.metadata ?? void 0, event.sessionKey);
     const effectiveSessionKey = resolveSessionKey(meta, ctx);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
       return;
@@ -1678,7 +1708,7 @@ export default function register(api) {
 
   api.on("message_sent", async (event, ctx) => {
     const raw = sanitizeMessageContent(event.content ?? "");
-    const meta = event ?? {};
+    const meta = normalizeEventMeta(event.metadata ?? void 0, event.sessionKey);
     const sessionKey = meta?.sessionKey ?? ctx?.sessionKey;
     const effectiveSessionKey = sessionKey ?? (ctx.channelId ? `channel:${ctx.channelId}` : void 0);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
