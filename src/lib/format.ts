@@ -1,5 +1,13 @@
-export function formatDateTime(value: string) {
+/**
+ * Formats a date string into a human-readable format.
+ * @param value - ISO date string to format
+ * @returns Formatted date string or "Invalid Date" if parsing fails
+ */
+export function formatDateTime(value: string): string {
+  if (typeof value !== 'string') return "Invalid Date";
   const date = new Date(value);
+  if (isNaN(date.getTime())) return "Invalid Date";
+  
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
@@ -8,9 +16,17 @@ export function formatDateTime(value: string) {
   }).format(date);
 }
 
-export function formatRelativeTime(value: string) {
-  const date = new Date(value).getTime();
-  const diff = date - Date.now();
+/**
+ * Formats a date string into a relative time format (e.g., "2 hours ago").
+ * @param value - ISO date string to format
+ * @returns Relative time string or "Invalid Date" if parsing fails
+ */
+export function formatRelativeTime(value: string): string {
+  if (typeof value !== 'string') return "Invalid Date";
+  const date = new Date(value);
+  if (isNaN(date.getTime())) return "Invalid Date";
+  
+  const diff = date.getTime() - Date.now();
   const seconds = Math.round(diff / 1000);
   const rtf = new Intl.RelativeTimeFormat("en-US", { numeric: "auto" });
 

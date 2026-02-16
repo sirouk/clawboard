@@ -274,8 +274,8 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
         const skills = Array.isArray(payload?.skills) ? payload?.skills : [];
         const normalized = skills
           .map((entry) => {
-            const name = String((entry as any)?.name ?? "").trim();
-            const description = String((entry as any)?.description ?? "").trim();
+            const name = String((entry as { name?: unknown; description?: unknown })?.name ?? "").trim();
+            const description = String((entry as { name?: unknown; description?: unknown })?.description ?? "").trim();
             return name ? { name, description, kind: "skill" } : null;
           })
           .filter(Boolean) as Array<{ name: string; description: string; kind: string }>;

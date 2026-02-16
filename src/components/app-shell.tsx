@@ -311,7 +311,12 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
       : "No token required.";
   const statusIconClass = statusIconColor(status);
   const statusTooltip = statusTitle;
-  const docsHref = `${apiBase || ""}/docs`;
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const docsHref = mounted ? `${apiBase || ""}/docs` : "";
   const iconSize = collapsed ? 32 : 40;
 
   const toggleCollapsed = () => {

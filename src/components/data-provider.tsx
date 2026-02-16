@@ -5,6 +5,7 @@ import type { Draft, LogEntry, Task, Topic } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
 import { useLiveUpdates } from "@/lib/use-live-updates";
 import { LiveEvent, mergeById, mergeLogs, maxTimestamp, removeById, upsertById } from "@/lib/live-utils";
+import { normalizeBoardSessionKey } from "@/lib/board-session";
 
 type DataContextValue = {
   topics: Topic[];
@@ -136,13 +137,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       if (event.type === "openclaw.typing" && event.data && typeof event.data === "object") {
         const payload = event.data as { sessionKey?: unknown; typing?: unknown; requestId?: unknown };
         const sessionKey = String(payload.sessionKey ?? "").trim();
-        if (!sessionKey) return;
+        const normalizedSessionKey = normalizeBoardSessionKey(sessionKey);
+        if (!normalizedSessionKey) return;
         const typing = Boolean(payload.typing);
         const requestId = String(payload.requestId ?? "").trim();
         const updatedAt = new Date().toISOString();
         setOpenclawTyping((prev) => ({
           ...prev,
-          [sessionKey]: { typing, requestId: requestId || undefined, updatedAt },
+          [normalizedSessionKey]: { typing, requestId: requestId || undefined, updatedAt },
         }));
         return;
       }

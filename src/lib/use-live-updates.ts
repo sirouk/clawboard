@@ -170,10 +170,15 @@ export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; r
         const res = await fetch(streamUrl, {
           method: "GET",
           headers,
+          mode: "cors",
+          credentials: "omit",
           cache: "no-store",
           signal: streamAbort.signal,
         });
         if (!res.ok || !res.body) {
+          if (res.status === 401) {
+            console.error("[sse] stream unauthorized (401)");
+          }
           startPoll();
           return;
         }

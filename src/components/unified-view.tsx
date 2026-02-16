@@ -17,8 +17,8 @@ import { Button, Input, SearchInput, Select, StatusPill } from "@/components/ui"
 import { LogList } from "@/components/log-list";
 import { formatRelativeTime } from "@/lib/format";
 import { useAppConfig } from "@/components/providers";
-import { PinToggle } from "@/components/pin-toggle";
-import { TaskPinToggle } from "@/components/task-pin-toggle";
+import { PinToggleGeneric } from "@/components/pin-toggle-generic";
+
 import { decodeSlugId, encodeTaskSlug, encodeTopicSlug, slugify } from "@/lib/slug";
 import { cn } from "@/lib/cn";
 import { apiFetch } from "@/lib/api";
@@ -29,7 +29,13 @@ import {
   type BoardChatComposerHandle,
   type BoardChatComposerSendEvent,
 } from "@/components/board-chat-composer";
-import { BOARD_TASK_SESSION_PREFIX, BOARD_TOPIC_SESSION_PREFIX, taskSessionKey, topicSessionKey } from "@/lib/board-session";
+import {
+  BOARD_TASK_SESSION_PREFIX,
+  BOARD_TOPIC_SESSION_PREFIX,
+  normalizeBoardSessionKey,
+  taskSessionKey,
+  topicSessionKey,
+} from "@/lib/board-session";
 import { Markdown } from "@/components/markdown";
 import { AttachmentStrip, type AttachmentLike } from "@/components/attachments";
 import { queueDraftUpsert, readBestDraftValue, usePersistentDraft } from "@/lib/drafts";
@@ -1003,18 +1009,33 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const isSessionResponding = useCallback(
     (sessionKey: string) => {
-      const key = String(sessionKey ?? "").trim();
+      const key = normalizeBoardSessionKey(sessionKey);
       if (!key) return false;
-      if (openclawTyping[key]?.typing) return true;
+      const typing = openclawTyping[key];
+      if (typing?.typing) {
+        // Fallback: if the typing indicator is older than 3 minutes, assume it's orphaned.
+        const age = Date.now() - Date.parse(typing.updatedAt);
+        if (Number.isFinite(age) && age < 3 * 60 * 1000) {
+          return true;
+        }
+      }
       if (Object.prototype.hasOwnProperty.call(awaitingAssistant, key)) return true;
+
       const alias = typingAliasRef.current.get(key);
       if (!alias) return false;
       if (Date.now() - alias.createdAt > 30 * 60 * 1000) {
         typingAliasRef.current.delete(key);
         return false;
       }
+
       const sourceKey = alias.sourceSessionKey;
-      if (openclawTyping[sourceKey]?.typing) return true;
+      const sourceTyping = openclawTyping[sourceKey];
+      if (sourceTyping?.typing) {
+        const age = Date.now() - Date.parse(sourceTyping.updatedAt);
+        if (Number.isFinite(age) && age < 3 * 60 * 1000) {
+          return true;
+        }
+      }
       return Object.prototype.hasOwnProperty.call(awaitingAssistant, sourceKey);
     },
     [awaitingAssistant, openclawTyping]
@@ -1490,7 +1511,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const taskReorderEnabled = topicReorderEnabled;
 
   const chatKeyFromSessionKey = useCallback((sessionKey: string) => {
-    const key = (sessionKey ?? "").trim();
+    const key = normalizeBoardSessionKey(sessionKey);
+    if (!key) return "";
     if (key.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
       const topicId = key.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim();
       return topicId ? `topic:${topicId}` : "";
@@ -1504,8 +1526,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return "";
   }, []);
 
+  const findPendingMessagesBySession = useCallback(
+    (sessionKey: string) => {
+      const normalized = normalizeBoardSessionKey(sessionKey);
+      if (!normalized) return [];
+      return pendingMessages.filter((pending) => normalizeBoardSessionKey(pending.sessionKey) === normalized);
+    },
+    [pendingMessages]
+  );
+
   const markRecentBoardSend = useCallback((sessionKey: string) => {
-    const key = (sessionKey ?? "").trim();
+    const key = normalizeBoardSessionKey(sessionKey);
     if (!key) return;
     const now = Date.now();
     const map = recentBoardSendAtRef.current;
@@ -1518,17 +1549,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const handleComposerSendUpdate = useCallback(
     (event: BoardChatComposerSendEvent | undefined) => {
       if (!event) return;
-      markRecentBoardSend(event.sessionKey);
+      const sessionKey = normalizeBoardSessionKey(event.sessionKey);
+      if (!sessionKey) return;
+      markRecentBoardSend(sessionKey);
       if (event.phase === "sending") {
         setAwaitingAssistant((prev) => ({
           ...prev,
-          [event.sessionKey]: { sentAt: event.createdAt },
+          [sessionKey]: { sentAt: event.createdAt },
         }));
         setPendingMessages((prev) => [
           ...prev.filter((item) => item.localId !== event.localId),
           {
             localId: event.localId,
-            sessionKey: event.sessionKey,
+            sessionKey,
             message: event.message,
             attachments: event.attachments,
             createdAt: event.createdAt,
@@ -1538,7 +1571,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       } else if (event.phase === "queued") {
         setAwaitingAssistant((prev) => ({
           ...prev,
-          [event.sessionKey]: { sentAt: event.createdAt, requestId: event.requestId },
+          [sessionKey]: { sentAt: event.createdAt, requestId: event.requestId },
         }));
         setPendingMessages((prev) =>
           prev.map((item) =>
@@ -1547,16 +1580,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         );
       } else if (event.phase === "failed") {
         setAwaitingAssistant((prev) => {
-          if (!Object.prototype.hasOwnProperty.call(prev, event.sessionKey)) return prev;
+          if (!Object.prototype.hasOwnProperty.call(prev, sessionKey)) return prev;
           const next = { ...prev };
-          delete next[event.sessionKey];
+          delete next[sessionKey];
           return next;
         });
         setPendingMessages((prev) =>
           prev.map((item) => (item.localId === event.localId ? { ...item, status: "failed", error: event.error } : item))
         );
       }
-      const chatKey = chatKeyFromSessionKey(event.sessionKey);
+      const chatKey = chatKeyFromSessionKey(sessionKey);
       if (chatKey) {
         activeChatKeyRef.current = chatKey;
         activeChatAtBottomRef.current = true;
@@ -1599,13 +1632,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setPendingMessages((prev) => {
       if (prev.length === 0) return prev;
       return prev.filter((pending) => {
-        const pSession = pending.sessionKey;
+        const pSession = normalizeBoardSessionKey(pending.sessionKey);
+        if (!pSession) return true;
         const pMessage = norm(pending.message);
         const pRequest = (pending.requestId ?? "").trim();
         const pTs = Date.parse(pending.createdAt);
         const matches = logs.some((entry) => {
+          const lSession = normalizeBoardSessionKey(entry.source?.sessionKey);
+          if (!lSession) return false;
           if ((entry.agentId ?? "").toLowerCase() !== "user") return false;
-          if (String(entry.source?.sessionKey ?? "").trim() !== pSession) return false;
+          if (lSession !== pSession) return false;
           const req = String(entry.source?.requestId ?? "").trim();
           if (pRequest && req && req === pRequest) return true;
           if (pRequest) return false;
@@ -1627,14 +1663,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const terminalRequestIds = new Set<string>();
 
     for (const entry of logs) {
-      const sessionKey = String(entry.source?.sessionKey ?? "").trim();
-      if (sessionKey) {
-        const agentId = String(entry.agentId ?? "").trim().toLowerCase();
-        if (agentId === "assistant" && entry.type === "conversation") {
-          const ts = entry.createdAt;
-          const prev = latestAssistantBySession.get(sessionKey) ?? "";
-          if (!prev || ts > prev) latestAssistantBySession.set(sessionKey, ts);
-        }
+      const sessionKey = normalizeBoardSessionKey(entry.source?.sessionKey);
+      if (!sessionKey) continue;
+      const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+      if (agentId === "assistant" && entry.type === "conversation") {
+        const ts = entry.createdAt;
+        const prev = latestAssistantBySession.get(sessionKey) ?? "";
+        if (!prev || ts > prev) latestAssistantBySession.set(sessionKey, ts);
       }
       const reqId = String(entry.source?.requestId ?? "").trim();
       if (reqId) {
@@ -1648,14 +1683,32 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const next: typeof prev = {};
       for (const [sessionKey, info] of Object.entries(prev)) {
         const sentAtMs = Date.parse(info.sentAt);
-        if (Number.isFinite(sentAtMs) && now - sentAtMs > 10 * 60 * 1000) {
+
+        // 1. Time-based expiry (fallback)
+        // 1. Time-based expiry (fallback). 5m is plenty for a 2m gateway timeout.
+        if (Number.isFinite(sentAtMs) && now - sentAtMs > 5 * 60 * 1000) {
           changed = true;
           continue;
         }
+
+        // 2. Explicit terminal system events (error/timeout)
         if (info.requestId && terminalRequestIds.has(info.requestId)) {
           changed = true;
           continue;
         }
+
+        // 3. Explicit typing: false event from backend
+        // We also check for matching requestId if available to prevent stale events from
+        // clearing newer requests in the same session.
+        const typingStatus = openclawTyping[sessionKey];
+        if (typingStatus && !typingStatus.typing) {
+          if (!info.requestId || !typingStatus.requestId || info.requestId === typingStatus.requestId) {
+            changed = true;
+            continue;
+          }
+        }
+
+        // 4. New assistant activity in this session
         const assistantAt = latestAssistantBySession.get(sessionKey);
         if (assistantAt && assistantAt > info.sentAt) {
           changed = true;
@@ -1665,7 +1718,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       }
       return changed ? next : prev;
     });
-  }, [awaitingAssistant, logs]);
+  }, [awaitingAssistant, logs, openclawTyping]);
 
   useEffect(() => {
     const prev = prevPendingAttachmentsRef.current;
@@ -2050,7 +2103,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
   }, [token, writeHeaders]);
 
-  const updateTask = async (taskId: string, updates: Partial<Task>) => {
+  const updateTask = useCallback(async (taskId: string, updates: Partial<Task>) => {
     if (readOnly) return;
     const current = tasks.find((task) => task.id === taskId);
     if (!current) return;
@@ -2096,7 +2149,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         setMobileChatTarget(null);
       }
     }
-  };
+  }, [readOnly, tasks, writeHeaders, token, mdUp, mobileLayer, mobileChatTarget, setTasks, setExpandedTasks, setMobileLayer, setMobileChatTarget]);
 
   const persistTopicOrder = useCallback(async (orderedIds: string[]) => {
     if (readOnly) return;
@@ -3467,8 +3520,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const prevTask = prev.get(entry.id) ?? null;
       const nextTask = entry.taskId ?? null;
       if (!promotion && hadPrev && prevTask == null && nextTask != null) {
-        const sessionKey = String(entry.source?.sessionKey ?? "").trim();
-        if (sessionKey.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
+        const sessionKey = normalizeBoardSessionKey(entry.source?.sessionKey);
+        if (sessionKey && sessionKey.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
           const topicId = sessionKey.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim();
           if (topicId) promotion = { topicId, taskId: nextTask, sessionKey };
         }
@@ -4182,8 +4235,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         </button>
                       </>
                     )}
-                    <PinToggle
-                      topic={topic}
+                    <PinToggleGeneric
+                      item={topic} itemType="topic"
                       size="sm"
                       onToggled={(nextPinned) =>
                         setTopics((prev) =>
@@ -4740,8 +4793,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                   </button>
                                 </>
                               )}
-                              <TaskPinToggle
-                                task={task}
+                              <PinToggleGeneric
+                                item={task} itemType="task"
                                 size="sm"
                                 onToggled={(nextPinned) =>
                                   setTasks((prev) =>
@@ -5032,8 +5085,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                           </div>
                                         </div>
                                       </div>
-		                              {taskChatAllLogs.length === 0 &&
-                              !pendingMessages.some((pending) => pending.sessionKey === taskSessionKey(topicId, task.id)) &&
+                              {taskChatAllLogs.length === 0 &&
+                              findPendingMessagesBySession(taskSessionKey(topicId, task.id)).length === 0 &&
                               !isSessionResponding(taskSessionKey(topicId, task.id)) ? (
 		                                <p className="mb-3 text-sm text-[rgb(var(--claw-muted))]">No messages yet.</p>
 		                              ) : null}
@@ -5124,7 +5177,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                                    />
                                       {!isUnassigned
                                         ? pendingMessages
-                                            .filter((pending) => pending.sessionKey === taskSessionKey(topicId, task.id))
+                                            .filter((pending) => normalizeBoardSessionKey(pending.sessionKey) === normalizeBoardSessionKey(taskSessionKey(topicId, task.id)))
                                             .map((pending) => (
                                               <div key={pending.localId} className="py-1">
                                                 <div className="flex justify-end">
@@ -5380,7 +5433,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       </div>
 					                        </div>
 			                          {topicChatAllLogs.length === 0 &&
-                              !pendingMessages.some((pending) => pending.sessionKey === topicSessionKey(topicId)) &&
+                              findPendingMessagesBySession(topicSessionKey(topicId)).length === 0 &&
                               !isSessionResponding(topicSessionKey(topicId)) ? (
 			                            <p className="mb-3 text-sm text-[rgb(var(--claw-muted))]">No messages yet.</p>
 			                          ) : null}
@@ -5470,7 +5523,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                enableNavigation={false}
 			                              />
                                       {pendingMessages
-                                        .filter((pending) => pending.sessionKey === topicSessionKey(topicId))
+                                        .filter((pending) =>
+                                          normalizeBoardSessionKey(pending.sessionKey) === normalizeBoardSessionKey(topicSessionKey(topicId))
+                                        )
                                         .map((pending) => (
                                           <div key={pending.localId} className="py-1">
                                             <div className="flex justify-end">
