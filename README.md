@@ -28,6 +28,44 @@ Clawboard runs as a multi-stage pipeline:
 - API provides context endpoints (`/api/context`, `/api/search`) for response-time augmentation.
 - UI provides Unified Board, Logs, Stats, Setup, Providers, and Clawgraph.
 
+## Plain-English Mental Model
+
+Think of Clawboard like a smart school binder for your AI:
+
+- `Topic` = a class folder (example: "Website Launch")
+- `Task` = an assignment inside that folder (example: "Fix login redirect bug")
+- `Conversation log` = every message/action that happened
+- `Note` = important highlight you want remembered
+
+Statuses are how the system tracks state:
+
+- Tasks: `todo`, `doing`, `blocked`, `done` (plus due dates, priority, snooze, etc.)
+- Logs: `pending` (not sorted yet), `classified` (sorted into topic/task), `failed` (filtered/noise)
+
+### The self-improving loop
+
+1. You chat in OpenClaw.
+2. The logger plugin saves messages/tool activity into Clawboard.
+3. The classifier reviews new `pending` logs and decides:
+   - which Topic they belong to
+   - which Task (if any) they belong to
+   - a short summary chip
+4. It stores routing memory so short follow-ups like "ok continue" can still stay in the right place.
+5. Search/indexes update so relevant older work can be found quickly.
+6. Before the next model turn, Clawboard builds a compact context block via `/api/context`:
+   - active board location (where you are speaking from)
+   - active working set (important topics/tasks)
+   - recent timeline
+   - routing memory
+   - semantic recall from past related logs/notes
+7. That context is injected into the prompt, so responses stay coherent over long-running work.
+
+### Why this matters
+
+- You repeat yourself less.
+- The AI stays aligned to the right project/task.
+- Retrieval is scoped by Space visibility rules when a source space is known.
+
 ## Architecture
 
 - `web` (Next.js): operator UI and API proxy routes.
