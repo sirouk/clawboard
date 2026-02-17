@@ -4071,7 +4071,10 @@ def upsert_task(
         task = session.get(Task, payload.id) if payload.id else None
         timestamp = now_iso()
         fields = payload.model_fields_set
+        scope_changed = False
         if task:
+            original_topic_id = str(task.topicId or "")
+            original_space_id = _space_id_for_task(task)
             task.title = payload.title or task.title
             if "color" in fields:
                 if payload.color is None:
@@ -4108,6 +4111,10 @@ def upsert_task(
             if "snoozedUntil" in fields:
                 task.snoozedUntil = payload.snoozedUntil
             task.updatedAt = timestamp
+            scope_changed = (
+                str(task.topicId or "") != original_topic_id
+                or _space_id_for_task(task) != original_space_id
+            )
         else:
             parent_space_id_for_create = None
             if payload.topicId:
@@ -4123,6 +4130,8 @@ def upsert_task(
                 space_id=requested_space_id,
             )
             if duplicate:
+                original_duplicate_topic_id = str(duplicate.topicId or "")
+                original_duplicate_space_id = _space_id_for_task(duplicate)
                 if "color" in fields:
                     if payload.color is None:
                         duplicate.color = None
@@ -4139,11 +4148,13 @@ def upsert_task(
                     duplicate.color = _auto_pick_color(f"task:{duplicate.id}:{duplicate.title}", used_colors, 21.0)
                 if "status" in fields and payload.status is not None:
                     duplicate.status = payload.status
-                if "topicId" in fields and payload.topicId:
-                    parent = session.get(Topic, payload.topicId)
-                    if not parent:
-                        raise HTTPException(status_code=400, detail="topicId not found")
-                    duplicate.spaceId = _space_id_for_topic(parent)
+                if "topicId" in fields:
+                    duplicate.topicId = payload.topicId
+                    if payload.topicId:
+                        parent = session.get(Topic, payload.topicId)
+                        if not parent:
+                            raise HTTPException(status_code=400, detail="topicId not found")
+                        duplicate.spaceId = _space_id_for_topic(parent)
                 elif "spaceId" in fields and ("topicId" not in fields or not payload.topicId):
                     normalized_space_id = _normalize_space_id(payload.spaceId)
                     if not normalized_space_id:
@@ -4163,10 +4174,14 @@ def upsert_task(
                 if "snoozedUntil" in fields:
                     duplicate.snoozedUntil = payload.snoozedUntil
                 duplicate.updatedAt = timestamp
+                duplicate_scope_changed = (
+                    str(duplicate.topicId or "") != original_duplicate_topic_id
+                    or _space_id_for_task(duplicate) != original_duplicate_space_id
+                )
                 session.add(duplicate)
                 session.commit()
                 session.refresh(duplicate)
-                if "topicId" in fields or "spaceId" in fields:
+                if duplicate_scope_changed:
                     duplicate_space_id = _space_id_for_task(duplicate)
                     scoped_logs = session.exec(select(LogEntry).where(LogEntry.taskId == duplicate.id)).all()
                     for scoped_log in scoped_logs:
@@ -4230,7 +4245,7 @@ def upsert_task(
         session.add(task)
         session.commit()
         session.refresh(task)
-        if "topicId" in fields or "spaceId" in fields:
+        if scope_changed:
             task_space_id = _space_id_for_task(task)
             scoped_logs = session.exec(select(LogEntry).where(LogEntry.taskId == task.id)).all()
             for scoped_log in scoped_logs:
