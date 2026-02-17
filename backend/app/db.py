@@ -340,6 +340,48 @@ def init_db() -> None:
                         ),
                     )
 
+            # Seed missing explicit connectivity edges once from defaultVisible.
+            # Runtime visibility checks use explicit edges only.
+            rows = conn.exec_driver_sql("SELECT id, connectivity, defaultVisible FROM space;").fetchall()
+            by_id: dict[str, tuple[dict[str, bool], bool]] = {}
+            for row in rows:
+                space_id = str(row[0] or "").strip()
+                if not space_id:
+                    continue
+                parsed = _normalize_space_connectivity(row[1])
+                default_visible = bool(row[2]) if row[2] is not None else True
+                by_id[space_id] = (parsed, default_visible)
+
+            if by_id:
+                valid_ids = set(by_id.keys())
+                seed_stamp = _now_iso()
+                for source_id, (connectivity, _default_visible) in by_id.items():
+                    next_connectivity: dict[str, bool] = {}
+                    changed = False
+                    for target_id, enabled in connectivity.items():
+                        if target_id == source_id:
+                            changed = True
+                            continue
+                        if target_id not in valid_ids:
+                            changed = True
+                            continue
+                        next_connectivity[target_id] = bool(enabled)
+                    for target_id in valid_ids:
+                        if target_id == source_id:
+                            continue
+                        if target_id in next_connectivity:
+                            continue
+                        target_default = by_id[target_id][1]
+                        next_connectivity[target_id] = bool(target_default)
+                        changed = True
+                    if not changed:
+                        continue
+                    serialized_connectivity = json.dumps(next_connectivity, separators=(",", ":"), sort_keys=True)
+                    conn.exec_driver_sql(
+                        "UPDATE space SET connectivity = ?, updatedAt = ? WHERE id = ?;",
+                        (serialized_connectivity, seed_stamp, source_id),
+                    )
+
             conn.commit()
 
     # Backfill missing topic/task colors once so existing instances get stable hues.

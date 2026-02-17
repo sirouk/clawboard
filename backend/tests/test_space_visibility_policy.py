@@ -68,7 +68,7 @@ class SpaceVisibilityPolicyTests(unittest.TestCase):
         self.assertEqual(payload["spaceId"], source_space_id)
         return payload["allowedSpaceIds"]
 
-    def test_hidden_default_policy_is_persisted_and_independent_from_explicit_toggle(self):
+    def test_default_visibility_is_seed_only_for_new_spaces(self):
         self._create_space("space-alpha", "Alpha")
         self._create_space("space-beta", "Beta")
 
@@ -84,22 +84,24 @@ class SpaceVisibilityPolicyTests(unittest.TestCase):
         payload = res.json()
         self.assertFalse(payload.get("defaultVisible", True))
 
+        # Existing explicit relation remains unchanged (seed-only behavior).
         after_policy_hidden = self._allowed("space-beta")
-        self.assertNotIn("space-alpha", after_policy_hidden)
+        self.assertIn("space-alpha", after_policy_hidden)
 
         self._create_space("space-gamma", "Gamma")
         after_new_space = self._allowed("space-gamma")
         self.assertNotIn("space-alpha", after_new_space)
+        self.assertIn("space-beta", after_new_space)
 
         res = self.client.patch(
             "/api/spaces/space-beta/connectivity",
-            json={"connectivity": {"space-alpha": True}},
+            json={"connectivity": {"space-alpha": False}},
             headers=self.auth_headers,
         )
         self.assertEqual(res.status_code, 200, res.text)
 
-        after_explicit_visible = self._allowed("space-beta")
-        self.assertIn("space-alpha", after_explicit_visible)
+        after_explicit_hidden = self._allowed("space-beta")
+        self.assertNotIn("space-alpha", after_explicit_hidden)
 
         spaces_res = self.client.get("/api/spaces")
         self.assertEqual(spaces_res.status_code, 200, spaces_res.text)

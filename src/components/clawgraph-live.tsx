@@ -18,7 +18,7 @@ import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam } from "@/li
 import type { Space, Task, Topic } from "@/lib/types";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
-import { resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
+import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 
 const EDGE_COLORS: Record<string, string> = {
   has_task: "rgba(78,161,255,0.72)",
@@ -32,7 +32,8 @@ const EDGE_COLORS: Record<string, string> = {
 const MIN_ZOOM = 0.38;
 const MAX_ZOOM = 2.6;
 const MAX_NODE_DRAG = 1200;
-const DEFAULT_LAYOUT_STRENGTH = 75;
+const DEFAULT_STRENGTH_PERCENT = 90;
+const DEFAULT_LAYOUT_STRENGTH = DEFAULT_STRENGTH_PERCENT;
 const INITIAL_REMOTE_WAIT_MS = 900;
 const REMOTE_REFRESH_DEBOUNCE_MS = 320;
 
@@ -224,7 +225,7 @@ export function ClawgraphLive() {
   const spaceFromUrl = (searchParams.get("space") ?? "").trim();
   const spaceQueryInitializedRef = useRef(false);
   const [query, setQuery] = useState("");
-  const [strengthPercent, setStrengthPercent] = useState(75);
+  const [strengthPercent, setStrengthPercent] = useState(DEFAULT_STRENGTH_PERCENT);
   const [showEntityLinks, setShowEntityLinks] = useState(false);
   const [showLabels, setShowLabels] = useState(true);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
@@ -324,6 +325,7 @@ export function ClawgraphLive() {
     }
     return out;
   }, [selectedSpaceId, spaces]);
+  const spaceVisibilityRevision = useMemo(() => buildSpaceVisibilityRevision(spaces), [spaces]);
 
   const allowedSpaceSet = useMemo(() => new Set(allowedSpaceIds), [allowedSpaceIds]);
 
@@ -435,7 +437,7 @@ export function ClawgraphLive() {
       alive = false;
       clearTimeout(fallbackTimer);
     };
-  }, [fetchRemoteGraph, graphMode]);
+  }, [fetchRemoteGraph, graphMode, spaceVisibilityRevision]);
 
   useEffect(() => {
     if (graphMode !== "remote") return;
@@ -457,7 +459,7 @@ export function ClawgraphLive() {
       alive = false;
       clearTimeout(timer);
     };
-  }, [fetchRemoteGraph, graphMode, topics.length, tasks.length, logs.length]);
+  }, [fetchRemoteGraph, graphMode, logs.length, spaceVisibilityRevision, tasks.length, topics.length]);
 
   useEffect(() => {
     const node = containerRef.current;
@@ -592,8 +594,8 @@ export function ClawgraphLive() {
       const stamp = item.updatedAt || item.createdAt || "";
       return stamp > acc ? stamp : acc;
     }, "");
-    return `${topics.length}:${tasks.length}:${logs.length}:${latestTopic}:${latestTask}:${latestLog}`;
-  }, [logs, tasks, topics]);
+    return `${topics.length}:${tasks.length}:${logs.length}:${latestTopic}:${latestTask}:${latestLog}:${spaceVisibilityRevision}`;
+  }, [logs, spaceVisibilityRevision, tasks, topics]);
   const semanticSearch = useSemanticSearch({
     query: normalizedQuery,
     spaceId: selectedSpaceId || undefined,

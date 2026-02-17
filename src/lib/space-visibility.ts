@@ -32,5 +32,28 @@ export function resolveSpaceVisibilityFromViewer(
   if (Object.prototype.hasOwnProperty.call(viewerConnectivity, candidate.id)) {
     return Boolean(viewerConnectivity[candidate.id]);
   }
-  return getSpaceDefaultVisibility(candidate);
+  return false;
+}
+
+export function buildSpaceVisibilityRevision(
+  spaces: ReadonlyArray<Pick<Space, "id" | "updatedAt" | "defaultVisible" | "connectivity">> | null | undefined
+): string {
+  if (!Array.isArray(spaces) || spaces.length === 0) return "space-visibility:0";
+  const normalized = spaces
+    .map((space) => {
+      const id = String(space?.id ?? "").trim();
+      if (!id) return "";
+      const updatedAt = String(space?.updatedAt ?? "").trim();
+      const defaultVisible = getSpaceDefaultVisibility(space) ? "1" : "0";
+      const connectivityEntries = Object.entries(connectivityOf(space))
+        .map(([targetId, enabled]) => [String(targetId ?? "").trim(), enabled] as const)
+        .filter(([targetId]) => Boolean(targetId))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([targetId, enabled]) => `${targetId}:${enabled ? "1" : "0"}`)
+        .join(",");
+      return `${id}|${updatedAt}|${defaultVisible}|${connectivityEntries}`;
+    })
+    .filter(Boolean)
+    .sort();
+  return `space-visibility:${normalized.join(";")}`;
 }

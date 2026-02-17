@@ -34,7 +34,10 @@ For "what exists today", see `CONTEXT.md`.
 - Baseline visibility set for a source space:
   - include source space itself
   - apply explicit `source.connectivity[target]` overrides
-  - if no override exists, fallback to `target.defaultVisible`
+  - if no override exists, treat as hidden
+- `defaultVisible` is a seed policy, not a runtime fallback:
+  - used when a new space is added and missing explicit connectivity edges are initialized
+  - changing `defaultVisible` does not retroactively override existing explicit connectivity
 - If both `spaceId` and `allowedSpaceIds` are provided, effective set is intersection: `allowedSpaceIds ∩ baseline`.
 - If only `allowedSpaceIds` is provided, use it as-is.
 

@@ -92,7 +92,7 @@ class SpaceOut(ModelBase):
     color: Optional[str] = Field(description="Optional space color #RRGGBB.", examples=["#FF8A4A"])
     defaultVisible: bool = Field(
         default=True,
-        description="Default inherited visibility policy for this source space when no explicit toggle exists.",
+        description="Seed policy used when new spaces are added and missing explicit connectivity edges are initialized.",
         examples=[True],
     )
     connectivity: Dict[str, bool] = Field(
@@ -114,8 +114,8 @@ class SpaceConnectivityPatch(BaseModel):
     defaultVisible: Optional[bool] = Field(
         default=None,
         description=(
-            "Optional default inherited visibility policy for this source space. "
-            "When omitted, only explicit per-target connectivity entries are changed."
+            "Optional seed visibility policy used for future spaces when missing connectivity edges are initialized. "
+            "Does not retroactively override existing explicit connectivity edges."
         ),
         examples=[False],
     )

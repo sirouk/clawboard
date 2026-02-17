@@ -7,7 +7,7 @@ import { useDataStore } from "@/components/data-provider";
 import type { IntegrationLevel, Space, Topic } from "@/lib/types";
 import { apiFetch, getApiBase, setApiBase } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { getSpaceDefaultVisibility, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
+import { resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 
 const STEPS = [
   { id: 1, title: "OpenClaw Skill", description: "Install the skill and connect your agent." },
@@ -277,11 +277,8 @@ Once I have those, I’ll validate /api/health and /api/config and start logging
     if (!viewer) return;
     const currentConnectivity =
       viewer.connectivity && typeof viewer.connectivity === "object" ? viewer.connectivity : {};
-    const visibleSpace = spaces.find((space) => space.id === visibleSpaceId);
     const hadPrevious = Object.prototype.hasOwnProperty.call(currentConnectivity, visibleSpaceId);
-    const previousEnabled = hadPrevious
-      ? Boolean(currentConnectivity[visibleSpaceId])
-      : getSpaceDefaultVisibility(visibleSpace);
+    const previousEnabled = hadPrevious ? Boolean(currentConnectivity[visibleSpaceId]) : false;
     const saveKey = `${viewerSpaceId}:${visibleSpaceId}`;
     setSpaceSavingKey(saveKey);
     setSpaceError(null);
@@ -476,8 +473,8 @@ openclaw gateway restart`;
             <div>
               <h2 className="text-xl font-semibold">Space Visibility</h2>
               <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">
-                Spaces are derived from topic tags. Select a space, then control where that space is visible from other
-                spaces for classifier retrieval, search, graph, and logger context injection.
+                Spaces are derived from topic tags. Select a space, then control which other spaces are visible from
+                that space for classifier retrieval, search, graph, and logger context injection.
               </p>
             </div>
             {readOnly ? (
@@ -508,8 +505,8 @@ openclaw gateway restart`;
                     ) : (
                       <div className="grid gap-2 sm:grid-cols-2">
                         {targets.map((target) => {
-                          const enabled = resolveSpaceVisibilityFromViewer(target, selectedSpace);
-                          const saveKey = `${target.id}:${selectedSpace.id}`;
+                          const enabled = resolveSpaceVisibilityFromViewer(selectedSpace, target);
+                          const saveKey = `${selectedSpace.id}:${target.id}`;
                           const disabled = readOnly || spaceSavingKey === saveKey;
                           return (
                             <label
@@ -519,7 +516,7 @@ openclaw gateway restart`;
                               <div className="min-w-0">
                                 <div className="truncate text-sm font-semibold">{target.name}</div>
                                 <div className="truncate text-xs text-[rgb(var(--claw-muted))]">
-                                  {enabled ? "Can see this space" : "Blocked from this space"}
+                                  {enabled ? "Visible from this space" : "Hidden from this space"}
                                 </div>
                                 <div className="truncate font-mono text-[10px] text-[rgb(var(--claw-muted))]">{target.id}</div>
                               </div>
@@ -527,7 +524,7 @@ openclaw gateway restart`;
                                 checked={enabled}
                                 disabled={disabled}
                                 onToggle={() => {
-                                  void updateSpaceConnectivity(target.id, selectedSpace.id, !enabled);
+                                  void updateSpaceConnectivity(selectedSpace.id, target.id, !enabled);
                                 }}
                               />
                             </label>

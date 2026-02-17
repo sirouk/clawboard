@@ -32,13 +32,13 @@ class Space(SQLModel, table=True):
     defaultVisible: bool = Field(
         default=True,
         description=(
-            "Default inherited visibility policy for this space when no explicit per-viewer override exists."
+            "Seed visibility policy used when initializing missing explicit connectivity for newly discovered spaces."
         ),
     )
     connectivity: Dict[str, bool] = Field(
         default_factory=dict,
         sa_column=Column(JSON),
-        description="Inbound visibility overrides by candidate/source space id.",
+        description="Outbound visibility toggles by target space id.",
     )
     createdAt: str = Field(description="ISO timestamp when the space was created.")
     updatedAt: str = Field(description="ISO timestamp of last update.")

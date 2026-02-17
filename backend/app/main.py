@@ -233,6 +233,71 @@ def _space_default_visibility(space: Space | None) -> bool:
     return True
 
 
+def _seed_missing_space_connectivity(
+    session: Any,
+    *,
+    spaces: list[Space] | None = None,
+    seed_space_ids: set[str] | None = None,
+    stamp: str | None = None,
+) -> list[Space]:
+    """Seed missing explicit connectivity entries from target defaultVisible.
+
+    This is a one-time expansion strategy: once an edge exists in connectivity, runtime
+    visibility resolution relies on that explicit edge only. If `seed_space_ids` is
+    provided, only edges touching those spaces are auto-initialized.
+    """
+
+    rows = list(spaces) if spaces is not None else session.exec(select(Space)).all()
+    by_id: dict[str, Space] = {
+        str(item.id): item for item in rows if str(getattr(item, "id", "") or "").strip()
+    }
+    if not by_id:
+        return []
+
+    valid_ids = set(by_id.keys())
+    seeded_ids = (
+        {space_id for space_id in (seed_space_ids or set()) if space_id in valid_ids}
+        if seed_space_ids is not None
+        else None
+    )
+    next_stamp = stamp or now_iso()
+    touched: list[Space] = []
+
+    for source_id, source_row in by_id.items():
+        current = _normalize_connectivity(getattr(source_row, "connectivity", None))
+        next_connectivity: dict[str, bool] = {}
+        changed = False
+
+        for target_id, enabled in current.items():
+            if target_id == source_id:
+                changed = True
+                continue
+            if target_id not in valid_ids:
+                changed = True
+                continue
+            next_connectivity[target_id] = bool(enabled)
+
+        for target_id, target_row in by_id.items():
+            if target_id == source_id:
+                continue
+            if target_id in next_connectivity:
+                continue
+            if seeded_ids is not None and source_id not in seeded_ids and target_id not in seeded_ids:
+                continue
+            next_connectivity[target_id] = _space_default_visibility(target_row)
+            changed = True
+
+        if not changed and next_connectivity == current:
+            continue
+
+        source_row.connectivity = next_connectivity
+        source_row.updatedAt = next_stamp
+        session.add(source_row)
+        touched.append(source_row)
+
+    return touched
+
+
 def _ensure_default_space(session: Any) -> Space:
     row = session.get(Space, DEFAULT_SPACE_ID)
     if row:
@@ -313,13 +378,10 @@ def _allowed_space_ids_for_source(session: Any, source_space_id: str | None) -> 
 
     toggles = _normalize_connectivity(getattr(source_row, "connectivity", None))
     allowed = {source_id}
-    for candidate_id, candidate_row in by_id.items():
+    for candidate_id in by_id.keys():
         if candidate_id == source_id:
             continue
-        enabled = toggles.get(candidate_id)
-        if enabled is None:
-            enabled = _space_default_visibility(candidate_row)
-        if enabled:
+        if bool(toggles.get(candidate_id)):
             allowed.add(candidate_id)
     return allowed
 
@@ -532,6 +594,10 @@ def _ensure_space_row(session: Any, *, space_id: str, name: str | None = None) -
         updatedAt=stamp,
     )
     session.add(row)
+    known_spaces = session.exec(select(Space)).all()
+    if not any(str(getattr(item, "id", "") or "").strip() == normalized_id for item in known_spaces):
+        known_spaces.append(row)
+    _seed_missing_space_connectivity(session, spaces=known_spaces, seed_space_ids={normalized_id})
     return row
 
 
@@ -3024,10 +3090,27 @@ def upsert_space(payload: SpaceUpsert = Body(...)):
             updatedAt=stamp,
         )
         session.add(row)
+        known_spaces = session.exec(select(Space)).all()
+        if not any(str(getattr(item, "id", "") or "").strip() == space_id for item in known_spaces):
+            known_spaces.append(row)
+        seeded = _seed_missing_space_connectivity(
+            session,
+            spaces=known_spaces,
+            seed_space_ids={space_id},
+            stamp=stamp,
+        )
         session.commit()
-        session.refresh(row)
-        _publish_space_upserted(row)
-        return row
+        seeded_ids = {str(getattr(item, "id", "") or "").strip() for item in seeded}
+        seeded_ids = {item for item in seeded_ids if item}
+        seeded_ids.add(space_id)
+        for seeded_id in seeded_ids:
+            refreshed = session.get(Space, seeded_id)
+            if refreshed:
+                _publish_space_upserted(refreshed)
+        refreshed_row = session.get(Space, space_id)
+        if not refreshed_row:
+            raise HTTPException(status_code=500, detail="Failed to load created space")
+        return refreshed_row
 
 
 @app.patch(
@@ -3037,7 +3120,7 @@ def upsert_space(payload: SpaceUpsert = Body(...)):
     tags=["spaces"],
 )
 def patch_space_connectivity(space_id: str, payload: SpaceConnectivityPatch = Body(...)):
-    """Patch default visibility policy and explicit connectivity toggles for one source space."""
+    """Patch default seed policy and explicit connectivity toggles for one source space."""
     normalized_id = _normalize_space_id(space_id)
     if not normalized_id:
         raise HTTPException(status_code=400, detail="space_id is required")

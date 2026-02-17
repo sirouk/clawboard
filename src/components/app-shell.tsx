@@ -12,7 +12,7 @@ import { DataProvider, useDataStore } from "@/components/data-provider";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { formatRelativeTime } from "@/lib/format";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
-import { resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
+import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 import { buildTaskUrl, buildTopicUrl, withRevealParam } from "@/lib/url";
 import { apiFetch, getApiBase } from "@/lib/api";
 import type { Space, Task, Topic } from "@/lib/types";
@@ -455,6 +455,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     }
     return out;
   }, [mergedSpaces, selectedSpaceId]);
+  const spaceVisibilityRevision = useMemo(() => buildSpaceVisibilityRevision(mergedSpaces), [mergedSpaces]);
 
   const allowedSpaceSet = useMemo(() => new Set(allowedSpaceIds), [allowedSpaceIds]);
   const storeTopicById = useMemo(() => new Map(storeTopics.map((topic) => [topic.id, topic])), [storeTopics]);
@@ -708,8 +709,8 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const topicSemanticRefreshKey = useMemo(() => {
     if (!showBoardTopics || normalizedTopicSearch.length < 1) return "";
     const latestTopic = topics.reduce((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), "");
-    return `${topics.length}:${latestTopic}:${tasks.length}`;
-  }, [normalizedTopicSearch.length, showBoardTopics, tasks.length, topics]);
+    return `${topics.length}:${latestTopic}:${tasks.length}:${spaceVisibilityRevision}`;
+  }, [normalizedTopicSearch.length, showBoardTopics, spaceVisibilityRevision, tasks.length, topics]);
 
   const topicSemanticSearch = useSemanticSearch({
     query: normalizedTopicSearch,

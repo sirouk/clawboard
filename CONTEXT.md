@@ -111,7 +111,9 @@ Effective allowlist resolution:
 - baseline policy matches `/api/spaces/allowed` semantics:
   - source space is always included
   - explicit override: `source.connectivity[target] = true/false`
-  - fallback when override is absent: `target.defaultVisible`
+  - if no explicit override exists: hidden
+- `defaultVisible` is used only to seed missing explicit edges when new spaces are added
+- changing `defaultVisible` does not retroactively alter existing explicit connectivity
 - if caller sends both `spaceId` and `allowedSpaceIds`, effective set is `allowedSpaceIds ∩ baseline`
 - if caller sends only `allowedSpaceIds` (no source), effective set is used as-is
 

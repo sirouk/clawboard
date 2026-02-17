@@ -272,14 +272,12 @@ export function SettingsLive() {
       setError("Token required to update space visibility.");
       return;
     }
-    const targetSpace = spaces.find((space) => space.id === targetId);
-    if (!targetSpace) return;
-    const key = `${targetId}:${sourceSpaceId}`;
+    const key = `${sourceSpaceId}:${targetId}`;
     const currentConnectivity =
-      targetSpace.connectivity && typeof targetSpace.connectivity === "object" ? targetSpace.connectivity : {};
-    const hadPrevious = Object.prototype.hasOwnProperty.call(currentConnectivity, sourceSpaceId);
-    const previous = hadPrevious ? Boolean(currentConnectivity[sourceSpaceId]) : getSpaceDefaultVisibility(sourceSpace);
-    const previousUpdatedAt = String(targetSpace.updatedAt ?? "");
+      sourceSpace.connectivity && typeof sourceSpace.connectivity === "object" ? sourceSpace.connectivity : {};
+    const hadPrevious = Object.prototype.hasOwnProperty.call(currentConnectivity, targetId);
+    const previous = hadPrevious ? Boolean(currentConnectivity[targetId]) : false;
+    const previousUpdatedAt = String(sourceSpace.updatedAt ?? "");
     const optimisticUpdatedAt = new Date().toISOString();
 
     setSavingConnectivityKey(key);
@@ -288,10 +286,10 @@ export function SettingsLive() {
 
     setSpaces((prev) =>
       prev.map((space) => {
-        if (space.id !== targetId) return space;
+        if (space.id !== sourceSpaceId) return space;
         const connectivity = {
           ...(space.connectivity && typeof space.connectivity === "object" ? space.connectivity : {}),
-          [sourceSpaceId]: enabled,
+          [targetId]: enabled,
         };
         return { ...space, connectivity, updatedAt: optimisticUpdatedAt };
       })
@@ -299,7 +297,7 @@ export function SettingsLive() {
 
     try {
       const res = await apiFetch(
-        `/api/spaces/${encodeURIComponent(targetId)}/connectivity`,
+        `/api/spaces/${encodeURIComponent(sourceSpaceId)}/connectivity`,
         {
           method: "PATCH",
           headers: {
@@ -307,7 +305,7 @@ export function SettingsLive() {
           },
           body: JSON.stringify({
             connectivity: {
-              [sourceSpaceId]: enabled,
+              [targetId]: enabled,
             },
           }),
         },
@@ -331,12 +329,12 @@ export function SettingsLive() {
     } catch (err) {
       setSpaces((prev) =>
         prev.map((space) => {
-          if (space.id !== targetId) return space;
+          if (space.id !== sourceSpaceId) return space;
           const connectivity = {
             ...(space.connectivity && typeof space.connectivity === "object" ? space.connectivity : {}),
           };
-          if (hadPrevious) connectivity[sourceSpaceId] = previous;
-          else delete connectivity[sourceSpaceId];
+          if (hadPrevious) connectivity[targetId] = previous;
+          else delete connectivity[targetId];
           return { ...space, connectivity, updatedAt: previousUpdatedAt || space.updatedAt };
         })
       );
@@ -441,7 +439,7 @@ export function SettingsLive() {
           return [updated, ...next];
         });
       }
-      setMessage(`Default visibility policy set to ${visible ? "Visible" : "Hidden"}.`);
+      setMessage(`Default visibility for newly added spaces set to ${visible ? "Visible" : "Hidden"}.`);
     } catch (err) {
       setSpaces((prev) =>
         prev.map((space) => {
@@ -517,7 +515,7 @@ export function SettingsLive() {
             <div>
               <h3 className="text-sm font-semibold">Space visibility</h3>
               <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
-                Pick a source space on the left, then toggle where it is visible on the right.
+                Pick a source space on the left, then toggle which other spaces are visible from it.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -565,7 +563,7 @@ export function SettingsLive() {
               {sourceSpaceId ? (
                 <div className="inline-flex items-center gap-2 rounded-full border border-[rgb(var(--claw-border))] bg-[rgba(16,21,29,0.72)] px-3 py-1.5">
                   <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[rgb(var(--claw-muted))]">
-                    {defaultVisibilityVisible ? "Visible is default" : "Hidden is default"}
+                    {defaultVisibilityVisible ? "Visible default for new spaces" : "Hidden default for new spaces"}
                   </span>
                   <SpaceSwitch
                     checked={defaultVisibilityVisible}
@@ -630,7 +628,7 @@ export function SettingsLive() {
 
           <div className="min-w-0">
             <div className="border-b border-[rgb(var(--claw-border))] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))] sm:px-4">
-              Where {sourceSpace?.name ?? "selected space"} is visible
+              Spaces visible from {sourceSpace?.name ?? "selected space"}
             </div>
             <div className="max-h-[56vh] overflow-y-auto overflow-x-hidden p-3 sm:p-3.5">
               {targets.length === 0 ? (
@@ -640,13 +638,13 @@ export function SettingsLive() {
               ) : (
                 <div className="space-y-2.5">
                   {targets.map((target) => {
-                    const connectivity =
-                      target.connectivity && typeof target.connectivity === "object"
-                        ? target.connectivity
+                    const sourceConnectivity =
+                      sourceSpace?.connectivity && typeof sourceSpace.connectivity === "object"
+                        ? sourceSpace.connectivity
                         : {};
-                    const hasExplicit = Object.prototype.hasOwnProperty.call(connectivity, sourceSpaceId);
-                    const enabled = hasExplicit ? Boolean(connectivity[sourceSpaceId]) : defaultVisibilityVisible;
-                    const key = `${target.id}:${sourceSpaceId}`;
+                    const hasExplicit = Object.prototype.hasOwnProperty.call(sourceConnectivity, target.id);
+                    const enabled = hasExplicit ? Boolean(sourceConnectivity[target.id]) : false;
+                    const key = `${sourceSpaceId}:${target.id}`;
                     return (
                       <div
                         key={target.id}

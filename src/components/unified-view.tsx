@@ -50,7 +50,7 @@ import { Markdown } from "@/components/markdown";
 import { AttachmentStrip, type AttachmentLike } from "@/components/attachments";
 import { queueDraftUpsert, readBestDraftValue, usePersistentDraft } from "@/lib/drafts";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
-import { resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
+import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 import { SnoozeModal } from "@/components/snooze-modal";
 import { useUnifiedExpansionState } from "@/components/unified-view-state";
 import { getInitialUnifiedUrlState, parseUnifiedUrlState } from "@/components/unified-view-url-state";
@@ -924,6 +924,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     return out;
   }, [selectedSpaceId, spaces]);
+  const spaceVisibilityRevision = useMemo(() => buildSpaceVisibilityRevision(spaces), [spaces]);
 
   const spaceNameById = useMemo(() => {
     const entries = spaces.map((space) => [space.id, String(space.name ?? "").trim() || deriveSpaceName(space.id)] as const);
@@ -2292,8 +2293,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const stamp = item.updatedAt || item.createdAt || "";
       return stamp > acc ? stamp : acc;
     }, "");
-    return `${selectedSpaceId}:${topics.length}:${tasks.length}:${visibleLogs.length}:${latestTopic}:${latestTask}:${latestLog}:${statusFilter}:${showDone ? 1 : 0}:${showRaw ? 1 : 0}`;
-  }, [selectedSpaceId, showDone, showRaw, statusFilter, tasks, topics, visibleLogs]);
+    return `${selectedSpaceId}:${topics.length}:${tasks.length}:${visibleLogs.length}:${latestTopic}:${latestTask}:${latestLog}:${statusFilter}:${showDone ? 1 : 0}:${showRaw ? 1 : 0}:${spaceVisibilityRevision}`;
+  }, [selectedSpaceId, showDone, showRaw, spaceVisibilityRevision, statusFilter, tasks, topics, visibleLogs]);
 
   const semanticSearch = useSemanticSearch({
     query: normalizedSearch,
