@@ -131,7 +131,7 @@ log "Dev server is accepting connections."
 PREWARM_ENABLED="$(printf '%s' "${CLAWBOARD_WEB_DEV_PREWARM:-true}" | tr '[:upper:]' '[:lower:]')"
 case "$PREWARM_ENABLED" in
   1|true|yes|on)
-    PREWARM_PATHS="${CLAWBOARD_WEB_DEV_PREWARM_PATHS:-/ /u}"
+    PREWARM_PATHS="${CLAWBOARD_WEB_DEV_PREWARM_PATHS:-/ /u /graph /log /stats}"
     PREWARM_TIMEOUT_MS="${CLAWBOARD_WEB_DEV_PREWARM_TIMEOUT_MS:-180000}"
     for path in $PREWARM_PATHS; do
       log "Prewarming ${path}..."

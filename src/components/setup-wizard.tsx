@@ -22,7 +22,49 @@ function deriveSpaceName(spaceId: string) {
   const base = normalized.replace(/^space[-_]+/i, "");
   const withSpaces = base.replace(/[-_]+/g, " ").trim();
   if (!withSpaces) return normalized;
-  return withSpaces.replace(/\b\w/g, (match) => match.toUpperCase());
+  return withSpaces
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((segment) => {
+      const token = String(segment ?? "").trim().toLowerCase();
+      if (!token) return "";
+      const devSuffix = token.match(/^([a-z]{2})dev$/);
+      if (devSuffix) return `${devSuffix[1].toUpperCase()}Dev`;
+      if (/^[a-z]{1,2}$/.test(token)) return token.toUpperCase();
+      return token.charAt(0).toUpperCase() + token.slice(1);
+    })
+    .join(" ");
+}
+
+function friendlyLabelFromSlug(value: string) {
+  const slug = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!slug) return "";
+  return slug
+    .split("-")
+    .filter(Boolean)
+    .map((segment) => {
+      const token = String(segment ?? "").trim().toLowerCase();
+      if (!token) return "";
+      const devSuffix = token.match(/^([a-z]{2})dev$/);
+      if (devSuffix) return `${devSuffix[1].toUpperCase()}Dev`;
+      if (/^[a-z]{1,2}$/.test(token)) return token.toUpperCase();
+      return token.charAt(0).toUpperCase() + token.slice(1);
+    })
+    .join(" ");
+}
+
+function displaySpaceName(space: Pick<Space, "id" | "name">) {
+  const id = String(space?.id ?? "").trim();
+  const raw = String(space?.name ?? "").trim();
+  if (!raw) return deriveSpaceName(id);
+  const friendly = friendlyLabelFromSlug(raw);
+  return friendly || deriveSpaceName(id);
 }
 
 function spaceIdFromTagLabel(value: string) {
@@ -149,7 +191,7 @@ export function SetupWizard({ initialStep = 1 }: { initialStep?: number } = {}) 
       if (!id) continue;
       if (id === "space-default") continue;
       if (!topicBackedSpaceIds.has(id)) continue;
-      byId.set(id, space);
+      byId.set(id, { ...space, name: displaySpaceName(space) });
     }
     for (const topic of storeTopics) {
       for (const id of topicSpaceIds(topic)) {

@@ -5,6 +5,7 @@ import json
 import hashlib
 import base64
 import heapq
+import queue
 from io import BytesIO
 import colorsys
 import asyncio
@@ -20,7 +21,7 @@ from fastapi import Request
 from uuid import uuid4
 from fastapi import FastAPI, Depends, Query, Body, HTTPException, Header, BackgroundTasks, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
-from typing import List, Any, Iterable
+from typing import List, Any, Iterable, Callable
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, text, or_, and_
 from sqlalchemy.exc import IntegrityError
@@ -783,6 +784,231 @@ SEARCH_DIRECT_LABEL_EXACT_BOOST = float(os.getenv("CLAWBOARD_SEARCH_DIRECT_LABEL
 SEARCH_DIRECT_LABEL_PREFIX_BOOST = float(os.getenv("CLAWBOARD_SEARCH_DIRECT_LABEL_PREFIX_BOOST", "0.2") or "0.2")
 SEARCH_DIRECT_LABEL_COVERAGE_BOOST = float(os.getenv("CLAWBOARD_SEARCH_DIRECT_LABEL_COVERAGE_BOOST", "0.16") or "0.16")
 _SEARCH_QUERY_GATE = threading.BoundedSemaphore(max(1, SEARCH_CONCURRENCY_LIMIT))
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "1" if default else "0")
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+PRECOMPILE_ENABLED = _env_flag("CLAWBOARD_PRECOMPILE_ENABLED", True)
+PRECOMPILE_TTL_SECONDS = max(1.0, float(os.getenv("CLAWBOARD_PRECOMPILE_TTL_SECONDS", "8") or "8"))
+PRECOMPILE_MAX_KEYS = max(8, int(os.getenv("CLAWBOARD_PRECOMPILE_MAX_KEYS", "32") or "32"))
+PRECOMPILE_WARM_ON_STARTUP = _env_flag("CLAWBOARD_PRECOMPILE_WARM_ON_STARTUP", True)
+PRECOMPILE_WARM_LISTENER_ENABLED = _env_flag("CLAWBOARD_PRECOMPILE_WARM_LISTENER_ENABLED", True)
+PRECOMPILE_WARM_MIN_INTERVAL_SECONDS = max(
+    0.25,
+    float(os.getenv("CLAWBOARD_PRECOMPILE_WARM_MIN_INTERVAL_SECONDS", "1.5") or "1.5"),
+)
+_PRECOMPILE_WARM_TRIGGER_EVENTS = {
+    "space.upserted",
+    "topic.upserted",
+    "topic.deleted",
+    "task.upserted",
+    "task.deleted",
+    "log.appended",
+    "log.patched",
+    "log.deleted",
+    "draft.upserted",
+}
+_PRECOMPILE_CACHE_LOCK = threading.Lock()
+_PRECOMPILE_CACHE: dict[str, dict[str, Any]] = {}
+_PRECOMPILE_KEY_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _precompile_cache_key(namespace: str, parts: Iterable[str]) -> str:
+    normalized = [str(part).strip() for part in parts]
+    return f"{namespace}|{'|'.join(normalized)}"
+
+
+def _precompile_key_lock(cache_key: str) -> threading.Lock:
+    with _PRECOMPILE_CACHE_LOCK:
+        lock = _PRECOMPILE_KEY_LOCKS.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _PRECOMPILE_KEY_LOCKS[cache_key] = lock
+        return lock
+
+
+def _precompile_cache_get(cache_key: str, revision: str) -> Any | None:
+    if not PRECOMPILE_ENABLED:
+        return None
+    now_mono = time.monotonic()
+    with _PRECOMPILE_CACHE_LOCK:
+        entry = _PRECOMPILE_CACHE.get(cache_key)
+        if not entry:
+            return None
+        if str(entry.get("revision") or "") != revision:
+            _PRECOMPILE_CACHE.pop(cache_key, None)
+            return None
+        expires_at = float(entry.get("expiresAtMonotonic") or 0.0)
+        if expires_at < now_mono:
+            _PRECOMPILE_CACHE.pop(cache_key, None)
+            return None
+        return entry.get("payload")
+
+
+def _precompile_cache_set(cache_key: str, revision: str, payload: Any) -> None:
+    if not PRECOMPILE_ENABLED:
+        return
+    now_mono = time.monotonic()
+    with _PRECOMPILE_CACHE_LOCK:
+        _PRECOMPILE_CACHE[cache_key] = {
+            "revision": revision,
+            "payload": payload,
+            "builtAtMonotonic": now_mono,
+            "expiresAtMonotonic": now_mono + PRECOMPILE_TTL_SECONDS,
+        }
+        if len(_PRECOMPILE_CACHE) <= PRECOMPILE_MAX_KEYS:
+            return
+        # Keep eviction deterministic: remove the oldest built entries first.
+        overflow = len(_PRECOMPILE_CACHE) - PRECOMPILE_MAX_KEYS
+        oldest = sorted(
+            _PRECOMPILE_CACHE.items(),
+            key=lambda item: float(item[1].get("builtAtMonotonic") or 0.0),
+        )
+        for stale_key, _entry in oldest[:overflow]:
+            _PRECOMPILE_CACHE.pop(stale_key, None)
+            _PRECOMPILE_KEY_LOCKS.pop(stale_key, None)
+
+
+def _get_or_build_precompiled(
+    *,
+    namespace: str,
+    key_parts: list[str],
+    revision: str,
+    build_fn: Callable[[], Any],
+) -> tuple[Any, bool]:
+    if not PRECOMPILE_ENABLED:
+        return build_fn(), False
+    cache_key = _precompile_cache_key(namespace, key_parts)
+    cached = _precompile_cache_get(cache_key, revision)
+    if cached is not None:
+        return cached, True
+    lock = _precompile_key_lock(cache_key)
+    with lock:
+        cached = _precompile_cache_get(cache_key, revision)
+        if cached is not None:
+            return cached, True
+        payload = build_fn()
+        _precompile_cache_set(cache_key, revision, payload)
+        return payload, False
+
+
+def _allowed_space_ids_cache_key(allowed_space_ids: set[str] | None) -> str:
+    if allowed_space_ids is None:
+        return "*"
+    if not allowed_space_ids:
+        return "-"
+    return ",".join(sorted({str(space_id).strip() for space_id in allowed_space_ids if str(space_id).strip()}))
+
+
+def _clawgraph_cache_key_parts(
+    *,
+    max_entities: int,
+    max_nodes: int,
+    min_edge_weight: float,
+    limit_logs: int,
+    include_pending: bool,
+    allowed_space_ids: set[str] | None,
+) -> list[str]:
+    return [
+        f"maxEntities={int(max_entities)}",
+        f"maxNodes={int(max_nodes)}",
+        f"minEdgeWeight={float(min_edge_weight):.4f}",
+        f"limitLogs={int(limit_logs)}",
+        f"includePending={1 if include_pending else 0}",
+        f"allowed={_allowed_space_ids_cache_key(allowed_space_ids)}",
+    ]
+
+
+def _changes_cache_key_parts(*, limit_logs: int, include_raw: bool, allowed_space_ids: set[str] | None) -> list[str]:
+    return [
+        f"limitLogs={int(limit_logs)}",
+        f"includeRaw={1 if include_raw else 0}",
+        f"allowed={_allowed_space_ids_cache_key(allowed_space_ids)}",
+    ]
+
+
+def _table_count_and_max_ts(session: Any, model: Any, ts_column: Any) -> tuple[int, str]:
+    row = session.exec(select(func.count(), func.max(ts_column)).select_from(model)).one()
+    total_raw = 0
+    max_raw = ""
+    if row is not None:
+        try:
+            total_raw = row[0]  # tuple-like (Row / tuple)
+        except Exception:
+            total_raw = row
+        try:
+            max_raw = row[1]
+        except Exception:
+            max_raw = ""
+    total = int(total_raw or 0)
+    max_ts = str(max_raw or "")
+    return total, max_ts
+
+
+def _graph_revision_token(session: Any) -> str:
+    topic_count, topic_max = _table_count_and_max_ts(session, Topic, Topic.updatedAt)
+    task_count, task_max = _table_count_and_max_ts(session, Task, Task.updatedAt)
+    log_count, log_max = _table_count_and_max_ts(session, LogEntry, LogEntry.updatedAt)
+    return "|".join(
+        [
+            f"topic:{topic_count}:{topic_max}",
+            f"task:{task_count}:{task_max}",
+            f"log:{log_count}:{log_max}",
+        ]
+    )
+
+
+def _changes_revision_token(session: Any) -> str:
+    space_count, space_max = _table_count_and_max_ts(session, Space, Space.updatedAt)
+    topic_count, topic_max = _table_count_and_max_ts(session, Topic, Topic.updatedAt)
+    task_count, task_max = _table_count_and_max_ts(session, Task, Task.updatedAt)
+    log_count, log_max = _table_count_and_max_ts(session, LogEntry, LogEntry.updatedAt)
+    draft_count, draft_max = _table_count_and_max_ts(session, Draft, Draft.updatedAt)
+    deleted_count, deleted_max = _table_count_and_max_ts(session, DeletedLog, DeletedLog.deletedAt)
+    return "|".join(
+        [
+            f"space:{space_count}:{space_max}",
+            f"topic:{topic_count}:{topic_max}",
+            f"task:{task_count}:{task_max}",
+            f"log:{log_count}:{log_max}",
+            f"draft:{draft_count}:{draft_max}",
+            f"deleted:{deleted_count}:{deleted_max}",
+        ]
+    )
+
+
+def _creation_audit_path() -> str:
+    return (
+        os.getenv("CLAWBOARD_CREATION_AUDIT_PATH")
+        or os.getenv("CLASSIFIER_CREATION_AUDIT_PATH")
+        or "/data/creation-gate.jsonl"
+    )
+
+
+def _file_revision_token(path: str) -> str:
+    try:
+        stat = os.stat(path)
+        return f"{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
+    except Exception:
+        return "missing"
+
+
+def _metrics_revision_token(session: Any) -> str:
+    topic_count, topic_max = _table_count_and_max_ts(session, Topic, Topic.updatedAt)
+    task_count, task_max = _table_count_and_max_ts(session, Task, Task.updatedAt)
+    log_count, log_max = _table_count_and_max_ts(session, LogEntry, LogEntry.updatedAt)
+    audit_token = _file_revision_token(_creation_audit_path())
+    return "|".join(
+        [
+            f"topic:{topic_count}:{topic_max}",
+            f"task:{task_count}:{task_max}",
+            f"log:{log_count}:{log_max}",
+            f"audit:{audit_token}",
+        ]
+    )
 SLASH_COMMANDS = {
     "/new",
     "/topic",
@@ -1298,9 +1524,107 @@ def _next_sort_index_for_new_task(session, topic_id: str | None, pinned: bool) -
     return min(indices) - 1
 
 
+def _warm_precompiled_defaults() -> None:
+    if not PRECOMPILE_ENABLED:
+        return
+    try:
+        with get_session() as session:
+            # Warm the graph shape used by the UI and the endpoint defaults.
+            graph_presets = [
+                (140, 320, 0.08, 3200, True),  # src/components/clawgraph-live.tsx
+                (120, 260, 0.16, 2400, True),  # /api/clawgraph defaults
+            ]
+            graph_revision = _graph_revision_token(session)
+            for max_entities, max_nodes, min_edge_weight, limit_logs, include_pending in graph_presets:
+                key_parts = _clawgraph_cache_key_parts(
+                    max_entities=max_entities,
+                    max_nodes=max_nodes,
+                    min_edge_weight=min_edge_weight,
+                    limit_logs=limit_logs,
+                    include_pending=include_pending,
+                    allowed_space_ids=None,
+                )
+                _get_or_build_precompiled(
+                    namespace="clawgraph",
+                    key_parts=key_parts,
+                    revision=graph_revision,
+                    build_fn=lambda me=max_entities, mn=max_nodes, ew=min_edge_weight, ll=limit_logs, ip=include_pending: _build_clawgraph_payload(
+                        session,
+                        max_entities=me,
+                        max_nodes=mn,
+                        min_edge_weight=ew,
+                        limit_logs=ll,
+                        include_pending=ip,
+                        allowed_space_ids=None,
+                    ),
+                )
+
+            changes_revision = _changes_revision_token(session)
+            _get_or_build_precompiled(
+                namespace="changes",
+                key_parts=_changes_cache_key_parts(limit_logs=2000, include_raw=False, allowed_space_ids=None),
+                revision=changes_revision,
+                build_fn=lambda: _build_changes_payload(
+                    session,
+                    since=None,
+                    limit_logs=2000,
+                    include_raw=False,
+                    allowed_space_ids=None,
+                ),
+            )
+
+            metrics_revision = _metrics_revision_token(session)
+            _get_or_build_precompiled(
+                namespace="metrics",
+                key_parts=["default"],
+                revision=metrics_revision,
+                build_fn=lambda: _build_metrics_payload(session),
+            )
+    except Exception:
+        # Best-effort warmup only.
+        return
+
+
+def _precompile_warm_worker() -> None:
+    if not PRECOMPILE_ENABLED:
+        return
+    if PRECOMPILE_WARM_ON_STARTUP:
+        _warm_precompiled_defaults()
+
+    subscriber = event_hub.subscribe()
+    pending = False
+    next_warm_at = 0.0
+    try:
+        while True:
+            timeout = 30.0
+            if pending:
+                timeout = max(0.05, next_warm_at - time.monotonic())
+            try:
+                _event_id, payload = subscriber.get(timeout=timeout)
+            except queue.Empty:
+                if pending and time.monotonic() >= next_warm_at:
+                    _warm_precompiled_defaults()
+                    pending = False
+                continue
+
+            event_type = str((payload or {}).get("type") or "")
+            if event_type not in _PRECOMPILE_WARM_TRIGGER_EVENTS:
+                continue
+            pending = True
+            next_warm_at = time.monotonic() + PRECOMPILE_WARM_MIN_INTERVAL_SECONDS
+    finally:
+        event_hub.unsubscribe(subscriber)
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    if PRECOMPILE_ENABLED and PRECOMPILE_WARM_LISTENER_ENABLED:
+        thread = threading.Thread(target=_precompile_warm_worker, daemon=True)
+        thread.start()
+    elif PRECOMPILE_ENABLED and PRECOMPILE_WARM_ON_STARTUP:
+        thread = threading.Thread(target=_warm_precompiled_defaults, daemon=True)
+        thread.start()
     if os.getenv("CLAWBOARD_INGEST_MODE", "").lower() == "queue":
         thread = threading.Thread(target=_queue_worker, daemon=True)
         thread.start()
@@ -4828,6 +5152,143 @@ def purge_log_forward(log_id: str):
         return {"ok": True, "deleted": True, "deletedCount": len(deleted_ids), "deletedIds": deleted_ids, "anchorLogId": anchor_id}
 
 
+def _serialize_changes_payload(
+    *,
+    spaces: list[Space],
+    topics: list[Topic],
+    tasks: list[Task],
+    logs: list[LogEntry],
+    drafts: list[Draft],
+    deleted_log_ids: list[str],
+) -> dict[str, Any]:
+    return {
+        "spaces": [SpaceOut.model_validate(row).model_dump() for row in spaces],
+        "topics": [TopicOut.model_validate(row).model_dump() for row in topics],
+        "tasks": [TaskOut.model_validate(row).model_dump() for row in tasks],
+        "logs": [LogOutLite.model_validate(row).model_dump() for row in logs],
+        "drafts": [DraftOut.model_validate(row).model_dump() for row in drafts],
+        "deletedLogIds": [str(item) for item in deleted_log_ids if str(item).strip()],
+    }
+
+
+def _build_changes_payload(
+    session: Any,
+    *,
+    since: str | None,
+    limit_logs: int,
+    include_raw: bool,
+    allowed_space_ids: set[str] | None,
+) -> dict[str, Any]:
+    if not since:
+        space_query = select(Space)
+        topic_query = select(Topic)
+        task_query = select(Task)
+        if allowed_space_ids is not None:
+            space_query = space_query.where(Space.id.in_(list(allowed_space_ids)))
+        spaces = session.exec(space_query).all()
+        topics = session.exec(topic_query).all()
+        if allowed_space_ids is not None:
+            topics = [topic for topic in topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
+        topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in topics if getattr(topic, "id", None)}
+        tasks = session.exec(task_query).all()
+        if allowed_space_ids is not None:
+            parent_topics = _load_topics_by_ids(
+                session,
+                [str(getattr(task, "topicId", "") or "").strip() for task in tasks],
+            )
+            merged_topic_by_id = {**parent_topics, **topic_by_id}
+            tasks = [task for task in tasks if _task_matches_allowed_spaces(task, allowed_space_ids, merged_topic_by_id)]
+        drafts = session.exec(select(Draft)).all()
+        log_query = select(LogEntry).order_by(
+            LogEntry.createdAt.desc(),
+            (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
+        ).limit(limit_logs)
+        if not include_raw:
+            log_query = log_query.options(defer(LogEntry.raw))
+        logs = session.exec(log_query).all()
+        if allowed_space_ids is not None:
+            seeded_tasks = {str(getattr(task, "id", "") or ""): task for task in tasks if getattr(task, "id", None)}
+            topic_by_id_for_logs, task_by_id_for_logs = _load_related_maps_for_logs(
+                session,
+                logs,
+                seeded_topics=topic_by_id,
+                seeded_tasks=seeded_tasks,
+            )
+            logs = [
+                row
+                for row in logs
+                if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id_for_logs, task_by_id_for_logs)
+            ]
+    else:
+        space_query = select(Space).where(Space.updatedAt >= since)
+        topic_query = select(Topic).where(Topic.updatedAt >= since)
+        task_query = select(Task).where(Task.updatedAt >= since)
+        if allowed_space_ids is not None:
+            space_query = space_query.where(Space.id.in_(list(allowed_space_ids)))
+        spaces = session.exec(space_query).all()
+        topics = session.exec(topic_query).all()
+        if allowed_space_ids is not None:
+            topics = [topic for topic in topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
+        topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in topics if getattr(topic, "id", None)}
+        tasks = session.exec(task_query).all()
+        if allowed_space_ids is not None:
+            parent_topics = _load_topics_by_ids(
+                session,
+                [str(getattr(task, "topicId", "") or "").strip() for task in tasks],
+            )
+            merged_topic_by_id = {**parent_topics, **topic_by_id}
+            tasks = [task for task in tasks if _task_matches_allowed_spaces(task, allowed_space_ids, merged_topic_by_id)]
+        drafts = session.exec(select(Draft).where(Draft.updatedAt >= since)).all()
+        log_query = (
+            select(LogEntry)
+            .where(LogEntry.updatedAt >= since)
+            .order_by(LogEntry.updatedAt.desc(), LogEntry.createdAt.desc(), LogEntry.id.desc())
+            .limit(limit_logs)
+        )
+        if not include_raw:
+            log_query = log_query.options(defer(LogEntry.raw))
+        logs = session.exec(log_query).all()
+        if allowed_space_ids is not None:
+            seeded_tasks = {str(getattr(task, "id", "") or ""): task for task in tasks if getattr(task, "id", None)}
+            topic_by_id_for_logs, task_by_id_for_logs = _load_related_maps_for_logs(
+                session,
+                logs,
+                seeded_topics=topic_by_id,
+                seeded_tasks=seeded_tasks,
+            )
+            logs = [
+                row
+                for row in logs
+                if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id_for_logs, task_by_id_for_logs)
+            ]
+
+    if not include_raw:
+        for row in logs:
+            row.raw = None
+
+    spaces.sort(key=lambda s: s.updatedAt, reverse=True)
+    topics.sort(key=lambda t: t.updatedAt, reverse=True)
+    tasks.sort(key=lambda t: t.updatedAt, reverse=True)
+    drafts.sort(key=lambda d: d.updatedAt, reverse=True)
+
+    deleted_log_ids: list[str] = []
+    if since:
+        try:
+            deleted_rows = session.exec(select(DeletedLog).where(DeletedLog.deletedAt >= since)).all()
+            deleted_log_ids = [row.id for row in deleted_rows if getattr(row, "id", None)]
+        except Exception:
+            deleted_log_ids = []
+
+    return _serialize_changes_payload(
+        spaces=spaces,
+        topics=topics,
+        tasks=tasks,
+        logs=logs,
+        drafts=drafts,
+        deleted_log_ids=deleted_log_ids,
+    )
+
+
 @app.get("/api/changes", response_model=ChangesResponse, tags=["changes"])
 def list_changes(
     since: str | None = Query(
@@ -4861,115 +5322,31 @@ def list_changes(
             source_space_id=spaceId,
             allowed_space_ids_raw=allowedSpaceIds,
         )
-        if not since:
-            space_query = select(Space)
-            topic_query = select(Topic)
-            task_query = select(Task)
-            if allowed_space_ids is not None:
-                space_query = space_query.where(Space.id.in_(list(allowed_space_ids)))
-            spaces = session.exec(space_query).all()
-            topics = session.exec(topic_query).all()
-            if allowed_space_ids is not None:
-                topics = [topic for topic in topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
-            topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in topics if getattr(topic, "id", None)}
-            tasks = session.exec(task_query).all()
-            if allowed_space_ids is not None:
-                parent_topics = _load_topics_by_ids(
-                    session,
-                    [str(getattr(task, "topicId", "") or "").strip() for task in tasks],
-                )
-                merged_topic_by_id = {**parent_topics, **topic_by_id}
-                tasks = [task for task in tasks if _task_matches_allowed_spaces(task, allowed_space_ids, merged_topic_by_id)]
-            drafts = session.exec(select(Draft)).all()
-            log_query = select(LogEntry).order_by(
-                LogEntry.createdAt.desc(),
-                (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
-            ).limit(limitLogs)
-            if not includeRaw:
-                log_query = log_query.options(defer(LogEntry.raw))
-            logs = session.exec(log_query).all()
-            if allowed_space_ids is not None:
-                seeded_tasks = {str(getattr(task, "id", "") or ""): task for task in tasks if getattr(task, "id", None)}
-                topic_by_id_for_logs, task_by_id_for_logs = _load_related_maps_for_logs(
-                    session,
-                    logs,
-                    seeded_topics=topic_by_id,
-                    seeded_tasks=seeded_tasks,
-                )
-                logs = [
-                    row
-                    for row in logs
-                    if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id_for_logs, task_by_id_for_logs)
-                ]
-        else:
-            space_query = select(Space).where(Space.updatedAt >= since)
-            topic_query = select(Topic).where(Topic.updatedAt >= since)
-            task_query = select(Task).where(Task.updatedAt >= since)
-            if allowed_space_ids is not None:
-                space_query = space_query.where(Space.id.in_(list(allowed_space_ids)))
-            spaces = session.exec(space_query).all()
-            topics = session.exec(topic_query).all()
-            if allowed_space_ids is not None:
-                topics = [topic for topic in topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
-            topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in topics if getattr(topic, "id", None)}
-            tasks = session.exec(task_query).all()
-            if allowed_space_ids is not None:
-                parent_topics = _load_topics_by_ids(
-                    session,
-                    [str(getattr(task, "topicId", "") or "").strip() for task in tasks],
-                )
-                merged_topic_by_id = {**parent_topics, **topic_by_id}
-                tasks = [task for task in tasks if _task_matches_allowed_spaces(task, allowed_space_ids, merged_topic_by_id)]
-            drafts = session.exec(select(Draft).where(Draft.updatedAt >= since)).all()
-            log_query = (
-                select(LogEntry)
-                .where(LogEntry.updatedAt >= since)
-                .order_by(LogEntry.updatedAt.desc(), LogEntry.createdAt.desc(), LogEntry.id.desc())
-                .limit(limitLogs)
+
+        def _build() -> dict[str, Any]:
+            return _build_changes_payload(
+                session,
+                since=since,
+                limit_logs=limitLogs,
+                include_raw=includeRaw,
+                allowed_space_ids=allowed_space_ids,
             )
-            if not includeRaw:
-                log_query = log_query.options(defer(LogEntry.raw))
-            logs = session.exec(log_query).all()
-            if allowed_space_ids is not None:
-                seeded_tasks = {str(getattr(task, "id", "") or ""): task for task in tasks if getattr(task, "id", None)}
-                topic_by_id_for_logs, task_by_id_for_logs = _load_related_maps_for_logs(
-                    session,
-                    logs,
-                    seeded_topics=topic_by_id,
-                    seeded_tasks=seeded_tasks,
-                )
-                logs = [
-                    row
-                    for row in logs
-                    if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id_for_logs, task_by_id_for_logs)
-                ]
 
-        if not includeRaw:
-            for row in logs:
-                row.raw = None
+        if not since and not includeRaw:
+            revision = _changes_revision_token(session)
+            payload, _cached = _get_or_build_precompiled(
+                namespace="changes",
+                key_parts=_changes_cache_key_parts(
+                    limit_logs=limitLogs,
+                    include_raw=includeRaw,
+                    allowed_space_ids=allowed_space_ids,
+                ),
+                revision=revision,
+                build_fn=_build,
+            )
+            return payload
 
-        spaces.sort(key=lambda s: s.updatedAt, reverse=True)
-        topics.sort(key=lambda t: t.updatedAt, reverse=True)
-        tasks.sort(key=lambda t: t.updatedAt, reverse=True)
-        drafts.sort(key=lambda d: d.updatedAt, reverse=True)
-
-        deleted_log_ids: list[str] = []
-        if since:
-            try:
-                deleted_rows = session.exec(select(DeletedLog).where(DeletedLog.deletedAt >= since)).all()
-                deleted_log_ids = [row.id for row in deleted_rows if getattr(row, "id", None)]
-            except Exception:
-                deleted_log_ids = []
-
-        # Preserve query ordering for logs (it may include SQLite rowid tiebreaks).
-        return {
-            "spaces": spaces,
-            "topics": topics,
-            "tasks": tasks,
-            "logs": logs,
-            "drafts": drafts,
-            "deletedLogIds": deleted_log_ids,
-        }
+        return _build()
 
 
 @app.post(
@@ -5023,6 +5400,59 @@ def upsert_draft(payload: DraftUpsert = Body(...)):
         return row
 
 
+def _build_clawgraph_payload(
+    session: Any,
+    *,
+    max_entities: int,
+    max_nodes: int,
+    min_edge_weight: float,
+    limit_logs: int,
+    include_pending: bool,
+    allowed_space_ids: set[str] | None,
+) -> dict[str, Any]:
+    all_topics = session.exec(select(Topic)).all()
+    all_topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in all_topics if getattr(topic, "id", None)}
+    topics = (
+        [topic for topic in all_topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
+        if allowed_space_ids is not None
+        else all_topics
+    )
+    all_tasks = session.exec(select(Task)).all()
+    tasks = (
+        [task for task in all_tasks if _task_matches_allowed_spaces(task, allowed_space_ids, all_topic_by_id)]
+        if allowed_space_ids is not None
+        else all_tasks
+    )
+    all_task_by_id = {str(getattr(task, "id", "") or ""): task for task in all_tasks if getattr(task, "id", None)}
+    # Raw payloads can be very large; exclude from bulk graph extraction.
+    log_query = select(LogEntry).options(defer(LogEntry.raw))
+    if not include_pending:
+        log_query = log_query.where(LogEntry.classificationStatus == "classified")
+    log_query = log_query.order_by(
+        LogEntry.createdAt.desc(),
+        LogEntry.updatedAt.desc(),
+        (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
+    ).limit(limit_logs)
+    logs = session.exec(log_query).all()
+    if allowed_space_ids is not None:
+        logs = [
+            entry
+            for entry in logs
+            if _log_matches_allowed_spaces(entry, allowed_space_ids, all_topic_by_id, all_task_by_id)
+        ]
+
+    graph = build_clawgraph(
+        topics,
+        tasks,
+        logs,
+        max_entities=max_entities,
+        max_nodes=max_nodes,
+        min_edge_weight=min_edge_weight,
+    )
+    graph["generatedAt"] = now_iso()
+    return graph
+
+
 @app.get("/api/clawgraph", response_model=ClawgraphResponse, tags=["clawgraph"])
 def clawgraph(
     maxEntities: int = Query(default=120, ge=20, le=400, description="Maximum number of entity nodes."),
@@ -5040,47 +5470,33 @@ def clawgraph(
             source_space_id=spaceId,
             allowed_space_ids_raw=allowedSpaceIds,
         )
-        all_topics = session.exec(select(Topic)).all()
-        all_topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in all_topics if getattr(topic, "id", None)}
-        topics = (
-            [topic for topic in all_topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
-            if allowed_space_ids is not None
-            else all_topics
-        )
-        all_tasks = session.exec(select(Task)).all()
-        tasks = (
-            [task for task in all_tasks if _task_matches_allowed_spaces(task, allowed_space_ids, all_topic_by_id)]
-            if allowed_space_ids is not None
-            else all_tasks
-        )
-        all_task_by_id = {str(getattr(task, "id", "") or ""): task for task in all_tasks if getattr(task, "id", None)}
-        # Raw payloads can be very large; exclude from bulk graph extraction.
-        log_query = select(LogEntry).options(defer(LogEntry.raw))
-        if not includePending:
-            log_query = log_query.where(LogEntry.classificationStatus == "classified")
-        log_query = log_query.order_by(
-            LogEntry.createdAt.desc(),
-            LogEntry.updatedAt.desc(),
-            (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
-        ).limit(limitLogs)
-        logs = session.exec(log_query).all()
-        if allowed_space_ids is not None:
-            logs = [
-                entry
-                for entry in logs
-                if _log_matches_allowed_spaces(entry, allowed_space_ids, all_topic_by_id, all_task_by_id)
-            ]
 
-        graph = build_clawgraph(
-            topics,
-            tasks,
-            logs,
-            max_entities=maxEntities,
-            max_nodes=maxNodes,
-            min_edge_weight=minEdgeWeight,
+        def _build() -> dict[str, Any]:
+            return _build_clawgraph_payload(
+                session,
+                max_entities=maxEntities,
+                max_nodes=maxNodes,
+                min_edge_weight=minEdgeWeight,
+                limit_logs=limitLogs,
+                include_pending=includePending,
+                allowed_space_ids=allowed_space_ids,
+            )
+
+        revision = _graph_revision_token(session)
+        payload, _cached = _get_or_build_precompiled(
+            namespace="clawgraph",
+            key_parts=_clawgraph_cache_key_parts(
+                max_entities=maxEntities,
+                max_nodes=maxNodes,
+                min_edge_weight=minEdgeWeight,
+                limit_logs=limitLogs,
+                include_pending=includePending,
+                allowed_space_ids=allowed_space_ids,
+            ),
+            revision=revision,
+            build_fn=_build,
         )
-        graph["generatedAt"] = now_iso()
-        return graph
+        return payload
 
 
 def _search_impl(
@@ -6345,106 +6761,113 @@ def request_reindex(payload: ReindexRequest = Body(...)):
     return {"ok": True, "queued": True}
 
 
+def _build_metrics_payload(session: Any) -> dict[str, Any]:
+    total = int(session.exec(select(func.count()).select_from(LogEntry)).one() or 0)
+    pending_count = int(
+        session.exec(
+            select(func.count()).select_from(LogEntry).where(LogEntry.classificationStatus == "pending")
+        ).one()
+        or 0
+    )
+    failed_count = int(
+        session.exec(
+            select(func.count()).select_from(LogEntry).where(LogEntry.classificationStatus == "failed")
+        ).one()
+        or 0
+    )
+    classified_count = max(0, total - pending_count - failed_count)
+    newest = session.exec(select(func.max(LogEntry.createdAt))).one()
+    oldest_pending = session.exec(
+        select(func.min(LogEntry.createdAt)).where(LogEntry.classificationStatus == "pending")
+    ).one()
+
+    topics_total = int(session.exec(select(func.count()).select_from(Topic)).one() or 0)
+    tasks_total = int(session.exec(select(func.count()).select_from(Task)).one() or 0)
+
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff_iso = cutoff_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    topics_created_24h = int(session.exec(select(func.count()).select_from(Topic).where(Topic.createdAt >= cutoff_iso)).one() or 0)
+    tasks_created_24h = int(session.exec(select(func.count()).select_from(Task).where(Task.createdAt >= cutoff_iso)).one() or 0)
+
+    gate = {
+        "topics": {"allowedTotal": 0, "blockedTotal": 0, "allowed24h": 0, "blocked24h": 0},
+        "tasks": {"allowedTotal": 0, "blockedTotal": 0, "allowed24h": 0, "blocked24h": 0},
+    }
+    audit_path = _creation_audit_path()
+
+    def parse_iso(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        raw = str(value).strip()
+        if not raw:
+            return None
+        try:
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            ts = datetime.fromisoformat(raw)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return ts.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    cutoff_ts = cutoff_dt.timestamp()
+    try:
+        if audit_path and os.path.exists(audit_path):
+            with open(audit_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except Exception:
+                        continue
+                    kind = str(item.get("kind") or "").lower()
+                    decision = str(item.get("decision") or "").lower()
+                    if kind not in ("topic", "task"):
+                        continue
+                    bucket = gate["topics" if kind == "topic" else "tasks"]
+                    is_allowed = decision == "allow"
+                    if is_allowed:
+                        bucket["allowedTotal"] += 1
+                    else:
+                        bucket["blockedTotal"] += 1
+                    ts = parse_iso(item.get("ts"))
+                    if ts and ts.timestamp() >= cutoff_ts:
+                        if is_allowed:
+                            bucket["allowed24h"] += 1
+                        else:
+                            bucket["blocked24h"] += 1
+    except Exception:
+        pass
+
+    return {
+        "logs": {
+            "total": total,
+            "pending": pending_count,
+            "classified": classified_count,
+            "failed": failed_count,
+            "newestCreatedAt": newest,
+            "oldestPendingAt": oldest_pending,
+        },
+        "creation": {
+            "topics": {"total": topics_total, "created24h": topics_created_24h},
+            "tasks": {"total": tasks_total, "created24h": tasks_created_24h},
+            "gate": gate,
+        },
+    }
+
+
 @app.get("/api/metrics", tags=["metrics"])
 def metrics():
     """Operational metrics for ingestion + classifier lag."""
     with get_session() as session:
-        total = int(session.exec(select(func.count()).select_from(LogEntry)).one() or 0)
-        pending_count = int(
-            session.exec(
-                select(func.count()).select_from(LogEntry).where(LogEntry.classificationStatus == "pending")
-            ).one()
-            or 0
+        revision = _metrics_revision_token(session)
+        payload, _cached = _get_or_build_precompiled(
+            namespace="metrics",
+            key_parts=["default"],
+            revision=revision,
+            build_fn=lambda: _build_metrics_payload(session),
         )
-        failed_count = int(
-            session.exec(
-                select(func.count()).select_from(LogEntry).where(LogEntry.classificationStatus == "failed")
-            ).one()
-            or 0
-        )
-        classified_count = max(0, total - pending_count - failed_count)
-        newest = session.exec(select(func.max(LogEntry.createdAt))).one()
-        oldest_pending = session.exec(
-            select(func.min(LogEntry.createdAt)).where(LogEntry.classificationStatus == "pending")
-        ).one()
-        topics = session.exec(select(Topic)).all()
-        tasks = session.exec(select(Task)).all()
-        now = datetime.now(timezone.utc)
-
-        def parse_iso(value: str | None) -> datetime | None:
-            if not value:
-                return None
-            raw = str(value).strip()
-            if not raw:
-                return None
-            try:
-                if raw.endswith("Z"):
-                    raw = raw[:-1] + "+00:00"
-                ts = datetime.fromisoformat(raw)
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                return ts.astimezone(timezone.utc)
-            except Exception:
-                return None
-
-        cutoff = now.timestamp() - 24 * 60 * 60
-        topics_created_24h = sum(
-            1
-            for t in topics
-            if (parsed := parse_iso(getattr(t, "createdAt", None))) and parsed.timestamp() >= cutoff
-        )
-        tasks_created_24h = sum(
-            1
-            for t in tasks
-            if (parsed := parse_iso(getattr(t, "createdAt", None))) and parsed.timestamp() >= cutoff
-        )
-
-        gate = {
-            "topics": {"allowedTotal": 0, "blockedTotal": 0, "allowed24h": 0, "blocked24h": 0},
-            "tasks": {"allowedTotal": 0, "blockedTotal": 0, "allowed24h": 0, "blocked24h": 0},
-        }
-        audit_path = os.getenv("CLAWBOARD_CREATION_AUDIT_PATH") or os.getenv("CLASSIFIER_CREATION_AUDIT_PATH") or "/data/creation-gate.jsonl"
-        try:
-            if audit_path and os.path.exists(audit_path):
-                with open(audit_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            item = json.loads(line)
-                        except Exception:
-                            continue
-                        kind = str(item.get("kind") or "").lower()
-                        decision = str(item.get("decision") or "").lower()
-                        if kind not in ("topic", "task"):
-                            continue
-                        bucket = gate["topics" if kind == "topic" else "tasks"]
-                        is_allowed = decision == "allow"
-                        if is_allowed:
-                            bucket["allowedTotal"] += 1
-                        else:
-                            bucket["blockedTotal"] += 1
-                        ts = parse_iso(item.get("ts"))
-                        if ts and ts.timestamp() >= cutoff:
-                            if is_allowed:
-                                bucket["allowed24h"] += 1
-                            else:
-                                bucket["blocked24h"] += 1
-        except Exception:
-            pass
-        return {
-            "logs": {
-                "total": total,
-                "pending": pending_count,
-                "classified": classified_count,
-                "failed": failed_count,
-                "newestCreatedAt": newest,
-                "oldestPendingAt": oldest_pending,
-            },
-            "creation": {
-                "topics": {"total": len(topics), "created24h": topics_created_24h},
-                "tasks": {"total": len(tasks), "created24h": tasks_created_24h},
-                "gate": gate,
-            },
-        }
+        return payload

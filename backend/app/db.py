@@ -156,6 +156,15 @@ def init_db() -> None:
                 "CREATE INDEX IF NOT EXISTS ix_logentry_space_created_at "
                 'ON logentry("spaceId", "createdAt");'
             )
+            # Incremental sync and graph fetches rely heavily on updatedAt/createdAt ordering.
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_logentry_updated_created_at "
+                'ON logentry("updatedAt", "createdAt");'
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_logentry_created_at "
+                'ON logentry("createdAt");'
+            )
 
             # Session routing memory: keep GC fast for large instances.
             try:
@@ -195,6 +204,10 @@ def init_db() -> None:
             conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_topic_space_updated_at "
                 'ON topic("spaceId", "updatedAt");'
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_topic_created_at "
+                'ON topic("createdAt");'
             )
             conn.exec_driver_sql("UPDATE topic SET tags = '[]' WHERE tags IS NULL;")
             conn.exec_driver_sql(
@@ -236,6 +249,10 @@ def init_db() -> None:
             conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_task_space_updated_at "
                 'ON task("spaceId", "updatedAt");'
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_task_created_at "
+                'ON task("createdAt");'
             )
             conn.exec_driver_sql("UPDATE task SET tags = '[]' WHERE tags IS NULL;")
             conn.exec_driver_sql(

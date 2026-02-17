@@ -101,8 +101,6 @@ export function StatsLive() {
     };
   }, []);
 
-  const logsSorted = useMemo(() => [...logs].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)), [logs]);
-
   const taskCounts = tasks.reduce<Record<string, number>>(
     (acc, task) => {
       acc[task.status] = (acc[task.status] ?? 0) + 1;
@@ -112,14 +110,30 @@ export function StatsLive() {
   );
   const openCount = tasks.filter((task) => task.status !== "done").length;
 
-  const topicActivity = topics
-    .map((topic) => {
-      const logCount = logs.filter((log) => log.topicId === topic.id).length;
-      const taskCount = tasks.filter((task) => task.topicId === topic.id).length;
-      return { ...topic, logCount, taskCount };
-    })
-    .sort((a, b) => b.logCount - a.logCount)
-    .slice(0, 6);
+  const topicActivity = useMemo(() => {
+    const logCountByTopic = new Map<string, number>();
+    for (const entry of logs) {
+      const topicId = String(entry.topicId ?? "").trim();
+      if (!topicId) continue;
+      logCountByTopic.set(topicId, (logCountByTopic.get(topicId) ?? 0) + 1);
+    }
+
+    const taskCountByTopic = new Map<string, number>();
+    for (const task of tasks) {
+      const topicId = String(task.topicId ?? "").trim();
+      if (!topicId) continue;
+      taskCountByTopic.set(topicId, (taskCountByTopic.get(topicId) ?? 0) + 1);
+    }
+
+    return topics
+      .map((topic) => ({
+        ...topic,
+        logCount: logCountByTopic.get(topic.id) ?? 0,
+        taskCount: taskCountByTopic.get(topic.id) ?? 0,
+      }))
+      .sort((a, b) => b.logCount - a.logCount)
+      .slice(0, 6);
+  }, [logs, tasks, topics]);
 
   const agentStats = useMemo(() => {
     const latestEventTime = logs.reduce((max, entry) => {
@@ -297,7 +311,7 @@ export function StatsLive() {
         </Card>
       </div>
 
-      {logsSorted.length === 0 && (
+      {logs.length === 0 && (
         <p className="text-xs text-[rgb(var(--claw-muted))]">Waiting on the first events from OpenClaw.</p>
       )}
     </div>

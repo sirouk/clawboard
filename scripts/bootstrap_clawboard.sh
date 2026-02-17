@@ -133,12 +133,33 @@ API_URL="${CLAWBOARD_API_URL:-http://localhost:8010}"
 WEB_URL="${CLAWBOARD_WEB_URL:-http://localhost:3010}"
 PUBLIC_API_BASE="${CLAWBOARD_PUBLIC_API_BASE:-}"
 PUBLIC_WEB_URL="${CLAWBOARD_PUBLIC_WEB_URL:-}"
+OPENCLAW_BASE_URL_VALUE="${OPENCLAW_BASE_URL:-}"
 TOKEN="${CLAWBOARD_TOKEN:-}"
 TITLE="${CLAWBOARD_TITLE:-Clawboard}"
 INTEGRATION_LEVEL="${CLAWBOARD_INTEGRATION_LEVEL:-write}"
 INTEGRATION_LEVEL_EXPLICIT=false
 if [ -n "${CLAWBOARD_INTEGRATION_LEVEL:-}" ]; then
   INTEGRATION_LEVEL_EXPLICIT=true
+fi
+API_URL_EXPLICIT=false
+WEB_URL_EXPLICIT=false
+PUBLIC_API_BASE_EXPLICIT=false
+PUBLIC_WEB_URL_EXPLICIT=false
+OPENCLAW_BASE_URL_EXPLICIT=false
+if [ -n "${CLAWBOARD_API_URL+x}" ]; then
+  API_URL_EXPLICIT=true
+fi
+if [ -n "${CLAWBOARD_WEB_URL+x}" ]; then
+  WEB_URL_EXPLICIT=true
+fi
+if [ -n "${CLAWBOARD_PUBLIC_API_BASE+x}" ]; then
+  PUBLIC_API_BASE_EXPLICIT=true
+fi
+if [ -n "${CLAWBOARD_PUBLIC_WEB_URL+x}" ]; then
+  PUBLIC_WEB_URL_EXPLICIT=true
+fi
+if [ -n "${OPENCLAW_BASE_URL+x}" ]; then
+  OPENCLAW_BASE_URL_EXPLICIT=true
 fi
 CHUTES_FAST_PATH_URL="${CHUTES_FAST_PATH_URL:-https://raw.githubusercontent.com/sirouk/clawboard/main/inference-providers/add_chutes.sh}"
 WEB_HOT_RELOAD_OVERRIDE=""
@@ -151,6 +172,8 @@ CONTEXT_MAX_CHARS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS:-}"
 SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="${CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS:-}"
 SKILL_INSTALL_MODE="${CLAWBOARD_SKILL_INSTALL_MODE:-symlink}"
 MEMORY_BACKUP_SETUP_MODE="${CLAWBOARD_MEMORY_BACKUP_SETUP:-ask}"
+MEMORY_BACKUP_SETUP_STATUS="not-run"
+MEMORY_BACKUP_SETUP_SCRIPT=""
 
 SKIP_DOCKER=false
 SKIP_OPENCLAW=false
@@ -163,6 +186,7 @@ PROMPT_ACCESS_URL=true
 AUTO_DETECT_ACCESS_URL=true
 ACCESS_API_URL=""
 ACCESS_WEB_URL=""
+ENV_WIZARD_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -172,19 +196,23 @@ while [ $# -gt 0 ]; do
       ;;
     --api-url)
       [ $# -ge 2 ] || log_error "--api-url requires a value"
-      API_URL="$2"; shift 2
+      API_URL="$2"; API_URL_EXPLICIT=true; shift 2
       ;;
     --web-url)
       [ $# -ge 2 ] || log_error "--web-url requires a value"
-      WEB_URL="$2"; shift 2
+      WEB_URL="$2"; WEB_URL_EXPLICIT=true; shift 2
       ;;
     --public-api-base)
       [ $# -ge 2 ] || log_error "--public-api-base requires a value"
-      PUBLIC_API_BASE="$2"; shift 2
+      PUBLIC_API_BASE="$2"; PUBLIC_API_BASE_EXPLICIT=true; shift 2
       ;;
     --public-web-url)
       [ $# -ge 2 ] || log_error "--public-web-url requires a value"
-      PUBLIC_WEB_URL="$2"; shift 2
+      PUBLIC_WEB_URL="$2"; PUBLIC_WEB_URL_EXPLICIT=true; shift 2
+      ;;
+    --openclaw-base-url)
+      [ $# -ge 2 ] || log_error "--openclaw-base-url requires a value"
+      OPENCLAW_BASE_URL_VALUE="$2"; OPENCLAW_BASE_URL_EXPLICIT=true; shift 2
       ;;
     --token)
       [ $# -ge 2 ] || log_error "--token requires a value"
@@ -239,6 +267,8 @@ while [ $# -gt 0 ]; do
     --install-chutes-if-missing-openclaw) INSTALL_CHUTES_IF_MISSING_OPENCLAW=true; shift ;;
     --no-access-url-prompt) PROMPT_ACCESS_URL=false; shift ;;
     --no-access-url-detect) AUTO_DETECT_ACCESS_URL=false; shift ;;
+    --env-wizard) ENV_WIZARD_OVERRIDE="1"; shift ;;
+    --no-env-wizard) ENV_WIZARD_OVERRIDE="0"; shift ;;
     --no-backfill) INTEGRATION_LEVEL="manual"; INTEGRATION_LEVEL_EXPLICIT=true; shift ;;
     --no-color) shift ;;
     -h|--help)
@@ -255,12 +285,15 @@ Environment overrides:
                               Skill install strategy for \$OPENCLAW_HOME/skills (default: symlink)
   CLAWBOARD_MEMORY_BACKUP_SETUP=<ask|always|never>
                               Offer/run memory+Clawboard backup setup during bootstrap (default: ask)
+  CLAWBOARD_ENV_WIZARD=<0|1>  Force disable/enable interactive .env connection wizard
   --api-url <url>      Clawboard API base (default: http://localhost:8010)
   --web-url <url>      Clawboard web URL (default: http://localhost:3010)
   --public-api-base <url>
                        Browser-facing API base (used for web clients / NEXT_PUBLIC_CLAWBOARD_API_BASE)
   --public-web-url <url>
                        Browser-facing UI URL shown in output summary
+  --openclaw-base-url <url>
+                       OpenClaw gateway URL used by classifier (writes OPENCLAW_BASE_URL)
   --token <token>      Use a specific CLAWBOARD_TOKEN
   --title <title>      Instance display name (default: Clawboard)
   --integration-level <manual|write|full>
@@ -304,6 +337,8 @@ Environment overrides:
                       Do not prompt for public/domain access URLs
   --no-access-url-detect
                       Do not auto-detect Tailscale/local access URL defaults
+  --env-wizard         Force-enable interactive .env connection wizard
+  --no-env-wizard      Disable interactive .env connection wizard
   --no-color           Disable ANSI colors
 USAGE
       exit 0
@@ -423,6 +458,214 @@ read_env_value_from_file() {
   printf "%s" "$line"
 }
 
+trim_whitespace() {
+  local value="${1:-}"
+  value="${value//$'\r'/}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf "%s" "$value"
+}
+
+normalize_http_url() {
+  local value
+  value="$(trim_whitespace "${1:-}")"
+  if [ -z "$value" ]; then
+    printf ""
+    return
+  fi
+  case "$value" in
+    http://*|https://*) ;;
+    *) value="http://$value" ;;
+  esac
+  printf "%s" "${value%/}"
+}
+
+prompt_with_default_tty() {
+  local prompt="$1"
+  local default_value="$2"
+  local input=""
+  if [ ! -r /dev/tty ]; then
+    printf "%s" "$default_value"
+    return
+  fi
+  if [ -n "$default_value" ]; then
+    printf "%s [%s]: " "$prompt" "$default_value" > /dev/tty
+  else
+    printf "%s: " "$prompt" > /dev/tty
+  fi
+  read -r input < /dev/tty || input=""
+  input="$(trim_whitespace "$input")"
+  if [ -z "$input" ]; then
+    input="$default_value"
+  fi
+  printf "%s" "$input"
+}
+
+ensure_env_file() {
+  local repo_dir="$1"
+  local env_file="$repo_dir/.env"
+  if [ -f "$env_file" ]; then
+    return
+  fi
+  if [ -f "$repo_dir/.env.example" ]; then
+    cp "$repo_dir/.env.example" "$env_file"
+    log_info "Seeded $env_file from .env.example."
+    return
+  fi
+  touch "$env_file"
+}
+
+should_run_env_wizard() {
+  case "${ENV_WIZARD_OVERRIDE:-}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+    0|false|FALSE|no|NO) return 1 ;;
+  esac
+  if [ "$PROMPT_ACCESS_URL" = false ]; then
+    return 1
+  fi
+  if [ -n "${CLAWBOARD_ENV_WIZARD:-}" ]; then
+    case "$CLAWBOARD_ENV_WIZARD" in
+      1|true|TRUE|yes|YES) return 0 ;;
+      0|false|FALSE|no|NO) return 1 ;;
+    esac
+  fi
+  [ -r /dev/tty ]
+}
+
+run_env_connection_wizard() {
+  if ! should_run_env_wizard; then
+    return
+  fi
+
+  local api_port web_port tail_ip profile_choice default_profile
+  local default_web_access default_api_access host_default host_input
+  local custom_web custom_api internal_api_default internal_web_default openclaw_default
+
+  api_port="$(extract_url_port "$API_URL" "8010")"
+  web_port="$(extract_url_port "$WEB_URL" "3010")"
+
+  if [ -n "$PUBLIC_API_BASE" ]; then
+    ACCESS_API_URL="$(normalize_http_url "$PUBLIC_API_BASE")"
+  fi
+  if [ -n "$PUBLIC_WEB_URL" ]; then
+    ACCESS_WEB_URL="$(normalize_http_url "$PUBLIC_WEB_URL")"
+  fi
+  if [ -z "$ACCESS_API_URL" ]; then
+    ACCESS_API_URL="$(normalize_http_url "$API_URL")"
+  fi
+  if [ -z "$ACCESS_WEB_URL" ]; then
+    ACCESS_WEB_URL="$(normalize_http_url "$WEB_URL")"
+  fi
+
+  default_profile="1"
+  if ! is_local_host "$(extract_url_host "$ACCESS_API_URL")"; then
+    if [[ "$(extract_url_host "$ACCESS_API_URL")" =~ ^100\. ]] || [[ "$(extract_url_host "$ACCESS_API_URL")" == *.ts.net ]]; then
+      default_profile="2"
+    else
+      default_profile="3"
+    fi
+  fi
+
+  printf "\nConnection setup for %s/.env:\n" "$INSTALL_DIR" > /dev/tty
+  printf "  1) Local machine only (localhost)\n" > /dev/tty
+  printf "  2) LAN/Tailscale access from other devices\n" > /dev/tty
+  printf "  3) Custom domain/proxy URLs\n" > /dev/tty
+  printf "  4) Keep current values\n" > /dev/tty
+  printf "Select [1-4] (default: %s): " "$default_profile" > /dev/tty
+  read -r profile_choice < /dev/tty || profile_choice=""
+  profile_choice="$(trim_whitespace "$profile_choice")"
+  if [ -z "$profile_choice" ]; then
+    profile_choice="$default_profile"
+  fi
+
+  case "$profile_choice" in
+    1)
+      default_web_access="http://localhost:$web_port"
+      default_api_access="http://localhost:$api_port"
+      if [ "$PUBLIC_WEB_URL_EXPLICIT" = false ]; then ACCESS_WEB_URL="$default_web_access"; fi
+      if [ "$PUBLIC_API_BASE_EXPLICIT" = false ]; then ACCESS_API_URL="$default_api_access"; fi
+      ;;
+    2)
+      host_default="$(extract_url_host "$ACCESS_WEB_URL")"
+      if is_local_host "$host_default"; then
+        if tail_ip="$(detect_tailscale_ipv4)"; then
+          host_default="$tail_ip"
+        else
+          host_default="localhost"
+        fi
+      fi
+      if [ "$PUBLIC_WEB_URL_EXPLICIT" = false ] || [ "$PUBLIC_API_BASE_EXPLICIT" = false ]; then
+        host_input="$(prompt_with_default_tty "Hostname/IP for browser access" "$host_default")"
+        host_input="$(trim_whitespace "$host_input")"
+        if [ -z "$host_input" ]; then
+          host_input="$host_default"
+        fi
+        host_input="${host_input#http://}"
+        host_input="${host_input#https://}"
+        host_input="${host_input%%/*}"
+        host_input="${host_input#\[}"
+        host_input="${host_input%\]}"
+        host_input="${host_input%%:*}"
+        if [ -z "$host_input" ]; then
+          host_input="$host_default"
+        fi
+        if [ "$PUBLIC_WEB_URL_EXPLICIT" = false ]; then
+          ACCESS_WEB_URL="$(normalize_http_url "http://$host_input:$web_port")"
+        fi
+        if [ "$PUBLIC_API_BASE_EXPLICIT" = false ]; then
+          ACCESS_API_URL="$(normalize_http_url "http://$host_input:$api_port")"
+        fi
+      fi
+      ;;
+    3)
+      if [ "$PUBLIC_WEB_URL_EXPLICIT" = false ]; then
+        custom_web="$(prompt_with_default_tty "Public Clawboard Web URL" "$ACCESS_WEB_URL")"
+        ACCESS_WEB_URL="$(normalize_http_url "$custom_web")"
+      fi
+      if [ "$PUBLIC_API_BASE_EXPLICIT" = false ]; then
+        custom_api="$(prompt_with_default_tty "Public Clawboard API base URL" "$ACCESS_API_URL")"
+        ACCESS_API_URL="$(normalize_http_url "$custom_api")"
+      fi
+      ;;
+    4)
+      ;;
+    *)
+      log_warn "Unrecognized choice ($profile_choice). Keeping current values."
+      ;;
+  esac
+
+  if [ "$PUBLIC_WEB_URL_EXPLICIT" = false ]; then
+    PUBLIC_WEB_URL="$ACCESS_WEB_URL"
+  fi
+  if [ "$PUBLIC_API_BASE_EXPLICIT" = false ]; then
+    PUBLIC_API_BASE="$ACCESS_API_URL"
+  fi
+
+  if [ "$API_URL_EXPLICIT" = false ]; then
+    internal_api_default="$(normalize_http_url "$API_URL")"
+    if [ "$profile_choice" = "3" ] && [ -n "$ACCESS_API_URL" ]; then
+      internal_api_default="$ACCESS_API_URL"
+    fi
+    API_URL="$(normalize_http_url "$(prompt_with_default_tty "API URL used by bootstrap + logger plugin (must be reachable by OpenClaw)" "$internal_api_default")")"
+  fi
+
+  if [ "$WEB_URL_EXPLICIT" = false ]; then
+    internal_web_default="$(normalize_http_url "$WEB_URL")"
+    if [ "$profile_choice" = "3" ] && [ -n "$ACCESS_WEB_URL" ]; then
+      internal_web_default="$ACCESS_WEB_URL"
+    fi
+    WEB_URL="$(normalize_http_url "$(prompt_with_default_tty "Web URL to check after startup" "$internal_web_default")")"
+  fi
+
+  if [ "$OPENCLAW_BASE_URL_EXPLICIT" = false ]; then
+    openclaw_default="$(normalize_http_url "$OPENCLAW_BASE_URL_VALUE")"
+    if [ -z "$openclaw_default" ]; then
+      openclaw_default="http://host.docker.internal:18789"
+    fi
+    OPENCLAW_BASE_URL_VALUE="$(normalize_http_url "$(prompt_with_default_tty "OpenClaw gateway URL for classifier (OPENCLAW_BASE_URL)" "$openclaw_default")")"
+  fi
+}
+
 is_valid_context_mode() {
   case "$1" in
     auto|cheap|full|patient) return 0 ;;
@@ -532,7 +775,7 @@ configure_access_urls() {
     fi
   fi
 
-  if [ "$PROMPT_ACCESS_URL" = true ] && [ -r /dev/tty ] && { [ -z "$PUBLIC_API_BASE" ] || [ -z "$PUBLIC_WEB_URL" ]; }; then
+  if [ "$PROMPT_ACCESS_URL" = true ] && [ -r /dev/tty ] && ! should_run_env_wizard && { [ -z "$PUBLIC_API_BASE" ] || [ -z "$PUBLIC_WEB_URL" ]; }; then
     printf "\nDetected access URLs:\n" > /dev/tty
     printf "  Web: %s\n" "$ACCESS_WEB_URL" > /dev/tty
     printf "  API: %s\n" "$ACCESS_API_URL" > /dev/tty
@@ -585,6 +828,26 @@ wait_for_api_health() {
     attempt=$((attempt + 1))
   done
   log_warn "Clawboard API did not become ready in time: $health_url"
+  return 1
+}
+
+wait_for_web_health() {
+  local web_url="${WEB_URL%/}"
+  local max_attempts=45
+  local attempt=1
+  if ! command -v curl >/dev/null 2>&1; then
+    log_warn "curl not found. Skipping web readiness check."
+    return 1
+  fi
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if curl -fsS "$web_url" >/dev/null 2>&1; then
+      log_success "Clawboard web is reachable at $web_url."
+      return 0
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+  log_warn "Clawboard web did not become ready in time: $web_url"
   return 1
 }
 
@@ -647,6 +910,25 @@ maybe_run_chutes_fast_path() {
   return 0
 }
 
+resolve_memory_backup_setup_script() {
+  if [ -n "${MEMORY_BACKUP_SETUP_SCRIPT:-}" ] && [ -f "$MEMORY_BACKUP_SETUP_SCRIPT" ]; then
+    printf "%s" "$MEMORY_BACKUP_SETUP_SCRIPT"
+    return 0
+  fi
+
+  if [ -f "$OPENCLAW_SKILLS_DIR/clawboard/scripts/setup-openclaw-memory-backup.sh" ]; then
+    MEMORY_BACKUP_SETUP_SCRIPT="$OPENCLAW_SKILLS_DIR/clawboard/scripts/setup-openclaw-memory-backup.sh"
+  elif [ -f "$INSTALL_DIR/skills/clawboard/scripts/setup-openclaw-memory-backup.sh" ]; then
+    MEMORY_BACKUP_SETUP_SCRIPT="$INSTALL_DIR/skills/clawboard/scripts/setup-openclaw-memory-backup.sh"
+  elif [ -f "$INSTALL_DIR/scripts/setup-openclaw-memory-backup.sh" ]; then
+    MEMORY_BACKUP_SETUP_SCRIPT="$INSTALL_DIR/scripts/setup-openclaw-memory-backup.sh"
+  else
+    return 1
+  fi
+
+  printf "%s" "$MEMORY_BACKUP_SETUP_SCRIPT"
+}
+
 maybe_offer_memory_backup_setup() {
   local mode="${1:-ask}"
   local setup_script=""
@@ -654,43 +936,52 @@ maybe_offer_memory_backup_setup() {
   local should_run=false
 
   case "$mode" in
-    never) return 0 ;;
+    never)
+      MEMORY_BACKUP_SETUP_STATUS="skipped-mode-never"
+      return 0
+      ;;
     always) should_run=true ;;
     ask)
       if [ ! -t 0 ]; then
+        MEMORY_BACKUP_SETUP_STATUS="skipped-no-tty"
         return 0
       fi
-      printf "\nSet up automated continuity + Clawboard git backups now? [y/N]: "
+      printf "\nBackups are strongly recommended for continuity + Clawboard state safety.\n"
+      printf "Set up automated continuity + Clawboard backups now? [Y/n]: "
       read -r answer
-      case "$answer" in
-        y|Y|yes|YES) should_run=true ;;
+      case "$(printf "%s" "$answer" | tr '[:upper:]' '[:lower:]')" in
+        ""|y|yes) should_run=true ;;
         *) should_run=false ;;
       esac
       ;;
     *)
+      MEMORY_BACKUP_SETUP_STATUS="skipped-invalid-mode"
       return 0
       ;;
   esac
 
   if [ "$should_run" = false ]; then
+    MEMORY_BACKUP_SETUP_STATUS="skipped-by-user"
+    if setup_script="$(resolve_memory_backup_setup_script)"; then
+      log_warn "Backup setup skipped. Recommended when ready: bash $setup_script"
+    else
+      log_warn "Backup setup skipped. Run setup-openclaw-memory-backup.sh later when available."
+    fi
     return 0
   fi
 
-  if [ -f "$OPENCLAW_SKILLS_DIR/clawboard/scripts/setup-openclaw-memory-backup.sh" ]; then
-    setup_script="$OPENCLAW_SKILLS_DIR/clawboard/scripts/setup-openclaw-memory-backup.sh"
-  elif [ -f "$INSTALL_DIR/skills/clawboard/scripts/setup-openclaw-memory-backup.sh" ]; then
-    setup_script="$INSTALL_DIR/skills/clawboard/scripts/setup-openclaw-memory-backup.sh"
-  fi
-
-  if [ -z "$setup_script" ]; then
+  if ! setup_script="$(resolve_memory_backup_setup_script)"; then
+    MEMORY_BACKUP_SETUP_STATUS="missing-script"
     log_warn "Memory backup setup script not found. Run manually when available."
     return 0
   fi
 
   log_info "Launching memory + Clawboard backup setup..."
   if bash "$setup_script"; then
+    MEMORY_BACKUP_SETUP_STATUS="configured"
     log_success "Memory + Clawboard backup setup completed."
   else
+    MEMORY_BACKUP_SETUP_STATUS="failed"
     log_warn "Memory + Clawboard backup setup did not complete. You can rerun: bash $setup_script"
   fi
 }
@@ -716,6 +1007,18 @@ else
   git clone "$REPO_URL" "$INSTALL_DIR"
 fi
 
+ensure_env_file "$INSTALL_DIR"
+
+if [ "$PUBLIC_API_BASE_EXPLICIT" = false ] && read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" >/dev/null 2>&1; then
+  PUBLIC_API_BASE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" || true)"
+fi
+if [ "$PUBLIC_WEB_URL_EXPLICIT" = false ] && read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_WEB_URL" >/dev/null 2>&1; then
+  PUBLIC_WEB_URL="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_WEB_URL" || true)"
+fi
+if [ "$OPENCLAW_BASE_URL_EXPLICIT" = false ] && read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_BASE_URL" >/dev/null 2>&1; then
+  OPENCLAW_BASE_URL_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_BASE_URL" || true)"
+fi
+
 if [ -z "$TOKEN" ]; then
   if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_TOKEN" >/dev/null 2>&1; then
     TOKEN="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_TOKEN" || true)"
@@ -729,10 +1032,21 @@ fi
 log_info "Writing CLAWBOARD_TOKEN in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_TOKEN" "$TOKEN"
 configure_access_urls
+run_env_connection_wizard
+ACCESS_API_URL="$(normalize_http_url "$ACCESS_API_URL")"
+ACCESS_WEB_URL="$(normalize_http_url "$ACCESS_WEB_URL")"
+API_URL="$(normalize_http_url "$API_URL")"
+WEB_URL="$(normalize_http_url "$WEB_URL")"
+if [ -z "$OPENCLAW_BASE_URL_VALUE" ]; then
+  OPENCLAW_BASE_URL_VALUE="http://host.docker.internal:18789"
+fi
+OPENCLAW_BASE_URL_VALUE="$(normalize_http_url "$OPENCLAW_BASE_URL_VALUE")"
 log_info "Writing CLAWBOARD_PUBLIC_API_BASE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" "$ACCESS_API_URL"
 log_info "Writing CLAWBOARD_PUBLIC_WEB_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_WEB_URL" "$ACCESS_WEB_URL"
+log_info "Writing OPENCLAW_BASE_URL in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_BASE_URL" "$OPENCLAW_BASE_URL_VALUE"
 
 # Web hot reload (dev web service).
 WEB_HOT_RELOAD_VALUE=""
@@ -996,6 +1310,7 @@ if [ "$SKIP_DOCKER" = false ]; then
       ;;
   esac
   log_success "Clawboard services running."
+  wait_for_web_health || log_warn "Check WEB_URL/CLAWBOARD_PUBLIC_WEB_URL in .env if the UI is not loading."
 fi
 
 if command -v curl >/dev/null 2>&1; then
@@ -1180,6 +1495,7 @@ log_success "Bootstrap complete."
 echo "Clawboard UI (access):   $ACCESS_WEB_URL"
 echo "Clawboard API (access):  ${ACCESS_API_URL%/}/docs"
 echo "Clawboard API (internal): $API_URL"
+echo "OpenClaw gateway (classifier): $OPENCLAW_BASE_URL_VALUE"
 MASKED_TOKEN="(not set)"
 if [ -n "${TOKEN:-}" ]; then
   if [ "${#TOKEN}" -le 10 ]; then
@@ -1191,12 +1507,32 @@ if [ -n "${TOKEN:-}" ]; then
   fi
 fi
 echo "Token:         $MASKED_TOKEN"
+BACKUP_SETUP_HINT="$OPENCLAW_SKILLS_DIR/clawboard/scripts/setup-openclaw-memory-backup.sh"
+if backup_setup_path="$(resolve_memory_backup_setup_script 2>/dev/null)"; then
+  BACKUP_SETUP_HINT="$backup_setup_path"
+fi
+case "$MEMORY_BACKUP_SETUP_STATUS" in
+  configured)
+    echo "Backups:       configured (automation setup complete)"
+    ;;
+  failed)
+    echo "Backups:       setup attempted but did not complete"
+    echo "               Rerun: bash $BACKUP_SETUP_HINT"
+    ;;
+  missing-script)
+    echo "Backups:       setup helper not found in this install"
+    ;;
+  skipped-mode-never|skipped-by-user|skipped-no-tty|skipped-invalid-mode|not-run)
+    echo "Backups:       not configured in this run"
+    echo "               Recommended: bash $BACKUP_SETUP_HINT"
+    ;;
+esac
 echo "Security note: CLAWBOARD_TOKEN is required for all writes and non-localhost reads."
 echo "               Localhost reads can run tokenless. Keep network ACLs strict (no Funnel/public exposure)."
 echo ""
 echo "If OpenClaw was not installed, run this later:"
 echo "  bash scripts/bootstrap_clawboard.sh --skip-docker --update"
 echo "Set up automated continuity + Clawboard backups:"
-echo "  bash $OPENCLAW_SKILLS_DIR/clawboard/scripts/setup-openclaw-memory-backup.sh"
+echo "  bash $BACKUP_SETUP_HINT"
 echo "If you want Chutes before Clawboard skill wiring:"
 echo "  tmp=\$(mktemp -t add-chutes.sh.XXXXXX) && curl -fsSL $CHUTES_FAST_PATH_URL -o \"\$tmp\" && bash \"\$tmp\" && rm -f \"\$tmp\""

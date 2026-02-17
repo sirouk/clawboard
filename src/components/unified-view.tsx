@@ -142,10 +142,43 @@ function normalizeTagValue(value: string) {
   return stripped.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
 }
 
+function friendlySegmentLabel(value: string) {
+  const segment = String(value ?? "").trim().toLowerCase();
+  if (!segment) return "";
+  const devSuffix = segment.match(/^([a-z]{2})dev$/);
+  if (devSuffix) return `${devSuffix[1].toUpperCase()}Dev`;
+  if (/^[a-z]{1,2}$/.test(segment)) return segment.toUpperCase();
+  return segment.charAt(0).toUpperCase() + segment.slice(1);
+}
+
+function friendlyTagLabel(value: string) {
+  const normalized = normalizeTagValue(value);
+  if (!normalized) return "";
+  return normalized
+    .split("-")
+    .filter(Boolean)
+    .map((segment) => friendlySegmentLabel(segment))
+    .join(" ");
+}
+
+function friendlyTagDraftLabel(value: string) {
+  const raw = String(value ?? "");
+  const trailingSeparator = /[-\s]+$/.test(raw);
+  const friendly = friendlyTagLabel(raw);
+  if (!friendly) return "";
+  return trailingSeparator ? `${friendly} ` : friendly;
+}
+
 function normalizeTagDraftInput(text: string) {
-  return String(text ?? "")
-    .split(",")
-    .map((part) => normalizeTagValue(part))
+  const raw = String(text ?? "");
+  const trailingComma = /,\s*$/.test(raw);
+  const parts = raw.split(",");
+  return parts
+    .map((part, index) => {
+      const isLast = index === parts.length - 1;
+      const isActiveQuery = isLast && !trailingComma;
+      return isActiveQuery ? friendlyTagDraftLabel(part) : friendlyTagLabel(part);
+    })
     .join(", ");
 }
 
@@ -158,7 +191,7 @@ function parseTags(text: string) {
 }
 
 function formatTags(tags: string[] | undefined | null) {
-  const list = (tags ?? []).map((t) => normalizeTagValue(String(t || ""))).filter(Boolean);
+  const list = (tags ?? []).map((t) => friendlyTagLabel(String(t || ""))).filter(Boolean);
   return list.join(", ");
 }
 
@@ -177,7 +210,7 @@ function applyTagSuggestionToDraft(text: string, suggestion: string) {
   const { committed } = splitTagDraft(text);
   const deduped = new Set<string>(committed);
   deduped.add(suggestion);
-  const next = Array.from(deduped).slice(0, 32);
+  const next = Array.from(deduped).slice(0, 32).map((entry) => friendlyTagLabel(entry)).filter(Boolean);
   return next.length > 0 ? `${next.join(", ")}, ` : "";
 }
 
@@ -185,7 +218,7 @@ function commitTagDraftEntry(text: string) {
   const { committed, query } = splitTagDraft(text);
   const deduped = new Set<string>(committed);
   if (query) deduped.add(query);
-  const next = Array.from(deduped).slice(0, 32);
+  const next = Array.from(deduped).slice(0, 32).map((entry) => friendlyTagLabel(entry)).filter(Boolean);
   return next.length > 0 ? `${next.join(", ")}, ` : "";
 }
 
@@ -238,7 +271,19 @@ function deriveSpaceName(spaceId: string) {
   const base = normalized.replace(/^space[-_]+/i, "");
   const withSpaces = base.replace(/[-_]+/g, " ").trim();
   if (!withSpaces) return normalized;
-  return withSpaces.replace(/\b\w/g, (match) => match.toUpperCase());
+  return withSpaces
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((segment) => friendlySegmentLabel(segment))
+    .join(" ");
+}
+
+function displaySpaceName(space: Pick<Space, "id" | "name">) {
+  const id = String(space?.id ?? "").trim();
+  const raw = String(space?.name ?? "").trim();
+  if (!raw) return deriveSpaceName(id);
+  const friendly = friendlyTagLabel(raw);
+  return friendly || deriveSpaceName(id);
 }
 
 const CHAT_HEADER_BLURB_LIMIT = 56;
@@ -520,17 +565,19 @@ function SwipeRevealRow({
       }
       style={{ touchAction: allowSwipe ? "pan-y" : "auto" }}
     >
-      {showAnchorLabel ? (
-        <div className="pointer-events-none absolute left-2 top-2 z-20 max-w-[70%] rounded-full border border-[rgba(255,255,255,0.14)] bg-[rgba(9,11,15,0.72)] px-3 py-1.5 text-[11px] font-semibold text-[rgb(var(--claw-text))] shadow-[0_8px_18px_rgba(0,0,0,0.26)] backdrop-blur">
-          <span className="block truncate">{anchorLabel}</span>
-        </div>
-      ) : null}
       {showActions ? (
         <div
-          className="absolute inset-0 flex items-stretch justify-end gap-2 bg-[rgba(10,12,16,0.18)] p-1 transition-opacity"
+          className="absolute inset-0 flex items-stretch gap-2 bg-[rgba(10,12,16,0.18)] p-1 transition-opacity"
           style={{ opacity: actionsOpacity }}
         >
-          {actions}
+          {showAnchorLabel ? (
+            <div className="pointer-events-none flex min-w-0 flex-1 items-center">
+              <div className="max-w-full rounded-[var(--radius-md)] border border-[rgba(255,255,255,0.14)] bg-[rgba(9,11,15,0.72)] px-2.5 py-1.5 text-[11px] font-semibold leading-tight text-[rgb(var(--claw-text))] shadow-[0_8px_18px_rgba(0,0,0,0.26)] backdrop-blur">
+                <span className="block whitespace-normal break-words">{anchorLabel}</span>
+              </div>
+            </div>
+          ) : null}
+          <div className="ml-auto flex items-stretch gap-2">{actions}</div>
         </div>
       ) : null}
       <div
@@ -856,7 +903,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (!id) continue;
       if (id === "space-default") continue;
       if (!topicSpaceIdsSet.has(id)) continue;
-      byId.set(id, space);
+      byId.set(id, { ...space, name: displaySpaceName(space) });
     }
     for (const topic of storeTopics) {
       for (const id of topicSpaceIds(topic)) {
@@ -897,6 +944,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     return out;
   }, [selectedSpaceId, spaces]);
+
+  const spaceNameById = useMemo(() => {
+    const entries = spaces.map((space) => [space.id, String(space.name ?? "").trim() || deriveSpaceName(space.id)] as const);
+    return new Map<string, string>(entries);
+  }, [spaces]);
 
   const allowedSpaceSet = useMemo(() => new Set(allowedSpaceIds), [allowedSpaceIds]);
 
@@ -2931,6 +2983,26 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     writeHeaders,
   ]);
 
+  const cancelTopicEdit = useCallback((topic: Topic, currentColor: string) => {
+    setEditingTopicId(null);
+    setTopicNameDraft("");
+    setTopicColorDraft(currentColor);
+    setTopicTagsDraft("");
+    setActiveTopicTagField(null);
+    setDeleteArmedKey(null);
+    setRenameError(`topic:${topic.id}`);
+  }, [setRenameError]);
+
+  const cancelTaskEdit = useCallback((task: Task, currentColor: string) => {
+    setEditingTaskId(null);
+    setTaskNameDraft("");
+    setTaskColorDraft(currentColor);
+    setTaskTagsDraft("");
+    setMoveTaskId(null);
+    setDeleteArmedKey(null);
+    setRenameError(`task:${task.id}`);
+  }, [setRenameError]);
+
   const createTopic = () => {
     if (readOnly) return;
     setEditingTaskId(null);
@@ -4245,8 +4317,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                           setNewTopicTagsDraft(applyTagSuggestionToDraft(newTopicTagsDraft, suggestion));
                         }}
                       >
-                        <span>{suggestion}</span>
-                        <span className="font-mono text-[10px] text-[rgb(var(--claw-muted))]">existing</span>
+                        <span>{friendlyTagLabel(suggestion)}</span>
+                        <span className="font-mono text-[10px] text-[rgb(var(--claw-muted))]">{suggestion}</span>
                       </button>
                     ))}
                   </div>
@@ -4330,11 +4402,21 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 topicChatAllLogs
               );
           const topicChatLogs = topicChatAllLogs.slice(topicChatStart);
-          const topicChatTruncated = !normalizedSearch && topicChatStart > 0;
-          const topicColor =
-            topicDisplayColors.get(topicId) ??
-            normalizeHexColor(topic.color) ??
-            colorFromSeed(`topic:${topic.id}:${topic.name}`, TOPIC_FALLBACK_COLORS);
+	          const topicChatTruncated = !normalizedSearch && topicChatStart > 0;
+	          const topicColor =
+	            topicDisplayColors.get(topicId) ??
+	            normalizeHexColor(topic.color) ??
+	            colorFromSeed(`topic:${topic.id}:${topic.name}`, TOPIC_FALLBACK_COLORS);
+          const topicSpaceIdList = topicSpaceIds(topic).filter((id) => id !== "space-default");
+          const primaryTopicSpaceId = (() => {
+            const direct = String(topic.spaceId ?? "").trim();
+            if (direct && direct !== "space-default") return direct;
+            return topicSpaceIdList[0] ?? "";
+          })();
+          const topicSpaceName = primaryTopicSpaceId
+            ? spaceNameById.get(primaryTopicSpaceId) ?? deriveSpaceName(primaryTopicSpaceId)
+            : "";
+          const topicSpaceExtraCount = topicSpaceName ? Math.max(0, topicSpaceIdList.length - 1) : 0;
 
 	          const swipeActions = isUnassigned ? null : (
 	            <>
@@ -4359,12 +4441,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   readOnly ? "opacity-60" : ""
                 )}
               >
-	                {(() => {
-	                  const normalizedStatus = String(topic.status ?? "active").trim().toLowerCase();
-	                  const isSnoozed = normalizedStatus === "snoozed" || normalizedStatus === "paused";
-	                  return isSnoozed ? "UNSNOOZE" : "SNOOZE";
-	                })()}
-	              </button>
+		                {(() => {
+		                  const normalizedStatus = String(topic.status ?? "active").trim().toLowerCase();
+		                  const isSnoozed = normalizedStatus === "snoozed" || normalizedStatus === "paused";
+		                  return isSnoozed ? "UNSNZE" : "SNOOZE";
+		                })()}
+		              </button>
               <button
                 type="button"
                 onClick={(event) => {
@@ -4530,7 +4612,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                        <GripIcon />
 		                      </button>
 		                    {editingTopicId === topic.id ? (
-		                      <div className="flex flex-wrap items-center gap-2">
+		                      <div
+                            className="flex flex-wrap items-center gap-2"
+                            onKeyDownCapture={(event) => {
+                              if (event.key !== "Escape") return;
+                              event.preventDefault();
+                              event.stopPropagation();
+                              cancelTopicEdit(topic, topicColor);
+                            }}
+                          >
 		                        <Input
 		                          data-testid={`rename-topic-input-${topic.id}`}
 		                          value={topicNameDraft}
@@ -4540,13 +4630,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             if (event.key === "Enter") {
                               event.preventDefault();
                               void saveTopicRename(topic);
-                            }
-                            if (event.key === "Escape") {
-                              event.preventDefault();
-                              setEditingTopicId(null);
-                              setTopicNameDraft("");
-                              setDeleteArmedKey(null);
-                              setRenameError(`topic:${topic.id}`);
                             }
                           }}
 		                          placeholder="Rename topic"
@@ -4583,8 +4666,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                                    setTopicTagsDraft(applyTagSuggestionToDraft(topicTagsDraft, suggestion));
 		                                  }}
 		                                >
-		                                  <span>{suggestion}</span>
-		                                  <span className="font-mono text-[10px] text-[rgb(var(--claw-muted))]">existing</span>
+		                                  <span>{friendlyTagLabel(suggestion)}</span>
+		                                  <span className="font-mono text-[10px] text-[rgb(var(--claw-muted))]">{suggestion}</span>
 		                                </button>
 		                              ))}
 		                            </div>
@@ -4630,13 +4713,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                           variant="ghost"
 		                          onClick={(event) => {
 		                            event.stopPropagation();
-                            setEditingTopicId(null);
-                            setTopicNameDraft("");
-                            setTopicColorDraft(topicColor);
-                            setTopicTagsDraft("");
-                            setActiveTopicTagField(null);
-                            setDeleteArmedKey(null);
-                            setRenameError(`topic:${topic.id}`);
+                            cancelTopicEdit(topic, topicColor);
                           }}
                         >
                           Cancel
@@ -4748,6 +4825,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   )}
                   {isExpanded && <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topic.description}</p>}
 		                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-[rgb(var(--claw-muted))] sm:text-xs">
+                    {topicSpaceName ? (
+                      <span
+                        className="inline-flex items-center rounded-full border border-[rgba(148,163,184,0.22)] bg-[rgba(148,163,184,0.07)] px-2 py-0.5 text-[10px] font-medium tracking-[0.08em] text-[rgb(var(--claw-muted))]"
+                        title={
+                          topicSpaceIdList
+                            .map((id) => spaceNameById.get(id) ?? deriveSpaceName(id))
+                            .join(", ")
+                        }
+                      >
+                        {topicSpaceName}
+                        {topicSpaceExtraCount > 0 ? ` +${topicSpaceExtraCount}` : ""}
+                      </span>
+                    ) : null}
 	                    <span>{taskList.length} tasks</span>
 	                    <span>{openCount} open</span>
 	                    {isExpanded && <span>{doingCount} doing</span>}
@@ -4890,8 +4980,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                               readOnly ? "opacity-60" : ""
                             )}
                           >
-                            {taskIsSnoozed ? "UNSNOOZE" : "SNOOZE"}
-                          </button>
+	                            {taskIsSnoozed ? "UNSNZE" : "SNOOZE"}
+	                          </button>
                           <button
                             type="button"
                             onClick={(event) => {
@@ -5074,7 +5164,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                                <GripIcon />
 		                              </button>
 		                              {editingTaskId === task.id ? (
-		                                <div className="flex flex-wrap items-center gap-2">
+		                                <div
+                                    className="flex flex-wrap items-center gap-2"
+                                    onKeyDownCapture={(event) => {
+                                      if (event.key !== "Escape") return;
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      cancelTaskEdit(task, taskColor);
+                                    }}
+                                  >
 		                                  <Input
 		                                    data-testid={`rename-task-input-${task.id}`}
 		                                    value={taskNameDraft}
@@ -5084,14 +5182,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       if (event.key === "Enter") {
                                         event.preventDefault();
                                         void saveTaskRename(task);
-                                      }
-                                      if (event.key === "Escape") {
-                                        event.preventDefault();
-                                        setEditingTaskId(null);
-                                        setTaskNameDraft("");
-                                        setMoveTaskId(null);
-                                        setDeleteArmedKey(null);
-                                        setRenameError(`task:${task.id}`);
                                       }
                                     }}
 		                                    placeholder="Rename task"
@@ -5207,13 +5297,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                     variant="ghost"
 		                                    onClick={(event) => {
 		                                      event.stopPropagation();
-		                                      setEditingTaskId(null);
-		                                      setTaskNameDraft("");
-		                                      setTaskColorDraft(taskColor);
-		                                      setTaskTagsDraft("");
-		                                      setMoveTaskId(null);
-		                                      setDeleteArmedKey(null);
-		                                      setRenameError(`task:${task.id}`);
+		                                      cancelTaskEdit(task, taskColor);
 		                                    }}
 		                                  >
                                     Cancel
