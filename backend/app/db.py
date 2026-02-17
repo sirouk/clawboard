@@ -4,6 +4,7 @@ import os
 import hashlib
 import colorsys
 import re
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlmodel import SQLModel, create_engine, Session, select
@@ -33,6 +34,7 @@ engine = create_engine(DATABASE_URL, **engine_kwargs)
 
 DEFAULT_SPACE_ID = "space-default"
 DEFAULT_SPACE_NAME = "Default"
+SPACE_DEFAULT_VISIBILITY_KEY = "__claw_default_visible"
 
 
 def _now_iso() -> str:
@@ -55,6 +57,23 @@ def _auto_color(seed: str, offset: float = 0.0) -> str:
     lig = 0.50 + (int(digest[12:16], 16) % 11) / 100.0
     r, g, b = colorsys.hls_to_rgb(hue / 360.0, min(0.66, lig), min(0.80, sat))
     return f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
+
+
+def _normalize_space_connectivity(value: object) -> dict[str, bool]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = {}
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, bool] = {}
+    for raw_key, raw_enabled in value.items():
+        key = str(raw_key or "").strip()
+        if not key or key == SPACE_DEFAULT_VISIBILITY_KEY:
+            continue
+        out[key] = bool(raw_enabled)
+    return out
 
 
 def init_db() -> None:
@@ -240,13 +259,69 @@ def init_db() -> None:
                 f"UPDATE logentry SET spaceId = '{DEFAULT_SPACE_ID}' WHERE spaceId IS NULL OR trim(spaceId) = '';"
             )
 
+            space_cols = conn.exec_driver_sql("PRAGMA table_info(space);").fetchall()
+            space_existing = {row[1] for row in space_cols}
+            if "connectivity" not in space_existing:
+                conn.exec_driver_sql("ALTER TABLE space ADD COLUMN connectivity JSON NOT NULL DEFAULT '{}';")
+            if "defaultVisible" not in space_existing:
+                conn.exec_driver_sql("ALTER TABLE space ADD COLUMN defaultVisible INTEGER NOT NULL DEFAULT 1;")
+            conn.exec_driver_sql("UPDATE space SET connectivity = '{}' WHERE connectivity IS NULL;")
+            conn.exec_driver_sql("UPDATE space SET defaultVisible = 1 WHERE defaultVisible IS NULL;")
+
             # Ensure default space row exists (table is created via SQLModel metadata).
             stamp = _now_iso()
             conn.exec_driver_sql(
-                "INSERT OR IGNORE INTO space (id, name, color, connectivity, createdAt, updatedAt) "
-                "VALUES (?, ?, NULL, ?, ?, ?);",
-                (DEFAULT_SPACE_ID, DEFAULT_SPACE_NAME, "{}", stamp, stamp),
+                "INSERT OR IGNORE INTO space (id, name, color, defaultVisible, connectivity, createdAt, updatedAt) "
+                "VALUES (?, ?, NULL, ?, ?, ?, ?);",
+                (DEFAULT_SPACE_ID, DEFAULT_SPACE_NAME, 1, "{}", stamp, stamp),
             )
+
+            # Migrate legacy default visibility key out of connectivity into the first-class column.
+            rows = conn.exec_driver_sql("SELECT id, connectivity, defaultVisible FROM space;").fetchall()
+            for row in rows:
+                space_id = str(row[0] or "").strip()
+                if not space_id:
+                    continue
+                raw_connectivity = row[1]
+                raw_default_visible = row[2]
+                parsed = {}
+                if isinstance(raw_connectivity, dict):
+                    parsed = raw_connectivity
+                elif isinstance(raw_connectivity, str):
+                    try:
+                        decoded = json.loads(raw_connectivity)
+                        if isinstance(decoded, dict):
+                            parsed = decoded
+                    except Exception:
+                        parsed = {}
+                has_legacy_default_key = isinstance(parsed, dict) and SPACE_DEFAULT_VISIBILITY_KEY in parsed
+                normalized_connectivity = _normalize_space_connectivity(parsed)
+                serialized_connectivity = json.dumps(normalized_connectivity, separators=(",", ":"), sort_keys=True)
+
+                current_default_visible = bool(raw_default_visible) if raw_default_visible is not None else True
+                next_default_visible = current_default_visible
+                if has_legacy_default_key:
+                    next_default_visible = bool(parsed.get(SPACE_DEFAULT_VISIBILITY_KEY))
+
+                connectivity_needs_update = has_legacy_default_key
+                if isinstance(raw_connectivity, str):
+                    connectivity_needs_update = connectivity_needs_update or (raw_connectivity.strip() != serialized_connectivity)
+                elif isinstance(raw_connectivity, dict):
+                    connectivity_needs_update = connectivity_needs_update or (raw_connectivity != normalized_connectivity)
+                else:
+                    connectivity_needs_update = True
+
+                default_needs_update = (raw_default_visible is None) or (current_default_visible != next_default_visible)
+
+                if connectivity_needs_update or default_needs_update:
+                    conn.exec_driver_sql(
+                        "UPDATE space SET defaultVisible = ?, connectivity = ? WHERE id = ?;",
+                        (
+                            1 if next_default_visible else 0,
+                            serialized_connectivity,
+                            space_id,
+                        ),
+                    )
 
             conn.commit()
 
@@ -262,6 +337,7 @@ def init_db() -> None:
                         id=DEFAULT_SPACE_ID,
                         name=DEFAULT_SPACE_NAME,
                         color=None,
+                        defaultVisible=True,
                         connectivity={},
                         createdAt=stamp,
                         updatedAt=stamp,

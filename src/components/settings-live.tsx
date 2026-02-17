@@ -6,6 +6,7 @@ import { useAppConfig } from "@/components/providers";
 import { useDataStore } from "@/components/data-provider";
 import { apiFetch, getApiBase, setApiBase } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { getSpaceDefaultVisibility } from "@/lib/space-visibility";
 import type { IntegrationLevel, Space, Topic } from "@/lib/types";
 
 function deriveSpaceName(spaceId: string) {
@@ -58,35 +59,30 @@ function SpaceSwitch({
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={checked ? "Visible" : "Hidden"}
       onClick={onToggle}
       disabled={disabled}
       className={cn(
-        "relative inline-flex h-9 w-16 items-center rounded-full border px-1 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(77,171,158,0.38)] disabled:cursor-not-allowed disabled:opacity-50",
+        "relative inline-flex h-8 w-14 flex-none items-center rounded-full border p-1 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(80,200,120,0.42)] disabled:cursor-not-allowed disabled:opacity-50",
         checked
-          ? "border-[rgba(77,171,158,0.62)] bg-[linear-gradient(120deg,rgba(54,151,135,0.62),rgba(61,128,205,0.56))] shadow-[0_0_0_1px_rgba(77,171,158,0.18),0_6px_18px_rgba(35,120,140,0.35)]"
-          : "border-[rgb(var(--claw-border))] bg-[linear-gradient(120deg,rgba(24,28,36,0.96),rgba(14,17,24,0.9))]"
+          ? "border-[rgba(166,255,201,0.88)] bg-[rgb(var(--claw-success))] shadow-[0_0_0_1px_rgba(80,200,120,0.25)]"
+          : "border-[rgba(148,163,184,0.56)] bg-[rgba(17,22,30,0.96)]"
       )}
     >
-      <span className="pointer-events-none absolute left-2 text-[9px] font-semibold tracking-[0.14em] text-white/70">
-        ON
-      </span>
-      <span className="pointer-events-none absolute right-2 text-[9px] font-semibold tracking-[0.14em] text-white/55">
-        OFF
-      </span>
       <span
         className={cn(
-          "relative z-10 inline-flex h-7 w-7 items-center justify-center rounded-full border shadow-[0_8px_18px_rgba(0,0,0,0.42)] transition-transform duration-200",
+          "inline-flex h-6 w-6 items-center justify-center rounded-full border shadow-[0_1px_2px_rgba(0,0,0,0.35)] transition-transform duration-200",
           checked
-            ? "translate-x-7 border-[rgba(190,255,238,0.8)] bg-[linear-gradient(155deg,#f2fff8,#baf6e4)] text-[rgb(20,96,84)]"
-            : "translate-x-0 border-[rgba(146,158,176,0.5)] bg-[linear-gradient(155deg,#eef4ff,#cfd7e6)] text-[rgb(71,83,108)]"
+            ? "translate-x-6 border-white/75 bg-[rgb(248,250,252)] text-[rgb(24,102,74)]"
+            : "translate-x-0 border-[rgba(148,163,184,0.7)] bg-[rgb(226,232,240)] text-[rgb(71,85,105)]"
         )}
       >
         {checked ? (
-          <svg viewBox="0 0 20 20" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2.1">
-            <path d="M4.5 10.5l3.2 3.1 7.8-7.8" strokeLinecap="round" strokeLinejoin="round" />
+          <svg viewBox="0 0 20 20" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2.2">
+            <path d="M4.5 10.5l3.1 3.1 7.9-8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         ) : (
-          <svg viewBox="0 0 20 20" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2.1">
+          <svg viewBox="0 0 20 20" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2.2">
             <path d="M6 6l8 8M14 6l-8 8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         )}
@@ -114,6 +110,7 @@ export function SettingsLive() {
   const [sourceSpaceId, setSourceSpaceId] = useState("");
   const [savingGeneral, setSavingGeneral] = useState(false);
   const [savingConnectivityKey, setSavingConnectivityKey] = useState<string | null>(null);
+  const [savingDefaultVisibility, setSavingDefaultVisibility] = useState(false);
   const [cleanupArmedSpaceId, setCleanupArmedSpaceId] = useState<string | null>(null);
   const [cleanupSpaceId, setCleanupSpaceId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -143,6 +140,7 @@ export function SettingsLive() {
           id,
           name: deriveSpaceName(id),
           color: null,
+          defaultVisible: true,
           connectivity: {},
           createdAt: "",
           updatedAt: "",
@@ -170,6 +168,7 @@ export function SettingsLive() {
     [sourceSpaceId, spaces]
   );
   const targets = useMemo(() => spaces.filter((space) => space.id !== sourceSpaceId), [sourceSpaceId, spaces]);
+  const defaultVisibilityVisible = useMemo(() => getSpaceDefaultVisibility(sourceSpace), [sourceSpace]);
   const topicCountBySpaceId = useMemo(() => {
     const counts = new Map<string, number>();
     for (const topic of storeTopics) {
@@ -226,7 +225,9 @@ export function SettingsLive() {
     const currentConnectivity =
       targetSpace.connectivity && typeof targetSpace.connectivity === "object" ? targetSpace.connectivity : {};
     const hadPrevious = Object.prototype.hasOwnProperty.call(currentConnectivity, sourceSpaceId);
-    const previous = hadPrevious ? Boolean(currentConnectivity[sourceSpaceId]) : true;
+    const previous = hadPrevious ? Boolean(currentConnectivity[sourceSpaceId]) : getSpaceDefaultVisibility(sourceSpace);
+    const previousUpdatedAt = String(targetSpace.updatedAt ?? "");
+    const optimisticUpdatedAt = new Date().toISOString();
 
     setSavingConnectivityKey(key);
     setError(null);
@@ -239,7 +240,7 @@ export function SettingsLive() {
           ...(space.connectivity && typeof space.connectivity === "object" ? space.connectivity : {}),
           [sourceSpaceId]: enabled,
         };
-        return { ...space, connectivity };
+        return { ...space, connectivity, updatedAt: optimisticUpdatedAt };
       })
     );
 
@@ -262,7 +263,16 @@ export function SettingsLive() {
       if (!res.ok) throw new Error("Failed to update visibility.");
       const updated = (await res.json().catch(() => null)) as Space | null;
       if (updated && typeof updated.id === "string" && updated.id.trim()) {
-        setSpaces((prev) => prev.map((space) => (space.id === updated.id ? { ...space, ...updated } : space)));
+        setSpaces((prev) => {
+          let seen = false;
+          const next = prev.map((space) => {
+            if (space.id !== updated.id) return space;
+            seen = true;
+            return { ...space, ...updated };
+          });
+          if (seen) return next;
+          return [updated, ...next];
+        });
       }
       setMessage("Space visibility updated.");
     } catch (err) {
@@ -274,7 +284,7 @@ export function SettingsLive() {
           };
           if (hadPrevious) connectivity[sourceSpaceId] = previous;
           else delete connectivity[sourceSpaceId];
-          return { ...space, connectivity };
+          return { ...space, connectivity, updatedAt: previousUpdatedAt || space.updatedAt };
         })
       );
       setError(err instanceof Error ? err.message : "Failed to update visibility.");
@@ -320,6 +330,76 @@ export function SettingsLive() {
       setError(err instanceof Error ? err.message : "Failed to cleanup space tags.");
     } finally {
       setCleanupSpaceId(null);
+    }
+  };
+
+  const applyDefaultVisibility = async (visible: boolean) => {
+    if (!sourceSpaceId) return;
+    if (readOnly) {
+      setError("Token required to update space visibility.");
+      return;
+    }
+
+    setSavingDefaultVisibility(true);
+    setError(null);
+    setMessage(null);
+
+    const hadPrevious = typeof sourceSpace?.defaultVisible === "boolean";
+    const previous = getSpaceDefaultVisibility(sourceSpace);
+    const previousUpdatedAt = String(sourceSpace?.updatedAt ?? "");
+    const optimisticUpdatedAt = new Date().toISOString();
+
+    setSpaces((prev) =>
+      prev.map((space) => {
+        if (space.id !== sourceSpaceId) return space;
+        return { ...space, defaultVisible: visible, updatedAt: optimisticUpdatedAt };
+      })
+    );
+
+    try {
+      const res = await apiFetch(
+        `/api/spaces/${encodeURIComponent(sourceSpaceId)}/connectivity`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            defaultVisible: visible,
+          }),
+        },
+        localToken.trim()
+      );
+      if (!res.ok) throw new Error("Failed to update default space visibility.");
+      const updated = (await res.json().catch(() => null)) as Space | null;
+      if (updated && typeof updated.id === "string" && updated.id.trim()) {
+        const persisted = getSpaceDefaultVisibility(updated);
+        if (persisted !== visible) {
+          throw new Error("API did not persist default visibility policy. Restart the backend and retry.");
+        }
+        setSpaces((prev) => {
+          let seen = false;
+          const next = prev.map((space) => {
+            if (space.id !== updated.id) return space;
+            seen = true;
+            return { ...space, ...updated };
+          });
+          if (seen) return next;
+          return [updated, ...next];
+        });
+      }
+      setMessage(`Default visibility policy set to ${visible ? "Visible" : "Hidden"}.`);
+    } catch (err) {
+      setSpaces((prev) =>
+        prev.map((space) => {
+          if (space.id !== sourceSpaceId) return space;
+          if (hadPrevious) return { ...space, defaultVisible: previous, updatedAt: previousUpdatedAt || space.updatedAt };
+          return { ...space, defaultVisible: undefined, updatedAt: previousUpdatedAt || space.updatedAt };
+        })
+      );
+      setError(err instanceof Error ? err.message : "Failed to update default space visibility.");
+    } finally {
+      setSavingDefaultVisibility(false);
     }
   };
 
@@ -378,62 +458,22 @@ export function SettingsLive() {
         </div>
       </Card>
 
-      <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
-        <Card className="p-0">
-          <div className="border-b border-[rgb(var(--claw-border))] px-4 py-3">
-            <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Space</div>
-          </div>
-          <div className="p-3 lg:hidden">
-            <label className="mb-1 block text-xs uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
-              Selected space
-            </label>
-            <Select value={sourceSpaceId} onChange={(event) => setSourceSpaceId(event.target.value)}>
-              {spaces.map((space) => (
-                <option key={space.id} value={space.id}>
-                  {space.name} ({topicCountBySpaceId.get(space.id) ?? 0})
-                </option>
-              ))}
-            </Select>
-          </div>
-          <div className="hidden max-h-[56vh] overflow-auto p-2 lg:block">
-            <div className="space-y-2">
-              {spaces.map((space) => {
-                const active = space.id === sourceSpaceId;
-                return (
-                  <button
-                    key={space.id}
-                    type="button"
-                    onClick={() => setSourceSpaceId(space.id)}
-                    className={cn(
-                      "w-full rounded-[var(--radius-sm)] border px-3 py-2 text-left transition",
-                      active
-                        ? "border-[rgba(255,90,45,0.5)] bg-[rgba(255,90,45,0.14)]"
-                        : "border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] hover:border-[rgba(255,90,45,0.32)]"
-                    )}
-                  >
-                    <div className="truncate text-sm font-semibold">{space.name}</div>
-                    <div className="truncate text-[10px] text-[rgb(var(--claw-muted))]">
-                      {topicCountBySpaceId.get(space.id) ?? 0} topics
-                    </div>
-                    <div className="truncate font-mono text-[10px] text-[rgb(var(--claw-muted))]">{space.id}</div>
-                  </button>
-                );
-              })}
+      <Card className="overflow-hidden p-0">
+        <div className="border-b border-[rgb(var(--claw-border))] px-4 py-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold">Space visibility</h3>
+              <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
+                Pick a source space on the left, then toggle where it is visible on the right.
+              </p>
             </div>
-          </div>
-        </Card>
-
-        <Card className="p-0">
-          <div className="border-b border-[rgb(var(--claw-border))] px-4 py-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="text-sm font-semibold">Where {sourceSpace?.name ?? "Selected space"} is visible</div>
-              <Badge tone="muted">{targets.length} spaces</Badge>
-            </div>
-            <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
-              These toggles control whether this selected space can be used from each other space for search, graph, classifier retrieval, and logger context injection.
-            </p>
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <Badge tone="muted">{sourceTopicCount} topics</Badge>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone="muted" className="rounded-full px-4 py-1.5 text-[11px] tracking-[0.16em]">
+                {sourceTopicCount} topics
+              </Badge>
+              <Badge tone="muted" className="rounded-full px-4 py-1.5 text-[11px] tracking-[0.16em]">
+                {targets.length} spaces
+              </Badge>
               {sourceSpaceId ? (
                 cleanupArmedSpaceId === sourceSpaceId ? (
                   <>
@@ -469,50 +509,141 @@ export function SettingsLive() {
                   </Button>
                 )
               ) : null}
+              {sourceSpaceId ? (
+                <div className="inline-flex items-center gap-2 rounded-full border border-[rgb(var(--claw-border))] bg-[rgba(16,21,29,0.72)] px-3 py-1.5">
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[rgb(var(--claw-muted))]">
+                    {defaultVisibilityVisible ? "Visible is default" : "Hidden is default"}
+                  </span>
+                  <SpaceSwitch
+                    checked={defaultVisibilityVisible}
+                    disabled={readOnly || savingDefaultVisibility || !sourceSpaceId}
+                    onToggle={() => {
+                      void applyDefaultVisibility(!defaultVisibilityVisible);
+                    }}
+                  />
+                </div>
+              ) : null}
             </div>
           </div>
-          <div className="p-3 sm:p-4">
-            {targets.length === 0 ? (
-              <p className="text-sm text-[rgb(var(--claw-muted))]">Create another tagged topic to configure cross-space visibility.</p>
-            ) : (
-              <div className="space-y-2.5">
-                {targets.map((target) => {
-                  const connectivity =
-                    target.connectivity && typeof target.connectivity === "object"
-                      ? target.connectivity
-                      : {};
-                  const hasExplicit = Object.prototype.hasOwnProperty.call(connectivity, sourceSpaceId);
-                  const enabled = hasExplicit ? Boolean(connectivity[sourceSpaceId]) : true;
-                  const key = `${target.id}:${sourceSpaceId}`;
-                  return (
-                    <div
-                      key={target.id}
-                      className="flex items-center justify-between gap-3 rounded-[var(--radius-sm)] border border-[rgb(var(--claw-border))] bg-[linear-gradient(145deg,rgba(25,30,38,0.78),rgba(14,17,23,0.74))] px-3 py-3 sm:px-4"
-                    >
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-semibold">
-                          {target.name} <span className="text-[rgb(var(--claw-muted))]">({topicCountBySpaceId.get(target.id) ?? 0})</span>
+        </div>
+
+        <div className="grid grid-cols-2">
+          <div className="min-w-0 border-r border-[rgb(var(--claw-border))]">
+            <div className="border-b border-[rgb(var(--claw-border))] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))] sm:px-4">
+              Space
+            </div>
+            <div className="max-h-[56vh] overflow-y-auto overflow-x-hidden p-3 sm:p-3.5">
+              {spaces.length === 0 ? (
+                <p className="rounded-[var(--radius-sm)] border border-[rgb(var(--claw-border))] px-3 py-3 text-xs text-[rgb(var(--claw-muted))]">
+                  Create a tagged topic to configure space visibility.
+                </p>
+              ) : (
+                <div className="space-y-2.5">
+                  {spaces.map((space) => {
+                    const active = space.id === sourceSpaceId;
+                    return (
+                      <button
+                        key={space.id}
+                        type="button"
+                        onClick={() => setSourceSpaceId(space.id)}
+                        className={cn(
+                          "w-full rounded-[12px] border px-3.5 py-3 text-left transition",
+                          active
+                            ? "border-[rgba(166,255,201,0.82)] bg-[linear-gradient(118deg,rgba(80,200,120,0.22),rgba(77,171,158,0.18))] shadow-[0_0_0_1px_rgba(80,200,120,0.15)]"
+                            : "border-[rgb(var(--claw-border))] bg-[rgba(16,21,29,0.74)] hover:border-[rgba(148,163,184,0.52)]"
+                        )}
+                      >
+                        <div
+                          className={cn(
+                            "truncate text-sm",
+                            active ? "font-semibold text-[rgb(var(--claw-text))]" : "font-medium text-[rgb(var(--claw-text))]"
+                          )}
+                        >
+                          {space.name}
                         </div>
-                        <div className="truncate text-xs text-[rgb(var(--claw-muted))]">
-                          {enabled ? "Can see this space" : "Blocked from this space"}
+                        <div className="truncate text-[10px] text-[rgb(var(--claw-muted))]">
+                          {topicCountBySpaceId.get(space.id) ?? 0} topics
                         </div>
-                        <div className="truncate font-mono text-[10px] text-[rgb(var(--claw-muted))]">{target.id}</div>
-                      </div>
-                      <SpaceSwitch
-                        checked={enabled}
-                        disabled={readOnly || savingConnectivityKey === key}
-                        onToggle={() => {
-                          void toggleVisibility(target.id, !enabled);
-                        }}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+                        <div className="hidden truncate font-mono text-[10px] text-[rgb(var(--claw-muted))] sm:block">
+                          {space.id}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
-        </Card>
-      </div>
+
+          <div className="min-w-0">
+            <div className="border-b border-[rgb(var(--claw-border))] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))] sm:px-4">
+              Where {sourceSpace?.name ?? "selected space"} is visible
+            </div>
+            <div className="max-h-[56vh] overflow-y-auto overflow-x-hidden p-3 sm:p-3.5">
+              {targets.length === 0 ? (
+                <p className="rounded-[var(--radius-sm)] border border-[rgb(var(--claw-border))] px-3 py-3 text-xs text-[rgb(var(--claw-muted))]">
+                  Create another tagged topic to configure cross-space visibility.
+                </p>
+              ) : (
+                <div className="space-y-2.5">
+                  {targets.map((target) => {
+                    const connectivity =
+                      target.connectivity && typeof target.connectivity === "object"
+                        ? target.connectivity
+                        : {};
+                    const hasExplicit = Object.prototype.hasOwnProperty.call(connectivity, sourceSpaceId);
+                    const enabled = hasExplicit ? Boolean(connectivity[sourceSpaceId]) : defaultVisibilityVisible;
+                    const key = `${target.id}:${sourceSpaceId}`;
+                    return (
+                      <div
+                        key={target.id}
+                        className={cn(
+                          "flex items-center justify-between gap-3 rounded-[12px] border px-3.5 py-3 transition",
+                          enabled
+                            ? "border-[rgba(80,200,120,0.38)] bg-[rgba(28,46,37,0.42)]"
+                            : "border-[rgb(var(--claw-border))] bg-[rgba(16,21,29,0.74)]"
+                        )}
+                      >
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-semibold text-[rgb(var(--claw-text))]">
+                            {target.name} <span className="text-[rgb(var(--claw-muted))]">({topicCountBySpaceId.get(target.id) ?? 0})</span>
+                          </div>
+                          <div
+                            className={cn(
+                              "inline-flex items-center gap-1.5 truncate text-[11px] font-medium",
+                              enabled ? "text-[rgb(var(--claw-success))]" : "text-[rgb(var(--claw-muted))]"
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                "h-1.5 w-1.5 rounded-full",
+                                enabled ? "bg-[rgb(var(--claw-success))]" : "bg-[rgb(var(--claw-muted))]"
+                              )}
+                            />
+                            {enabled ? "Visible" : "Hidden"}
+                          </div>
+                          <div className="hidden truncate font-mono text-[10px] text-[rgb(var(--claw-muted))] sm:block">
+                            {target.id}
+                          </div>
+                        </div>
+                        <div className="flex flex-none items-center">
+                          <SpaceSwitch
+                            checked={enabled}
+                            disabled={readOnly || savingConnectivityKey === key}
+                            onToggle={() => {
+                              void toggleVisibility(target.id, !enabled);
+                            }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </Card>
 
       {error ? <p className="text-sm text-[rgb(var(--claw-danger))]">{error}</p> : null}
       {message ? <p className="text-sm text-[rgb(var(--claw-muted))]">{message}</p> : null}

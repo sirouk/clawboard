@@ -12,6 +12,7 @@ import { DataProvider, useDataStore } from "@/components/data-provider";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { formatRelativeTime } from "@/lib/format";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
+import { resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 import { buildTaskUrl, buildTopicUrl, withRevealParam } from "@/lib/url";
 import { apiFetch, getApiBase } from "@/lib/api";
 import type { Space, Task, Topic } from "@/lib/types";
@@ -365,6 +366,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
           id,
           name: deriveSpaceName(id),
           color: null,
+          defaultVisible: true,
           connectivity: {},
           createdAt: "",
           updatedAt: "",
@@ -403,14 +405,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     if (mergedSpaces.length === 0) return [] as string[];
     if (!selectedSpaceId) return [] as string[];
     const source = mergedSpaces.find((space) => space.id === selectedSpaceId);
-    const connectivity =
-      source && source.connectivity && typeof source.connectivity === "object" ? source.connectivity : {};
     const out = [selectedSpaceId];
     for (const candidate of mergedSpaces) {
       if (candidate.id === selectedSpaceId) continue;
-      const enabled = Object.prototype.hasOwnProperty.call(connectivity, candidate.id)
-        ? Boolean(connectivity[candidate.id])
-        : true;
+      const enabled = resolveSpaceVisibilityFromViewer(source, candidate);
       if (enabled) out.push(candidate.id);
     }
     return out;

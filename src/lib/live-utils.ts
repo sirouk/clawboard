@@ -12,12 +12,21 @@ export type LiveEvent =
   | { type: "stream.reset" }
   | { type: string; data?: unknown };
 
-export function upsertById<T extends { id: string }>(items: T[], next: T): T[] {
+export function upsertById<T extends { id: string; updatedAt?: string }>(items: T[], next: T): T[] {
   const index = items.findIndex((item) => item.id === next.id);
   if (index === -1) {
     return [next, ...items];
   }
   const current = items[index];
+  const currentUpdatedAtMs = parseIsoMs(current.updatedAt);
+  const nextUpdatedAtMs = parseIsoMs(next.updatedAt);
+  if (
+    Number.isFinite(currentUpdatedAtMs) &&
+    Number.isFinite(nextUpdatedAtMs) &&
+    nextUpdatedAtMs < currentUpdatedAtMs
+  ) {
+    return items;
+  }
   if (JSON.stringify(current) === JSON.stringify(next)) {
     return items;
   }
@@ -35,7 +44,7 @@ export function removeById<T extends { id: string }>(items: T[], id: string): T[
   return items.filter((item) => item.id !== id);
 }
 
-export function mergeById<T extends { id: string }>(items: T[], incoming: T[]): T[] {
+export function mergeById<T extends { id: string; updatedAt?: string }>(items: T[], incoming: T[]): T[] {
   if (incoming.length === 0) return items;
   let next = items;
   for (const entry of incoming) {

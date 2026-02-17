@@ -7,6 +7,7 @@ import { useDataStore } from "@/components/data-provider";
 import type { IntegrationLevel, Space, Topic } from "@/lib/types";
 import { apiFetch, getApiBase, setApiBase } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { getSpaceDefaultVisibility, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 
 const STEPS = [
   { id: 1, title: "OpenClaw Skill", description: "Install the skill and connect your agent." },
@@ -157,6 +158,7 @@ export function SetupWizard({ initialStep = 1 }: { initialStep?: number } = {}) 
           id,
           name: deriveSpaceName(id),
           color: null,
+          defaultVisible: true,
           connectivity: {},
           createdAt: "",
           updatedAt: "",
@@ -233,8 +235,11 @@ Once I have those, I’ll validate /api/health and /api/config and start logging
     if (!viewer) return;
     const currentConnectivity =
       viewer.connectivity && typeof viewer.connectivity === "object" ? viewer.connectivity : {};
+    const visibleSpace = spaces.find((space) => space.id === visibleSpaceId);
     const hadPrevious = Object.prototype.hasOwnProperty.call(currentConnectivity, visibleSpaceId);
-    const previousEnabled = hadPrevious ? Boolean(currentConnectivity[visibleSpaceId]) : true;
+    const previousEnabled = hadPrevious
+      ? Boolean(currentConnectivity[visibleSpaceId])
+      : getSpaceDefaultVisibility(visibleSpace);
     const saveKey = `${viewerSpaceId}:${visibleSpaceId}`;
     setSpaceSavingKey(saveKey);
     setSpaceError(null);
@@ -463,10 +468,7 @@ openclaw gateway restart`;
                     ) : (
                       <div className="grid gap-2 sm:grid-cols-2">
                         {targets.map((target) => {
-                          const targetConnectivity =
-                            target.connectivity && typeof target.connectivity === "object" ? target.connectivity : {};
-                          const hasExplicit = Object.prototype.hasOwnProperty.call(targetConnectivity, selectedSpace.id);
-                          const enabled = hasExplicit ? Boolean(targetConnectivity[selectedSpace.id]) : true;
+                          const enabled = resolveSpaceVisibilityFromViewer(target, selectedSpace);
                           const saveKey = `${target.id}:${selectedSpace.id}`;
                           const disabled = readOnly || spaceSavingKey === saveKey;
                           return (

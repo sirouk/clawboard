@@ -192,6 +192,8 @@ def create_id(prefix: str) -> str:
 
 DEFAULT_SPACE_ID = (os.getenv("CLAWBOARD_DEFAULT_SPACE_ID", "space-default") or "space-default").strip() or "space-default"
 DEFAULT_SPACE_NAME = (os.getenv("CLAWBOARD_DEFAULT_SPACE_NAME", "Default") or "Default").strip() or "Default"
+# Legacy key supported only for one-way migration compatibility.
+SPACE_DEFAULT_VISIBILITY_KEY = "__claw_default_visible"
 
 
 def _normalize_space_id(value: str | None) -> str | None:
@@ -209,20 +211,41 @@ def _normalize_connectivity(value: Any) -> dict[str, bool]:
         key = _normalize_space_id(str(raw_key))
         if not key:
             continue
+        if key == SPACE_DEFAULT_VISIBILITY_KEY:
+            continue
         out[key] = bool(raw_value)
     return out
+
+
+def _space_default_visibility(space: Space | None) -> bool:
+    if not space:
+        return True
+    raw = getattr(space, "defaultVisible", None)
+    if isinstance(raw, bool):
+        return raw
+    if raw is not None:
+        return bool(raw)
+    # Legacy fallback when serving very old rows before migration has run.
+    legacy = getattr(space, "connectivity", None)
+    if isinstance(legacy, dict) and SPACE_DEFAULT_VISIBILITY_KEY in legacy:
+        return bool(legacy.get(SPACE_DEFAULT_VISIBILITY_KEY))
+    return True
 
 
 def _ensure_default_space(session: Any) -> Space:
     row = session.get(Space, DEFAULT_SPACE_ID)
     if row:
         changed = False
+        resolved_default_visible = _space_default_visibility(row)
         if not str(getattr(row, "name", "") or "").strip():
             row.name = DEFAULT_SPACE_NAME
             changed = True
         normalized = _normalize_connectivity(getattr(row, "connectivity", None))
         if normalized != (row.connectivity or {}):
             row.connectivity = normalized
+            changed = True
+        if not isinstance(getattr(row, "defaultVisible", None), bool):
+            row.defaultVisible = resolved_default_visible
             changed = True
         if changed:
             row.updatedAt = now_iso()
@@ -236,6 +259,7 @@ def _ensure_default_space(session: Any) -> Space:
         id=DEFAULT_SPACE_ID,
         name=DEFAULT_SPACE_NAME,
         color=None,
+        defaultVisible=True,
         connectivity={},
         createdAt=stamp,
         updatedAt=stamp,
@@ -288,12 +312,14 @@ def _allowed_space_ids_for_source(session: Any, source_space_id: str | None) -> 
 
     toggles = _normalize_connectivity(getattr(source_row, "connectivity", None))
     allowed = {source_id}
-    for candidate in by_id.keys():
-        if candidate == source_id:
+    for candidate_id, candidate_row in by_id.items():
+        if candidate_id == source_id:
             continue
-        enabled = toggles.get(candidate)
-        if enabled is None or enabled:
-            allowed.add(candidate)
+        enabled = toggles.get(candidate_id)
+        if enabled is None:
+            enabled = _space_default_visibility(candidate_row)
+        if enabled:
+            allowed.add(candidate_id)
     return allowed
 
 
@@ -499,6 +525,7 @@ def _ensure_space_row(session: Any, *, space_id: str, name: str | None = None) -
         id=normalized_id,
         name=normalized_name or _space_display_name_from_id(normalized_id),
         color=None,
+        defaultVisible=True,
         connectivity={},
         createdAt=stamp,
         updatedAt=stamp,
@@ -2667,6 +2694,7 @@ def upsert_space(payload: SpaceUpsert = Body(...)):
             id=space_id,
             name=payload.name,
             color=normalized_color,
+            defaultVisible=True,
             connectivity={},
             createdAt=stamp,
             updatedAt=stamp,
@@ -2685,7 +2713,7 @@ def upsert_space(payload: SpaceUpsert = Body(...)):
     tags=["spaces"],
 )
 def patch_space_connectivity(space_id: str, payload: SpaceConnectivityPatch = Body(...)):
-    """Patch outbound connectivity toggles for one source space."""
+    """Patch default visibility policy and explicit connectivity toggles for one source space."""
     normalized_id = _normalize_space_id(space_id)
     if not normalized_id:
         raise HTTPException(status_code=400, detail="space_id is required")
@@ -2706,6 +2734,8 @@ def patch_space_connectivity(space_id: str, payload: SpaceConnectivityPatch = Bo
                 raise HTTPException(status_code=404, detail="Space not found")
 
         connectivity = _normalize_connectivity(getattr(row, "connectivity", None))
+        if "defaultVisible" in payload.model_fields_set and payload.defaultVisible is not None:
+            row.defaultVisible = bool(payload.defaultVisible)
         for raw_target, enabled in payload.connectivity.items():
             target = _normalize_space_id(raw_target)
             if not target:

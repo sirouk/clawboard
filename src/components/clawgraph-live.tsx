@@ -18,6 +18,7 @@ import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam } from "@/li
 import type { Space, Task, Topic } from "@/lib/types";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
+import { resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 
 const EDGE_COLORS: Record<string, string> = {
   has_task: "rgba(78,161,255,0.72)",
@@ -219,6 +220,7 @@ export function ClawgraphLive() {
           id,
           name: deriveSpaceName(id),
           color: null,
+          defaultVisible: true,
           connectivity: {},
           createdAt: "",
           updatedAt: "",
@@ -272,14 +274,10 @@ export function ClawgraphLive() {
     if (spaces.length === 0) return [] as string[];
     if (!selectedSpaceId) return [] as string[];
     const source = spaces.find((space) => space.id === selectedSpaceId);
-    const connectivity =
-      source && source.connectivity && typeof source.connectivity === "object" ? source.connectivity : {};
     const out = [selectedSpaceId];
     for (const candidate of spaces) {
       if (candidate.id === selectedSpaceId) continue;
-      const enabled = Object.prototype.hasOwnProperty.call(connectivity, candidate.id)
-        ? Boolean(connectivity[candidate.id])
-        : true;
+      const enabled = resolveSpaceVisibilityFromViewer(source, candidate);
       if (enabled) out.push(candidate.id);
     }
     return out;

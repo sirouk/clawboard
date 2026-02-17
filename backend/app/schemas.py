@@ -90,9 +90,14 @@ class SpaceOut(ModelBase):
     id: str = Field(description="Space ID.", examples=["space-default"])
     name: str = Field(description="Space name.", examples=["Default"])
     color: Optional[str] = Field(description="Optional space color #RRGGBB.", examples=["#FF8A4A"])
+    defaultVisible: bool = Field(
+        default=True,
+        description="Default inherited visibility policy for this source space when no explicit toggle exists.",
+        examples=[True],
+    )
     connectivity: Dict[str, bool] = Field(
         default_factory=dict,
-        description="Outbound connectivity toggles by target space id (missing => enabled).",
+        description="Outbound connectivity toggles by target space id.",
         examples=[{"space-work": True, "space-personal": False}],
     )
     createdAt: str = Field(description="ISO timestamp when the space was created.", examples=["2026-02-03T20:05:00.000Z"])
@@ -106,6 +111,14 @@ class SpaceUpsert(BaseModel):
 
 
 class SpaceConnectivityPatch(BaseModel):
+    defaultVisible: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Optional default inherited visibility policy for this source space. "
+            "When omitted, only explicit per-target connectivity entries are changed."
+        ),
+        examples=[False],
+    )
     connectivity: Dict[str, bool] = Field(
         default_factory=dict,
         description="Outbound connectivity toggles by target space id.",

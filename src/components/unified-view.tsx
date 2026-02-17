@@ -40,6 +40,7 @@ import { Markdown } from "@/components/markdown";
 import { AttachmentStrip, type AttachmentLike } from "@/components/attachments";
 import { queueDraftUpsert, readBestDraftValue, usePersistentDraft } from "@/lib/drafts";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
+import { resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 import { SnoozeModal } from "@/components/snooze-modal";
 import { useUnifiedExpansionState } from "@/components/unified-view-state";
 import { getInitialUnifiedUrlState, parseUnifiedUrlState } from "@/components/unified-view-url-state";
@@ -864,6 +865,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           id,
           name: deriveSpaceName(id),
           color: null,
+          defaultVisible: true,
           connectivity: {},
           createdAt: "",
           updatedAt: "",
@@ -887,14 +889,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (spaces.length === 0) return [] as string[];
     if (!selectedSpaceId) return [] as string[];
     const source = spaces.find((space) => space.id === selectedSpaceId);
-    const connectivity =
-      source && source.connectivity && typeof source.connectivity === "object" ? source.connectivity : {};
     const out = [selectedSpaceId];
     for (const candidate of spaces) {
       if (candidate.id === selectedSpaceId) continue;
-      const enabled = Object.prototype.hasOwnProperty.call(connectivity, candidate.id)
-        ? Boolean(connectivity[candidate.id])
-        : true;
+      const enabled = resolveSpaceVisibilityFromViewer(source, candidate);
       if (enabled) out.push(candidate.id);
     }
     return out;
@@ -2276,27 +2274,36 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const effectiveView: TopicView = normalizedSearch ? "all" : topicView;
       let topicStatus = String(topic.status ?? "active").trim().toLowerCase();
       if (topicStatus === "paused") topicStatus = "snoozed";
+      const taskList = tasksByTopic.get(topic.id) ?? [];
+      const hasMatchingTask = taskList.some((task) => matchesStatusFilter(task) && matchesTaskSearch(task));
+
       if (effectiveView === "active") {
-        if (topicStatus !== "active") return false;
+        if (topicStatus !== "active") {
+          // "Show snoozed" should surface snoozed topics even when they currently have no tasks.
+          const includeSnoozedTopicByTask = topicStatus === "snoozed" && showSnoozedTasks;
+          const includeArchivedTopicByTask =
+            topicStatus === "archived" && (showDone || statusFilter === "done") && hasMatchingTask;
+          if (!includeSnoozedTopicByTask && !includeArchivedTopicByTask) return false;
+        }
       } else if (effectiveView === "snoozed") {
         if (topicStatus !== "snoozed") return false;
       } else if (effectiveView === "archived") {
         if (topicStatus !== "archived") return false;
       }
-      const taskList = tasksByTopic.get(topic.id) ?? [];
+
       if (statusFilter !== "all") {
-        return taskList.some((task) => matchesStatusFilter(task) && matchesTaskSearch(task));
+        return hasMatchingTask;
       }
       if (!normalizedSearch) return true;
       if (semanticForQuery) {
         if (semanticTopicIds.has(topic.id)) return true;
-        if (taskList.some((task) => matchesStatusFilter(task) && matchesTaskSearch(task))) return true;
+        if (hasMatchingTask) return true;
         const topicLogs = logsByTopic.get(topic.id) ?? [];
         return topicLogs.some((entry) => semanticLogIds.has(entry.id));
       }
       const topicHit = `${topic.name} ${topic.description ?? ""}`.toLowerCase().includes(normalizedSearch);
       if (topicHit) return true;
-      if (taskList.some((task) => matchesStatusFilter(task) && matchesTaskSearch(task))) return true;
+      if (hasMatchingTask) return true;
       const topicLogs = logsByTopic.get(topic.id) ?? [];
       return topicLogs.some(matchesLogSearch);
     });
@@ -2336,6 +2343,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     revealSelection,
     revealedTopicIds,
     selectedSpaceId,
+    showDone,
+    showSnoozedTasks,
     statusFilter,
     topicView,
     tasksByTopic,
@@ -3046,9 +3055,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       nextTopics.add(resolvedTopicId || "unassigned");
       const nextTasks = new Set(expandedTasksSafe);
       nextTasks.add(created.id);
-      pushUrl({ topics: Array.from(nextTopics), tasks: Array.from(nextTasks), page: "1" }, "replace");
+      pushUrl(
+        { topics: Array.from(nextTopics), tasks: Array.from(nextTasks), page: "1" },
+        !mdUp && !!resolvedTopicId ? "push" : "replace"
+      );
       if (resolvedTopicId) {
         setAutoFocusTask({ topicId: resolvedTopicId, taskId: created.id });
+        if (!mdUp) {
+          openMobileTaskChat(resolvedTopicId, created.id);
+        }
       }
 
       setNewTaskDraftByTopicId((prev) => ({ ...prev, [draftKey]: "" }));
@@ -3761,7 +3776,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     pushUrl({ tasks: nextTasks }, "replace");
   }, [expandedTasksSafe, pushUrl]);
 
-  const submitNewTopicDraft = useCallback(async () => {
+  const submitNewTopicDraft = useCallback(async (options?: { openMobileChat?: boolean }) => {
     if (readOnly) return null;
     const nextName = newTopicNameDraft.trim();
     const nextColor = normalizeHexColor(newTopicColorDraft) ?? TOPIC_FALLBACK_COLORS[0];
@@ -3807,6 +3822,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       setNewTopicTagsDraft("");
       setNewTopicError(null);
       setAutoFocusTopicId(created.id);
+      if (!mdUp && options?.openMobileChat) {
+        openMobileTopicChat(created.id);
+      }
       return created;
     } finally {
       setNewTopicSaving(false);
@@ -3814,10 +3832,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   }, [
     expandedTopicsSafe,
     markBumped,
+    mdUp,
     newTopicColorDraft,
     newTopicNameDraft,
     newTopicSaving,
     newTopicTagsDraft,
+    openMobileTopicChat,
     pushUrl,
     readOnly,
     setExpandedTopicChats,
@@ -4164,7 +4184,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               if (next && event.currentTarget.contains(next)) return;
               if (newTopicSaving) return;
               if (newTopicNameDraft.trim()) {
-                void submitNewTopicDraft();
+                void submitNewTopicDraft({ openMobileChat: false });
               } else {
                 setNewTopicDraftOpen(false);
                 setNewTopicError(null);
@@ -4186,7 +4206,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
                     event.preventDefault();
-                    void submitNewTopicDraft();
+                    void submitNewTopicDraft({ openMobileChat: true });
                   }
                   if (event.key === "Escape") {
                     event.preventDefault();
@@ -4245,12 +4265,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   className="h-6 w-7 cursor-pointer rounded border border-[rgb(var(--claw-border))] bg-transparent p-0 disabled:cursor-not-allowed"
                 />
               </label>
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={newTopicSaving || !newTopicNameDraft.trim() || !normalizeHexColor(newTopicColorDraft)}
-                onClick={() => void submitNewTopicDraft()}
-              >
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={newTopicSaving || !newTopicNameDraft.trim() || !normalizeHexColor(newTopicColorDraft)}
+                  onClick={() => void submitNewTopicDraft({ openMobileChat: true })}
+                >
                 Create
               </Button>
               <Button

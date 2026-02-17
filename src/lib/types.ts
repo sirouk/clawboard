@@ -103,6 +103,7 @@ export type Space = {
   id: string;
   name: string;
   color?: string | null;
+  defaultVisible?: boolean;
   connectivity?: Record<string, boolean>;
   createdAt: string;
   updatedAt: string;

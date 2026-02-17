@@ -69,7 +69,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     if (!payload) return;
     // Full snapshot: replace to avoid keeping stale items when the stream resets or base/token changes.
     if (!since) {
-      if (Array.isArray(payload.spaces)) setSpaces(payload.spaces as Space[]);
+      // Preserve newer local/SSE-updated space rows if a full snapshot races with in-flight writes.
+      if (Array.isArray(payload.spaces)) setSpaces((prev) => mergeById(prev, payload.spaces as Space[]));
       if (Array.isArray(payload.topics)) setTopics(payload.topics as Topic[]);
       if (Array.isArray(payload.tasks)) setTasks(payload.tasks as Task[]);
       if (Array.isArray(payload.logs)) setLogs(mergeLogs([], payload.logs as LogEntry[]));
