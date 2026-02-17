@@ -24,6 +24,7 @@ import { cn } from "@/lib/cn";
 import { apiFetch } from "@/lib/api";
 import { useDataStore } from "@/components/data-provider";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
+import { mergeLogs } from "@/lib/live-utils";
 import {
   BoardChatComposer,
   type BoardChatComposerHandle,
@@ -1201,6 +1202,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [chatTopFade, setChatTopFade] = useState<Record<string, boolean>>({});
   const [chatJumpToBottom, setChatJumpToBottom] = useState<Record<string, boolean>>({});
   const chatLastScrollTopRef = useRef<Map<string, number>>(new Map());
+  const taskLogHydratedRef = useRef<Set<string>>(new Set());
+  const taskLogHydratingRef = useRef<Set<string>>(new Set());
 
   const CHAT_AUTO_SCROLL_THRESHOLD_PX = 24;
   const topicAutosaveTimerRef = useRef<number | null>(null);
@@ -1859,6 +1862,42 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return map;
   }, [logs, showRaw]);
 
+  const hydrateTaskLogs = useCallback(
+    async (taskId: string) => {
+      const id = String(taskId || "").trim();
+      if (!id) return;
+      if (taskLogHydratedRef.current.has(id)) return;
+      if (taskLogHydratingRef.current.has(id)) return;
+      taskLogHydratingRef.current.add(id);
+      try {
+        const merged: LogEntry[] = [];
+        const pageSize = 400;
+        const maxRows = 4000;
+        let offset = 0;
+        while (merged.length < maxRows) {
+          const res = await apiFetch(
+            `/api/log?taskId=${encodeURIComponent(id)}&limit=${pageSize}&offset=${offset}`,
+            { cache: "no-store" },
+            token
+          );
+          if (!res.ok) break;
+          const rows = (await res.json().catch(() => [])) as LogEntry[];
+          if (!Array.isArray(rows) || rows.length === 0) break;
+          merged.push(...rows);
+          if (rows.length < pageSize) break;
+          offset += rows.length;
+        }
+        if (merged.length > 0) {
+          setLogs((prev) => mergeLogs(prev, merged));
+        }
+        taskLogHydratedRef.current.add(id);
+      } finally {
+        taskLogHydratingRef.current.delete(id);
+      }
+    },
+    [setLogs, token]
+  );
+
   const normalizedSearch = search.trim().toLowerCase();
   const topicReorderEnabled = !readOnly && normalizedSearch.length === 0 && statusFilter === "all";
   const taskReorderEnabled = topicReorderEnabled;
@@ -2092,6 +2131,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     prevPendingAttachmentsRef.current = next;
   }, [pendingMessages]);
+
+  useEffect(() => {
+    const targets = new Set<string>();
+    for (const taskId of expandedTasksSafe) {
+      if (taskId) targets.add(taskId);
+    }
+    if (mobileLayer === "chat" && mobileChatTarget?.kind === "task" && mobileChatTarget.taskId) {
+      targets.add(mobileChatTarget.taskId);
+    }
+    for (const taskId of targets) {
+      void hydrateTaskLogs(taskId);
+    }
+  }, [expandedTasksSafe, hydrateTaskLogs, mobileChatTarget, mobileLayer]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2479,11 +2531,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const current = tasks.find((task) => task.id === taskId);
     if (!current) return;
     const res = await apiFetch(
-      "/api/tasks",
+      `/api/tasks/${encodeURIComponent(taskId)}`,
       {
-        method: "POST",
+        method: "PATCH",
         headers: writeHeaders,
-        body: JSON.stringify({ ...current, ...updates }),
+        body: JSON.stringify(updates),
       },
       token
     );
