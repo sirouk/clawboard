@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Badge, Button, Card, CardHeader, Input, Select } from "@/components/ui";
+import { Badge, Button, Card, CardHeader, Input, Select, Switch } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { useDataStore } from "@/components/data-provider";
 import { apiFetch, getApiBase, setApiBase } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { getSpaceDefaultVisibility } from "@/lib/space-visibility";
+import { usePwaNotifications, usePwaBadging } from "@/lib/pwa-utils";
 import type { IntegrationLevel, Space, Topic } from "@/lib/types";
 
 function deriveSpaceName(spaceId: string) {
@@ -144,6 +145,16 @@ export function SettingsLive() {
     tokenRequired,
   } = useAppConfig();
   const { spaces: storeSpaces, topics: storeTopics, setSpaces } = useDataStore();
+
+  const {
+    isSupported: pushSupported,
+    permission: pushPermission,
+    isEnabled: pushEnabled,
+    isEnabling: pushEnabling,
+    enableNotifications,
+    toggleNotifications,
+  } = usePwaNotifications();
+  const { isSupported: badgeSupported } = usePwaBadging();
 
   const [localTitle, setLocalTitle] = useState(instanceTitle);
   const [localIntegration, setLocalIntegration] = useState<IntegrationLevel>(integrationLevel);
@@ -689,6 +700,79 @@ export function SettingsLive() {
 
       {error ? <p className="text-sm text-[rgb(var(--claw-danger))]">{error}</p> : null}
       {message ? <p className="text-sm text-[rgb(var(--claw-muted))]">{message}</p> : null}
+
+      <Card>
+        <CardHeader>
+          <div>
+            <h2 className="text-lg font-semibold">PWA Enhancements</h2>
+            <p className="mt-1 text-sm text-[rgb(var(--claw-muted))]">
+              Configure notifications and badging for your Home Screen app.
+            </p>
+          </div>
+          <Badge tone={pushSupported ? "success" : "warning"}>
+            {pushSupported ? "Supported" : "Not Supported"}
+          </Badge>
+        </CardHeader>
+        
+        <div className="space-y-6">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold">Enable Notifications</h3>
+              <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
+                Request permission to send notifications when the app is in the background.
+              </p>
+              {pushPermission === "denied" && (
+                <p className="mt-2 text-xs text-[rgb(var(--claw-danger))]">
+                  Notifications are blocked. Please enable them in your device settings.
+                </p>
+              )}
+            </div>
+            <div className="flex flex-none items-center gap-3">
+              {pushPermission === "granted" ? (
+                <Badge tone="success">Granted</Badge>
+              ) : (
+                <Button 
+                  size="sm" 
+                  disabled={!pushSupported || pushPermission === "denied" || pushEnabling}
+                  onClick={enableNotifications}
+                >
+                  {pushEnabling ? "Enabling..." : "Enable"}
+                </Button>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-4 border-t border-[rgb(var(--claw-border))] pt-6">
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold">Allow Push Notifications</h3>
+              <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
+                Globally enable or disable notifications from Clawboard.
+              </p>
+            </div>
+            <div className="flex flex-none items-center">
+              <Switch
+                checked={pushEnabled}
+                disabled={!pushSupported || pushPermission !== "granted"}
+                onCheckedChange={toggleNotifications}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-4 border-t border-[rgb(var(--claw-border))] pt-6">
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold">Unread Badge Count</h3>
+              <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
+                Show unseen chat messages plus unsnoozed activity on the app icon badge.
+              </p>
+            </div>
+            <div className="flex flex-none items-center">
+              <Badge tone={badgeSupported ? "success" : "warning"}>
+                {badgeSupported ? "Supported" : "Not Supported"}
+              </Badge>
+            </div>
+          </div>
+        </div>
+      </Card>
     </div>
   );
 }

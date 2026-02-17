@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 import json
+import types
 import unittest
 from unittest.mock import patch
 
 from classifier import classifier as c
+
+if c.requests is None:
+    class _ReadTimeout(Exception):
+        pass
+
+    c.requests = types.SimpleNamespace(  # type: ignore[assignment]
+        exceptions=types.SimpleNamespace(ReadTimeout=_ReadTimeout),
+        post=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("requests.post should be mocked in classifier failure-path tests")
+        ),
+    )
 
 
 def _pending_log(
@@ -47,7 +59,6 @@ class _FakeCompletionsResponse:
         return {"choices": [{"message": {"content": self._content}}]}
 
 
-@unittest.skipIf(c.requests is None, "requests dependency is required for classifier LLM-path tests")
 class ClassifierFailurePathTests(unittest.TestCase):
     def test_cls_021_call_classifier_repairs_malformed_output_once(self):
         pending_ids = ["log-1"]

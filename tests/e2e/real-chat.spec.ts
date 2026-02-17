@@ -1,48 +1,49 @@
 import { test, expect } from "@playwright/test";
 
 test.describe("Real Chat E2E", () => {
-  test("should send a message and see it in the log", async ({ page }) => {
-    test.skip(
-      process.env.PLAYWRIGHT_USE_EXTERNAL_SERVER !== "1",
-      "Requires external Clawboard/OpenClaw runtime with real chat agents."
+  test("should send a message and see it in the log", async ({ page, request }) => {
+    const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+    const suffix = Date.now();
+    const topicId = `topic-real-chat-${suffix}`;
+    const topicName = `Real Chat ${suffix}`;
+    const sessionKey = `clawboard:topic:${topicId}`;
+    const message = `Hello from Playwright E2E ${suffix}`;
+
+    const createTopic = await request.post(`${apiBase}/api/topics`, {
+      data: { id: topicId, name: topicName, pinned: false },
+    });
+    expect(createTopic.ok()).toBeTruthy();
+
+    await page.goto(`/u/topic/${topicId}`);
+    await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+    const topicToggle = page.getByTestId(`toggle-topic-chat-${topicId}`);
+    const label = (await topicToggle.getAttribute("aria-label")) ?? "";
+    if (/expand/i.test(label)) {
+      await topicToggle.click();
+    }
+
+    const composer = page.getByTestId(`topic-chat-composer-${topicId}`).getByRole("textbox");
+    await expect(composer).toBeVisible();
+
+    const send = page.waitForResponse(
+      (resp) => resp.url().includes("/api/openclaw/chat") && resp.request().method() === "POST"
     );
+    await composer.fill(message);
+    await composer.press("Enter");
+    await send;
 
-    const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3010";
-    const token = process.env.PLAYWRIGHT_TOKEN ?? "";
-    test.skip(!token, "PLAYWRIGHT_TOKEN is required for real-chat external test.");
+    await expect(page.locator("[data-testid^='message-bubble-']").filter({ hasText: message }).first()).toBeVisible();
 
-    await page.goto(`${baseURL}/setup`);
-    
-    // Clear local storage to ensure we use the new token
-    await page.evaluate(() => localStorage.clear());
-    await page.reload();
+    const logsRes = await request.get(
+      `${apiBase}/api/log?sessionKey=${encodeURIComponent(sessionKey)}&limit=30`
+    );
+    expect(logsRes.ok()).toBeTruthy();
+    const rows = (await logsRes.json()) as Array<{ content?: string }>;
+    expect(rows.some((row) => row.content === message)).toBeTruthy();
 
-    // Navigate to setup and set the token manually to be sure
-    await page.goto(`${baseURL}/setup`);
-    await page.click('button:has-text("Step 2")');
-    await page.fill('input[type="password"], input[type="text"]', token);
-    await page.click('button:has-text("Save Token")');
-    
-    // Go to unified view
-    await page.goto(`${baseURL}/u`);
-    
-    // Find a topic and open chat
-    await page.waitForSelector('text="Small Talk"');
-    const topicRow = page.locator('div').filter({ hasText: /^Small Talk/ }).first();
-    await topicRow.locator('button[title*="Chat"]').click();
-
-    // Type and send a message
-    const composer = page.locator('textarea[placeholder*="Message"]');
-    await composer.fill("Hello from Playwright E2E");
-    await page.keyboard.press("Enter");
-
-    // Check if the message appears in the list
-    await expect(page.locator('text="Hello from Playwright E2E"')).toBeVisible({ timeout: 10000 });
-    
-    // Wait for assistant response (typing indicator then message)
-    // This might take a while depending on the model
-    console.log("Waiting for assistant response...");
-    await expect(page.locator('div[data-agent-id="assistant"]')).toBeVisible({ timeout: 60000 });
-    console.log("Assistant responded!");
+    await page.goto("/log");
+    await page.getByRole("heading", { name: "All Activity" }).waitFor();
+    await expect(page.getByText(message, { exact: true }).first()).toBeVisible();
   });
 });

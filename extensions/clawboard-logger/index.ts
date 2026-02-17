@@ -126,12 +126,8 @@ type ClawboardLoggerConfig = {
    * - patient: like full, but server may use larger bounded recall limits
    */
   contextMode?: "auto" | "cheap" | "full" | "patient";
-  /** Fallback mode to try if the primary mode times out/fails. */
-  contextFallbackMode?: "auto" | "cheap" | "full" | "patient";
   /** Timeout (ms) for context GET calls (e.g. `/api/context`, `/api/search`) in before_agent_start. */
   contextFetchTimeoutMs?: number;
-  /** Total budget (ms) for context retrieval work in before_agent_start (includes fallback attempts). */
-  contextTotalBudgetMs?: number;
   /** Hard cap for prepended context characters. */
   contextMaxChars?: number;
   /** Max topics to include in context block. */
@@ -352,19 +348,10 @@ export default function register(api: OpenClawPluginApi) {
       ? rawConfig.contextMode
       : "auto"
   );
-  const contextFallbackMode: "auto" | "cheap" | "full" | "patient" = (
-    rawConfig.contextFallbackMode && ["auto", "cheap", "full", "patient"].includes(rawConfig.contextFallbackMode)
-      ? rawConfig.contextFallbackMode
-      : "cheap"
-  );
   const contextFetchTimeoutMs =
     typeof rawConfig.contextFetchTimeoutMs === "number" && Number.isFinite(rawConfig.contextFetchTimeoutMs)
       ? Math.max(200, Math.min(20_000, Math.floor(rawConfig.contextFetchTimeoutMs)))
       : 1200;
-  const contextTotalBudgetMs =
-    typeof rawConfig.contextTotalBudgetMs === "number" && Number.isFinite(rawConfig.contextTotalBudgetMs)
-      ? Math.max(400, Math.min(45_000, Math.floor(rawConfig.contextTotalBudgetMs)))
-      : 2200;
   const contextMaxChars =
     typeof rawConfig.contextMaxChars === "number" && Number.isFinite(rawConfig.contextMaxChars)
       ? Math.max(400, Math.min(12000, Math.floor(rawConfig.contextMaxChars)))
@@ -1003,67 +990,6 @@ export default function register(api: OpenClawPluginApi) {
     agentId?: string;
     agentLabel?: string;
   };
-  type ApiTopic = {
-    id: string;
-    name: string;
-    description?: string | null;
-  };
-  type ApiTask = {
-    id: string;
-    topicId?: string | null;
-    title: string;
-    status?: string;
-  };
-  type ApiSearchTopic = {
-    id: string;
-    name: string;
-    description?: string | null;
-    score?: number;
-    noteWeight?: number;
-    sessionBoosted?: boolean;
-  };
-  type ApiSearchTask = {
-    id: string;
-    topicId?: string | null;
-    title: string;
-    status?: string;
-    score?: number;
-    noteWeight?: number;
-    sessionBoosted?: boolean;
-  };
-  type ApiSearchLog = {
-    id: string;
-    topicId?: string | null;
-    taskId?: string | null;
-    type?: string;
-    summary?: string | null;
-    content?: string | null;
-    createdAt?: string;
-    score?: number;
-    noteCount?: number;
-    noteWeight?: number;
-    sessionBoosted?: boolean;
-  };
-  type ApiSearchNote = {
-    id: string;
-    relatedLogId?: string | null;
-    topicId?: string | null;
-    taskId?: string | null;
-    summary?: string | null;
-    content?: string | null;
-    createdAt?: string;
-  };
-  type ApiSearchResponse = {
-    query?: string;
-    mode?: string;
-    topics?: ApiSearchTopic[];
-    tasks?: ApiSearchTask[];
-    logs?: ApiSearchLog[];
-    notes?: ApiSearchNote[];
-    matchedTopicIds?: string[];
-    matchedTaskIds?: string[];
-    matchedLogIds?: string[];
-  };
 
   const apiHeaders = {
     "Content-Type": "application/json",
@@ -1094,40 +1020,9 @@ export default function register(api: OpenClawPluginApi) {
     return Array.isArray(data) ? (data as ApiLogEntry[]) : [];
   }
 
-  function coerceTopics(data: unknown) {
-    return Array.isArray(data) ? (data as ApiTopic[]) : [];
-  }
-
-  function coerceTasks(data: unknown) {
-    return Array.isArray(data) ? (data as ApiTask[]) : [];
-  }
-
   async function listLogs(params: Record<string, string | number | undefined>) {
     const data = await getJson("/api/log", params);
     return coerceLogs(data);
-  }
-
-  async function listTopics(sessionKey?: string) {
-    const data = await getJson("/api/topics", { sessionKey });
-    return coerceTopics(data);
-  }
-
-  async function listTasks(topicId: string, sessionKey?: string) {
-    const data = await getJson("/api/tasks", { topicId, sessionKey });
-    return coerceTasks(data);
-  }
-
-  async function semanticLookup(query: string, sessionKey?: string) {
-    const data = await getJson("/api/search", {
-      q: query,
-      sessionKey,
-      includePending: 1,
-      limitTopics: Math.max(12, contextTopicLimit * 4),
-      limitTasks: Math.max(24, contextTaskLimit * 5),
-      limitLogs: Math.max(120, contextLogLimit * 30),
-    });
-    if (!data || typeof data !== "object") return null;
-    return data as ApiSearchResponse;
   }
 
   function toolJsonResult(payload: unknown) {
@@ -1462,184 +1357,6 @@ export default function register(api: OpenClawPluginApi) {
 
   registerAgentTools();
 
-  function extractUpstreamMemorySignals(prompt: string | undefined, messages: unknown[] | undefined) {
-    const memoryLines: string[] = [];
-    const turnLines: string[] = [];
-    const seen = new Set<string>();
-
-    const remember = (line: string, bucket: string[]) => {
-      const text = clip(normalizeWhitespace(sanitizeMessageContent(line)), 180);
-      if (!text) return;
-      const key = text.toLowerCase();
-      if (seen.has(key)) return;
-      seen.add(key);
-      bucket.push(text);
-    };
-
-    const promptText = sanitizeMessageContent(prompt ?? "");
-    if (promptText) {
-      const lines = promptText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean);
-      const memoryHints = lines.filter((line) =>
-        /(memory|markdown|\.md\b|session|history|continuity|topic|task|retriev|vector|embed|note|curat)/i.test(line)
-      );
-      for (const line of memoryHints.slice(0, 8)) {
-        remember(line, memoryLines);
-      }
-    }
-
-    if (Array.isArray(messages)) {
-      const recent = messages.slice(-8);
-      for (const raw of recent) {
-        const item = (raw ?? {}) as { role?: unknown; content?: unknown };
-        const role = typeof item.role === "string" ? item.role : "turn";
-        const text = extractTextLoose(item.content);
-        if (!text) continue;
-        const clean = clip(normalizeWhitespace(sanitizeMessageContent(text)), 140);
-        if (!clean) continue;
-        remember(`${role}: ${clean}`, turnLines);
-      }
-    }
-
-    return {
-      memoryLines: memoryLines.slice(0, 6),
-      turnLines: turnLines.slice(0, 6),
-    };
-  }
-
-  function formatLogLine(entry: ApiLogEntry) {
-    const who = (entry.agentId || "").toLowerCase() === "user" ? "User" : entry.agentLabel || entry.agentId || "Agent";
-    const text = sanitizeMessageContent(entry.summary || entry.content || "");
-    return `${who}: ${clip(normalizeWhitespace(text), 120)}`;
-  }
-
-  function buildContextBlock(params: {
-    query: string;
-    searchMode?: string;
-    sessionLogs: ApiLogEntry[];
-    semanticLogs: ApiSearchLog[];
-    topics: ApiTopic[];
-    tasks: ApiTask[];
-    topicRecent: Record<string, ApiLogEntry[]>;
-    notes: Array<ApiLogEntry | ApiSearchNote>;
-    upstream: ReturnType<typeof extractUpstreamMemorySignals>;
-  }) {
-    const { query, searchMode, sessionLogs, semanticLogs, topics, tasks, topicRecent, notes, upstream } = params;
-    const lines: string[] = [];
-    lines.push("Clawboard continuity context:");
-    lines.push(`Current user intent: ${clip(normalizeWhitespace(query), 180)}`);
-    if (searchMode) {
-      lines.push(`Retrieval mode: ${searchMode}`);
-    }
-
-    if (upstream.memoryLines.length > 0) {
-      lines.push("OpenClaw memory signals (sessions/markdown/recent retrieval):");
-      for (const line of upstream.memoryLines.slice(0, 5)) {
-        lines.push(`- ${line}`);
-      }
-    }
-
-    if (upstream.turnLines.length > 0) {
-      lines.push("Recent turns:");
-      for (const line of upstream.turnLines.slice(0, 4)) {
-        lines.push(`- ${line}`);
-      }
-    }
-
-    if (topics.length > 0) {
-      lines.push("Likely topics:");
-      for (const topic of topics) {
-        const desc = topic.description ? ` - ${clip(normalizeWhitespace(topic.description), 80)}` : "";
-        lines.push(`- ${topic.name}${desc}`);
-      }
-    }
-
-    if (tasks.length > 0) {
-      lines.push("Likely active tasks:");
-      for (const task of tasks) {
-        const status = task.status ? ` [${task.status}]` : "";
-        lines.push(`- ${task.title}${status}`);
-      }
-    }
-
-    const timeline: ApiLogEntry[] = [];
-    const pushed = new Set<string>();
-    for (const item of sessionLogs.filter((entry) => entry.type === "conversation").slice(0, contextLogLimit + 2)) {
-      const key = item.id || `${item.createdAt}:${item.summary || item.content || ""}`;
-      if (pushed.has(key)) continue;
-      pushed.add(key);
-      timeline.push(item);
-      if (timeline.length >= contextLogLimit) break;
-    }
-    for (const item of semanticLogs.slice(0, contextLogLimit + 3)) {
-      if (item.type && item.type !== "conversation") continue;
-      const key = item.id || `${item.createdAt}:${item.summary || item.content || ""}`;
-      if (pushed.has(key)) continue;
-      pushed.add(key);
-      timeline.push({
-        id: item.id,
-        topicId: item.topicId,
-        taskId: item.taskId,
-        type: item.type ?? "conversation",
-        summary: item.summary ?? undefined,
-        content: item.content ?? undefined,
-        createdAt: item.createdAt,
-      });
-      if (timeline.length >= contextLogLimit) break;
-    }
-    if (timeline.length > 0) {
-      lines.push("Recent thread timeline:");
-      for (const entry of timeline) {
-        lines.push(`- ${formatLogLine(entry)}`);
-      }
-    }
-
-    const notesByLog = new Map<string, string[]>();
-    for (const note of notes) {
-      if ("type" in note && note.type && note.type !== "note") continue;
-      const key = String(note.relatedLogId ?? "");
-      if (!key) continue;
-      const text = sanitizeMessageContent(note.content || note.summary || "");
-      if (!text) continue;
-      const existing = notesByLog.get(key) ?? [];
-      if (existing.length < 2) existing.push(clip(normalizeWhitespace(text), 140));
-      notesByLog.set(key, existing);
-    }
-    const noteLines: string[] = [];
-    for (const entry of timeline) {
-      if (!entry.id) continue;
-      const attached = notesByLog.get(entry.id) ?? [];
-      for (const noteText of attached) {
-        noteLines.push(`- ${formatLogLine(entry)} | note: ${noteText}`);
-      }
-      if (noteLines.length >= 4) break;
-    }
-    if (noteLines.length > 0) {
-      lines.push("Curated user notes (high weight):");
-      lines.push(...noteLines.slice(0, 4));
-    }
-
-    const topicCtxLines: string[] = [];
-    for (const topic of topics) {
-      const recent = topicRecent[topic.id] ?? [];
-      if (recent.length === 0) continue;
-      topicCtxLines.push(`Topic ${topic.name}:`);
-      for (const item of recent.slice(0, 2)) {
-        topicCtxLines.push(`- ${formatLogLine(item)}`);
-      }
-      if (topicCtxLines.length >= 10) break;
-    }
-    if (topicCtxLines.length > 0) {
-      lines.push("Topic memory:");
-      lines.push(...topicCtxLines.slice(0, 10));
-    }
-
-    const block = lines.join("\n");
-    return clip(block, contextMaxChars);
-  }
-
   async function retrieveContextViaContextApi(
     query: string,
     sessionKey: string | undefined,
@@ -1665,152 +1382,6 @@ export default function register(api: OpenClawPluginApi) {
     return undefined;
   }
 
-  async function retrieveContext(
-    query: string,
-    sessionKey: string | undefined,
-    upstream: ReturnType<typeof extractUpstreamMemorySignals>
-  ) {
-    const normalizedQuery = clip(normalizeWhitespace(sanitizeMessageContent(query)), 500);
-    if (!normalizedQuery || normalizedQuery.length < 6) return undefined;
-
-    const [topicsAll, sessionLogsRaw, semantic] = await Promise.all([
-      listTopics(sessionKey),
-      sessionKey
-        ? listLogs({
-            sessionKey,
-            type: "conversation",
-            limit: 80,
-            offset: 0,
-          })
-        : Promise.resolve([] as ApiLogEntry[]),
-      semanticLookup(normalizedQuery, sessionKey),
-    ]);
-
-    const sessionLogs = sessionLogsRaw
-      .filter((entry) => entry.type === "conversation")
-      .sort((a, b) => (String(a.createdAt || "") < String(b.createdAt || "") ? 1 : -1));
-
-    const topicsById = new Map(topicsAll.map((topic) => [topic.id, topic]));
-
-    const recentTopicOrder: string[] = [];
-    const recentTopicSet = new Set<string>();
-    const recentTaskSet = new Set<string>();
-    for (const entry of sessionLogs) {
-      if (entry.topicId && !recentTopicSet.has(entry.topicId)) {
-        recentTopicSet.add(entry.topicId);
-        recentTopicOrder.push(entry.topicId);
-      }
-      if (entry.taskId) recentTaskSet.add(entry.taskId);
-    }
-
-    const topicScore = new Map<string, number>();
-    if (semantic?.topics?.length) {
-      for (const item of semantic.topics) {
-        if (!item?.id) continue;
-        const base = Number(item.score || 0);
-        const noteWeight = Number(item.noteWeight || 0);
-        const boosted = base + Math.min(0.24, noteWeight);
-        topicScore.set(item.id, Math.max(topicScore.get(item.id) ?? 0, boosted));
-      }
-    }
-    for (let i = 0; i < recentTopicOrder.length; i += 1) {
-      const id = recentTopicOrder[i];
-      const continuityBoost = Math.max(0.5, 0.9 - i * 0.08);
-      topicScore.set(id, Math.max(topicScore.get(id) ?? 0, continuityBoost));
-    }
-    for (const topic of topicsAll) {
-      const lexical = lexicalSimilarity(normalizedQuery, `${topic.name} ${topic.description ?? ""}`);
-      if (lexical > 0) {
-        const next = Math.max(topicScore.get(topic.id) ?? 0, lexical * 0.8);
-        topicScore.set(topic.id, next);
-      }
-    }
-
-    const topics = topicsAll
-      .map((topic) => ({ topic, score: topicScore.get(topic.id) ?? 0 }))
-      .filter((item) => item.score > 0.12 || recentTopicSet.has(item.topic.id))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, contextTopicLimit)
-      .map((item) => item.topic);
-
-    const semanticTaskById = new Map((semantic?.tasks ?? []).map((item) => [item.id, item]));
-    const semanticLogs = (semantic?.logs ?? []).slice(0, contextLogLimit + 4);
-    const semanticNotes = (semantic?.notes ?? []).slice(0, 120);
-
-    const taskBuckets = await Promise.all(
-      topics.map(async (topic) => {
-        const [tasks, logs] = await Promise.all([
-          listTasks(topic.id, sessionKey),
-          listLogs({
-            topicId: topic.id,
-            type: "conversation",
-            limit: contextLogLimit,
-            offset: 0,
-          }),
-        ]);
-        return { topicId: topic.id, tasks, logs };
-      })
-    );
-
-    const topicRecent: Record<string, ApiLogEntry[]> = {};
-    const taskScored: Array<{ task: ApiTask; score: number }> = [];
-    const relatedIds = new Set<string>();
-    for (const bucket of taskBuckets) {
-      topicRecent[bucket.topicId] = bucket.logs;
-      for (const log of bucket.logs) {
-        if (log.id) relatedIds.add(log.id);
-      }
-      for (const task of bucket.tasks) {
-        const lexical = lexicalSimilarity(normalizedQuery, task.title || "");
-        const continuityBoost = recentTaskSet.has(task.id) ? 0.25 : 0;
-        const semanticScore = Number(semanticTaskById.get(task.id)?.score || 0);
-        const noteWeight = Number(semanticTaskById.get(task.id)?.noteWeight || 0);
-        taskScored.push({ task, score: lexical + continuityBoost + semanticScore + Math.min(0.24, noteWeight) });
-      }
-    }
-    for (const entry of sessionLogs.slice(0, contextLogLimit + 4)) {
-      if (entry.id) relatedIds.add(entry.id);
-    }
-    for (const entry of semanticLogs) {
-      if (entry.id) relatedIds.add(entry.id);
-      if (entry.topicId && topics.length < contextTopicLimit) {
-        const candidate = topicsById.get(entry.topicId);
-        if (candidate && !topics.some((item) => item.id === candidate.id)) topics.push(candidate);
-      }
-    }
-
-    const tasks = taskScored
-      .sort((a, b) => b.score - a.score)
-      .filter((item, idx) => item.score > 0.08 || idx < contextTaskLimit)
-      .slice(0, contextTaskLimit)
-      .map((item) => item.task);
-
-    const relatedLogId = Array.from(relatedIds).slice(0, 50).join(",");
-    const fallbackNotes =
-      relatedLogId.length > 0
-        ? await listLogs({
-            type: "note",
-            relatedLogId,
-            limit: 120,
-            offset: 0,
-          })
-        : [];
-    const notes = [...semanticNotes, ...fallbackNotes];
-
-    const context = buildContextBlock({
-      query: normalizedQuery,
-      searchMode: semantic?.mode,
-      sessionLogs,
-      semanticLogs,
-      topics,
-      tasks,
-      topicRecent,
-      notes,
-      upstream,
-    });
-    return context || undefined;
-  }
-
   const beforeAgentStartApi = api as unknown as {
     on: (event: "before_agent_start", handler: (event: PluginHookBeforeAgentStartEvent, ctx: PluginHookAgentContext) => unknown) => void;
   };
@@ -1828,30 +1399,9 @@ export default function register(api: OpenClawPluginApi) {
       cleanInput && cleanInput.trim().length > 0
         ? clip(cleanInput, 320)
         : "current conversation continuity, active topics, active tasks, and curated notes";
-    const upstream = extractUpstreamMemorySignals(event.prompt, event.messages);
-    const startedAt = nowMs();
     const sessionKeyForContext = effectiveSessionKey ?? ctx?.sessionKey;
     const primaryMode = contextMode;
-
-    let context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, primaryMode);
-    if (!context && contextFallbackMode !== primaryMode) {
-      // Defensive fallback: /api/context in auto mode may run deep recall (semantic search) and exceed our
-      // fetch timeout/budget. Always try to at least get Layer A continuity.
-      const remaining = Math.max(0, contextTotalBudgetMs - (nowMs() - startedAt));
-      if (remaining > 150) {
-        context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, contextFallbackMode);
-      }
-    }
-    if (!context) {
-      const remaining = Math.max(0, contextTotalBudgetMs - (nowMs() - startedAt));
-      // Back-compat: older servers won't have /api/context yet.
-      if (remaining > 250) {
-        context = await Promise.race([
-          retrieveContext(retrievalQuery, sessionKeyForContext, upstream),
-          sleep(remaining).then(() => undefined),
-        ]);
-      }
-    }
+    const context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, primaryMode);
     if (!context) return;
     const prependContext = [
       CLAWBOARD_CONTEXT_BEGIN,

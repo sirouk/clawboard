@@ -10,7 +10,7 @@ test("ui snapshots pass", async ({ page }, testInfo) => {
   await page.screenshot({ path: testInfo.outputPath("dashboard.png"), fullPage: true });
 
   await page.goto("/setup");
-  await page.getByRole("heading", { name: "Setup" }).waitFor();
+  await page.getByText("Instance Configuration").first().waitFor();
   await page.screenshot({ path: testInfo.outputPath("setup.png"), fullPage: true });
 
   await page.goto("/stats");

@@ -205,9 +205,7 @@ openclaw config set plugins.entries.clawboard-logger.config --json '{
   "token":"YOUR_TOKEN",
   "enabled":true,
   "contextMode":"auto",
-  "contextFallbackMode":"cheap",
   "contextFetchTimeoutMs":1200,
-  "contextTotalBudgetMs":2200,
   "contextMaxChars":2200
 }'
 openclaw config set plugins.entries.clawboard-logger.enabled --json true

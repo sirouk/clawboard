@@ -699,6 +699,62 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertIn("health", search_text)
         self.assertIn("insurance", search_text)
 
+    def test_search_low_signal_board_session_expands_semantic_query(self):
+        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        read_headers = {"Host": "localhost:8010"}
+
+        topic = self.client.post("/api/topics", json={"name": "Scoped Semantic Topic"}, headers=write_headers).json()
+        task = self.client.post(
+            "/api/tasks",
+            json={"topicId": topic["id"], "title": "Scoped Semantic Task", "status": "doing"},
+            headers=write_headers,
+        ).json()
+
+        board_session_key = f"clawboard:task:{topic['id']}:{task['id']}"
+        self.client.post(
+            "/api/log",
+            json={
+                "topicId": topic["id"],
+                "taskId": task["id"],
+                "type": "conversation",
+                "summary": "Board semantic history mentions deductible planning details.",
+                "content": "Board semantic history mentions deductible planning details.",
+                "createdAt": now_iso(),
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {"sessionKey": board_session_key},
+            },
+            headers=write_headers,
+        )
+
+        captured_calls: list[dict] = []
+
+        def fake_semantic_search(query, topics, tasks, logs, **kwargs):
+            captured_calls.append({"query": query, "topics": topics, "logs": logs, "kwargs": kwargs})
+            return {"query": query, "mode": "mock", "topics": [], "tasks": [], "logs": []}
+
+        with patch("app.main.semantic_search", side_effect=fake_semantic_search):
+            res = self.client.get(
+                "/api/search",
+                params={"q": "resume", "sessionKey": board_session_key, "limitTopics": 10, "limitTasks": 10, "limitLogs": 100},
+                headers=read_headers,
+            )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertTrue(captured_calls, "Expected semantic_search to be called")
+
+        semantic_query = str((captured_calls[0] or {}).get("query") or "").lower()
+        self.assertIn("resume", semantic_query)
+        self.assertIn("scoped semantic topic", semantic_query)
+        self.assertIn("scoped semantic task", semantic_query)
+        self.assertIn("deductible", semantic_query)
+        self.assertNotEqual(semantic_query.strip(), "resume")
+
+        payload = res.json()
+        meta = payload.get("searchMeta") or {}
+        self.assertEqual(meta.get("semanticQuerySource"), "auto_scoped_low_signal")
+        self.assertTrue(bool(meta.get("semanticQueryExpanded")))
+        self.assertIn("scoped semantic task", str(meta.get("semanticQuery") or "").lower())
+
     def test_search_caps_effective_semantic_limits_for_stability(self):
         read_headers = {"Host": "localhost:8010"}
         captured_calls: list[dict] = []

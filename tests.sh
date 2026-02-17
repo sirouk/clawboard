@@ -55,11 +55,19 @@ wait_for_http() {
   local expected="$2"
   local label="$3"
   local attempts="${4:-60}"
+  local -a curl_args=()
+  if (( $# > 4 )); then
+    curl_args=("${@:5}")
+  fi
   local code=""
   local n=1
 
   while (( n <= attempts )); do
-    code="$(curl -s -m 5 -o /dev/null -w "%{http_code}" "$url" || true)"
+    if (( ${#curl_args[@]} > 0 )); then
+      code="$(curl -s -m 5 -o /dev/null -w "%{http_code}" "${curl_args[@]}" "$url" || true)"
+    else
+      code="$(curl -s -m 5 -o /dev/null -w "%{http_code}" "$url" || true)"
+    fi
     if [[ "$code" == "$expected" ]]; then
       log "$label is ready ($code)"
       return 0
@@ -77,9 +85,17 @@ run_security_checks() {
 
   log "Running security smoke checks"
 
-  local local_read_code
-  local_read_code="$(curl -sS -o /dev/null -w "%{http_code}" http://localhost:8010/api/config || true)"
-  [[ "$local_read_code" == "200" ]] || fail "Localhost read should be 200, got $local_read_code"
+  local read_no_token_code
+  read_no_token_code="$(curl -sS -o /dev/null -w "%{http_code}" http://localhost:8010/api/config || true)"
+  [[ "$read_no_token_code" == "401" ]] || fail "Read without token should be 401, got $read_no_token_code"
+
+  local read_with_token_code
+  read_with_token_code="$(
+    curl -sS -o /dev/null -w "%{http_code}" \
+      -H "X-Clawboard-Token: ${CLAWBOARD_TOKEN}" \
+      http://localhost:8010/api/config || true
+  )"
+  [[ "$read_with_token_code" == "200" ]] || fail "Read with token should be 200, got $read_with_token_code"
 
   local remote_no_token_code
   remote_no_token_code="$(
@@ -157,7 +173,7 @@ fi
 # Override the classifier to heuristic mode unless the caller explicitly set a mode.
 CLASSIFIER_LLM_MODE="${CLASSIFIER_LLM_MODE:-off}" docker compose up -d --build api web classifier
 
-wait_for_http "http://localhost:8010/api/health" "200" "API"
+wait_for_http "http://localhost:8010/api/health" "200" "API" 60 -H "X-Clawboard-Token: ${CLAWBOARD_TOKEN}"
 wait_for_http "http://localhost:3010/u" "200" "Web UI"
 
 running_services="$(docker compose ps --services --filter status=running)"

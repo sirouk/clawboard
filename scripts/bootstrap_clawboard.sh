@@ -165,9 +165,7 @@ CHUTES_FAST_PATH_URL="${CHUTES_FAST_PATH_URL:-https://raw.githubusercontent.com/
 WEB_HOT_RELOAD_OVERRIDE=""
 ALLOWED_DEV_ORIGINS_OVERRIDE=""
 CONTEXT_MODE_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_MODE:-}"
-CONTEXT_FALLBACK_MODE_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE:-}"
 CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS:-}"
-CONTEXT_TOTAL_BUDGET_MS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS:-}"
 CONTEXT_MAX_CHARS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS:-}"
 SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="${CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS:-}"
 SKILL_INSTALL_MODE="${CLAWBOARD_SKILL_INSTALL_MODE:-symlink}"
@@ -236,17 +234,9 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || log_error "--context-mode requires a value"
       CONTEXT_MODE_OVERRIDE="$2"; shift 2
       ;;
-    --context-fallback-mode)
-      [ $# -ge 2 ] || log_error "--context-fallback-mode requires a value"
-      CONTEXT_FALLBACK_MODE_OVERRIDE="$2"; shift 2
-      ;;
     --context-fetch-timeout-ms)
       [ $# -ge 2 ] || log_error "--context-fetch-timeout-ms requires a value"
       CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE="$2"; shift 2
-      ;;
-    --context-total-budget-ms)
-      [ $# -ge 2 ] || log_error "--context-total-budget-ms requires a value"
-      CONTEXT_TOTAL_BUDGET_MS_OVERRIDE="$2"; shift 2
       ;;
     --context-max-chars)
       [ $# -ge 2 ] || log_error "--context-max-chars requires a value"
@@ -304,12 +294,8 @@ Environment overrides:
                        Extra allowed dev origins/hosts for Next dev server (writes CLAWBOARD_ALLOWED_DEV_ORIGINS)
   --context-mode <auto|cheap|full|patient>
                        Context retrieval mode for the OpenClaw clawboard-logger plugin (writes CLAWBOARD_LOGGER_CONTEXT_MODE)
-  --context-fallback-mode <auto|cheap|full|patient>
-                       Fallback context mode for the OpenClaw clawboard-logger plugin (writes CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE)
   --context-fetch-timeout-ms <ms>
                        Per-request timeout for /api/context calls made by the OpenClaw plugin (writes CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS)
-  --context-total-budget-ms <ms>
-                       Total budget for before_agent_start context retrieval in the OpenClaw plugin (writes CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS)
   --context-max-chars <n>
                        Hard cap for injected context block size (writes CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS)
   --include-tool-call-logs
@@ -1129,7 +1115,6 @@ log_info "Writing CLAWBOARD_LOGGER_CONTEXT_MODE=$CONTEXT_MODE_VALUE in $INSTALL_
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_MODE" "$CONTEXT_MODE_VALUE"
 
 DEFAULT_CONTEXT_FETCH_TIMEOUT_MS="1200"
-DEFAULT_CONTEXT_TOTAL_BUDGET_MS="2200"
 DEFAULT_CONTEXT_MAX_CHARS="2200"
 DEFAULT_SEARCH_CONCURRENCY_LIMIT="2"
 DEFAULT_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS="900"
@@ -1138,31 +1123,13 @@ DEFAULT_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS="2400"
 case "$CONTEXT_MODE_VALUE" in
   full)
     DEFAULT_CONTEXT_FETCH_TIMEOUT_MS="2500"
-    DEFAULT_CONTEXT_TOTAL_BUDGET_MS="4500"
     DEFAULT_CONTEXT_MAX_CHARS="3500"
     ;;
   patient)
     DEFAULT_CONTEXT_FETCH_TIMEOUT_MS="8000"
-    DEFAULT_CONTEXT_TOTAL_BUDGET_MS="12000"
     DEFAULT_CONTEXT_MAX_CHARS="6000"
     ;;
 esac
-
-CONTEXT_FALLBACK_MODE_VALUE=""
-if [ -n "$CONTEXT_FALLBACK_MODE_OVERRIDE" ]; then
-  CONTEXT_FALLBACK_MODE_VALUE="$CONTEXT_FALLBACK_MODE_OVERRIDE"
-elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE" >/dev/null 2>&1; then
-  CONTEXT_FALLBACK_MODE_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE" || true)"
-else
-  CONTEXT_FALLBACK_MODE_VALUE="cheap"
-fi
-CONTEXT_FALLBACK_MODE_VALUE="$(printf "%s" "$CONTEXT_FALLBACK_MODE_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
-if ! is_valid_context_mode "$CONTEXT_FALLBACK_MODE_VALUE"; then
-  log_warn "Invalid CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE=$CONTEXT_FALLBACK_MODE_VALUE. Using cheap."
-  CONTEXT_FALLBACK_MODE_VALUE="cheap"
-fi
-log_info "Writing CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE=$CONTEXT_FALLBACK_MODE_VALUE in $INSTALL_DIR/.env..."
-upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODE" "$CONTEXT_FALLBACK_MODE_VALUE"
 
 CONTEXT_FETCH_TIMEOUT_MS_VALUE=""
 if [ -n "$CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE" ]; then
@@ -1175,18 +1142,6 @@ fi
 CONTEXT_FETCH_TIMEOUT_MS_VALUE="$(clamp_int "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" 200 20000 || echo "$DEFAULT_CONTEXT_FETCH_TIMEOUT_MS")"
 log_info "Writing CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS=$CONTEXT_FETCH_TIMEOUT_MS_VALUE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE"
-
-CONTEXT_TOTAL_BUDGET_MS_VALUE=""
-if [ -n "$CONTEXT_TOTAL_BUDGET_MS_OVERRIDE" ]; then
-  CONTEXT_TOTAL_BUDGET_MS_VALUE="$CONTEXT_TOTAL_BUDGET_MS_OVERRIDE"
-elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS" >/dev/null 2>&1; then
-  CONTEXT_TOTAL_BUDGET_MS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS" || true)"
-else
-  CONTEXT_TOTAL_BUDGET_MS_VALUE="$DEFAULT_CONTEXT_TOTAL_BUDGET_MS"
-fi
-CONTEXT_TOTAL_BUDGET_MS_VALUE="$(clamp_int "$CONTEXT_TOTAL_BUDGET_MS_VALUE" 400 45000 || echo "$DEFAULT_CONTEXT_TOTAL_BUDGET_MS")"
-log_info "Writing CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS=$CONTEXT_TOTAL_BUDGET_MS_VALUE in $INSTALL_DIR/.env..."
-upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_TOTAL_BUDGET_MS" "$CONTEXT_TOTAL_BUDGET_MS_VALUE"
 
 CONTEXT_MAX_CHARS_VALUE=""
 if [ -n "$CONTEXT_MAX_CHARS_OVERRIDE" ]; then
@@ -1465,9 +1420,9 @@ PY
 
       log_info "Configuring logger plugin..."
       if [ -n "$TOKEN" ]; then
-        CONFIG_JSON=$(printf '{"baseUrl":"%s","token":"%s","enabled":true,"contextMode":"%s","contextFallbackMode":"%s","contextFetchTimeoutMs":%s,"contextTotalBudgetMs":%s,"contextMaxChars":%s}' "$API_URL" "$TOKEN" "$CONTEXT_MODE_VALUE" "$CONTEXT_FALLBACK_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_TOTAL_BUDGET_MS_VALUE" "$CONTEXT_MAX_CHARS_VALUE")
+        CONFIG_JSON=$(printf '{"baseUrl":"%s","token":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextMaxChars":%s}' "$API_URL" "$TOKEN" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_MAX_CHARS_VALUE")
       else
-        CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true,"contextMode":"%s","contextFallbackMode":"%s","contextFetchTimeoutMs":%s,"contextTotalBudgetMs":%s,"contextMaxChars":%s}' "$API_URL" "$CONTEXT_MODE_VALUE" "$CONTEXT_FALLBACK_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_TOTAL_BUDGET_MS_VALUE" "$CONTEXT_MAX_CHARS_VALUE")
+        CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextMaxChars":%s}' "$API_URL" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_MAX_CHARS_VALUE")
       fi
       openclaw config set plugins.entries.clawboard-logger.config --json "$CONFIG_JSON" >/dev/null 2>&1 || true
       openclaw config set plugins.entries.clawboard-logger.enabled --json true >/dev/null 2>&1 || true

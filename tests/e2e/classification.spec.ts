@@ -37,10 +37,8 @@ test("classification patches move logs between topics without refresh", async ({
   await page.goto("/u");
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
-  const topicAButton = page.getByRole("button", { name: new RegExp(topicAName) }).first();
-  const topicBButton = page.getByRole("button", { name: new RegExp(topicBName) }).first();
-  await expect(topicAButton).toBeVisible();
-  await expect(topicBButton).toBeVisible();
+  await expect(page.getByRole("button", { name: new RegExp(topicAName) }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: new RegExp(topicBName) }).first()).toBeVisible();
 
   const message = `Classification pending ${suffix}`;
   const create = await request.post(`${apiBase}/api/log`, {
@@ -71,9 +69,8 @@ test("classification patches move logs between topics without refresh", async ({
   });
   expect(classify.ok()).toBeTruthy();
 
-  await topicAButton.click();
-  const taskAButton = page.getByRole("button", { name: new RegExp(taskAName) }).first();
-  await taskAButton.click();
+  await page.goto(`/u/topic/${topicAId}/task/${taskA.id}`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
   await expect(messageLocator).toBeVisible();
 
   const move = await request.patch(`${apiBase}/api/log/${entry.id}`, {
@@ -86,9 +83,8 @@ test("classification patches move logs between topics without refresh", async ({
   expect(move.ok()).toBeTruthy();
 
   await expect(messageLocator).toHaveCount(0);
-  await topicBButton.click();
-  const taskBButton = page.getByRole("button", { name: new RegExp(taskBName) }).first();
-  await taskBButton.click();
+  await page.goto(`/u/topic/${topicBId}/task/${taskB.id}`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
   await expect(messageLocator).toBeVisible();
 });
 
@@ -127,16 +123,12 @@ test("raw=1 shows pending logs that default unified view hides", async ({ page, 
   expect(logRes.ok()).toBeTruthy();
   const entry = await logRes.json();
 
-  await page.goto("/u");
+  await page.goto(`/u/topic/${topicId}/task/${taskId}`);
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
-  await page.getByRole("button", { name: new RegExp(topicName) }).first().click();
-  await page.getByRole("button", { name: new RegExp(taskName) }).first().click();
   const messageLocator = page.getByTestId(`message-bubble-${entry.id}`).getByText(pendingMessage, { exact: true });
   await expect(messageLocator).toHaveCount(0);
 
-  await page.goto("/u?raw=1");
+  await page.goto(`/u/topic/${topicId}/task/${taskId}?raw=1`);
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
-  await page.getByRole("button", { name: new RegExp(topicName) }).first().click();
-  await page.getByRole("button", { name: new RegExp(taskName) }).first().click();
   await expect(messageLocator).toBeVisible();
 });

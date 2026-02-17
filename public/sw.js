@@ -39,6 +39,41 @@ self.addEventListener("message", (event) => {
   }
 });
 
+self.addEventListener("notificationclick", (event) => {
+  event.notification?.close();
+  const requested = event.notification?.data?.url;
+  const targetUrl = typeof requested === "string" && requested.trim() ? requested.trim() : "/";
+
+  event.waitUntil(
+    (async () => {
+      const clientsList = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const client of clientsList) {
+        let sameOrigin = false;
+        try {
+          sameOrigin = new URL(client.url).origin === self.location.origin;
+        } catch {
+          sameOrigin = false;
+        }
+        if (!sameOrigin) continue;
+        try {
+          if (typeof client.navigate === "function") {
+            await client.navigate(targetUrl);
+          }
+        } catch {
+          // ignore navigation failures and still try to focus
+        }
+        if (typeof client.focus === "function") {
+          await client.focus();
+        }
+        return;
+      }
+      if (self.clients.openWindow) {
+        await self.clients.openWindow(targetUrl);
+      }
+    })()
+  );
+});
+
 async function cacheFirst(request, cacheName) {
   const cache = await caches.open(cacheName);
   const cached = await cache.match(request);

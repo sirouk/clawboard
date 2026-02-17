@@ -41,7 +41,6 @@ def _list_logs_side_effect(logs: list[dict]):
     return _inner
 
 
-@unittest.skipIf(c.requests is None, "requests dependency is required for classifier tests")
 class ClassifierAdditionalCoverageTests(unittest.TestCase):
     def test_cls_003_oldest_pending_bundle_is_classified_first(self):
         session_key = "channel:cls-003"

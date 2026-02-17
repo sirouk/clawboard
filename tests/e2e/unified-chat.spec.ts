@@ -69,23 +69,17 @@ test("unified chat renders natural bubbles and topic-only chat entries", async (
   });
   expect(topicOnlyRes.ok()).toBeTruthy();
 
-  await page.goto("/u");
+  await page.goto(`/u/topic/${topicId}/task/${taskId}`);
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
-
-  await page.locator("div[role='button']").filter({ hasText: topicName }).first().click();
-  await page.locator("div[role='button']").filter({ hasText: taskTitle }).first().click();
 
   const assistantBubble = page.getByTestId(`message-bubble-${assistantLog.id}`);
   const userBubble = page.getByTestId(`message-bubble-${userLog.id}`);
   await expect(assistantBubble).toHaveAttribute("data-agent-side", "left");
   await expect(userBubble).toHaveAttribute("data-agent-side", "right");
 
-  const optionsToggle = page.getByRole("button", { name: /View options|Hide options/i });
+  const optionsToggle = page.getByRole("button", { name: /Board controls/i }).first();
   await expect(optionsToggle).toBeVisible();
-  const optionsLabel = ((await optionsToggle.textContent()) || "").toLowerCase();
-  if (optionsLabel.includes("view")) {
-    await optionsToggle.click();
-  }
+  await optionsToggle.click();
   const fullMessagesToggle = page.getByRole("button", { name: /Show full messages|Hide full messages/i });
   await expect(fullMessagesToggle).toBeVisible();
   const fullMessagesLabel = ((await fullMessagesToggle.textContent()) || "").toLowerCase();

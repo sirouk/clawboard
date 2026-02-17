@@ -1,11 +1,23 @@
 "use client";
 
-import { createContext, useContext, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Draft, LogEntry, Space, Task, Topic } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
 import { useLiveUpdates } from "@/lib/use-live-updates";
 import { LiveEvent, mergeById, mergeLogs, maxTimestamp, removeById, upsertById } from "@/lib/live-utils";
 import { normalizeBoardSessionKey } from "@/lib/board-session";
+import {
+  CHAT_SEEN_AT_KEY,
+  UNSNOOZED_TASKS_KEY,
+  UNSNOOZED_TOPICS_KEY,
+  chatKeyFromLogEntry,
+  parseNumberMap,
+  parseStringMap,
+  isUnreadConversationCandidate,
+} from "@/lib/attention-state";
+import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
+import { PUSH_ENABLED_KEY, setPwaBadge, showPwaNotification } from "@/lib/pwa-utils";
+import { buildTaskUrl, buildTopicUrl } from "@/lib/url";
 
 type DataContextValue = {
   spaces: Space[];
@@ -37,6 +49,14 @@ function normalizeTagValue(value: string) {
   return stripped.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
 }
 
+function clipNotificationText(value: string, max = 140) {
+  const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "New message";
+  if (normalized.length <= max) return normalized;
+  const safe = Math.max(1, max - 3);
+  return `${normalized.slice(0, safe)}...`;
+}
+
 export function DataProvider({ children }: { children: React.ReactNode }) {
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [topics, setTopics] = useState<Topic[]>([]);
@@ -47,6 +67,41 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     Record<string, { typing: boolean; requestId?: string; updatedAt: string }>
   >({});
   const [hydrated, setHydrated] = useState(false);
+  const unsnoozedTopicsRaw = useLocalStorageItem(UNSNOOZED_TOPICS_KEY) ?? "{}";
+  const unsnoozedTasksRaw = useLocalStorageItem(UNSNOOZED_TASKS_KEY) ?? "{}";
+  const chatSeenRaw = useLocalStorageItem(CHAT_SEEN_AT_KEY) ?? "{}";
+  const notificationsEnabledRaw = useLocalStorageItem(PUSH_ENABLED_KEY);
+
+  const unsnoozedTopicBadges = useMemo(() => parseNumberMap(unsnoozedTopicsRaw), [unsnoozedTopicsRaw]);
+  const unsnoozedTaskBadges = useMemo(() => parseNumberMap(unsnoozedTasksRaw), [unsnoozedTasksRaw]);
+  const chatSeenByKey = useMemo(() => parseStringMap(chatSeenRaw), [chatSeenRaw]);
+  const notificationsEnabled = useMemo(() => notificationsEnabledRaw !== "false", [notificationsEnabledRaw]);
+
+  const unreadMessageCount = useMemo(() => {
+    const seenAtMs = new Map<string, number>();
+    for (const [chatKey, seenAt] of Object.entries(chatSeenByKey)) {
+      const stamp = Date.parse(seenAt);
+      if (!Number.isFinite(stamp)) continue;
+      seenAtMs.set(chatKey, stamp);
+    }
+
+    let count = 0;
+    for (const entry of logs) {
+      if (!isUnreadConversationCandidate(entry)) continue;
+      const chatKey = chatKeyFromLogEntry(entry);
+      if (!chatKey) continue;
+      const createdAtMs = Date.parse(entry.createdAt);
+      if (!Number.isFinite(createdAtMs)) continue;
+      const seenAt = seenAtMs.get(chatKey) ?? Number.NEGATIVE_INFINITY;
+      if (createdAtMs > seenAt) count += 1;
+    }
+    return count;
+  }, [chatSeenByKey, logs]);
+
+  const pwaAttentionCount = useMemo(
+    () => Object.keys(unsnoozedTopicBadges).length + Object.keys(unsnoozedTaskBadges).length + unreadMessageCount,
+    [unsnoozedTaskBadges, unsnoozedTopicBadges, unreadMessageCount]
+  );
 
   const upsertSpace = (space: Space) => setSpaces((prev) => upsertById(prev, space));
   const upsertTopic = (topic: Topic) => setTopics((prev) => upsertById(prev, topic));
@@ -183,6 +238,242 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     },
     reconcile,
   });
+
+  const topicById = useMemo(() => new Map(topics.map((topic) => [topic.id, topic])), [topics]);
+  const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+  const knownLogIdsRef = useRef<Set<string> | null>(null);
+  const prevTopicStatusRef = useRef<Map<string, { status: string; snoozedUntil: string | null }> | null>(null);
+  const prevTaskSnoozeRef = useRef<Map<string, string | null> | null>(null);
+  const seededSeenMapRef = useRef(false);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    if (seededSeenMapRef.current) return;
+    seededSeenMapRef.current = true;
+    if (Object.keys(chatSeenByKey).length > 0) return;
+
+    const seeded: Record<string, string> = {};
+    for (const entry of logs) {
+      const chatKey = chatKeyFromLogEntry(entry);
+      if (!chatKey) continue;
+      const createdAt = String(entry.createdAt ?? "").trim();
+      if (!createdAt) continue;
+      const previous = seeded[chatKey] ?? "";
+      if (!previous || createdAt > previous) seeded[chatKey] = createdAt;
+    }
+    if (Object.keys(seeded).length === 0) return;
+    setLocalStorageItem(CHAT_SEEN_AT_KEY, JSON.stringify(seeded));
+  }, [chatSeenByKey, hydrated, logs]);
+
+  useEffect(() => {
+    void setPwaBadge(pwaAttentionCount);
+  }, [pwaAttentionCount]);
+
+  useEffect(() => {
+    const previous = prevTopicStatusRef.current;
+    const next = new Map<string, { status: string; snoozedUntil: string | null }>();
+    const additions: Topic[] = [];
+
+    for (const topic of topics) {
+      let status = String(topic.status ?? "active").trim().toLowerCase();
+      if (status === "paused") status = "snoozed";
+      const snoozedUntil = topic.snoozedUntil ? String(topic.snoozedUntil) : null;
+      next.set(topic.id, { status, snoozedUntil });
+      if (!previous) continue;
+      const before = previous.get(topic.id);
+      if (!before) continue;
+      if (before.status === "snoozed" && status === "active") {
+        additions.push(topic);
+      }
+    }
+    prevTopicStatusRef.current = next;
+
+    if (!previous || additions.length === 0) return;
+
+    const stamp = Date.now();
+    let changed = false;
+    const updated: Record<string, number> = { ...unsnoozedTopicBadges };
+    for (const topic of additions) {
+      if (!Object.prototype.hasOwnProperty.call(updated, topic.id)) changed = true;
+      updated[topic.id] = stamp;
+    }
+    if (changed) {
+      setLocalStorageItem(UNSNOOZED_TOPICS_KEY, JSON.stringify(updated));
+    }
+
+    if (typeof document === "undefined") return;
+    if (document.visibilityState === "visible") return;
+    if (!notificationsEnabled) return;
+
+    if (additions.length === 1) {
+      const topic = additions[0];
+      const url = `${buildTopicUrl(topic, topics)}?chat=1&focus=1`;
+      void showPwaNotification(
+        {
+          title: `Topic unsnoozed: ${topic.name}`,
+          body: "Activity resumed.",
+          tag: `clawboard-unsnooze-topic-${topic.id}`,
+          url,
+        },
+        notificationsEnabled
+      );
+      return;
+    }
+
+    void showPwaNotification(
+      {
+        title: "Clawboard",
+        body: `${additions.length} topics unsnoozed.`,
+        tag: "clawboard-unsnooze-topics",
+        url: "/u",
+      },
+      notificationsEnabled
+    );
+  }, [notificationsEnabled, topics, unsnoozedTopicBadges]);
+
+  useEffect(() => {
+    const previous = prevTaskSnoozeRef.current;
+    const next = new Map<string, string | null>();
+    const additions: Task[] = [];
+
+    for (const task of tasks) {
+      const snoozedUntil = task.snoozedUntil ? String(task.snoozedUntil) : null;
+      next.set(task.id, snoozedUntil);
+      if (!previous) continue;
+      const before = previous.get(task.id);
+      if (!before) continue;
+      if (before && !snoozedUntil) additions.push(task);
+    }
+    prevTaskSnoozeRef.current = next;
+
+    if (!previous || additions.length === 0) return;
+
+    const stamp = Date.now();
+    let changed = false;
+    const updated: Record<string, number> = { ...unsnoozedTaskBadges };
+    for (const task of additions) {
+      if (!Object.prototype.hasOwnProperty.call(updated, task.id)) changed = true;
+      updated[task.id] = stamp;
+    }
+    if (changed) {
+      setLocalStorageItem(UNSNOOZED_TASKS_KEY, JSON.stringify(updated));
+    }
+
+    if (typeof document === "undefined") return;
+    if (document.visibilityState === "visible") return;
+    if (!notificationsEnabled) return;
+
+    if (additions.length === 1) {
+      const task = additions[0];
+      const url = `${buildTaskUrl(task, topics)}?focus=1`;
+      void showPwaNotification(
+        {
+          title: `Task unsnoozed: ${task.title}`,
+          body: "Activity resumed.",
+          tag: `clawboard-unsnooze-task-${task.id}`,
+          url,
+        },
+        notificationsEnabled
+      );
+      return;
+    }
+
+    void showPwaNotification(
+      {
+        title: "Clawboard",
+        body: `${additions.length} tasks unsnoozed.`,
+        tag: "clawboard-unsnooze-tasks",
+        url: "/u",
+      },
+      notificationsEnabled
+    );
+  }, [notificationsEnabled, tasks, topics, unsnoozedTaskBadges]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+
+    const known = knownLogIdsRef.current;
+    if (!known) {
+      knownLogIdsRef.current = new Set(logs.map((entry) => entry.id));
+      return;
+    }
+
+    const additions: LogEntry[] = [];
+    for (const entry of logs) {
+      if (known.has(entry.id)) continue;
+      known.add(entry.id);
+      additions.push(entry);
+    }
+    if (additions.length === 0) return;
+    if (typeof document === "undefined") return;
+    if (document.visibilityState === "visible") return;
+    if (!notificationsEnabled) return;
+
+    const unseenAdditions = additions.filter((entry) => {
+      if (!isUnreadConversationCandidate(entry)) return false;
+      const chatKey = chatKeyFromLogEntry(entry);
+      if (!chatKey) return false;
+      const createdAtMs = Date.parse(entry.createdAt);
+      if (!Number.isFinite(createdAtMs)) return false;
+      const seenAtMs = Date.parse(chatSeenByKey[chatKey] ?? "");
+      return !Number.isFinite(seenAtMs) || createdAtMs > seenAtMs;
+    });
+    if (unseenAdditions.length === 0) return;
+
+    if (unseenAdditions.length === 1) {
+      const entry = unseenAdditions[0];
+      const chatKey = chatKeyFromLogEntry(entry);
+      const body = clipNotificationText(entry.content ?? entry.summary ?? "");
+      if (chatKey.startsWith("task:")) {
+        const taskId = chatKey.slice("task:".length).trim();
+        const task = taskById.get(taskId);
+        if (task) {
+          const url = `${buildTaskUrl(task, topics)}?focus=1`;
+          void showPwaNotification(
+            {
+              title: `Task Chat: ${task.title}`,
+              body,
+              tag: `clawboard-chat-${chatKey}`,
+              url,
+            },
+            notificationsEnabled
+          );
+          return;
+        }
+      } else if (chatKey.startsWith("topic:")) {
+        const topicId = chatKey.slice("topic:".length).trim();
+        const topic = topicById.get(topicId);
+        if (topic) {
+          const url = `${buildTopicUrl(topic, topics)}?chat=1&focus=1`;
+          void showPwaNotification(
+            {
+              title: `Topic Chat: ${topic.name}`,
+              body,
+              tag: `clawboard-chat-${chatKey}`,
+              url,
+            },
+            notificationsEnabled
+          );
+          return;
+        }
+      }
+    }
+
+    const chatKeys = new Set<string>();
+    for (const entry of unseenAdditions) {
+      const key = chatKeyFromLogEntry(entry);
+      if (key) chatKeys.add(key);
+    }
+    void showPwaNotification(
+      {
+        title: "Clawboard",
+        body: `${unseenAdditions.length} unread messages in ${chatKeys.size} chats.`,
+        tag: "clawboard-chat-summary",
+        url: "/u",
+      },
+      notificationsEnabled
+    );
+  }, [chatSeenByKey, hydrated, logs, notificationsEnabled, taskById, topicById, topics]);
 
   const topicTags = useMemo(() => {
     const seen = new Set<string>();

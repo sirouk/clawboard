@@ -55,7 +55,7 @@ test("setup wizard enforces token gating and persists instance settings", async 
 
   await expect(page.getByRole("heading", { name: "Instance Details" })).toBeVisible();
   await page.getByPlaceholder("Clawboard").fill("Clawboard Test Instance");
-  await page.locator("select").first().selectOption("full");
+  await page.locator("select:visible").first().selectOption("full");
 
   // Preserve the existing api base, but ensure trailing slashes are normalized.
   const apiBaseInput = page.getByPlaceholder("http://localhost:8010");

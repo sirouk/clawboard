@@ -46,19 +46,20 @@ test("messages can be edited and reallocated without impossible topic/task combi
   expect(logRes.ok()).toBeTruthy();
   const log = await logRes.json();
 
-  await page.goto("/u");
+  await page.goto(`/u/topic/${topicAId}/task/${taskAId}`);
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
-
-  await page.locator("div[role='button']").filter({ hasText: topicAName }).first().click();
-  await page.locator("div[role='button']").filter({ hasText: taskAName }).first().click();
 
   const row = page.locator(`[data-log-id="${log.id}"]`);
   await expect(row).toBeVisible();
   await expect(row.getByTestId(`message-bubble-${log.id}`)).toContainText(originalMessage);
 
-  await row.getByRole("button", { name: "Edit" }).click();
+  const editButton = row.getByRole("button", { name: "Edit", exact: true });
+  await expect(editButton).toBeVisible();
+  await editButton.click();
+  await expect(row.getByText("Edit message", { exact: false })).toBeVisible();
 
   const selects = row.locator("select");
+  await expect(selects.first()).toBeVisible();
   await expect(selects).toHaveCount(2);
   const topicSelect = selects.nth(0);
   const taskSelect = selects.nth(1);
@@ -74,10 +75,9 @@ test("messages can be edited and reallocated without impossible topic/task combi
   await expect(page.locator(`[data-log-id="${log.id}"]`)).toHaveCount(0);
 
   // Expand the new destination and confirm the edited message is present.
-  await page.locator("div[role='button']").filter({ hasText: topicBName }).first().click();
-  await page.locator("div[role='button']").filter({ hasText: taskBName }).first().click();
+  await page.goto(`/u/topic/${topicBId}/task/${taskBId}`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
   const movedRow = page.locator(`[data-log-id="${log.id}"]`);
   await expect(movedRow).toBeVisible();
   await expect(movedRow.getByTestId(`message-bubble-${log.id}`)).toContainText(updatedMessage);
 });
-

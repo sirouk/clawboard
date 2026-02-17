@@ -28,7 +28,7 @@ test("task snooze modal sets snoozedUntil and hides the task by default", async 
 
   const topicCard = page.locator(`[data-topic-card-id="${topic.id}"]`).first();
   await expect(topicCard).toBeVisible();
-  await topicCard.click();
+  await page.getByRole("button", { name: `Expand topic ${topic.name}`, exact: true }).click();
 
   const taskCard = page.locator(`[data-task-card-id="${task.id}"]`).first();
   await expect(taskCard).toBeVisible();
@@ -89,10 +89,10 @@ test("task snooze modal sets snoozedUntil and hides the task by default", async 
   await swipeLeft(`[data-task-card-id="${task.id}"]`);
 
   const snoozeReq = page.waitForRequest((req) => {
-    if (!req.url().includes("/api/tasks") || req.method() !== "POST") return false;
+    if (!req.url().endsWith(`/api/tasks/${task.id}`) || req.method() !== "PATCH") return false;
     try {
       const body = req.postDataJSON() as Record<string, unknown>;
-      return body.id === task.id && typeof body.snoozedUntil === "string";
+      return typeof body.snoozedUntil === "string";
     } catch {
       return false;
     }

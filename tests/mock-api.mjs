@@ -592,6 +592,34 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (url.pathname.startsWith("/api/tasks/")) {
+    const taskId = url.pathname.split("/").pop();
+    if (!taskId) return sendJson(res, 400, { error: "taskId required" });
+
+    if (req.method === "PATCH") {
+      const payload = await parseBody(req);
+      const task = store.tasks.find((row) => row.id === taskId);
+      if (!task) return sendJson(res, 404, { error: "Not found" });
+      Object.assign(task, payload, { updatedAt: nowIso() });
+      pushEvent("task.upserted", task);
+      return sendJson(res, 200, task);
+    }
+
+    if (req.method === "DELETE") {
+      const idx = store.tasks.findIndex((row) => row.id === taskId);
+      if (idx < 0) return sendJson(res, 200, { ok: true, deleted: false });
+      store.tasks.splice(idx, 1);
+      const now = nowIso();
+      for (const log of store.logs) {
+        if (log.taskId !== taskId) continue;
+        log.taskId = null;
+        log.updatedAt = now;
+      }
+      pushEvent("task.deleted", { id: taskId, updatedAt: now });
+      return sendJson(res, 200, { ok: true, deleted: true });
+    }
+  }
+
   if (url.pathname === "/api/log") {
     if (req.method === "GET") {
       const topicId = url.searchParams.get("topicId");

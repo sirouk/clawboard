@@ -20,7 +20,16 @@ test("topic swipe actions (snooze/archive/delete) and reorder work in unified vi
   await expect(cardB).toBeVisible();
 
   const swipeLeft = async (selector: string) => {
-    const box = await page.locator(selector).first().boundingBox();
+    const target = page.locator(selector).first();
+    await target.scrollIntoViewIfNeeded();
+    await expect(target).toBeVisible();
+    let box = await target.boundingBox();
+    if (!box) {
+      for (let i = 0; i < 5 && !box; i += 1) {
+        await page.waitForTimeout(80);
+        box = await target.boundingBox();
+      }
+    }
     expect(box).toBeTruthy();
     if (!box) return;
     const startX = box.x + box.width * 0.55;
@@ -122,8 +131,9 @@ test("topic swipe actions (snooze/archive/delete) and reorder work in unified vi
   // Swipe once more to show delete (archive action closes tray).
   await swipeLeft(`[data-topic-card-id="${t1.id}"]`);
 
-  await expect(page.getByRole("button", { name: "DELETE" })).toBeVisible();
-  await page.getByRole("button", { name: "DELETE" }).click();
+  const deleteButton = page.getByRole("button", { name: /^DELETE$/ }).first();
+  await expect(deleteButton).toBeVisible();
+  await deleteButton.click();
   const resp = await deleteResp;
   expect(resp.ok()).toBeTruthy();
   const payload = (await resp.json().catch(() => null)) as { deleted?: boolean } | null;
@@ -146,7 +156,10 @@ test("topic swipe actions (snooze/archive/delete) and reorder work in unified vi
 
   const reorderReq = page.waitForRequest((req) => req.url().includes("/api/topics/reorder") && req.method() === "POST");
 
-  const gripB = page.getByTestId(`reorder-topic-${t2.id}`);
+  const gripB = page.getByTestId(`reorder-topic-${t2.id}`).first();
+  await gripB.scrollIntoViewIfNeeded();
+  await cardC.scrollIntoViewIfNeeded();
+  await expect(gripB).toBeVisible();
   const gripBox = await gripB.boundingBox();
   const targetBox = await cardC.boundingBox();
   expect(gripBox).toBeTruthy();

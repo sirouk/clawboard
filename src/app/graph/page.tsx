@@ -1,5 +1,10 @@
+import { Suspense } from "react";
 import { ClawgraphLive } from "@/components/clawgraph-live";
 
 export default function GraphPage() {
-  return <ClawgraphLive />;
+  return (
+    <Suspense fallback={null}>
+      <ClawgraphLive />
+    </Suspense>
+  );
 }

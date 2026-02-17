@@ -5526,6 +5526,7 @@ def _search_impl(
     limit_tasks: int,
     limit_logs: int,
     allow_deep_content_scan: bool = True,
+    semantic_query: str | None = None,
 ) -> dict:
     normalized_query = str(query or "").strip().lower()
     query_tokens = _search_query_tokens(normalized_query)
@@ -5717,6 +5718,85 @@ def _search_impl(
             if entry.taskId:
                 session_task_ids.add(entry.taskId)
 
+    semantic_query_effective = _sanitize_log_text(str(semantic_query or ""))
+    semantic_query_source = "explicit" if semantic_query_effective else "query"
+    if not semantic_query_effective:
+        semantic_query_effective = _sanitize_log_text(query) or normalized_query
+
+    if not semantic_query and _is_low_signal_context_query(normalized_query):
+        semantic_hints: list[str] = []
+
+        def _append_semantic_hint(value: str | None, *, max_chars: int = 180) -> None:
+            if len(semantic_hints) >= 8:
+                return
+            cleaned = _sanitize_log_text(value or "")
+            if not cleaned:
+                return
+            clipped = _clip(cleaned, max_chars)
+            lowered = clipped.lower()
+            if any(lowered == existing.lower() for existing in semantic_hints):
+                return
+            semantic_hints.append(clipped)
+
+        scoped_context = False
+        board_topic_id, board_task_id = _parse_board_session_key(session_key or "")
+        if board_task_id:
+            board_task = task_map.get(board_task_id)
+            if board_task:
+                scoped_context = True
+                _append_semantic_hint(str(getattr(board_task, "title", "") or ""), max_chars=120)
+                board_task_topic_id = str(getattr(board_task, "topicId", "") or "").strip()
+                if board_task_topic_id:
+                    board_topic = topic_map.get(board_task_topic_id)
+                    if board_topic:
+                        _append_semantic_hint(str(getattr(board_topic, "name", "") or ""), max_chars=120)
+
+        if board_topic_id:
+            board_topic = topic_map.get(board_topic_id)
+            if board_topic:
+                scoped_context = True
+                _append_semantic_hint(str(getattr(board_topic, "name", "") or ""), max_chars=120)
+
+        if topic_id:
+            scoped_topic = topic_map.get(topic_id)
+            if scoped_topic:
+                scoped_context = True
+                _append_semantic_hint(str(getattr(scoped_topic, "name", "") or ""), max_chars=120)
+                _append_semantic_hint(str(getattr(scoped_topic, "description", "") or ""), max_chars=180)
+
+        if scoped_context and session_key:
+            hinted_rows = 0
+            for entry in logs:
+                if hinted_rows >= 4:
+                    break
+                if str(getattr(entry, "type", "") or "") != "conversation":
+                    continue
+                if _is_command_log(entry):
+                    continue
+                if not _log_matches_session(entry, session_key):
+                    continue
+                text_hint = _sanitize_log_text(str(getattr(entry, "summary", "") or ""))
+                if not text_hint:
+                    text_hint = _sanitize_log_text(str(getattr(entry, "content", "") or ""))
+                if not text_hint:
+                    continue
+                _append_semantic_hint(text_hint, max_chars=180)
+                hinted_rows += 1
+
+        if semantic_hints:
+            composed_parts: list[str] = []
+            if normalized_query:
+                composed_parts.append(normalized_query)
+            composed_parts.extend(semantic_hints)
+            composed_query = _clip(" ".join(part for part in composed_parts if part).strip(), 500)
+            if composed_query and composed_query.lower() != normalized_query:
+                semantic_query_effective = composed_query
+                semantic_query_source = "auto_scoped_low_signal"
+
+    semantic_query_tokens = _search_query_tokens(semantic_query_effective.lower()) if semantic_query_effective else set()
+    hint_query_tokens = semantic_query_tokens or query_tokens
+    hint_query_lowered = (semantic_query_effective or normalized_query).lower()
+
     # Build a lightweight log payload for semantic_search without touching deferred columns.
     # If we access entry.content here, SQLAlchemy will lazy-load it and defeat the point.
     log_payloads: list[dict[str, Any]] = []
@@ -5758,10 +5838,10 @@ def _search_impl(
         cleaned_hint_raw = _sanitize_log_text(text_hint)
         if not cleaned_hint_raw:
             return
-        if query_tokens:
+        if hint_query_tokens:
             hint_tokens = _search_query_tokens(cleaned_hint_raw)
-            overlap = len(query_tokens & hint_tokens)
-            phrase_hit = bool(normalized_query and normalized_query in cleaned_hint_raw.lower())
+            overlap = len(hint_query_tokens & hint_tokens)
+            phrase_hit = bool(hint_query_lowered and hint_query_lowered in cleaned_hint_raw.lower())
             if overlap <= 0 and not phrase_hit:
                 return
         cleaned_hint = _clip(cleaned_hint_raw, 420)
@@ -5772,7 +5852,7 @@ def _search_impl(
             return
         bucket.append(cleaned_hint)
 
-    if query_tokens:
+    if hint_query_tokens:
         for task in tasks:
             _append_topic_hint(task.topicId, str(task.title or ""))
         for entry in logs:
@@ -5795,7 +5875,7 @@ def _search_impl(
         topics_payload.append(payload)
 
     search_result = semantic_search(
-        query,
+        semantic_query_effective or query,
         topics_payload,
         [item.model_dump() for item in tasks],
         log_payloads,
@@ -6111,6 +6191,9 @@ def _search_impl(
             "requireSparseForPropagation": bool(require_sparse_for_propagation),
             "windowLogs": int(len(logs)),
             "allowDeepContentScan": bool(allow_deep_content_scan),
+            "semanticQuery": semantic_query_effective or query,
+            "semanticQueryExpanded": bool((semantic_query_effective or "").strip().lower() != normalized_query),
+            "semanticQuerySource": semantic_query_source,
         },
     }
 
@@ -6341,12 +6424,16 @@ def context(
         or normalized_query.strip().startswith("/")
         or _is_low_signal_context_query(normalized_query)
     )
+    board_topic_hint_id, board_task_hint_id = _parse_board_session_key(sessionKey or "")
+    board_session_hint = bool(board_topic_hint_id or board_task_hint_id)
     if effective_mode in {"full", "patient"}:
         run_semantic = True
     elif effective_mode == "cheap":
         run_semantic = False
     else:
-        run_semantic = (not low_signal) and _query_has_signal(normalized_query)
+        run_semantic = ((not low_signal) and _query_has_signal(normalized_query)) or (
+            low_signal and board_session_hint and bool(normalized_query.strip())
+        )
 
     now_dt = datetime.now(timezone.utc)
     data: dict[str, Any] = {}
@@ -6372,14 +6459,14 @@ def context(
         )
 
         routing_items: list[dict[str, Any]] = []
+        routing_row: SessionRoutingMemory | None = None
         if sessionKey:
             row = session.get(SessionRoutingMemory, sessionKey)
             if not row and "|" in sessionKey:
                 row = session.get(SessionRoutingMemory, sessionKey.split("|", 1)[0])
             if row and isinstance(getattr(row, "items", None), list):
+                routing_row = row
                 routing_items = list(row.items or [])[-6:]
-                data["routingMemory"] = row.model_dump()
-                layers.append("A:routing_memory")
 
         timeline: list[dict[str, Any]] = []
         if sessionKey and timelineLimit > 0:
@@ -6453,6 +6540,35 @@ def context(
             else all_tasks
         )
         tasks_by_id = {t.id: t for t in tasks}
+
+        if routing_items and allowed_space_ids is not None:
+            filtered_routing_items: list[dict[str, Any]] = []
+            for item in routing_items:
+                topic_id_hint = str(item.get("topicId") or "").strip()
+                task_id_hint = str(item.get("taskId") or "").strip()
+                allowed = False
+                if task_id_hint:
+                    candidate_task = tasks_by_id.get(task_id_hint)
+                    if candidate_task and _task_matches_allowed_spaces(candidate_task, allowed_space_ids, all_topic_by_id):
+                        allowed = True
+                if not allowed and topic_id_hint:
+                    candidate_topic = all_topic_by_id.get(topic_id_hint)
+                    if candidate_topic and _topic_matches_allowed_spaces(candidate_topic, allowed_space_ids):
+                        allowed = True
+                if not topic_id_hint and not task_id_hint:
+                    allowed = True
+                if allowed:
+                    filtered_routing_items.append(item)
+            routing_items = filtered_routing_items
+
+        if routing_items:
+            data["routingMemory"] = {
+                "sessionKey": str(getattr(routing_row, "sessionKey", "") or sessionKey or ""),
+                "items": routing_items,
+                "createdAt": getattr(routing_row, "createdAt", None),
+                "updatedAt": getattr(routing_row, "updatedAt", None),
+            }
+            layers.append("A:routing_memory")
 
         visible_topics = [t for t in topics if _topic_visible(t, now_dt)]
         pinned_topics = [t for t in visible_topics if bool(getattr(t, "pinned", False))]

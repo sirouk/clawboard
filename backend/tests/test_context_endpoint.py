@@ -227,6 +227,129 @@ class ContextEndpointTests(unittest.TestCase):
         self.assertNotIn("semantic", (payload.get("data") or {}))
         search_mock.assert_not_called()
 
+    def test_context_auto_low_signal_board_session_runs_semantic_layer(self):
+        headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+
+        topic = self.client.post("/api/topics", json={"name": "Board Auto Semantic Topic"}, headers=headers).json()
+        task = self.client.post(
+            "/api/tasks",
+            json={"topicId": topic["id"], "title": "Board Auto Semantic Task", "status": "doing"},
+            headers=headers,
+        ).json()
+
+        board_session_key = f"clawboard:task:{topic['id']}:{task['id']}"
+        mocked_semantic = {
+            "query": "resume",
+            "mode": "mock",
+            "topics": [{"id": topic["id"], "name": topic["name"], "score": 0.7}],
+            "tasks": [],
+            "logs": [],
+            "notes": [],
+        }
+
+        with patch("app.main._search_impl", return_value=mocked_semantic) as search_mock:
+            res = self.client.get(
+                "/api/context",
+                params={"q": "resume", "sessionKey": board_session_key, "mode": "auto"},
+                headers={"Host": "localhost:8010"},
+            )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertEqual(payload.get("mode"), "auto")
+        self.assertIn("B:semantic", payload.get("layers", []))
+        self.assertIn("semantic", (payload.get("data") or {}))
+        search_mock.assert_called_once()
+        kwargs = search_mock.call_args.kwargs
+        self.assertEqual(kwargs.get("session_key"), board_session_key)
+        self.assertFalse(bool(kwargs.get("allow_deep_content_scan")))
+
+    def test_context_filters_routing_memory_by_allowed_spaces(self):
+        headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        session_key = "channel:routing-space-filter"
+
+        self.client.post(
+            "/api/spaces",
+            json={"id": "space-routing-allowed", "name": "Routing Allowed"},
+            headers=headers,
+        )
+        self.client.post(
+            "/api/spaces",
+            json={"id": "space-routing-blocked", "name": "Routing Blocked"},
+            headers=headers,
+        )
+
+        allowed_topic = self.client.post(
+            "/api/topics",
+            json={"name": "Routing Allowed Topic", "spaceId": "space-routing-allowed"},
+            headers=headers,
+        ).json()
+        blocked_topic = self.client.post(
+            "/api/topics",
+            json={"name": "Routing Blocked Topic", "spaceId": "space-routing-blocked"},
+            headers=headers,
+        ).json()
+
+        allowed_task = self.client.post(
+            "/api/tasks",
+            json={"topicId": allowed_topic["id"], "title": "Routing Allowed Task", "status": "doing"},
+            headers=headers,
+        ).json()
+        blocked_task = self.client.post(
+            "/api/tasks",
+            json={"topicId": blocked_topic["id"], "title": "Routing Blocked Task", "status": "doing"},
+            headers=headers,
+        ).json()
+
+        self.client.post(
+            "/api/classifier/session-routing",
+            json={
+                "sessionKey": session_key,
+                "topicId": allowed_topic["id"],
+                "topicName": allowed_topic["name"],
+                "taskId": allowed_task["id"],
+                "taskTitle": allowed_task["title"],
+                "anchor": "allowed anchor",
+                "ts": now_iso(),
+            },
+            headers=headers,
+        )
+        self.client.post(
+            "/api/classifier/session-routing",
+            json={
+                "sessionKey": session_key,
+                "topicId": blocked_topic["id"],
+                "topicName": blocked_topic["name"],
+                "taskId": blocked_task["id"],
+                "taskTitle": blocked_task["title"],
+                "anchor": "blocked anchor",
+                "ts": now_iso(),
+            },
+            headers=headers,
+        )
+
+        res = self.client.get(
+            "/api/context",
+            params={"q": "ok", "sessionKey": session_key, "mode": "cheap", "allowedSpaceIds": "space-routing-allowed"},
+            headers={"Host": "localhost:8010"},
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertTrue(payload.get("ok"), payload)
+        self.assertIn("A:routing_memory", payload.get("layers", []))
+
+        routing = ((payload.get("data") or {}).get("routingMemory") or {})
+        items = list(routing.get("items") or [])
+        self.assertEqual(len(items), 1, items)
+
+        item = items[0]
+        self.assertEqual(str(item.get("topicId") or ""), allowed_topic["id"])
+        self.assertEqual(str(item.get("taskId") or ""), allowed_task["id"])
+
+        block = str(payload.get("block") or "")
+        self.assertIn("Routing Allowed Topic", block)
+        self.assertNotIn("Routing Blocked Topic", block)
+
     def test_patch_task_without_title(self):
         headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
         topic = self.client.post("/api/topics", json={"name": "ContextPatch Topic"}, headers=headers).json()

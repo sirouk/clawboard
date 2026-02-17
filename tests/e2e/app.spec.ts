@@ -3,12 +3,9 @@ import { test, expect } from "@playwright/test";
 test("home loads unified view", async ({ page }) => {
   await page.goto("/u");
   await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
-  const optionsToggle = page.getByRole("button", { name: /View options|Hide options/i });
+  const optionsToggle = page.getByRole("button", { name: /Board controls/i }).first();
   await expect(optionsToggle).toBeVisible();
-  const optionsLabel = ((await optionsToggle.textContent()) || "").toLowerCase();
-  if (optionsLabel.includes("view")) {
-    await optionsToggle.click();
-  }
+  await optionsToggle.click();
   await expect(page.getByRole("button", { name: /Show full messages|Hide full messages/i })).toBeVisible();
 });
 
@@ -44,8 +41,8 @@ test("graph route loads clawgraph view", async ({ page }) => {
 test("unified view expands topics and tasks", async ({ page }) => {
   await page.goto("/u");
   await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
-  await page.getByRole("button", { name: /Clawboard/ }).first().click();
+  await page.getByRole("button", { name: "Expand topic Clawboard", exact: true }).click();
   await expect(page.getByText("Ship onboarding wizard")).toBeVisible();
-  await page.getByRole("button", { name: /Ship onboarding wizard/ }).first().click();
+  await page.getByRole("button", { name: "Expand task Ship onboarding wizard", exact: true }).click();
   await expect(page.getByText("Scaffolded onboarding wizard layout", { exact: false })).toBeVisible();
 });

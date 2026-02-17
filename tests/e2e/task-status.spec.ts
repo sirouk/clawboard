@@ -20,22 +20,21 @@ test("task status selector updates and persists", async ({ page, request }) => {
 
   await page.goto("/u");
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
-  await page.locator("div[role='button']").filter({ hasText: topicName }).first().click();
+  await page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true }).click();
 
   const statusUpdate = page.waitForRequest((apiRequest) => {
-    if (!apiRequest.url().includes("/api/tasks") || apiRequest.method() !== "POST") return false;
+    if (!apiRequest.url().endsWith(`/api/tasks/${taskId}`) || apiRequest.method() !== "PATCH") return false;
     try {
       const body = apiRequest.postDataJSON() as Record<string, unknown>;
-      return body.id === taskId && body.status === "done";
+      return body.status === "done";
     } catch {
       return false;
     }
   });
 
-  await page.getByTestId(`rename-task-${taskId}`).click();
-  await page.getByTestId(`task-status-${taskId}`).selectOption("done");
+  await page.getByTestId(`task-status-trigger-${taskId}`).click();
+  await page.getByRole("menuitem", { name: "Done" }).first().click();
   await statusUpdate;
-  await expect(page.getByTestId(`task-status-${taskId}`)).toHaveCount(0);
 
   const tasksRes = await request.get(`${apiBase}/api/tasks`);
   expect(tasksRes.ok()).toBeTruthy();
@@ -72,7 +71,7 @@ test("collapsed task status dropdown is visible and keyboard navigable", async (
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/u");
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
-  await page.locator("div[role='button']").filter({ hasText: topicName }).first().click();
+  await page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true }).click();
 
   const taskCard = page.locator(`[data-task-card-id='${taskId}']`);
   await expect(taskCard).toBeVisible();
@@ -90,10 +89,10 @@ test("collapsed task status dropdown is visible and keyboard navigable", async (
   expect((menuBox?.height ?? 0) > 40).toBeTruthy();
 
   const statusUpdate = page.waitForRequest((apiRequest) => {
-    if (!apiRequest.url().includes("/api/tasks") || apiRequest.method() !== "POST") return false;
+    if (!apiRequest.url().endsWith(`/api/tasks/${taskId}`) || apiRequest.method() !== "PATCH") return false;
     try {
       const body = apiRequest.postDataJSON() as Record<string, unknown>;
-      return body.id === taskId && body.status === "blocked";
+      return body.status === "blocked";
     } catch {
       return false;
     }
@@ -147,10 +146,10 @@ test("mobile task status dropdown remains usable", async ({ page, request }) => 
   await expect(option).toBeVisible();
 
   const statusUpdate = page.waitForRequest((apiRequest) => {
-    if (!apiRequest.url().includes("/api/tasks") || apiRequest.method() !== "POST") return false;
+    if (!apiRequest.url().endsWith(`/api/tasks/${taskId}`) || apiRequest.method() !== "PATCH") return false;
     try {
       const body = apiRequest.postDataJSON() as Record<string, unknown>;
-      return body.id === taskId && body.status === "done";
+      return body.status === "done";
     } catch {
       return false;
     }

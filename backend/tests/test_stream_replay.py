@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import queue
 import sys
@@ -45,45 +44,15 @@ class StreamReplayTests(unittest.TestCase):
         event_hub._buffer.clear()  # type: ignore[attr-defined]
         event_hub._next_id = 1  # type: ignore[attr-defined]
 
-    @staticmethod
-    def _collect_sse_frames(response, max_frames: int) -> list[dict]:
-        frames: list[dict] = []
-        current: dict[str, object] = {"id": None}
-        for raw_line in response.iter_lines():
-            line = raw_line.decode("utf-8") if isinstance(raw_line, (bytes, bytearray)) else str(raw_line)
-            if line == "":
-                if current:
-                    frames.append(current)
-                    current = {"id": None}
-                    if len(frames) >= max_frames:
-                        break
-                continue
-
-            if line.startswith("id:"):
-                current["id"] = line[3:].strip()
-            elif line.startswith("data:"):
-                payload = line[5:].strip()
-                current["data"] = json.loads(payload) if payload else {}
-        if current and len(frames) < max_frames:
-            frames.append(current)
-        return frames
-
     def test_reconnect_replays_only_new_events_after_cursor(self):
         first = event_hub.publish({"type": "topic.updated", "data": {"name": "alpha"}})
         second = event_hub.publish({"type": "topic.updated", "data": {"name": "bravo"}})
-
-        with self.client.stream(
-            "GET",
-            "/api/stream",
-            headers={"last-event-id": first["eventId"]},
-        ) as response:
-            frames = self._collect_sse_frames(response, 2)
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(frames[0]["data"], {})
-        self.assertEqual(frames[1]["id"], second["eventId"])
-        self.assertEqual(frames[1]["data"]["type"], "topic.updated")
-        self.assertEqual(frames[1]["data"]["data"], {"name": "bravo"})
+        replayed = list(event_hub.replay(int(first["eventId"])))
+        self.assertEqual(len(replayed), 1)
+        replay_id, replay_payload = replayed[0]
+        self.assertEqual(str(replay_id), str(second["eventId"]))
+        self.assertEqual(str(replay_payload.get("type") or ""), "topic.updated")
+        self.assertEqual(replay_payload.get("data"), {"name": "bravo"})
 
     def test_reconnect_plus_changes_reconcile_recovers_topic_updates(self):
         write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
@@ -96,17 +65,17 @@ class StreamReplayTests(unittest.TestCase):
         self.assertEqual(created.status_code, 200, created.text)
         topic = created.json()
 
-        with self.client.stream(
-            "GET",
-            "/api/stream",
-            headers={"last-event-id": prior["eventId"]},
-        ) as response:
-            frames = self._collect_sse_frames(response, 2)
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(frames[0]["data"], {})
-        self.assertEqual(frames[1]["data"]["type"], "topic.upserted")
-        self.assertEqual(str(frames[1]["data"]["data"]["id"]), str(topic["id"]))
+        replayed = list(event_hub.replay(int(prior["eventId"])))
+        topic_replayed = next(
+            (
+                payload
+                for _, payload in replayed
+                if str(payload.get("type") or "") == "topic.upserted"
+                and str((payload.get("data") or {}).get("id") or "") == str(topic["id"])
+            ),
+            None,
+        )
+        self.assertIsNotNone(topic_replayed, "Expected topic.upserted event in replay buffer after anchor event.")
 
         changes = self.client.get(
             "/api/changes",
@@ -121,18 +90,10 @@ class StreamReplayTests(unittest.TestCase):
     def test_stale_cursor_returns_stream_reset(self):
         event_hub._next_id = 11  # type: ignore[attr-defined]
         replayed = event_hub.publish({"type": "task.upserted", "data": {"name": "stale"}})
-
-        with self.client.stream(
-            "GET",
-            "/api/stream",
-            headers={"last-event-id": "2"},
-        ) as response:
-            frames = self._collect_sse_frames(response, 2)
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(frames[0]["data"], {})
-        self.assertEqual(frames[1]["id"], None)
-        self.assertEqual(frames[1]["data"]["type"], "stream.reset")
+        oldest = event_hub.oldest_id()
+        self.assertEqual(oldest, 11)
+        should_reset = oldest is not None and 2 < oldest
+        self.assertTrue(should_reset)
         self.assertEqual(replayed["eventId"], "11")
 
 

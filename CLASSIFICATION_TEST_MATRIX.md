@@ -107,9 +107,9 @@ Automated behavior full-coverage gate status: `MET` (`77/77` covered).
 
 | ID | Expected Behavior | Automated Evidence | Status |
 |---|---|---|---|
-| SRCH-001 | `/api/context` auto + low-signal query skips semantic layer | `backend/tests/test_context_endpoint.py::test_context_auto_low_signal_skips_semantic_layer` | Covered |
+| SRCH-001 | `/api/context` auto + low-signal query skips semantic unless board-scoped | `backend/tests/test_context_endpoint.py::test_context_auto_low_signal_skips_semantic_layer`; `backend/tests/test_context_endpoint.py::test_context_auto_low_signal_board_session_runs_semantic_layer` | Covered |
 | SRCH-002 | `/api/context` full/patient force semantic layer | `backend/tests/test_context_endpoint.py::test_context_full_includes_semantic`; `backend/tests/test_context_endpoint.py::test_context_patient_includes_semantic` | Covered |
-| SRCH-003 | board-session context surfaces active board scope first | `backend/tests/test_context_endpoint.py::test_context_board_session_surfaces_active_task` | Covered |
+| SRCH-003 | board-session context surfaces active board scope first and filters routing memory by allowed spaces | `backend/tests/test_context_endpoint.py::test_context_board_session_surfaces_active_task`; `backend/tests/test_context_endpoint.py::test_context_filters_routing_memory_by_allowed_spaces` | Covered |
 | SRCH-004 | `/api/search` gate saturation returns degraded busy fallback | `backend/tests/test_search_endpoint.py::test_search_busy_falls_back_to_degraded_mode`; `backend/tests/test_search_endpoint.py::test_search_uses_degraded_fallback_when_gate_is_busy` | Covered |
 | SRCH-005 | degraded fallback disables deep scans and tightens limits | `backend/tests/test_search_endpoint.py::test_search_busy_falls_back_to_degraded_mode` | Covered |
 | SRCH-006 | default semantic filters exclude command/tool/non-semantic noise | `backend/tests/test_vector_search.py::test_semantic_search_excludes_slash_command_logs`; `backend/tests/test_vector_search.py::test_semantic_search_excludes_tool_call_logs_by_default`; `backend/tests/test_vector_search.py::test_semantic_search_excludes_system_and_import_logs_by_default`; `backend/tests/test_vector_search.py::test_semantic_search_excludes_memory_action_logs_by_default` | Covered |

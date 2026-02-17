@@ -219,9 +219,7 @@ export default function register(api) {
   const autoTopicBySession = rawConfig.autoTopicBySession === true;
   const contextAugment = rawConfig.contextAugment !== false;
   const contextMode = typeof rawConfig.contextMode === "string" && ["auto", "cheap", "full", "patient"].includes(rawConfig.contextMode) ? rawConfig.contextMode : "auto";
-  const contextFallbackMode = typeof rawConfig.contextFallbackMode === "string" && ["auto", "cheap", "full", "patient"].includes(rawConfig.contextFallbackMode) ? rawConfig.contextFallbackMode : "cheap";
   const contextFetchTimeoutMs = typeof rawConfig.contextFetchTimeoutMs === "number" && Number.isFinite(rawConfig.contextFetchTimeoutMs) ? Math.max(200, Math.min(2e4, Math.floor(rawConfig.contextFetchTimeoutMs))) : 1200;
-  const contextTotalBudgetMs = typeof rawConfig.contextTotalBudgetMs === "number" && Number.isFinite(rawConfig.contextTotalBudgetMs) ? Math.max(400, Math.min(45e3, Math.floor(rawConfig.contextTotalBudgetMs))) : 2200;
   const contextMaxChars = typeof rawConfig.contextMaxChars === "number" && Number.isFinite(rawConfig.contextMaxChars) ? Math.max(400, Math.min(12e3, Math.floor(rawConfig.contextMaxChars))) : DEFAULT_CONTEXT_MAX_CHARS;
   const contextTopicLimit = typeof rawConfig.contextTopicLimit === "number" && Number.isFinite(rawConfig.contextTopicLimit) ? Math.max(1, Math.min(8, Math.floor(rawConfig.contextTopicLimit))) : DEFAULT_CONTEXT_TOPIC_LIMIT;
   const contextTaskLimit = typeof rawConfig.contextTaskLimit === "number" && Number.isFinite(rawConfig.contextTaskLimit) ? Math.max(1, Math.min(12, Math.floor(rawConfig.contextTaskLimit))) : DEFAULT_CONTEXT_TASK_LIMIT;
@@ -790,7 +788,7 @@ export default function register(api) {
     content: "clawboard-logger startup: routing enabled",
     summary: "clawboard-logger startup",
     raw: JSON.stringify(
-      { autoTopicBySession, defaultTopicId, defaultTaskId, contextAugment, contextMode, contextFallbackMode, contextFetchTimeoutMs, contextTotalBudgetMs, contextMaxChars },
+      { autoTopicBySession, defaultTopicId, defaultTaskId, contextAugment, contextMode, contextFetchTimeoutMs, contextMaxChars },
       null,
       2
     ),
@@ -831,28 +829,6 @@ export default function register(api) {
 
   async function listLogs(params) {
     return coerceArray(await getJson("/api/log", params));
-  }
-
-  async function listTopics(sessionKey) {
-    return coerceArray(await getJson("/api/topics", { sessionKey }));
-  }
-
-  async function listTasks(topicId, sessionKey) {
-    return coerceArray(await getJson("/api/tasks", { topicId, sessionKey }));
-  }
-
-  async function semanticLookup(query, sessionKey) {
-    const data = await getJson("/api/search", {
-      q: query,
-      sessionKey,
-      includePending: 1,
-      limitTopics: Math.max(12, contextTopicLimit * 4),
-      limitTasks: Math.max(24, contextTaskLimit * 5),
-      limitLogs: Math.max(120, contextLogLimit * 30)
-    });
-    if (!data || typeof data !== "object")
-      return null;
-    return data;
   }
 
   function toolJsonResult(payload) {
@@ -1182,165 +1158,6 @@ export default function register(api) {
 
   registerAgentTools();
 
-  function extractUpstreamMemorySignals(prompt, messages) {
-    const memoryLines = [];
-    const turnLines = [];
-    const seen = /* @__PURE__ */ new Set();
-    const remember = (line, bucket) => {
-      const text = clip(normalizeWhitespace(sanitizeMessageContent(line)), 180);
-      if (!text)
-        return;
-      const key = text.toLowerCase();
-      if (seen.has(key))
-        return;
-      seen.add(key);
-      bucket.push(text);
-    };
-    const promptText = sanitizeMessageContent(prompt ?? "");
-    if (promptText) {
-      const lines = promptText.split("\n").map((line) => line.trim()).filter(Boolean);
-      const memoryHints = lines.filter((line) => /(memory|markdown|\.md\b|session|history|continuity|topic|task|retriev|vector|embed|note|curat)/i.test(line));
-      for (const line of memoryHints.slice(0, 8))
-        remember(line, memoryLines);
-    }
-    if (Array.isArray(messages)) {
-      const recent = messages.slice(-8);
-      for (const raw of recent) {
-        const item = raw ?? {};
-        const role = typeof item.role === "string" ? item.role : "turn";
-        const text = extractTextLoose(item.content);
-        if (!text)
-          continue;
-        const clean = clip(normalizeWhitespace(sanitizeMessageContent(text)), 140);
-        if (!clean)
-          continue;
-        remember(`${role}: ${clean}`, turnLines);
-      }
-    }
-    return {
-      memoryLines: memoryLines.slice(0, 6),
-      turnLines: turnLines.slice(0, 6)
-    };
-  }
-
-  function formatLogLine(entry) {
-    const who = (entry.agentId || "").toLowerCase() === "user" ? "User" : entry.agentLabel || entry.agentId || "Agent";
-    const text = sanitizeMessageContent(entry.summary || entry.content || "");
-    return `${who}: ${clip(normalizeWhitespace(text), 120)}`;
-  }
-
-  function buildContextBlock({ query, searchMode, sessionLogs, semanticLogs, topics, tasks, topicRecent, notes, upstream }) {
-    const lines = [];
-    lines.push("Clawboard continuity context:");
-    lines.push(`Current user intent: ${clip(normalizeWhitespace(query), 180)}`);
-    if (searchMode)
-      lines.push(`Retrieval mode: ${searchMode}`);
-    if (upstream.memoryLines.length > 0) {
-      lines.push("OpenClaw memory signals (sessions/markdown/recent retrieval):");
-      for (const line of upstream.memoryLines.slice(0, 5))
-        lines.push(`- ${line}`);
-    }
-    if (upstream.turnLines.length > 0) {
-      lines.push("Recent turns:");
-      for (const line of upstream.turnLines.slice(0, 4))
-        lines.push(`- ${line}`);
-    }
-    if (topics.length > 0) {
-      lines.push("Likely topics:");
-      for (const topic of topics) {
-        const desc = topic.description ? ` - ${clip(normalizeWhitespace(topic.description), 80)}` : "";
-        lines.push(`- ${topic.name}${desc}`);
-      }
-    }
-    if (tasks.length > 0) {
-      lines.push("Likely active tasks:");
-      for (const task of tasks) {
-        const status = task.status ? ` [${task.status}]` : "";
-        lines.push(`- ${task.title}${status}`);
-      }
-    }
-    const timeline = [];
-    const pushed = /* @__PURE__ */ new Set();
-    for (const item of sessionLogs.filter((entry) => entry.type === "conversation").slice(0, contextLogLimit + 2)) {
-      const key = item.id || `${item.createdAt}:${item.summary || item.content || ""}`;
-      if (pushed.has(key))
-        continue;
-      pushed.add(key);
-      timeline.push(item);
-      if (timeline.length >= contextLogLimit)
-        break;
-    }
-    for (const item of semanticLogs.slice(0, contextLogLimit + 3)) {
-      if (item.type && item.type !== "conversation")
-        continue;
-      const key = item.id || `${item.createdAt}:${item.summary || item.content || ""}`;
-      if (pushed.has(key))
-        continue;
-      pushed.add(key);
-      timeline.push({
-        id: item.id,
-        topicId: item.topicId,
-        taskId: item.taskId,
-        type: item.type ?? "conversation",
-        summary: item.summary ?? void 0,
-        content: item.content ?? void 0,
-        createdAt: item.createdAt
-      });
-      if (timeline.length >= contextLogLimit)
-        break;
-    }
-    if (timeline.length > 0) {
-      lines.push("Recent thread timeline:");
-      for (const entry of timeline)
-        lines.push(`- ${formatLogLine(entry)}`);
-    }
-    const notesByLog = /* @__PURE__ */ new Map();
-    for (const note of notes) {
-      if ("type" in note && note.type && note.type !== "note")
-        continue;
-      const key = String(note.relatedLogId ?? "");
-      if (!key)
-        continue;
-      const text = sanitizeMessageContent(note.content || note.summary || "");
-      if (!text)
-        continue;
-      const existing = notesByLog.get(key) ?? [];
-      if (existing.length < 2)
-        existing.push(clip(normalizeWhitespace(text), 140));
-      notesByLog.set(key, existing);
-    }
-    const noteLines = [];
-    for (const entry of timeline) {
-      if (!entry.id)
-        continue;
-      const attached = notesByLog.get(entry.id) ?? [];
-      for (const noteText of attached)
-        noteLines.push(`- ${formatLogLine(entry)} | note: ${noteText}`);
-      if (noteLines.length >= 4)
-        break;
-    }
-    if (noteLines.length > 0) {
-      lines.push("Curated user notes (high weight):");
-      lines.push(...noteLines.slice(0, 4));
-    }
-    const topicCtxLines = [];
-    for (const topic of topics) {
-      const recent = topicRecent[topic.id] ?? [];
-      if (recent.length === 0)
-        continue;
-      topicCtxLines.push(`Topic ${topic.name}:`);
-      for (const item of recent.slice(0, 2))
-        topicCtxLines.push(`- ${formatLogLine(item)}`);
-      if (topicCtxLines.length >= 10)
-        break;
-    }
-    if (topicCtxLines.length > 0) {
-      lines.push("Topic memory:");
-      lines.push(...topicCtxLines.slice(0, 10));
-    }
-    return clip(lines.join("\n"), contextMaxChars);
-  }
-
   async function retrieveContextViaContextApi(query, sessionKey, mode = "auto") {
     const normalizedQuery = clip(normalizeWhitespace(sanitizeMessageContent(query)), 500);
     if (!normalizedQuery)
@@ -1362,127 +1179,6 @@ export default function register(api) {
     return void 0;
   }
 
-  async function retrieveContext(query, sessionKey, upstream) {
-    const normalizedQuery = clip(normalizeWhitespace(sanitizeMessageContent(query)), 500);
-    if (!normalizedQuery || normalizedQuery.length < 6)
-      return void 0;
-    const [topicsAll, sessionLogsRaw, semantic] = await Promise.all([
-      listTopics(sessionKey),
-      sessionKey ? listLogs({
-        sessionKey,
-        type: "conversation",
-        limit: 80,
-        offset: 0
-      }) : Promise.resolve([]),
-      semanticLookup(normalizedQuery, sessionKey)
-    ]);
-    const sessionLogs = sessionLogsRaw.filter((entry) => entry.type === "conversation").sort((a, b) => String(a.createdAt || "") < String(b.createdAt || "") ? 1 : -1);
-    const topicsById = new Map(topicsAll.map((topic) => [topic.id, topic]));
-    const recentTopicOrder = [];
-    const recentTopicSet = /* @__PURE__ */ new Set();
-    const recentTaskSet = /* @__PURE__ */ new Set();
-    for (const entry of sessionLogs) {
-      if (entry.topicId && !recentTopicSet.has(entry.topicId)) {
-        recentTopicSet.add(entry.topicId);
-        recentTopicOrder.push(entry.topicId);
-      }
-      if (entry.taskId)
-        recentTaskSet.add(entry.taskId);
-    }
-    const topicScore = /* @__PURE__ */ new Map();
-    if (semantic?.topics?.length) {
-      for (const item of semantic.topics) {
-        if (!item?.id)
-          continue;
-        const base = Number(item.score || 0);
-        const noteWeight = Number(item.noteWeight || 0);
-        const boosted = base + Math.min(0.24, noteWeight);
-        topicScore.set(item.id, Math.max(topicScore.get(item.id) ?? 0, boosted));
-      }
-    }
-    for (let i = 0; i < recentTopicOrder.length; i += 1) {
-      const id = recentTopicOrder[i];
-      const continuityBoost = Math.max(0.5, 0.9 - i * 0.08);
-      topicScore.set(id, Math.max(topicScore.get(id) ?? 0, continuityBoost));
-    }
-    for (const topic of topicsAll) {
-      const lexical = lexicalSimilarity(normalizedQuery, `${topic.name} ${topic.description ?? ""}`);
-      if (lexical > 0) {
-        const next = Math.max(topicScore.get(topic.id) ?? 0, lexical * 0.8);
-        topicScore.set(topic.id, next);
-      }
-    }
-    const topics = topicsAll.map((topic) => ({ topic, score: topicScore.get(topic.id) ?? 0 })).filter((item) => item.score > 0.12 || recentTopicSet.has(item.topic.id)).sort((a, b) => b.score - a.score).slice(0, contextTopicLimit).map((item) => item.topic);
-    const semanticTaskById = new Map((semantic?.tasks ?? []).map((item) => [item.id, item]));
-    const semanticLogs = (semantic?.logs ?? []).slice(0, contextLogLimit + 4);
-    const semanticNotes = (semantic?.notes ?? []).slice(0, 120);
-    const taskBuckets = await Promise.all(
-      topics.map(async (topic) => {
-        const [tasks, logs] = await Promise.all([
-          listTasks(topic.id, sessionKey),
-          listLogs({
-            topicId: topic.id,
-            type: "conversation",
-            limit: contextLogLimit,
-            offset: 0
-          })
-        ]);
-        return { topicId: topic.id, tasks, logs };
-      })
-    );
-    const topicRecent = {};
-    const taskScored = [];
-    const relatedIds = /* @__PURE__ */ new Set();
-    for (const bucket of taskBuckets) {
-      topicRecent[bucket.topicId] = bucket.logs;
-      for (const log of bucket.logs) {
-        if (log.id)
-          relatedIds.add(log.id);
-      }
-      for (const task of bucket.tasks) {
-        const lexical = lexicalSimilarity(normalizedQuery, task.title || "");
-        const continuityBoost = recentTaskSet.has(task.id) ? 0.25 : 0;
-        const semanticScore = Number(semanticTaskById.get(task.id)?.score || 0);
-        const noteWeight = Number(semanticTaskById.get(task.id)?.noteWeight || 0);
-        taskScored.push({ task, score: lexical + continuityBoost + semanticScore + Math.min(0.24, noteWeight) });
-      }
-    }
-    for (const entry of sessionLogs.slice(0, contextLogLimit + 4)) {
-      if (entry.id)
-        relatedIds.add(entry.id);
-    }
-    for (const entry of semanticLogs) {
-      if (entry.id)
-        relatedIds.add(entry.id);
-      if (entry.topicId && topics.length < contextTopicLimit) {
-        const candidate = topicsById.get(entry.topicId);
-        if (candidate && !topics.some((item) => item.id === candidate.id))
-          topics.push(candidate);
-      }
-    }
-    const tasks = taskScored.sort((a, b) => b.score - a.score).filter((item, idx) => item.score > 0.08 || idx < contextTaskLimit).slice(0, contextTaskLimit).map((item) => item.task);
-    const relatedLogId = Array.from(relatedIds).slice(0, 50).join(",");
-    const fallbackNotes = relatedLogId.length > 0 ? await listLogs({
-      type: "note",
-      relatedLogId,
-      limit: 120,
-      offset: 0
-    }) : [];
-    const notes = [...semanticNotes, ...fallbackNotes];
-    const context = buildContextBlock({
-      query: normalizedQuery,
-      searchMode: semantic?.mode,
-      sessionLogs,
-      semanticLogs,
-      topics,
-      tasks,
-      topicRecent,
-      notes,
-      upstream
-    });
-    return context || void 0;
-  }
-
   api.on("before_agent_start", async (event, ctx) => {
     if (!contextAugment)
       return;
@@ -1494,26 +1190,9 @@ export default function register(api) {
     if (cleanInput && isClassifierPayloadText(cleanInput))
       return;
     const retrievalQuery = cleanInput && cleanInput.trim().length > 0 ? clip(cleanInput, 320) : "current conversation continuity, active topics, active tasks, and curated notes";
-    const upstream = extractUpstreamMemorySignals(event.prompt, event.messages);
-    const startedAt = nowMs();
     const sessionKeyForContext = effectiveSessionKey ?? ctx?.sessionKey;
     const primaryMode = contextMode;
-    let context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, primaryMode);
-    if (!context && contextFallbackMode !== primaryMode) {
-      const remaining = Math.max(0, contextTotalBudgetMs - (nowMs() - startedAt));
-      if (remaining > 150) {
-        context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, contextFallbackMode);
-      }
-    }
-    if (!context) {
-      const remaining = Math.max(0, contextTotalBudgetMs - (nowMs() - startedAt));
-      if (remaining > 250) {
-        context = await Promise.race([
-          retrieveContext(retrievalQuery, sessionKeyForContext, upstream),
-          sleep(remaining).then(() => void 0)
-        ]);
-      }
-    }
+    const context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, primaryMode);
     if (!context)
       return;
     const prependContext = [

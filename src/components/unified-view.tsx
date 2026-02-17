@@ -37,6 +37,15 @@ import {
   taskSessionKey,
   topicSessionKey,
 } from "@/lib/board-session";
+import {
+  CHAT_SEEN_AT_KEY,
+  UNSNOOZED_TASKS_KEY,
+  UNSNOOZED_TOPICS_KEY,
+  chatKeyForTask,
+  chatKeyForTopic,
+  parseNumberMap,
+  parseStringMap,
+} from "@/lib/attention-state";
 import { Markdown } from "@/components/markdown";
 import { AttachmentStrip, type AttachmentLike } from "@/components/attachments";
 import { queueDraftUpsert, readBestDraftValue, usePersistentDraft } from "@/lib/drafts";
@@ -69,8 +78,6 @@ const isTaskStatusFilter = (value: string): value is TaskStatusFilter =>
 
 const TOPIC_VIEW_KEY = "clawboard.unified.topicView";
 const SHOW_SNOOZED_TASKS_KEY = "clawboard.unified.showSnoozedTasks";
-const UNSNOOZED_TOPICS_KEY = "clawboard.unified.unsnoozedTopics";
-const UNSNOOZED_TASKS_KEY = "clawboard.unified.unsnoozedTasks";
 const FILTERS_DRAWER_OPEN_KEY = "clawboard.unified.filtersDrawerOpen";
 const ACTIVE_SPACE_KEY = "clawboard.space.active";
 
@@ -112,8 +119,6 @@ const TOPIC_TIMELINE_LIMIT = 4;
 type MessageDensity = "comfortable" | "compact";
 const TOPIC_FALLBACK_COLORS = ["#FF8A4A", "#4DA39E", "#6FA8FF", "#E0B35A", "#8BC17E", "#F17C8E"];
 const TASK_FALLBACK_COLORS = ["#4EA1FF", "#59C3A6", "#F4B55F", "#9A8BFF", "#F0897C", "#6FB8D8"];
-const chatKeyForTopic = (topicId: string) => `topic:${topicId}`;
-const chatKeyForTask = (taskId: string) => `task:${taskId}`;
 
 const TOPIC_ACTION_REVEAL_PX = 288;
 // New Topics/Tasks should float to the very top immediately after creation.
@@ -821,6 +826,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const activeSpaceIdStored = (useLocalStorageItem(ACTIVE_SPACE_KEY) ?? "").trim();
   const unsnoozedTopicsRaw = useLocalStorageItem(UNSNOOZED_TOPICS_KEY) ?? "{}";
   const unsnoozedTasksRaw = useLocalStorageItem(UNSNOOZED_TASKS_KEY) ?? "{}";
+  const chatSeenRaw = useLocalStorageItem(CHAT_SEEN_AT_KEY) ?? "{}";
   const [mdUp, setMdUp] = useState(() => {
     if (typeof window === "undefined") return false;
     return window.matchMedia("(min-width: 768px)").matches;
@@ -835,42 +841,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   } = useUnifiedExpansionState(initialUrlState.topics, initialUrlState.tasks);
   const { expandedTopics, expandedTasks, expandedTopicChats, mobileLayer, mobileChatTarget } = expansionState;
   const showTwoColumns = twoColumn && mdUp;
-  const unsnoozedTopicBadges = useMemo<Record<string, number>>(() => {
-    try {
-      const parsed = JSON.parse(String(unsnoozedTopicsRaw || "{}")) as unknown;
-      if (!parsed || typeof parsed !== "object") return {};
-      const raw = parsed as Record<string, unknown>;
-      const next: Record<string, number> = {};
-      for (const [key, value] of Object.entries(raw)) {
-        const id = String(key || "").trim();
-        if (!id) continue;
-        const ts = typeof value === "number" ? value : Number(value);
-        if (!Number.isFinite(ts) || ts <= 0) continue;
-        next[id] = ts;
-      }
-      return next;
-    } catch {
-      return {};
-    }
-  }, [unsnoozedTopicsRaw]);
-  const unsnoozedTaskBadges = useMemo<Record<string, number>>(() => {
-    try {
-      const parsed = JSON.parse(String(unsnoozedTasksRaw || "{}")) as unknown;
-      if (!parsed || typeof parsed !== "object") return {};
-      const raw = parsed as Record<string, unknown>;
-      const next: Record<string, number> = {};
-      for (const [key, value] of Object.entries(raw)) {
-        const id = String(key || "").trim();
-        if (!id) continue;
-        const ts = typeof value === "number" ? value : Number(value);
-        if (!Number.isFinite(ts) || ts <= 0) continue;
-        next[id] = ts;
-      }
-      return next;
-    } catch {
-      return {};
-    }
-  }, [unsnoozedTasksRaw]);
+  const unsnoozedTopicBadges = useMemo<Record<string, number>>(
+    () => parseNumberMap(unsnoozedTopicsRaw),
+    [unsnoozedTopicsRaw]
+  );
+  const unsnoozedTaskBadges = useMemo<Record<string, number>>(
+    () => parseNumberMap(unsnoozedTasksRaw),
+    [unsnoozedTasksRaw]
+  );
+  const chatSeenByKey = useMemo<Record<string, string>>(() => parseStringMap(chatSeenRaw), [chatSeenRaw]);
   const [showRaw, setShowRaw] = useState(initialUrlState.raw);
   const [messageDensity, setMessageDensity] = useState<MessageDensity>(initialUrlState.density);
   const [search, setSearch] = useState(initialUrlState.search);
@@ -1316,23 +1295,20 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return fallback;
   };
 
-  const computeChatStart = (
-    state: Record<string, number>,
-    key: string,
-    len: number,
-    initialLimit: number,
-    logs?: LogEntry[]
-  ) => {
-    const maxStart = Math.max(0, len - 1);
-    const has = Object.prototype.hasOwnProperty.call(state, key);
-    const defaultStart = computeDefaultChatStart(logs, initialLimit);
-    const raw = has ? Number(state[key]) : defaultStart;
-    const value = Number.isFinite(raw) ? Math.floor(raw) : 0;
-    if (has && value <= 0 && len > initialLimit && !chatHistoryLoadedOlderRef.current.has(key)) {
-      return clamp(defaultStart, 0, maxStart);
-    }
-    return clamp(value, 0, maxStart);
-  };
+  const computeChatStart = useCallback(
+    (state: Record<string, number>, key: string, len: number, initialLimit: number, logs?: LogEntry[]) => {
+      const maxStart = Math.max(0, len - 1);
+      const has = Object.prototype.hasOwnProperty.call(state, key);
+      const defaultStart = computeDefaultChatStart(logs, initialLimit);
+      const raw = has ? Number(state[key]) : defaultStart;
+      const value = Number.isFinite(raw) ? Math.floor(raw) : 0;
+      if (has && value <= 0 && len > initialLimit && !chatHistoryLoadedOlderRef.current.has(key)) {
+        return clamp(defaultStart, 0, maxStart);
+      }
+      return clamp(value, 0, maxStart);
+    },
+    []
+  );
 
   const loadOlderChat = useCallback(
     (chatKey: string, step: number, len: number, initialLimit: number) => {
@@ -1360,7 +1336,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         node.scrollTop = beforeTop + delta;
       });
     },
-    [setChatHistoryStarts]
+    [computeChatStart, setChatHistoryStarts]
   );
 
   const isSessionResponding = useCallback(
@@ -1861,6 +1837,63 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     return map;
   }, [logs, showRaw]);
+
+  const markChatSeen = useCallback(
+    (chatKey: string, explicitSeenAt?: string) => {
+      const key = String(chatKey ?? "").trim();
+      if (!key) return;
+
+      let seenAt = String(explicitSeenAt ?? "").trim();
+      if (!seenAt) {
+        if (key.startsWith("task:")) {
+          const taskId = key.slice("task:".length).trim();
+          const rows = taskId ? logsByTaskAll.get(taskId) ?? [] : [];
+          seenAt = rows.length > 0 ? String(rows[rows.length - 1]?.createdAt ?? "").trim() : "";
+        } else if (key.startsWith("topic:")) {
+          const topicId = key.slice("topic:".length).trim();
+          const rows = topicId ? logsByTopicAll.get(topicId) ?? [] : [];
+          for (let i = rows.length - 1; i >= 0; i -= 1) {
+            const entry = rows[i];
+            if (!entry || entry.taskId) continue;
+            seenAt = String(entry.createdAt ?? "").trim();
+            if (seenAt) break;
+          }
+        }
+      }
+      if (!seenAt) return;
+
+      const previousSeenAt = chatSeenByKey[key] ?? "";
+      if (previousSeenAt && previousSeenAt >= seenAt) return;
+      setLocalStorageItem(CHAT_SEEN_AT_KEY, JSON.stringify({ ...chatSeenByKey, [key]: seenAt }));
+    },
+    [chatSeenByKey, logsByTaskAll, logsByTopicAll]
+  );
+
+  useEffect(() => {
+    const visibleChatKeys = new Set<string>();
+    for (const taskId of expandedTasksSafe) {
+      const key = chatKeyForTask(taskId);
+      if (key) visibleChatKeys.add(key);
+    }
+    for (const topicId of expandedTopicChatsSafe) {
+      const key = chatKeyForTopic(topicId);
+      if (key) visibleChatKeys.add(key);
+    }
+
+    if (!mdUp && mobileLayer === "chat") {
+      if (mobileChatTarget?.kind === "task") {
+        const key = chatKeyForTask(mobileChatTarget.taskId);
+        if (key) visibleChatKeys.add(key);
+      } else if (mobileChatTarget?.kind === "topic") {
+        const key = chatKeyForTopic(mobileChatTarget.topicId);
+        if (key) visibleChatKeys.add(key);
+      }
+    }
+
+    for (const key of visibleChatKeys) {
+      markChatSeen(key);
+    }
+  }, [expandedTasksSafe, expandedTopicChatsSafe, markChatSeen, mdUp, mobileChatTarget, mobileLayer]);
 
   const hydrateTaskLogs = useCallback(
     async (taskId: string) => {

@@ -61,6 +61,7 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 - Idempotent ingest must tolerate retries and queue replays without duplicate logical sends.
 - Bulk search/context paths must avoid loading unbounded raw payloads.
 - Tool call action logs are excluded from semantic search and graph extraction by default.
+- When a source space is resolved, classifier/context/search must stay within effective allowed-space visibility.
 
 ## 5) Ingestion, Allocation, and Routing Deep Dive
 
@@ -73,6 +74,7 @@ This spec is code-accurate for the current repository and adds mission-grade ope
   - board scope metadata (`source.boardScope*`)
   - subagent inherited scope cache.
 - API canonicalizes scope metadata into `source.boardScope*` fields for downstream consistency.
+- Classifier board-session runs resolve allowed spaces from source scope and apply `allowedSpaceIds` on API reads/writes.
 
 ### 5.2 Idempotency and Duplicate Suppression
 
@@ -111,6 +113,7 @@ This spec is code-accurate for the current repository and adds mission-grade ope
   - channel-like sessions first
   - newest pending activity
   - larger backlog count.
+- Board-scoped sessions execute through `_classify_session_scoped()` so classification candidates and mutations stay inside allowed spaces.
 - Guardrails:
   - `CLASSIFIER_MAX_SESSIONS_PER_CYCLE`
   - `CLASSIFIER_MAX_SESSION_SECONDS`
@@ -222,9 +225,10 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 ### 7.1 `/api/context` Layering
 
 - Layer A (always): board session location, working set, routing memory, timeline.
+- Layer A and Layer B are filtered by effective allowed spaces when source space is known.
 - Layer B (conditional): semantic recall from `_search_impl`.
 - Modes:
-  - `auto`: semantic only when query has signal
+  - `auto`: semantic when query has signal; low-signal queries stay Layer A-only unless they are board-scoped (`clawboard:topic|task`) with non-empty input
   - `cheap`: disable semantic layer
   - `full`: always semantic
   - `patient`: always semantic with larger limits.
@@ -233,6 +237,7 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 
 - Uses bounded log windows and deferred content snippets.
 - Query can degrade into bounded busy fallback when concurrency gate is saturated.
+- For low-signal board-session queries, semantic query text is auto-expanded with scoped hints (topic/task/session history) before hybrid ranking.
 - Ranking signals:
   - dense vectors
   - BM25
@@ -465,9 +470,9 @@ This catalog enumerates the complete engineered scenario surface at the methodol
 
 | ID | Scenario | Expected Outcome | Primary Code Paths |
 |---|---|---|---|
-| SRCH-001 | `/api/context` auto mode low-signal query | semantic layer skipped | `backend/app/main.py` `context` low-signal gating |
+| SRCH-001 | `/api/context` auto mode low-signal query | non-board low-signal skips semantic; board-scoped low-signal with non-empty query runs semantic | `backend/app/main.py` `context` low-signal/board-session gating |
 | SRCH-002 | `/api/context` full/patient mode | semantic layer forced | `backend/app/main.py` `context` mode branch |
-| SRCH-003 | board session query | active board topic/task surfaced first in working set | `backend/app/main.py` `context` board-session promotion |
+| SRCH-003 | board session query | active board topic/task surfaced first and context layers remain visibility-scoped | `backend/app/main.py` `context` board-session promotion + allowed-space filtering |
 | SRCH-004 | search gate saturated | bounded degraded busy fallback returned | `backend/app/main.py` `/api/search` gate branch |
 | SRCH-005 | deep search disabled in fallback | no deep content scan while preserving semantic ordering | `backend/app/main.py` `/api/search` degraded limits |
 | SRCH-006 | search default filters | system/import/tool-call/memory-action/command logs excluded | `backend/app/vector_search.py` `semantic_search` filters |

@@ -45,8 +45,8 @@ test.describe("mobile task fullscreen chat", () => {
     await page.goto("/u");
     await page.getByPlaceholder("Search topics, tasks, or messages").first().waitFor();
 
-    await page.locator("div[role='button']").filter({ hasText: topicName }).first().click();
-    await page.locator("div[role='button']").filter({ hasText: taskTitle }).first().click();
+    await page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true }).click();
+    await page.getByRole("button", { name: `Expand task ${taskTitle}`, exact: true }).click();
 
     const taskCard = page.locator(`[data-task-card-id='${taskId}']`).first();
     await expect(taskCard).toBeVisible();
@@ -180,8 +180,8 @@ test.describe("mobile task fullscreen chat", () => {
     await page.goto("/u");
     await page.getByPlaceholder("Search topics, tasks, or messages").first().waitFor();
 
-    await page.locator("div[role='button']").filter({ hasText: topicName }).first().click();
-    await page.locator("div[role='button']").filter({ hasText: taskTitle }).first().click();
+    await page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true }).click();
+    await page.getByRole("button", { name: `Expand task ${taskTitle}`, exact: true }).click();
 
     const closeButton = page.getByRole("button", { name: "Close chat" });
     await expect(closeButton).toBeVisible();
@@ -222,8 +222,8 @@ test.describe("mobile task fullscreen chat", () => {
       .first()
       .waitFor();
 
-    await page.locator("div[role='button']").filter({ hasText: topicName }).first().click();
-    await page.locator("div[role='button']").filter({ hasText: taskTitle }).first().click();
+    await page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true }).click();
+    await page.getByRole("button", { name: `Expand task ${taskTitle}`, exact: true }).click();
 
     const closeButton = page.getByRole("button", { name: "Close chat" });
     await expect(closeButton).toBeVisible();
