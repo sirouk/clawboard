@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Badge, Button, Card, CardHeader, SearchInput } from "@/components/ui";
 import { useDataStore } from "@/components/data-provider";
 import { apiFetch } from "@/lib/api";
@@ -15,8 +15,9 @@ import {
 } from "@/lib/clawgraph";
 import { cn } from "@/lib/cn";
 import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam } from "@/lib/url";
-import type { Task, Topic } from "@/lib/types";
+import type { Space, Task, Topic } from "@/lib/types";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
+import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 
 const EDGE_COLORS: Record<string, string> = {
   has_task: "rgba(78,161,255,0.72)",
@@ -126,6 +127,42 @@ function slug(value: string) {
     .replace(/^-+|-+$/g, "") || "unknown";
 }
 
+function deriveSpaceName(spaceId: string) {
+  const normalized = String(spaceId || "").trim();
+  if (!normalized || normalized === "space-default") return "Global";
+  const base = normalized.replace(/^space[-_]+/i, "");
+  const withSpaces = base.replace(/[-_]+/g, " ").trim();
+  if (!withSpaces) return normalized;
+  return withSpaces.replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function spaceIdFromTagLabel(value: string) {
+  let text = String(value ?? "").trim().toLowerCase();
+  if (!text) return null;
+  if (text.startsWith("system:")) return null;
+  if (text.startsWith("space:")) text = text.split(":", 2)[1]?.trim() ?? "";
+  const slugged = text
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!slugged || slugged === "default" || slugged === "global" || slugged === "all" || slugged === "all-spaces") {
+    return null;
+  }
+  return `space-${slugged}`;
+}
+
+function topicSpaceIds(topic: Pick<Topic, "spaceId" | "tags"> | null | undefined) {
+  const out = new Set<string>();
+  for (const rawTag of topic?.tags ?? []) {
+    const fromTag = spaceIdFromTagLabel(String(rawTag ?? ""));
+    if (fromTag) out.add(fromTag);
+  }
+  const primary = String(topic?.spaceId ?? "").trim();
+  if (primary && primary !== "space-default") out.add(primary);
+  return Array.from(out);
+}
+
 function edgeThresholdAtPercent(edges: ClawgraphEdge[], percent: number) {
   if (edges.length === 0) return 0;
   const weights = edges.map((edge) => edge.weight).sort((a, b) => a - b);
@@ -137,7 +174,12 @@ function edgeThresholdAtPercent(edges: ClawgraphEdge[], percent: number) {
 
 export function ClawgraphLive() {
   const router = useRouter();
-  const { topics, tasks, logs } = useDataStore();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const { spaces: storeSpaces, topics: storeTopics, tasks: storeTasks, logs: storeLogs, hydrated } = useDataStore();
+  const activeSpaceId = (useLocalStorageItem("clawboard.space.active") ?? "").trim();
+  const spaceFromUrl = (searchParams.get("space") ?? "").trim();
+  const spaceQueryInitializedRef = useRef(false);
   const [query, setQuery] = useState("");
   const [strengthPercent, setStrengthPercent] = useState(75);
   const [showEntityLinks, setShowEntityLinks] = useState(false);
@@ -157,6 +199,145 @@ export function ClawgraphLive() {
   const [viewportSize, setViewportSize] = useState({ width: 1080, height: 680 });
   const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
 
+  const spaces = useMemo(() => {
+    const byId = new Map<string, Space>();
+    const topicSpaceIdsSet = new Set<string>();
+    for (const topic of storeTopics) {
+      for (const id of topicSpaceIds(topic)) topicSpaceIdsSet.add(id);
+    }
+    for (const space of storeSpaces) {
+      const id = String(space?.id ?? "").trim();
+      if (!id) continue;
+      if (id === "space-default") continue;
+      if (!topicSpaceIdsSet.has(id)) continue;
+      byId.set(id, space);
+    }
+    for (const topic of storeTopics) {
+      for (const id of topicSpaceIds(topic)) {
+        if (byId.has(id)) continue;
+        byId.set(id, {
+          id,
+          name: deriveSpaceName(id),
+          color: null,
+          connectivity: {},
+          createdAt: "",
+          updatedAt: "",
+        });
+      }
+    }
+    const out = Array.from(byId.values());
+    out.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    return out;
+  }, [storeSpaces, storeTopics]);
+
+  const selectedSpaceId = useMemo(() => {
+    if (!activeSpaceId) return "";
+    if (spaces.some((space) => space.id === activeSpaceId)) return activeSpaceId;
+    return "";
+  }, [activeSpaceId, spaces]);
+
+  useEffect(() => {
+    if (spaceQueryInitializedRef.current) return;
+    spaceQueryInitializedRef.current = true;
+    if (!spaceFromUrl) return;
+    if (spaceFromUrl === activeSpaceId) return;
+    setLocalStorageItem("clawboard.space.active", spaceFromUrl);
+  }, [activeSpaceId, spaceFromUrl]);
+  useEffect(() => {
+    if (!hydrated) return;
+    if (!activeSpaceId) return;
+    if (selectedSpaceId) return;
+    setLocalStorageItem("clawboard.space.active", "");
+  }, [activeSpaceId, hydrated, selectedSpaceId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (pathname !== "/graph") return;
+    if (spaceFromUrl && !activeSpaceId && !selectedSpaceId) return;
+    const url = new URL(window.location.href);
+    const current = (url.searchParams.get("space") ?? "").trim();
+    if (selectedSpaceId) {
+      if (current === selectedSpaceId) return;
+      url.searchParams.set("space", selectedSpaceId);
+    } else {
+      if (!current) return;
+      url.searchParams.delete("space");
+    }
+    const query = url.searchParams.toString();
+    const nextUrl = `${url.pathname}${query ? `?${query}` : ""}${url.hash || ""}`;
+    window.history.replaceState(window.history.state, "", nextUrl);
+  }, [activeSpaceId, pathname, selectedSpaceId, spaceFromUrl]);
+
+  const allowedSpaceIds = useMemo(() => {
+    if (spaces.length === 0) return [] as string[];
+    if (!selectedSpaceId) return [] as string[];
+    const source = spaces.find((space) => space.id === selectedSpaceId);
+    const connectivity =
+      source && source.connectivity && typeof source.connectivity === "object" ? source.connectivity : {};
+    const out = [selectedSpaceId];
+    for (const candidate of spaces) {
+      if (candidate.id === selectedSpaceId) continue;
+      const enabled = Object.prototype.hasOwnProperty.call(connectivity, candidate.id)
+        ? Boolean(connectivity[candidate.id])
+        : true;
+      if (enabled) out.push(candidate.id);
+    }
+    return out;
+  }, [selectedSpaceId, spaces]);
+
+  const allowedSpaceSet = useMemo(() => new Set(allowedSpaceIds), [allowedSpaceIds]);
+
+  const topics = useMemo(() => {
+    if (!selectedSpaceId || allowedSpaceSet.size === 0) return storeTopics;
+    return storeTopics.filter((topic) => topicSpaceIds(topic).some((spaceId) => allowedSpaceSet.has(spaceId)));
+  }, [allowedSpaceSet, selectedSpaceId, storeTopics]);
+
+  const topicById = useMemo(() => new Map(topics.map((topic) => [topic.id, topic])), [topics]);
+
+  const tasks = useMemo(() => {
+    if (!selectedSpaceId || allowedSpaceSet.size === 0) return storeTasks;
+    return storeTasks.filter((task) => {
+      const directSpace = String(task.spaceId ?? "").trim();
+      if (directSpace) return allowedSpaceSet.has(directSpace);
+      if (task.topicId) {
+        const topic = topicById.get(task.topicId);
+        if (!topic) return false;
+        return topicSpaceIds(topic).some((spaceId) => allowedSpaceSet.has(spaceId));
+      }
+      return false;
+    });
+  }, [allowedSpaceSet, selectedSpaceId, storeTasks, topicById]);
+
+  const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+
+  const logs = useMemo(() => {
+    if (!selectedSpaceId || allowedSpaceSet.size === 0) return storeLogs;
+    return storeLogs.filter((entry) => {
+      const directSpace = String(entry.spaceId ?? "").trim();
+      if (directSpace) return allowedSpaceSet.has(directSpace);
+      if (entry.taskId) {
+        const task = taskById.get(entry.taskId);
+        if (task) {
+          const taskSpace = String(task.spaceId ?? "").trim();
+          if (taskSpace) return allowedSpaceSet.has(taskSpace);
+          if (task.topicId) {
+            const parent = topicById.get(task.topicId);
+            if (parent) {
+              return topicSpaceIds(parent).some((spaceId) => allowedSpaceSet.has(spaceId));
+            }
+          }
+        }
+      }
+      if (entry.topicId) {
+        const topic = topicById.get(entry.topicId);
+        if (topic) {
+          return topicSpaceIds(topic).some((spaceId) => allowedSpaceSet.has(spaceId));
+        }
+      }
+      return false;
+    });
+  }, [allowedSpaceSet, selectedSpaceId, storeLogs, taskById, topicById]);
+
   const localGraph = useMemo(
     () =>
       buildClawgraphFromData(topics, tasks, logs, {
@@ -175,12 +356,14 @@ export function ClawgraphLive() {
       limitLogs: "3200",
       includePending: "true",
     });
+    if (selectedSpaceId) params.set("spaceId", selectedSpaceId);
+    if (allowedSpaceIds.length > 0) params.set("allowedSpaceIds", allowedSpaceIds.join(","));
     const res = await apiFetch(`/api/clawgraph?${params.toString()}`, { cache: "no-store" });
     if (!res.ok) throw new Error(`status_${res.status}`);
     const payload = (await res.json()) as ClawgraphData;
     if (!payload || !Array.isArray(payload.nodes) || !Array.isArray(payload.edges)) throw new Error("invalid_graph");
     return payload;
-  }, []);
+  }, [allowedSpaceIds, selectedSpaceId]);
 
   useEffect(() => {
     if (graphMode !== "pending") return;
@@ -373,6 +556,8 @@ export function ClawgraphLive() {
   }, [logs, tasks, topics]);
   const semanticSearch = useSemanticSearch({
     query: normalizedQuery,
+    spaceId: selectedSpaceId || undefined,
+    allowedSpaceIds,
     includePending: true,
     limitTopics: Math.min(Math.max(topics.length, 120), 500),
     limitTasks: Math.min(Math.max(tasks.length, 240), 1200),

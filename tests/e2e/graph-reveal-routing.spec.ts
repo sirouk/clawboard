@@ -24,12 +24,18 @@ test("reveal deep-links surface archived topics and done tasks in board", async 
   expect(createTask.ok()).toBeTruthy();
 
   await page.goto(`/u?topic=${encodeURIComponent(topicId)}&task=${encodeURIComponent(taskId)}`);
-  await page.getByPlaceholder("Search topics, tasks, or messages").waitFor();
+  await page
+    .locator('input[placeholder="Search topics, tasks, or messages"]:visible')
+    .first()
+    .waitFor();
   await expect(page.locator(`[data-topic-card-id='${topicId}']`)).toHaveCount(0);
   await expect(page.locator(`[data-task-card-id='${taskId}']`)).toHaveCount(0);
 
   await page.goto(`/u?topic=${encodeURIComponent(topicId)}&task=${encodeURIComponent(taskId)}&reveal=1`);
-  await page.getByPlaceholder("Search topics, tasks, or messages").waitFor();
+  await page
+    .locator('input[placeholder="Search topics, tasks, or messages"]:visible')
+    .first()
+    .waitFor();
 
   const topicCard = page.locator(`[data-topic-card-id='${topicId}']`).first();
   const taskCard = page.locator(`[data-task-card-id='${taskId}']`).first();

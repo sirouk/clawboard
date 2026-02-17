@@ -1107,13 +1107,13 @@ export default function register(api: OpenClawPluginApi) {
     return coerceLogs(data);
   }
 
-  async function listTopics() {
-    const data = await getJson("/api/topics");
+  async function listTopics(sessionKey?: string) {
+    const data = await getJson("/api/topics", { sessionKey });
     return coerceTopics(data);
   }
 
-  async function listTasks(topicId: string) {
-    const data = await getJson("/api/tasks", { topicId });
+  async function listTasks(topicId: string, sessionKey?: string) {
+    const data = await getJson("/api/tasks", { topicId, sessionKey });
     return coerceTasks(data);
   }
 
@@ -1674,7 +1674,7 @@ export default function register(api: OpenClawPluginApi) {
     if (!normalizedQuery || normalizedQuery.length < 6) return undefined;
 
     const [topicsAll, sessionLogsRaw, semantic] = await Promise.all([
-      listTopics(),
+      listTopics(sessionKey),
       sessionKey
         ? listLogs({
             sessionKey,
@@ -1740,7 +1740,7 @@ export default function register(api: OpenClawPluginApi) {
     const taskBuckets = await Promise.all(
       topics.map(async (topic) => {
         const [tasks, logs] = await Promise.all([
-          listTasks(topic.id),
+          listTasks(topic.id, sessionKey),
           listLogs({
             topicId: topic.id,
             type: "conversation",

@@ -2,6 +2,7 @@ export type IntegrationLevel = "manual" | "write" | "full";
 
 export type Topic = {
   id: string;
+  spaceId?: string;
   name: string;
   createdBy?: "user" | "classifier" | "import";
   sortIndex?: number;
@@ -22,6 +23,7 @@ export type TaskStatus = "todo" | "doing" | "blocked" | "done";
 
 export type Task = {
   id: string;
+  spaceId?: string;
   topicId: string | null;
   title: string;
   sortIndex?: number;
@@ -52,6 +54,7 @@ export type Draft = {
 
 export type LogEntry = {
   id: string;
+  spaceId?: string;
   topicId: string | null;
   taskId?: string | null;
   relatedLogId?: string | null;
@@ -76,6 +79,7 @@ export type LogEntry = {
     messageId?: string;
     requestId?: string;
     channel?: string;
+    boardScopeSpaceId?: string;
     boardScopeTopicId?: string;
     boardScopeTaskId?: string;
     boardScopeKind?: "topic" | "task";
@@ -92,6 +96,15 @@ export type LogEntry = {
 export type InstanceConfig = {
   title: string;
   integrationLevel: IntegrationLevel;
+  updatedAt: string;
+};
+
+export type Space = {
+  id: string;
+  name: string;
+  color?: string | null;
+  connectivity?: Record<string, boolean>;
+  createdAt: string;
   updatedAt: string;
 };
 

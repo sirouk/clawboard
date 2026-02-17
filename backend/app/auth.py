@@ -7,7 +7,7 @@ from fastapi import Header, HTTPException, Request, status
 
 
 def _configured_token() -> str | None:
-    token = os.getenv("CLAWBOARD_TOKEN", "").strip()
+    token = os.getenv("CLAWBOARD_TOKEN", "").strip() or os.getenv("PORTAL_TOKEN", "").strip()
     return token or None
 
 
@@ -16,19 +16,26 @@ def _validate_token(value: str | None) -> None:
     if not configured:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Server token is not configured. Set CLAWBOARD_TOKEN.",
+            detail="Server misconfigured: missing CLAWBOARD_TOKEN (or PORTAL_TOKEN)",
         )
     provided = (value or "").strip()
     if not provided or not secrets.compare_digest(provided, configured):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized: invalid or missing X-Clawboard-Token")
+
+
+def _first_forwarded_hop(value: str) -> str:
+    if not value:
+        return ""
+    candidate = value.split(",")[0].strip()
+    return candidate
 
 
 def _client_ip(request: Request) -> str:
     trust_proxy = os.getenv("CLAWBOARD_TRUST_PROXY", "0").strip() == "1"
     if trust_proxy:
-        forwarded = request.headers.get("x-forwarded-for", "").strip()
+        forwarded = _first_forwarded_hop(request.headers.get("x-forwarded-for", ""))
         if forwarded:
-            return forwarded.split(",")[0].strip()
+            return forwarded
         real_ip = request.headers.get("x-real-ip", "").strip()
         if real_ip:
             return real_ip

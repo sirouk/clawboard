@@ -45,7 +45,7 @@ function isEntityId(prefix, value) {
   return /^[a-zA-Z0-9][a-zA-Z0-9-]{2,200}$/.test(trimmed);
 }
 
-function isBoardSessionKey(sessionKey) {
+export function isBoardSessionKey(sessionKey) {
   if (typeof sessionKey !== "string") return false;
   return /clawboard:(topic|task):topic-/.test(sessionKey);
 }

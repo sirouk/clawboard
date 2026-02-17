@@ -22,8 +22,29 @@ class InstanceConfig(SQLModel, table=True):
     )
 
 
+class Space(SQLModel, table=True):
+    id: str = Field(primary_key=True, description="Space ID.")
+    name: str = Field(description="Space name.")
+    color: Optional[str] = Field(
+        default=None,
+        description="Optional space display color in #RRGGBB format.",
+    )
+    connectivity: Dict[str, bool] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON),
+        description="Outbound connectivity toggles by target space id (missing => enabled).",
+    )
+    createdAt: str = Field(description="ISO timestamp when the space was created.")
+    updatedAt: str = Field(description="ISO timestamp of last update.")
+
+
 class Topic(SQLModel, table=True):
     id: str = Field(primary_key=True, description="Topic ID.")
+    spaceId: str = Field(
+        default="space-default",
+        foreign_key="space.id",
+        description="Owning space ID.",
+    )
     name: str = Field(description="Topic name.")
     createdBy: str = Field(
         default="user",
@@ -84,6 +105,11 @@ class Topic(SQLModel, table=True):
 
 class Task(SQLModel, table=True):
     id: str = Field(primary_key=True, description="Task ID.")
+    spaceId: str = Field(
+        default="space-default",
+        foreign_key="space.id",
+        description="Owning space ID.",
+    )
     topicId: Optional[str] = Field(
         default=None,
         foreign_key="topic.id",
@@ -140,6 +166,11 @@ class Task(SQLModel, table=True):
 
 class LogEntry(SQLModel, table=True):
     id: str = Field(primary_key=True, description="Log entry ID.")
+    spaceId: str = Field(
+        default="space-default",
+        foreign_key="space.id",
+        description="Owning space ID.",
+    )
     topicId: Optional[str] = Field(
         default=None,
         foreign_key="topic.id",

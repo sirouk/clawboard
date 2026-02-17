@@ -86,8 +86,45 @@ class InstanceOut(ModelBase):
     updatedAt: str = Field(description="ISO timestamp of the last config update.", examples=["2026-02-03T20:05:00.000Z"])
 
 
+class SpaceOut(ModelBase):
+    id: str = Field(description="Space ID.", examples=["space-default"])
+    name: str = Field(description="Space name.", examples=["Default"])
+    color: Optional[str] = Field(description="Optional space color #RRGGBB.", examples=["#FF8A4A"])
+    connectivity: Dict[str, bool] = Field(
+        default_factory=dict,
+        description="Outbound connectivity toggles by target space id (missing => enabled).",
+        examples=[{"space-work": True, "space-personal": False}],
+    )
+    createdAt: str = Field(description="ISO timestamp when the space was created.", examples=["2026-02-03T20:05:00.000Z"])
+    updatedAt: str = Field(description="ISO timestamp of last update.", examples=["2026-02-03T20:05:00.000Z"])
+
+
+class SpaceUpsert(BaseModel):
+    id: Optional[str] = Field(default=None, description="Space ID (omit to create).", examples=["space-work"])
+    name: str = Field(description="Space name.", examples=["Work"])
+    color: Optional[str] = Field(default=None, description="Optional space color #RRGGBB.", examples=["#4EA1FF"])
+
+
+class SpaceConnectivityPatch(BaseModel):
+    connectivity: Dict[str, bool] = Field(
+        default_factory=dict,
+        description="Outbound connectivity toggles by target space id.",
+        examples=[{"space-work": True, "space-personal": False}],
+    )
+
+
+class SpaceAllowedResponse(BaseModel):
+    spaceId: str = Field(description="Resolved source space id.", examples=["space-default"])
+    allowedSpaceIds: List[str] = Field(
+        default_factory=list,
+        description="Space ids that are currently visible/retrievable from the source space.",
+        examples=[["space-default", "space-work"]],
+    )
+
+
 class TopicOut(ModelBase):
     id: str = Field(description="Topic ID.", examples=["topic-1"])
+    spaceId: str = Field(description="Owning space ID.", examples=["space-default"])
     name: str = Field(description="Topic name.", examples=["Clawboard"])
     createdBy: Optional[str] = Field(
         description="Creation source (user | classifier | import).",
@@ -121,6 +158,7 @@ class TopicOut(ModelBase):
 
 class TaskOut(ModelBase):
     id: str = Field(description="Task ID.", examples=["task-1"])
+    spaceId: str = Field(description="Owning space ID.", examples=["space-default"])
     topicId: Optional[str] = Field(description="Parent topic ID (nullable).", examples=["topic-1"])
     title: str = Field(description="Task title.", examples=["Ship onboarding wizard"])
     sortIndex: int = Field(description="Manual ordering index within the topic (lower comes first).", examples=[0])
@@ -150,6 +188,7 @@ class TaskOut(ModelBase):
 
 class LogOut(ModelBase):
     id: str = Field(description="Log entry ID.", examples=["log-1"])
+    spaceId: str = Field(description="Owning space ID.", examples=["space-default"])
     topicId: Optional[str] = Field(description="Associated topic ID (nullable).", examples=["topic-1"])
     taskId: Optional[str] = Field(description="Associated task ID (nullable).", examples=["task-1"])
     relatedLogId: Optional[str] = Field(description="Link to original log (for notes).", examples=["log-12"])
@@ -181,6 +220,7 @@ class LogOutLite(ModelBase):
     """Lightweight log shape for high-frequency polling (classifier, live UI lists)."""
 
     id: str = Field(description="Log entry ID.", examples=["log-1"])
+    spaceId: str = Field(description="Owning space ID.", examples=["space-default"])
     topicId: Optional[str] = Field(description="Associated topic ID (nullable).", examples=["topic-1"])
     taskId: Optional[str] = Field(description="Associated task ID (nullable).", examples=["task-1"])
     relatedLogId: Optional[str] = Field(description="Link to original log (for notes).", examples=["log-12"])
@@ -223,6 +263,7 @@ class TopicUpsert(BaseModel):
         }
     )
     id: Optional[str] = Field(default=None, description="Topic ID (omit to create).", examples=["topic-1"])
+    spaceId: Optional[str] = Field(default=None, description="Owning space ID.", examples=["space-default"])
     name: str = Field(description="Topic name.", examples=["Clawboard"])
     color: Optional[str] = Field(default=None, description="Optional topic color #RRGGBB.", examples=["#FF8A4A"])
     description: Optional[str] = Field(default=None, description="Topic description.", examples=["Product work."])
@@ -253,6 +294,7 @@ class TaskUpsert(BaseModel):
         }
     )
     id: Optional[str] = Field(default=None, description="Task ID (omit to create).", examples=["task-1"])
+    spaceId: Optional[str] = Field(default=None, description="Owning space ID.", examples=["space-default"])
     topicId: Optional[str] = Field(default=None, description="Parent topic ID.", examples=["topic-1"])
     title: str = Field(description="Task title.", examples=["Ship onboarding wizard"])
     color: Optional[str] = Field(default=None, description="Optional task color #RRGGBB.", examples=["#4EA1FF"])
@@ -322,6 +364,7 @@ class LogAppend(BaseModel):
             }
         }
     )
+    spaceId: Optional[str] = Field(default=None, description="Owning space ID override.", examples=["space-default"])
     topicId: Optional[str] = Field(default=None, description="Topic ID (nullable).", examples=["topic-1"])
     taskId: Optional[str] = Field(default=None, description="Task ID (nullable).", examples=["task-1"])
     relatedLogId: Optional[str] = Field(default=None, description="Link to original log (for notes).", examples=["log-12"])
@@ -362,6 +405,7 @@ class LogAppend(BaseModel):
 class LogPatch(BaseModel):
     """Patch fields on an existing log entry (idempotent reclassification)."""
 
+    spaceId: Optional[str] = Field(default=None, description="Owning space ID.")
     topicId: Optional[str] = Field(default=None, description="Topic ID.")
     taskId: Optional[str] = Field(default=None, description="Task ID.")
     relatedLogId: Optional[str] = Field(default=None, description="Related log ID.")
@@ -376,6 +420,7 @@ class LogPatch(BaseModel):
 class TopicPatch(BaseModel):
     """Patch fields on an existing topic (partial update)."""
 
+    spaceId: Optional[str] = Field(default=None, description="Owning space ID.")
     name: Optional[str] = Field(default=None, description="Topic name.")
     color: Optional[str] = Field(default=None, description="Optional topic color #RRGGBB.")
     description: Optional[str] = Field(default=None, description="Topic description.")
@@ -392,6 +437,7 @@ class TopicPatch(BaseModel):
 class TaskPatch(BaseModel):
     """Patch fields on an existing task (partial update)."""
 
+    spaceId: Optional[str] = Field(default=None, description="Owning space ID.")
     title: Optional[str] = Field(default=None, description="Task title.")
     color: Optional[str] = Field(default=None, description="Optional task color #RRGGBB.")
     status: Optional[str] = Field(default=None, description="Task status (todo | doing | blocked | done).")
@@ -443,6 +489,7 @@ class DraftOut(ModelBase):
 
 
 class ChangesResponse(BaseModel):
+    spaces: List[SpaceOut] = Field(description="Spaces updated since timestamp.")
     topics: List[TopicOut] = Field(description="Topics updated since timestamp.")
     tasks: List[TaskOut] = Field(description="Tasks updated since timestamp.")
     logs: List[LogOutLite] = Field(description="Logs created since timestamp (lightweight, excludes raw).")
@@ -470,6 +517,11 @@ class OpenClawChatRequest(BaseModel):
         examples=["clawboard:thread-123"],
         min_length=1,
         max_length=240,
+    )
+    spaceId: Optional[str] = Field(
+        default=None,
+        description="Optional board source space id to scope context/retrieval (e.g. space-work).",
+        examples=["space-default"],
     )
     message: str = Field(
         ...,

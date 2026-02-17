@@ -33,14 +33,14 @@ export function PinToggleGeneric({
     const endpoint = itemType === "topic" ? "/api/topics" : "/api/tasks";
     
     // Prepare the payload - for topics we need to include the name
-    const payload: any = {
+    const payload = {
       ...item,
       pinned: !item.pinned,
-    };
+    } as Topic | Task;
     
     // For topics, ensure name is included
     if (itemType === "topic" && 'name' in item && item.name) {
-      payload.name = item.name;
+      (payload as Topic).name = item.name;
     }
 
     const res = await apiFetch(endpoint, {

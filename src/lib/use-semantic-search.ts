@@ -8,6 +8,8 @@ type SemanticSearchParams = {
   query: string;
   topicId?: string | null;
   sessionKey?: string | null;
+  spaceId?: string | null;
+  allowedSpaceIds?: string[] | null;
   includePending?: boolean;
   limitTopics?: number;
   limitTasks?: number;
@@ -29,6 +31,8 @@ export function useSemanticSearch({
   query,
   topicId,
   sessionKey,
+  spaceId,
+  allowedSpaceIds,
   includePending = true,
   limitTopics = 80,
   limitTasks = 160,
@@ -59,8 +63,24 @@ export function useSemanticSearch({
     params.set("limitLogs", String(logsValue));
     if (topicId) params.set("topicId", topicId);
     if (sessionKey) params.set("sessionKey", sessionKey);
+    if (spaceId) params.set("spaceId", spaceId);
+    if (allowedSpaceIds && allowedSpaceIds.length > 0) {
+      params.set("allowedSpaceIds", allowedSpaceIds.join(","));
+    }
     return `/api/search?${params.toString()}`;
-  }, [enabled, includePending, limitLogs, limitTasks, limitTopics, minQueryLength, sessionKey, topicId, trimmedQuery]);
+  }, [
+    allowedSpaceIds,
+    enabled,
+    includePending,
+    limitLogs,
+    limitTasks,
+    limitTopics,
+    minQueryLength,
+    sessionKey,
+    spaceId,
+    topicId,
+    trimmedQuery,
+  ]);
 
   useEffect(() => {
     if (!requestUrl) {

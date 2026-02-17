@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createTask, getData } from "../../../../lib/db";
 import { requireToken } from "../../../../lib/auth";
 import { z } from "zod";
+import { toFastApiDetail } from "../../../../lib/compat_api_validation";
 
 const StatusSchema = z.enum(["todo", "doing", "blocked", "done"]);
 const errorCode = (err: unknown): string | null => {
@@ -16,8 +17,7 @@ const CreateTaskSchema = z
     title: z.string().min(1).max(500),
     status: StatusSchema.optional(),
     color: z.string().optional().nullable()
-  })
-  .strict();
+  });
 
 export async function GET(req: NextRequest) {
   const authError = requireToken(req);
@@ -26,17 +26,9 @@ export async function GET(req: NextRequest) {
   const data = await getData();
   const { searchParams } = new URL(req.url);
   const topicId = searchParams.get("topicId");
-  const status = searchParams.get("status");
 
   let tasks = data.tasks;
   if (topicId) tasks = tasks.filter((t) => t.topicId === topicId);
-  if (status) {
-    const parsed = StatusSchema.safeParse(status);
-    if (!parsed.success) {
-      return NextResponse.json({ error: "Invalid status" }, { status: 400 });
-    }
-    tasks = tasks.filter((t) => t.status === parsed.data);
-  }
 
   // Newest updated first by default
   tasks = tasks.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -54,14 +46,14 @@ export async function POST(req: NextRequest) {
     body = await req.json();
   } catch {
     return NextResponse.json(
-      { error: "Invalid JSON body" },
+      { detail: "Invalid JSON body" },
       { status: 400 }
     );
   }
 
   const parsed = CreateTaskSchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    return NextResponse.json({ detail: toFastApiDetail(parsed.error) }, { status: 422 });
   }
 
   try {
@@ -72,13 +64,13 @@ export async function POST(req: NextRequest) {
       color: parsed.data.color ?? undefined
     });
     // Match FastAPI contract: return the created task object directly.
-    return NextResponse.json(task, { status: 201 });
+    return NextResponse.json(task);
   } catch (err: unknown) {
     // Prisma FK violation, etc.
     const code = errorCode(err);
     if (code === "P2003") {
-      return NextResponse.json({ error: "Invalid topicId" }, { status: 400 });
+      return NextResponse.json({ detail: "Invalid topicId" }, { status: 400 });
     }
-    return NextResponse.json({ error: "Failed to create task" }, { status: 500 });
+    return NextResponse.json({ detail: "Failed to create task" }, { status: 500 });
   }
 }

@@ -8,13 +8,6 @@ export type BoardSessionRoute =
   | { kind: "topic"; topicId: string }
   | { kind: "task"; topicId: string; taskId: string };
 
-function isEntityId(prefix: "topic" | "task", value: string) {
-  const trimmed = String(value ?? "").trim();
-  if (!trimmed.startsWith(`${prefix}-`)) return false;
-  // IDs are UUID-ish (`topic-<uuid>`, `task-<uuid>`). Keep it permissive but URL-safe.
-  return /^[a-zA-Z0-9][a-zA-Z0-9-]{2,200}$/.test(trimmed);
-}
-
 /**
  * Returns true if the session key is an explicit Clawboard UI session (Topic or Task chat).
  * Handles wrapped keys (e.g. agent:main:clawboard:topic:...).

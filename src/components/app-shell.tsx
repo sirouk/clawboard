@@ -4,7 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { SearchInput } from "@/components/ui";
+import { SearchInput, Select } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { cn } from "@/lib/cn";
 import { CommandPalette } from "@/components/command-palette";
@@ -14,7 +14,7 @@ import { formatRelativeTime } from "@/lib/format";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { buildTaskUrl, buildTopicUrl, withRevealParam } from "@/lib/url";
 import { apiFetch, getApiBase } from "@/lib/api";
-import type { Task, Topic } from "@/lib/types";
+import type { Space, Task, Topic } from "@/lib/types";
 
 const ICONS: Record<string, React.ReactElement> = {
   home: (
@@ -83,19 +83,79 @@ function GripIcon({ className }: { className?: string }) {
   );
 }
 
+function SpacesIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={className}
+    >
+      <circle cx="6.5" cy="7" r="2.1" />
+      <circle cx="17.5" cy="6.5" r="2.1" />
+      <circle cx="12" cy="16.8" r="2.1" />
+      <path d="M8.5 7.7l6.9-0.7" />
+      <path d="M7.7 8.8l3 5.8" />
+      <path d="M16.3 8.2l-3 6.3" />
+    </svg>
+  );
+}
+
+function deriveSpaceName(spaceId: string) {
+  const normalized = String(spaceId || "").trim();
+  if (!normalized || normalized === "space-default") return "Global";
+  const base = normalized.replace(/^space[-_]+/i, "");
+  const withSpaces = base.replace(/[-_]+/g, " ").trim();
+  if (!withSpaces) return normalized;
+  return withSpaces.replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function spaceIdFromTagLabel(value: string) {
+  let text = String(value ?? "").trim().toLowerCase();
+  if (!text) return null;
+  if (text.startsWith("system:")) return null;
+  if (text.startsWith("space:")) text = text.split(":", 2)[1]?.trim() ?? "";
+  const slugged = text
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!slugged || slugged === "default" || slugged === "global" || slugged === "all" || slugged === "all-spaces") {
+    return null;
+  }
+  return `space-${slugged}`;
+}
+
+function topicSpaceIds(topic: Pick<Topic, "spaceId" | "tags"> | null | undefined) {
+  const out = new Set<string>();
+  for (const rawTag of topic?.tags ?? []) {
+    const fromTag = spaceIdFromTagLabel(String(rawTag ?? ""));
+    if (fromTag) out.add(fromTag);
+  }
+  const primary = String(topic?.spaceId ?? "").trim();
+  if (primary && primary !== "space-default") out.add(primary);
+  return Array.from(out);
+}
+
 const NAV_ITEMS = [
   { href: "/u", label: "Board", id: "home" },
   { href: "/graph", label: "Graph", id: "graph" },
   { href: "/log", label: "Logs", id: "log" },
   { href: "/stats", label: "Stats", id: "stats" },
   { href: "/providers", label: "Providers", id: "providers" },
-  { href: "/setup", label: "Setup", id: "setup" },
+  { href: "/settings", label: "Settings", id: "setup" },
 ];
 
 const BOARD_TOPICS_EXPANDED_KEY = "clawboard.board.topics.navExpanded";
+const BOARD_SPACES_EXPANDED_KEY = "clawboard.board.spaces.navExpanded";
 const BOARD_TOPICS_SEARCH_KEY = "clawboard.board.topics.search";
 const BOARD_TOPICS_TASKS_EXPANDED_KEY = "clawboard.board.topics.tasksExpanded";
 const HEADER_COMPACT_KEY = "clawboard.header.compact";
+const ACTIVE_SPACE_KEY = "clawboard.space.active";
 const NAV_SEARCH_TASKS_LIMIT = 5;
 const NAV_SEARCH_TOPICS_LIMIT = 5;
 
@@ -269,16 +329,143 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 function AppShellLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { logs, topics, tasks, setTopics } = useDataStore();
+  const { spaces: storeSpaces, logs: storeLogs, topics: storeTopics, tasks: storeTasks, setTopics, hydrated } = useDataStore();
   const { instanceTitle, token, tokenRequired, tokenConfigured, remoteReadLocked } = useAppConfig();
   const collapsed = useLocalStorageItem("clawboard.navCollapsed") === "true";
+  const boardSpacesExpanded = useLocalStorageItem(BOARD_SPACES_EXPANDED_KEY) !== "false";
   const boardTopicsExpanded = useLocalStorageItem(BOARD_TOPICS_EXPANDED_KEY) === "true";
   const topicPanelSearch = useLocalStorageItem(BOARD_TOPICS_SEARCH_KEY) ?? "";
   const topicTasksExpandedRaw = useLocalStorageItem(BOARD_TOPICS_TASKS_EXPANDED_KEY) ?? "";
   const compactHeader = useLocalStorageItem(HEADER_COMPACT_KEY) === "true";
+  const activeSpaceIdStored = (useLocalStorageItem(ACTIVE_SPACE_KEY) ?? "").trim();
   useLocalStorageItem("clawboard.apiBase");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const headerRef = useRef<HTMLElement | null>(null);
+  const topicBackedSpaceIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const topic of storeTopics) {
+      for (const id of topicSpaceIds(topic)) ids.add(id);
+    }
+    return ids;
+  }, [storeTopics]);
+
+  const mergedSpaces = useMemo(() => {
+    const byId = new Map<string, Space>();
+    for (const space of storeSpaces) {
+      const id = String(space?.id ?? "").trim();
+      if (!id) continue;
+      if (id === "space-default") continue;
+      if (!topicBackedSpaceIds.has(id)) continue;
+      byId.set(id, space);
+    }
+    for (const topic of storeTopics) {
+      for (const id of topicSpaceIds(topic)) {
+        if (byId.has(id)) continue;
+        byId.set(id, {
+          id,
+          name: deriveSpaceName(id),
+          color: null,
+          connectivity: {},
+          createdAt: "",
+          updatedAt: "",
+        });
+      }
+    }
+    const out = Array.from(byId.values());
+    out.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    return out;
+  }, [storeSpaces, storeTopics, topicBackedSpaceIds]);
+
+  const selectedSpaceId = useMemo(() => {
+    if (!activeSpaceIdStored) return "";
+    if (mergedSpaces.some((space) => space.id === activeSpaceIdStored)) return activeSpaceIdStored;
+    return "";
+  }, [activeSpaceIdStored, mergedSpaces]);
+  useEffect(() => {
+    if (!hydrated) return;
+    if (!activeSpaceIdStored) return;
+    if (selectedSpaceId) return;
+    setLocalStorageItem(ACTIVE_SPACE_KEY, "");
+  }, [activeSpaceIdStored, hydrated, selectedSpaceId]);
+  const selectedSpaceName = useMemo(() => {
+    if (!selectedSpaceId) return "Global";
+    return mergedSpaces.find((space) => space.id === selectedSpaceId)?.name ?? deriveSpaceName(selectedSpaceId);
+  }, [mergedSpaces, selectedSpaceId]);
+  const selectedSpaceTagLabel = useMemo(() => {
+    const normalized = String(selectedSpaceName || "Global")
+      .replace(/[-_]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return (normalized || "Global").toUpperCase();
+  }, [selectedSpaceName]);
+
+  const allowedSpaceIds = useMemo(() => {
+    if (mergedSpaces.length === 0) return [] as string[];
+    if (!selectedSpaceId) return [] as string[];
+    const source = mergedSpaces.find((space) => space.id === selectedSpaceId);
+    const connectivity =
+      source && source.connectivity && typeof source.connectivity === "object" ? source.connectivity : {};
+    const out = [selectedSpaceId];
+    for (const candidate of mergedSpaces) {
+      if (candidate.id === selectedSpaceId) continue;
+      const enabled = Object.prototype.hasOwnProperty.call(connectivity, candidate.id)
+        ? Boolean(connectivity[candidate.id])
+        : true;
+      if (enabled) out.push(candidate.id);
+    }
+    return out;
+  }, [mergedSpaces, selectedSpaceId]);
+
+  const allowedSpaceSet = useMemo(() => new Set(allowedSpaceIds), [allowedSpaceIds]);
+  const storeTopicById = useMemo(() => new Map(storeTopics.map((topic) => [topic.id, topic])), [storeTopics]);
+  const storeTaskById = useMemo(() => new Map(storeTasks.map((task) => [task.id, task])), [storeTasks]);
+
+  const topics = useMemo(() => {
+    if (!selectedSpaceId || allowedSpaceSet.size === 0) return storeTopics;
+    return storeTopics.filter((topic) => topicSpaceIds(topic).some((spaceId) => allowedSpaceSet.has(spaceId)));
+  }, [allowedSpaceSet, selectedSpaceId, storeTopics]);
+
+  const tasks = useMemo(() => {
+    if (!selectedSpaceId || allowedSpaceSet.size === 0) return storeTasks;
+    return storeTasks.filter((task) => {
+      const taskSpace = String(task.spaceId ?? "").trim();
+      if (taskSpace) return allowedSpaceSet.has(taskSpace);
+      if (task.topicId) {
+        const parent = storeTopicById.get(task.topicId);
+        if (!parent) return false;
+        return topicSpaceIds(parent).some((spaceId) => allowedSpaceSet.has(spaceId));
+      }
+      return false;
+    });
+  }, [allowedSpaceSet, selectedSpaceId, storeTasks, storeTopicById]);
+
+  const logs = useMemo(() => {
+    if (!selectedSpaceId || allowedSpaceSet.size === 0) return storeLogs;
+    return storeLogs.filter((entry) => {
+      const directSpace = String(entry.spaceId ?? "").trim();
+      if (directSpace) return allowedSpaceSet.has(directSpace);
+      if (entry.taskId) {
+        const task = storeTaskById.get(entry.taskId);
+        if (task) {
+          const taskSpace = String(task.spaceId ?? "").trim();
+          if (taskSpace) return allowedSpaceSet.has(taskSpace);
+          if (task.topicId) {
+            const parent = storeTopicById.get(task.topicId);
+            if (parent) {
+              return topicSpaceIds(parent).some((spaceId) => allowedSpaceSet.has(spaceId));
+            }
+          }
+        }
+      }
+      if (entry.topicId) {
+        const topic = storeTopicById.get(entry.topicId);
+        if (topic) {
+          return topicSpaceIds(topic).some((spaceId) => allowedSpaceSet.has(spaceId));
+        }
+      }
+      return false;
+    });
+  }, [allowedSpaceSet, selectedSpaceId, storeLogs, storeTaskById, storeTopicById]);
 
   const apiBase = getApiBase();
   const isBoardRoute =
@@ -305,10 +492,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
         ? "Token accepted. Read/write access enabled."
         : "Token stored locally, but API server token is not configured."
     : remoteReadLocked
-      ? "Non-localhost reads require a token. Add token in Setup."
+      ? "Non-localhost reads require a token. Add token in Settings."
       : tokenRequired
-      ? "Token required for writes."
-      : "No token required.";
+        ? "Token required for writes."
+        : "No token required.";
   const statusIconClass = statusIconColor(status);
   const statusTooltip = statusTitle;
   const [mounted, setMounted] = useState(false);
@@ -394,10 +581,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
         subtitle: "Add new inference providers to your OpenClaw instance with the fastest, safest path.",
       };
     }
-    if (cleanPath === "/setup") {
+    if (cleanPath === "/setup" || cleanPath === "/settings") {
       return {
-        title: "Setup",
-        subtitle: "Configure your Clawboard instance and integration level.",
+        title: "Settings",
+        subtitle: "Configure your Clawboard instance, integration level, and space visibility.",
       };
     }
     if (cleanPath === "/log") {
@@ -486,6 +673,8 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 
   const topicSemanticSearch = useSemanticSearch({
     query: normalizedTopicSearch,
+    spaceId: selectedSpaceId || undefined,
+    allowedSpaceIds,
     includePending: true,
     limitTopics: 120,
     limitTasks: 80,
@@ -504,7 +693,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const filteredTopics = useMemo((): Topic[] => {
     const query = normalizedTopicSearch;
 
-	    const base = [...topics];
+	    const base = [...topics].filter((topic) => {
+	      if (query || !selectedSpaceId) return true;
+	      return topicSpaceIds(topic).includes(selectedSpaceId);
+	    });
 	    base.sort((a, b) => {
 	      const ap = Boolean(a.pinned);
 	      const bp = Boolean(b.pinned);
@@ -542,7 +734,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
         const tags = (topic.tags ?? []).join(" ").toLowerCase();
         return name.includes(q) || id.includes(q) || description.includes(q) || tags.includes(q);
       });
-	  }, [normalizedTopicSearch, topicSemanticForQuery, topics, topicsById]);
+	  }, [normalizedTopicSearch, selectedSpaceId, topicSemanticForQuery, topics, topicsById]);
 
   const filteredTasksForSearch = useMemo((): Task[] => {
     if (!topicSemanticForQuery) return [];
@@ -813,8 +1005,8 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			            )}
 			          >
 		            <div className="min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
-		              <div className="flex items-center justify-between gap-2.5 lg:block">
-		                <div className="flex min-w-0 items-center gap-2.5">
+		              <div className="flex items-center justify-between gap-2.5 lg:flex lg:justify-center">
+		                <div className="flex min-w-0 items-center gap-2.5 lg:justify-center">
 		                  <Link href="/u" className="flex items-center justify-center">
 			                    <div className={cn("relative transition-all", collapsed ? "h-8 w-8" : "h-8 w-8 lg:h-12 lg:w-12")}>
 			                      <Image
@@ -827,11 +1019,27 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 		                      />
 		                    </div>
 		                  </Link>
-			                  <div className="min-w-0 lg:hidden">
-			                    <div className="truncate text-xs font-semibold text-[rgb(var(--claw-text))]">{pageHeader.title}</div>
-			                  </div>
-				                </div>
-				                <div className="lg:hidden">
+				                  <div className="min-w-0 lg:hidden">
+				                    <div className="truncate text-xs font-semibold text-[rgb(var(--claw-text))]">{pageHeader.title}</div>
+				                  </div>
+					                </div>
+					                <div className="flex items-center gap-2 lg:hidden">
+                          <Select
+                            value={selectedSpaceId}
+                            onChange={(event) => {
+                              const next = String(event.target.value || "").trim();
+                              setLocalStorageItem(ACTIVE_SPACE_KEY, next);
+                            }}
+                            className="h-8 min-w-[130px] max-w-[52vw] rounded-full px-2.5 py-0 text-[11px]"
+                            aria-label="Active space"
+                          >
+                            <option value="">Global</option>
+                            {mergedSpaces.map((space) => (
+                              <option key={`mobile-space-${space.id}`} value={space.id}>
+                                {space.name}
+                              </option>
+                            ))}
+                          </Select>
                           <span
                             className="inline-flex h-8 w-8 items-center justify-center"
                             title={statusTooltip}
@@ -910,6 +1118,110 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                   )}
                 </div>
               </nav>
+              {!collapsed && (
+                <div className="mt-4 hidden lg:block space-y-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setLocalStorageItem(
+                          BOARD_SPACES_EXPANDED_KEY,
+                          boardSpacesExpanded ? "false" : "true"
+                        )
+                      }
+                      className={cn(
+                        "flex w-full items-center justify-between rounded-full px-4 py-2 text-sm transition",
+                        boardSpacesExpanded
+                          ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.04))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]"
+                          : "border border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
+                      )}
+                      aria-expanded={boardSpacesExpanded}
+                      aria-controls="clawboard-nav-spaces"
+                    >
+                      <span className="flex items-center gap-2">
+                        <span
+                          className={cn(
+                            "inline-flex h-5 w-5 items-center justify-center rounded-full border bg-[rgba(255,255,255,0.02)]",
+                            boardSpacesExpanded
+                              ? "border-[rgba(255,159,122,0.48)] text-[rgba(255,198,179,0.98)]"
+                              : "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))]"
+                          )}
+                        >
+                          <SpacesIcon className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="text-xs uppercase tracking-[0.2em]">{selectedSpaceTagLabel}</span>
+                      </span>
+                      <span className="text-[10px]">{boardSpacesExpanded ? "▾" : "▸"}</span>
+                    </button>
+                    {boardSpacesExpanded && (
+                      <div
+                        id="clawboard-nav-spaces"
+                        className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.18)] p-3"
+                      >
+                        <div className="space-y-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setLocalStorageItem(ACTIVE_SPACE_KEY, "");
+                            setLocalStorageItem(BOARD_SPACES_EXPANDED_KEY, "false");
+                          }}
+                          className={cn(
+                            "w-full rounded-full px-3 py-2 text-left text-xs transition",
+                            !selectedSpaceId
+                              ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.04))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]"
+                              : "text-[rgb(var(--claw-muted))] hover:bg-[rgba(255,255,255,0.03)] hover:text-[rgb(var(--claw-text))]"
+                          )}
+                          title="Show everything across spaces"
+                        >
+                          <div className="truncate font-semibold">Global</div>
+                          <div className="mt-0.5 truncate font-mono text-[10px] text-[rgba(148,163,184,0.8)]">all spaces</div>
+                        </button>
+                        <div className="space-y-1">
+                          {mergedSpaces.map((space) => {
+                            const active = space.id === selectedSpaceId;
+                            const swatch =
+                              typeof space.color === "string" && /^#[0-9a-fA-F]{6}$/.test(space.color)
+                                ? space.color
+                                : "#4DA39E";
+                            return (
+                              <button
+                                key={space.id}
+                                type="button"
+                                onClick={() => {
+                                  setLocalStorageItem(ACTIVE_SPACE_KEY, space.id);
+                                  setLocalStorageItem(BOARD_SPACES_EXPANDED_KEY, "false");
+                                }}
+                                className={cn(
+                                  "w-full rounded-full px-3 py-2 text-left text-xs transition",
+                                  active
+                                    ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.04))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]"
+                                    : "text-[rgb(var(--claw-muted))] hover:bg-[rgba(255,255,255,0.03)] hover:text-[rgb(var(--claw-text))]"
+                                )}
+                                title={space.name}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="min-w-0 flex items-center gap-2">
+                                    <span
+                                      className="inline-flex h-2.5 w-2.5 shrink-0 rounded-full"
+                                      style={{ backgroundColor: swatch }}
+                                    />
+                                    <div className="truncate font-semibold">{space.name}</div>
+                                  </div>
+                                  {active ? (
+                                    <span className="shrink-0 text-[10px] uppercase tracking-[0.12em] text-[rgba(255,159,122,0.95)]">
+                                      Active
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="mt-1 truncate font-mono text-[10px] text-[rgba(148,163,184,0.8)]">{space.id}</div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      </div>
+                    )}
+                </div>
+              )}
 		              <nav className="mt-6 hidden gap-3 lg:flex lg:flex-col">
 		                {NAV_ITEMS.map((item) => {
 		                  const active = isItemActive(item.href);

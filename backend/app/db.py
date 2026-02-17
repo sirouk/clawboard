@@ -4,6 +4,7 @@ import os
 import hashlib
 import colorsys
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from sqlmodel import SQLModel, create_engine, Session, select
 
@@ -29,6 +30,13 @@ engine_kwargs = {"echo": False, "connect_args": connect_args}
 if DATABASE_URL.startswith("sqlite") and NullPool is not None:
     engine_kwargs["poolclass"] = NullPool
 engine = create_engine(DATABASE_URL, **engine_kwargs)
+
+DEFAULT_SPACE_ID = "space-default"
+DEFAULT_SPACE_NAME = "Default"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _normalize_hex_color(value: str | None) -> str | None:
@@ -80,6 +88,10 @@ def init_db() -> None:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN idempotencyKey TEXT;")
             if "attachments" not in existing:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN attachments JSON;")
+            if "spaceId" not in existing:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE logentry ADD COLUMN spaceId TEXT NOT NULL DEFAULT '{DEFAULT_SPACE_ID}';"
+                )
             duplicate_keys = conn.exec_driver_sql(
                 'SELECT "idempotencyKey", COUNT(*) FROM logentry '
                 'WHERE "idempotencyKey" IS NOT NULL GROUP BY "idempotencyKey" HAVING COUNT(*) > 1;'
@@ -121,6 +133,10 @@ def init_db() -> None:
                 "CREATE INDEX IF NOT EXISTS ix_logentry_related_created_at "
                 'ON logentry("relatedLogId", "createdAt");'
             )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_logentry_space_created_at "
+                'ON logentry("spaceId", "createdAt");'
+            )
 
             # Session routing memory: keep GC fast for large instances.
             try:
@@ -153,7 +169,18 @@ def init_db() -> None:
                 conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN digest TEXT;")
             if "digestUpdatedAt" not in topic_existing:
                 conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN digestUpdatedAt TEXT;")
+            if "spaceId" not in topic_existing:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE topic ADD COLUMN spaceId TEXT NOT NULL DEFAULT '{DEFAULT_SPACE_ID}';"
+                )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_topic_space_updated_at "
+                'ON topic("spaceId", "updatedAt");'
+            )
             conn.exec_driver_sql("UPDATE topic SET tags = '[]' WHERE tags IS NULL;")
+            conn.exec_driver_sql(
+                f"UPDATE topic SET spaceId = '{DEFAULT_SPACE_ID}' WHERE spaceId IS NULL OR trim(spaceId) = '';"
+            )
 
             task_cols = conn.exec_driver_sql("PRAGMA table_info(task);").fetchall()
             task_existing = {row[1] for row in task_cols}
@@ -183,15 +210,64 @@ def init_db() -> None:
                 conn.exec_driver_sql("ALTER TABLE task ADD COLUMN digest TEXT;")
             if "digestUpdatedAt" not in task_existing:
                 conn.exec_driver_sql("ALTER TABLE task ADD COLUMN digestUpdatedAt TEXT;")
+            if "spaceId" not in task_existing:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE task ADD COLUMN spaceId TEXT NOT NULL DEFAULT '{DEFAULT_SPACE_ID}';"
+                )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_task_space_updated_at "
+                'ON task("spaceId", "updatedAt");'
+            )
             conn.exec_driver_sql("UPDATE task SET tags = '[]' WHERE tags IS NULL;")
+            conn.exec_driver_sql(
+                "UPDATE task "
+                "SET spaceId = COALESCE((SELECT spaceId FROM topic WHERE topic.id = task.topicId), spaceId, "
+                f"'{DEFAULT_SPACE_ID}') "
+                "WHERE topicId IS NOT NULL;"
+            )
+            conn.exec_driver_sql(
+                f"UPDATE task SET spaceId = '{DEFAULT_SPACE_ID}' WHERE spaceId IS NULL OR trim(spaceId) = '';"
+            )
+
+            # Keep log space in sync with task/topic ownership.
+            conn.exec_driver_sql(
+                "UPDATE logentry "
+                "SET spaceId = COALESCE((SELECT spaceId FROM task WHERE task.id = logentry.taskId), "
+                "(SELECT spaceId FROM topic WHERE topic.id = logentry.topicId), spaceId, "
+                f"'{DEFAULT_SPACE_ID}');"
+            )
+            conn.exec_driver_sql(
+                f"UPDATE logentry SET spaceId = '{DEFAULT_SPACE_ID}' WHERE spaceId IS NULL OR trim(spaceId) = '';"
+            )
+
+            # Ensure default space row exists (table is created via SQLModel metadata).
+            stamp = _now_iso()
+            conn.exec_driver_sql(
+                "INSERT OR IGNORE INTO space (id, name, color, connectivity, createdAt, updatedAt) "
+                "VALUES (?, ?, NULL, ?, ?, ?);",
+                (DEFAULT_SPACE_ID, DEFAULT_SPACE_NAME, "{}", stamp, stamp),
+            )
 
             conn.commit()
 
     # Backfill missing topic/task colors once so existing instances get stable hues.
     try:
-        from .models import Topic, Task  # local import avoids circulars at module import time
+        from .models import Topic, Task, Space  # local import avoids circulars at module import time
 
         with Session(engine) as session:
+            if not session.get(Space, DEFAULT_SPACE_ID):
+                stamp = _now_iso()
+                session.add(
+                    Space(
+                        id=DEFAULT_SPACE_ID,
+                        name=DEFAULT_SPACE_NAME,
+                        color=None,
+                        connectivity={},
+                        createdAt=stamp,
+                        updatedAt=stamp,
+                    )
+                )
+
             topics = session.exec(select(Topic)).all()
             topic_updates = 0
             for topic in topics:
@@ -210,9 +286,26 @@ def init_db() -> None:
                 topic.color = _auto_color(f"topic:{topic.id}:{topic.name}", 0.0)
                 topic_updates += 1
 
+                if not str(getattr(topic, "spaceId", "") or "").strip():
+                    topic.spaceId = DEFAULT_SPACE_ID
+                    topic_updates += 1
+
             tasks = session.exec(select(Task)).all()
             task_updates = 0
             for task in tasks:
+                topic_space_id = None
+                if getattr(task, "topicId", None):
+                    parent = next((item for item in topics if item.id == task.topicId), None)
+                    if parent and str(getattr(parent, "spaceId", "") or "").strip():
+                        topic_space_id = parent.spaceId
+                if topic_space_id:
+                    if task.spaceId != topic_space_id:
+                        task.spaceId = topic_space_id
+                        task_updates += 1
+                elif not str(getattr(task, "spaceId", "") or "").strip():
+                    task.spaceId = DEFAULT_SPACE_ID
+                    task_updates += 1
+
                 normalized = _normalize_hex_color(getattr(task, "color", None))
                 if normalized:
                     if task.color != normalized:

@@ -2,9 +2,14 @@ import { test, expect } from "@playwright/test";
 
 test.describe("Real Chat E2E", () => {
   test("should send a message and see it in the log", async ({ page }) => {
-    // We expect the services to be running at localhost:3010 (web) and localhost:8010 (api)
-    const baseURL = "http://localhost:3010";
-    const token = "af8d0bebf8b273af98bce2f35ac02aa08b2d980b95fb7bc1";
+    test.skip(
+      process.env.PLAYWRIGHT_USE_EXTERNAL_SERVER !== "1",
+      "Requires external Clawboard/OpenClaw runtime with real chat agents."
+    );
+
+    const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3010";
+    const token = process.env.PLAYWRIGHT_TOKEN ?? "";
+    test.skip(!token, "PLAYWRIGHT_TOKEN is required for real-chat external test.");
 
     await page.goto(`${baseURL}/setup`);
     

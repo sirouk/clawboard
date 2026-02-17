@@ -112,6 +112,43 @@ const parseDate = (value?: string | Date | null) =>
 
 const toIso = (value?: Date | null) => (value ? value.toISOString() : undefined);
 
+const toSortableMs = (value: Date | null | undefined): number =>
+  value instanceof Date && Number.isFinite(value.getTime()) ? value.getTime() : 0;
+
+const toSortIndex = (value: unknown): number => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+};
+
+const sortByCanonicalOwnership = <T extends { id?: string }>(
+  left: T & { sortIndex?: unknown; pinned?: unknown; updatedAt: Date },
+  right: T & { sortIndex?: unknown; pinned?: unknown; updatedAt: Date }
+) => {
+  const leftPinned = Boolean(left.pinned);
+  const rightPinned = Boolean(right.pinned);
+  if (leftPinned !== rightPinned) {
+    return leftPinned ? -1 : 1;
+  }
+
+  const leftSort = toSortIndex(left.sortIndex);
+  const rightSort = toSortIndex(right.sortIndex);
+  if (leftSort !== rightSort) {
+    return leftSort - rightSort;
+  }
+
+  const leftTime = toSortableMs(left.updatedAt);
+  const rightTime = toSortableMs(right.updatedAt);
+  if (leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+
+  return (left.id || "").localeCompare(right.id || "");
+};
+
 const parseJson = <T,>(value: unknown, fallback: T): T => {
   if (value === null || value === undefined) return fallback;
   if (typeof value !== "string") return value as T;
@@ -448,6 +485,18 @@ export const getData = async (): Promise<PortalData> => {
       prisma.event.findMany(),
       prisma.importJob.findMany()
     ]);
+
+  topics.sort(sortByCanonicalOwnership);
+  tasks.sort(sortByCanonicalOwnership);
+  log.sort((left, right) => toSortableMs(right.createdAt) - toSortableMs(left.createdAt) || left.id.localeCompare(right.id));
+  events.sort((left, right) =>
+    toSortableMs(right.timestamp) - toSortableMs(left.timestamp) ||
+    toSortableMs(right.updatedAt) - toSortableMs(left.updatedAt) ||
+    left.id.localeCompare(right.id)
+  );
+  importJobs.sort(
+    (left, right) => toSortableMs(right.createdAt) - toSortableMs(left.createdAt) || left.id.localeCompare(right.id)
+  );
 
   return {
     seedVersion: config?.seedVersion ?? SEED_VERSION,

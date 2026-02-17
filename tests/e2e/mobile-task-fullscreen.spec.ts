@@ -43,7 +43,7 @@ test.describe("mobile task fullscreen chat", () => {
     }
 
     await page.goto("/u");
-    await page.getByPlaceholder("Search topics, tasks, or messages").waitFor();
+    await page.getByPlaceholder("Search topics, tasks, or messages").first().waitFor();
 
     await page.locator("div[role='button']").filter({ hasText: topicName }).first().click();
     await page.locator("div[role='button']").filter({ hasText: taskTitle }).first().click();
@@ -178,7 +178,7 @@ test.describe("mobile task fullscreen chat", () => {
     expect(createTask.ok()).toBeTruthy();
 
     await page.goto("/u");
-    await page.getByPlaceholder("Search topics, tasks, or messages").waitFor();
+    await page.getByPlaceholder("Search topics, tasks, or messages").first().waitFor();
 
     await page.locator("div[role='button']").filter({ hasText: topicName }).first().click();
     await page.locator("div[role='button']").filter({ hasText: taskTitle }).first().click();
@@ -217,7 +217,10 @@ test.describe("mobile task fullscreen chat", () => {
     expect(createTask.ok()).toBeTruthy();
 
     await page.goto("/u?done=1");
-    await page.getByPlaceholder("Search topics, tasks, or messages").waitFor();
+    await page
+      .locator('input[placeholder="Search topics, tasks, or messages"]:visible')
+      .first()
+      .waitFor();
 
     await page.locator("div[role='button']").filter({ hasText: topicName }).first().click();
     await page.locator("div[role='button']").filter({ hasText: taskTitle }).first().click();

@@ -833,12 +833,12 @@ export default function register(api) {
     return coerceArray(await getJson("/api/log", params));
   }
 
-  async function listTopics() {
-    return coerceArray(await getJson("/api/topics"));
+  async function listTopics(sessionKey) {
+    return coerceArray(await getJson("/api/topics", { sessionKey }));
   }
 
-  async function listTasks(topicId) {
-    return coerceArray(await getJson("/api/tasks", { topicId }));
+  async function listTasks(topicId, sessionKey) {
+    return coerceArray(await getJson("/api/tasks", { topicId, sessionKey }));
   }
 
   async function semanticLookup(query, sessionKey) {
@@ -1367,7 +1367,7 @@ export default function register(api) {
     if (!normalizedQuery || normalizedQuery.length < 6)
       return void 0;
     const [topicsAll, sessionLogsRaw, semantic] = await Promise.all([
-      listTopics(),
+      listTopics(sessionKey),
       sessionKey ? listLogs({
         sessionKey,
         type: "conversation",
@@ -1419,7 +1419,7 @@ export default function register(api) {
     const taskBuckets = await Promise.all(
       topics.map(async (topic) => {
         const [tasks, logs] = await Promise.all([
-          listTasks(topic.id),
+          listTasks(topic.id, sessionKey),
           listLogs({
             topicId: topic.id,
             type: "conversation",

@@ -30,8 +30,12 @@ from sqlmodel import select
 
 from .auth import ensure_read_access, ensure_write_access, is_token_configured, is_token_required, require_token
 from .db import DATABASE_URL, init_db, get_session
-from .models import InstanceConfig, Topic, Task, LogEntry, DeletedLog, SessionRoutingMemory, IngestQueue, Attachment, Draft
+from .models import Space, InstanceConfig, Topic, Task, LogEntry, DeletedLog, SessionRoutingMemory, IngestQueue, Attachment, Draft
 from .schemas import (
+    SpaceOut,
+    SpaceUpsert,
+    SpaceConnectivityPatch,
+    SpaceAllowedResponse,
     StartFreshReplayRequest,
     InstanceUpdate,
     InstanceResponse,
@@ -116,6 +120,14 @@ async def enforce_api_access_policy(request: Request, call_next):
     if method == "OPTIONS":
         return await call_next(request)
 
+    if request.query_params.get("token") is not None:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": "Do not pass token via query param. Use X-Clawboard-Token header."
+            },
+        )
+
     provided_token = request.headers.get("x-clawboard-token")
     try:
         if method in {"GET", "HEAD"}:
@@ -176,6 +188,526 @@ def normalize_topic_status(value: str | None) -> str | None:
 
 def create_id(prefix: str) -> str:
     return f"{prefix}-{uuid4()}"
+
+
+DEFAULT_SPACE_ID = (os.getenv("CLAWBOARD_DEFAULT_SPACE_ID", "space-default") or "space-default").strip() or "space-default"
+DEFAULT_SPACE_NAME = (os.getenv("CLAWBOARD_DEFAULT_SPACE_NAME", "Default") or "Default").strip() or "Default"
+
+
+def _normalize_space_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _normalize_connectivity(value: Any) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, bool] = {}
+    for raw_key, raw_value in value.items():
+        key = _normalize_space_id(str(raw_key))
+        if not key:
+            continue
+        out[key] = bool(raw_value)
+    return out
+
+
+def _ensure_default_space(session: Any) -> Space:
+    row = session.get(Space, DEFAULT_SPACE_ID)
+    if row:
+        changed = False
+        if not str(getattr(row, "name", "") or "").strip():
+            row.name = DEFAULT_SPACE_NAME
+            changed = True
+        normalized = _normalize_connectivity(getattr(row, "connectivity", None))
+        if normalized != (row.connectivity or {}):
+            row.connectivity = normalized
+            changed = True
+        if changed:
+            row.updatedAt = now_iso()
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+        return row
+
+    stamp = now_iso()
+    row = Space(
+        id=DEFAULT_SPACE_ID,
+        name=DEFAULT_SPACE_NAME,
+        color=None,
+        connectivity={},
+        createdAt=stamp,
+        updatedAt=stamp,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+def _list_spaces(session: Any) -> list[Space]:
+    _ensure_default_space(session)
+    touched = False
+    for topic in session.exec(select(Topic)).all():
+        for resolved_space_id, label in _topic_space_candidates_from_tags(getattr(topic, "tags", None)):
+            if session.get(Space, resolved_space_id):
+                continue
+            _ensure_space_row(
+                session,
+                space_id=resolved_space_id,
+                name=label if resolved_space_id != DEFAULT_SPACE_ID else DEFAULT_SPACE_NAME,
+            )
+            touched = True
+    if touched:
+        session.commit()
+    spaces = session.exec(select(Space)).all()
+    if not spaces:
+        spaces = [_ensure_default_space(session)]
+    return spaces
+
+
+def _parse_space_ids_csv(value: str | None) -> set[str] | None:
+    if value is None:
+        return None
+    parts = [part.strip() for part in str(value).split(",")]
+    ids = {part for part in parts if part}
+    return ids
+
+
+def _allowed_space_ids_for_source(session: Any, source_space_id: str | None) -> set[str]:
+    spaces = _list_spaces(session)
+    by_id: dict[str, Space] = {str(item.id): item for item in spaces if str(getattr(item, "id", "")).strip()}
+    if not by_id:
+        return {DEFAULT_SPACE_ID}
+
+    normalized_source = _normalize_space_id(source_space_id)
+    source_id = normalized_source if normalized_source in by_id else DEFAULT_SPACE_ID
+    source_row = by_id.get(source_id) or by_id.get(DEFAULT_SPACE_ID) or next(iter(by_id.values()))
+    source_id = str(source_row.id)
+
+    toggles = _normalize_connectivity(getattr(source_row, "connectivity", None))
+    allowed = {source_id}
+    for candidate in by_id.keys():
+        if candidate == source_id:
+            continue
+        enabled = toggles.get(candidate)
+        if enabled is None or enabled:
+            allowed.add(candidate)
+    return allowed
+
+
+def _resolve_allowed_space_ids(
+    session: Any,
+    *,
+    source_space_id: str | None = None,
+    allowed_space_ids_raw: str | None = None,
+) -> set[str] | None:
+    explicit = _parse_space_ids_csv(allowed_space_ids_raw)
+    normalized = _normalize_space_id(source_space_id)
+    if explicit is not None:
+        if normalized:
+            baseline = _allowed_space_ids_for_source(session, normalized)
+            return explicit & baseline
+        return explicit
+    if not normalized:
+        return None
+    return _allowed_space_ids_for_source(session, normalized)
+
+
+def _normalize_tag_value(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered.startswith("system:"):
+        suffix = lowered.split(":", 1)[1].strip()
+        return f"system:{suffix}" if suffix else "system"
+    slug = re.sub(r"\s+", "-", lowered)
+    slug = re.sub(r"[^a-z0-9-]+", "", slug)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    return slug or None
+
+
+def _normalize_tags(values: list[str] | None) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values or []:
+        tag = _normalize_tag_value(raw)
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+        if len(out) >= 32:
+            break
+    return out
+
+
+def _space_id_for_topic(topic: Topic | None) -> str:
+    if not topic:
+        return DEFAULT_SPACE_ID
+    normalized = _normalize_space_id(getattr(topic, "spaceId", None))
+    return normalized or DEFAULT_SPACE_ID
+
+
+def _space_id_for_task(task: Task | None) -> str:
+    if not task:
+        return DEFAULT_SPACE_ID
+    normalized = _normalize_space_id(getattr(task, "spaceId", None))
+    return normalized or DEFAULT_SPACE_ID
+
+
+def _space_id_from_log_scope(entry: LogEntry | None) -> str | None:
+    if not entry:
+        return None
+    source = getattr(entry, "source", None)
+    if isinstance(source, dict):
+        scoped = _normalize_space_id(source.get("boardScopeSpaceId"))
+        if scoped:
+            return scoped
+    return _normalize_space_id(getattr(entry, "spaceId", None))
+
+
+def _infer_space_id_from_session_key(session: Any, session_key: str | None) -> str | None:
+    normalized_session_key = str(session_key or "").strip()
+    if not normalized_session_key:
+        return None
+
+    board_topic_id, board_task_id = _parse_board_session_key(normalized_session_key)
+    base_session_key = normalized_session_key.split("|", 1)[0].strip()
+    session_candidates = [normalized_session_key]
+    if base_session_key and base_session_key != normalized_session_key:
+        session_candidates.append(base_session_key)
+
+    session_expr = func.json_extract(LogEntry.source, "$.sessionKey")
+    for candidate in session_candidates:
+        query = (
+            select(LogEntry)
+            .where(session_expr == candidate)
+            .order_by(
+                LogEntry.createdAt.desc(),
+                (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
+            )
+            .limit(12)
+        )
+        rows = session.exec(query).all()
+        for row in rows:
+            scoped = _space_id_from_log_scope(row)
+            if scoped:
+                return scoped
+
+    if base_session_key:
+        query = (
+            select(LogEntry)
+            .where(session_expr.like(f"{base_session_key}|%"))
+            .order_by(
+                LogEntry.createdAt.desc(),
+                (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
+            )
+            .limit(20)
+        )
+        rows = session.exec(query).all()
+        for row in rows:
+            scoped = _space_id_from_log_scope(row)
+            if scoped:
+                return scoped
+
+    if board_task_id:
+        task = session.get(Task, board_task_id)
+        if task:
+            return _space_id_for_task(task)
+    if board_topic_id:
+        topic = session.get(Topic, board_topic_id)
+        if topic:
+            return _space_id_for_topic(topic)
+
+    for candidate in session_candidates:
+        memory = session.get(SessionRoutingMemory, candidate)
+        if not memory:
+            continue
+        task_id = str(getattr(memory, "taskId", "") or "").strip()
+        if task_id:
+            task = session.get(Task, task_id)
+            if task:
+                return _space_id_for_task(task)
+        topic_id = str(getattr(memory, "topicId", "") or "").strip()
+        if topic_id:
+            topic = session.get(Topic, topic_id)
+            if topic:
+                return _space_id_for_topic(topic)
+
+    return None
+
+
+def _resolve_source_space_id(
+    session: Any,
+    *,
+    explicit_space_id: str | None = None,
+    session_key: str | None = None,
+) -> str | None:
+    normalized_explicit = _normalize_space_id(explicit_space_id)
+    if normalized_explicit:
+        return normalized_explicit
+    return _infer_space_id_from_session_key(session, session_key)
+
+
+def _publish_space_upserted(space: Space | None) -> None:
+    if not space:
+        return
+    event_hub.publish({"type": "space.upserted", "data": space.model_dump(), "eventTs": space.updatedAt})
+
+
+def _space_display_name_from_id(space_id: str | None) -> str:
+    normalized_id = _normalize_space_id(space_id) or DEFAULT_SPACE_ID
+    if normalized_id == DEFAULT_SPACE_ID:
+        return DEFAULT_SPACE_NAME
+    base = re.sub(r"^space[-_]+", "", normalized_id, flags=re.IGNORECASE)
+    label = re.sub(r"[-_]+", " ", base).strip()
+    if not label:
+        return normalized_id
+    return " ".join(part.capitalize() for part in label.split(" "))
+
+
+def _space_id_from_label(label: str | None) -> str:
+    raw = str(label or "").strip()
+    if not raw:
+        return DEFAULT_SPACE_ID
+    slug = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
+    if not slug:
+        return DEFAULT_SPACE_ID
+    if slug in {"default", "global", "all", "all-spaces"}:
+        return DEFAULT_SPACE_ID
+    return f"space-{slug}"
+
+
+def _ensure_space_row(session: Any, *, space_id: str, name: str | None = None) -> Space:
+    normalized_id = _normalize_space_id(space_id) or DEFAULT_SPACE_ID
+    if normalized_id == DEFAULT_SPACE_ID:
+        return _ensure_default_space(session)
+
+    row = session.get(Space, normalized_id)
+    normalized_name = " ".join(str(name or "").split()).strip()
+    if row:
+        if normalized_name and row.name != normalized_name:
+            row.name = normalized_name
+            row.updatedAt = now_iso()
+            session.add(row)
+        return row
+
+    stamp = now_iso()
+    row = Space(
+        id=normalized_id,
+        name=normalized_name or _space_display_name_from_id(normalized_id),
+        color=None,
+        connectivity={},
+        createdAt=stamp,
+        updatedAt=stamp,
+    )
+    session.add(row)
+    return row
+
+
+def _topic_space_candidates_from_tags(tags: list[str] | None) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw_tag in tags or []:
+        tag = str(raw_tag or "").strip()
+        if not tag:
+            continue
+        lowered = tag.lower()
+        if lowered.startswith("system:"):
+            continue
+        if lowered.startswith("space:"):
+            tag = tag.split(":", 1)[1].strip()
+            if not tag:
+                continue
+        label = " ".join(tag.split()).strip()
+        if not label:
+            continue
+        resolved_space_id = _space_id_from_label(label)
+        if resolved_space_id in seen:
+            continue
+        seen.add(resolved_space_id)
+        out.append((resolved_space_id, label))
+    return out
+
+
+def _resolve_space_id_from_topic_tags(
+    session: Any,
+    tags: list[str] | None,
+    *,
+    fallback_space_id: str | None = None,
+) -> str:
+    _ensure_default_space(session)
+    candidates = _topic_space_candidates_from_tags(tags)
+    for resolved_space_id, label in candidates:
+        _ensure_space_row(
+            session,
+            space_id=resolved_space_id,
+            name=label if resolved_space_id != DEFAULT_SPACE_ID else DEFAULT_SPACE_NAME,
+        )
+    if candidates:
+        return candidates[0][0]
+
+    fallback = _normalize_space_id(fallback_space_id) or DEFAULT_SPACE_ID
+    if fallback == DEFAULT_SPACE_ID:
+        _ensure_default_space(session)
+        return DEFAULT_SPACE_ID
+    if session.get(Space, fallback):
+        return fallback
+    return DEFAULT_SPACE_ID
+
+
+def _topic_space_ids(topic: Topic | None) -> set[str]:
+    if not topic:
+        return {DEFAULT_SPACE_ID}
+    out = {_space_id_for_topic(topic)}
+    for resolved_space_id, _label in _topic_space_candidates_from_tags(getattr(topic, "tags", None)):
+        out.add(resolved_space_id)
+    return out or {DEFAULT_SPACE_ID}
+
+
+def _topic_matches_allowed_spaces(topic: Topic | None, allowed_space_ids: set[str]) -> bool:
+    return bool(_topic_space_ids(topic) & allowed_space_ids)
+
+
+def _task_matches_allowed_spaces(task: Task | None, allowed_space_ids: set[str], topic_by_id: dict[str, Topic]) -> bool:
+    if not task:
+        return False
+    if _space_id_for_task(task) in allowed_space_ids:
+        return True
+    topic_id = str(getattr(task, "topicId", "") or "").strip()
+    if not topic_id:
+        return False
+    topic = topic_by_id.get(topic_id)
+    if not topic:
+        return False
+    return _topic_matches_allowed_spaces(topic, allowed_space_ids)
+
+
+def _load_topics_by_ids(session: Any, topic_ids: Iterable[str]) -> dict[str, Topic]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in topic_ids:
+        topic_id = str(raw or "").strip()
+        if not topic_id or topic_id in seen:
+            continue
+        seen.add(topic_id)
+        normalized.append(topic_id)
+    if not normalized:
+        return {}
+    out: dict[str, Topic] = {}
+    for chunk in _chunked_values(normalized, 300):
+        rows = session.exec(select(Topic).where(Topic.id.in_(chunk))).all()
+        for row in rows:
+            row_id = str(getattr(row, "id", "") or "").strip()
+            if row_id:
+                out[row_id] = row
+    return out
+
+
+def _load_tasks_by_ids(session: Any, task_ids: Iterable[str]) -> dict[str, Task]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in task_ids:
+        task_id = str(raw or "").strip()
+        if not task_id or task_id in seen:
+            continue
+        seen.add(task_id)
+        normalized.append(task_id)
+    if not normalized:
+        return {}
+    out: dict[str, Task] = {}
+    for chunk in _chunked_values(normalized, 300):
+        rows = session.exec(select(Task).where(Task.id.in_(chunk))).all()
+        for row in rows:
+            row_id = str(getattr(row, "id", "") or "").strip()
+            if row_id:
+                out[row_id] = row
+    return out
+
+
+def _load_related_maps_for_logs(
+    session: Any,
+    logs: Iterable[LogEntry],
+    *,
+    seeded_topics: dict[str, Topic] | None = None,
+    seeded_tasks: dict[str, Task] | None = None,
+) -> tuple[dict[str, Topic], dict[str, Task]]:
+    topic_by_id: dict[str, Topic] = dict(seeded_topics or {})
+    task_by_id: dict[str, Task] = dict(seeded_tasks or {})
+
+    missing_task_ids: set[str] = set()
+    missing_topic_ids: set[str] = set()
+
+    for entry in logs:
+        task_id = str(getattr(entry, "taskId", "") or "").strip()
+        if task_id and task_id not in task_by_id:
+            missing_task_ids.add(task_id)
+        topic_id = str(getattr(entry, "topicId", "") or "").strip()
+        if topic_id and topic_id not in topic_by_id:
+            missing_topic_ids.add(topic_id)
+
+    if missing_task_ids:
+        loaded_tasks = _load_tasks_by_ids(session, missing_task_ids)
+        task_by_id.update(loaded_tasks)
+        for task in loaded_tasks.values():
+            topic_id = str(getattr(task, "topicId", "") or "").strip()
+            if topic_id and topic_id not in topic_by_id:
+                missing_topic_ids.add(topic_id)
+
+    if missing_topic_ids:
+        loaded_topics = _load_topics_by_ids(session, missing_topic_ids)
+        topic_by_id.update(loaded_topics)
+
+    return topic_by_id, task_by_id
+
+
+def _log_matches_allowed_spaces(
+    entry: LogEntry | None,
+    allowed_space_ids: set[str],
+    topic_by_id: dict[str, Topic],
+    task_by_id: dict[str, Task],
+) -> bool:
+    if not entry:
+        return False
+
+    direct_space_id = _normalize_space_id(getattr(entry, "spaceId", None)) or DEFAULT_SPACE_ID
+    if direct_space_id in allowed_space_ids:
+        return True
+
+    task_id = str(getattr(entry, "taskId", "") or "").strip()
+    if task_id:
+        task = task_by_id.get(task_id)
+        if task and _task_matches_allowed_spaces(task, allowed_space_ids, topic_by_id):
+            return True
+
+    topic_id = str(getattr(entry, "topicId", "") or "").strip()
+    if topic_id:
+        topic = topic_by_id.get(topic_id)
+        if topic and _topic_matches_allowed_spaces(topic, allowed_space_ids):
+            return True
+
+    return False
+
+
+def _propagate_topic_space(session: Any, topic: Topic, *, stamp: str) -> None:
+    topic_space_id = _space_id_for_topic(topic)
+    scoped_tasks = session.exec(select(Task).where(Task.topicId == topic.id)).all()
+    for scoped_task in scoped_tasks:
+        if _space_id_for_task(scoped_task) == topic_space_id:
+            continue
+        scoped_task.spaceId = topic_space_id
+        scoped_task.updatedAt = stamp
+        session.add(scoped_task)
+    scoped_logs = session.exec(select(LogEntry).where(LogEntry.topicId == topic.id)).all()
+    for scoped_log in scoped_logs:
+        current_log_space = _normalize_space_id(getattr(scoped_log, "spaceId", None)) or DEFAULT_SPACE_ID
+        if current_log_space == topic_space_id:
+            continue
+        scoped_log.spaceId = topic_space_id
+        scoped_log.updatedAt = stamp
+        session.add(scoped_log)
 
 
 REINDEX_QUEUE_PATH = os.getenv("CLAWBOARD_REINDEX_QUEUE_PATH", "./data/reindex-queue.jsonl")
@@ -672,10 +1204,13 @@ def _label_similarity(a: str | None, b: str | None) -> float:
     return (seq * 0.72) + (token * 0.28)
 
 
-def _find_similar_topic(session, name: str, threshold: float = 0.80):
+def _find_similar_topic(session, name: str, threshold: float = 0.80, space_id: str | None = None):
     if not name.strip():
         return None
     topics = session.exec(select(Topic)).all()
+    normalized_space_id = _normalize_space_id(space_id)
+    if normalized_space_id:
+        topics = [topic for topic in topics if _space_id_for_topic(topic) == normalized_space_id]
     best = None
     best_score = 0.0
     for topic in topics:
@@ -688,14 +1223,23 @@ def _find_similar_topic(session, name: str, threshold: float = 0.80):
     return None
 
 
-def _find_similar_task(session, topic_id: str | None, title: str, threshold: float = 0.88):
+def _find_similar_task(
+    session,
+    topic_id: str | None,
+    title: str,
+    threshold: float = 0.88,
+    space_id: str | None = None,
+):
     if not title.strip():
         return None
     tasks = session.exec(select(Task)).all()
+    normalized_space_id = _normalize_space_id(space_id)
     if topic_id is not None:
         tasks = [task for task in tasks if task.topicId == topic_id]
     else:
         tasks = [task for task in tasks if task.topicId is None]
+        if normalized_space_id:
+            tasks = [task for task in tasks if _space_id_for_task(task) == normalized_space_id]
     best = None
     best_score = 0.0
     for task in tasks:
@@ -949,14 +1493,21 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 return existing
 
     source_meta = payload.source.copy() if isinstance(payload.source, dict) else None
+    space_id = _normalize_space_id(payload.spaceId)
     topic_id = payload.topicId
     task_id = payload.taskId
 
+    source_scope_space_id: str | None = None
     source_scope_topic_id: str | None = None
     source_scope_task_id: str | None = None
     scope_lock = False
 
     if source_meta:
+        explicit_space = _normalize_space_id(source_meta.get("boardScopeSpaceId"))
+        if explicit_space:
+            source_scope_space_id = explicit_space
+            if not space_id:
+                space_id = explicit_space
         session_key = str(source_meta.get("sessionKey") or "").strip()
         if session_key:
             derived_topic_id, derived_task_id = _parse_board_session_key(session_key)
@@ -998,6 +1549,8 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     # before the classifier cycle runs.
     cron_event_filtered = source_channel == "cron-event"
     if cron_event_filtered:
+        if not space_id:
+            space_id = source_scope_space_id or DEFAULT_SPACE_ID
         topic_id = None
         task_id = None
 
@@ -1012,6 +1565,7 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     # This prevents "impossible" UI states where a log references a task from a different topic.
     if task_row:
         topic_id = task_row.topicId
+        space_id = _space_id_for_task(task_row)
 
     topic_row = None
     if topic_id:
@@ -1019,10 +1573,16 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         if not topic_row:
             topic_id = None
             topic_row = None
+        else:
+            space_id = _space_id_for_topic(topic_row)
+
+    if not space_id:
+        space_id = source_scope_space_id or DEFAULT_SPACE_ID
 
     # Normalize source-level board scope metadata so downstream classifier/UI can reliably
     # keep nested/subagent logs in the originating board Topic/Task.
     if source_meta is not None:
+        canonical_space = str(source_scope_space_id or space_id or "").strip()
         canonical_topic = str(topic_id or "").strip()
         canonical_task = str(task_id or "").strip()
         if source_scope_topic_id and not canonical_topic:
@@ -1036,12 +1596,16 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             source_meta["boardScopeTopicId"] = canonical_topic
             source_meta["boardScopeKind"] = "task" if canonical_task else "topic"
             source_meta["boardScopeLock"] = bool(scope_lock or canonical_task)
+            if canonical_space:
+                source_meta["boardScopeSpaceId"] = canonical_space
             if canonical_task:
                 source_meta["boardScopeTaskId"] = canonical_task
             else:
                 source_meta.pop("boardScopeTaskId", None)
         elif scope_lock:
             source_meta["boardScopeLock"] = True
+        if canonical_space:
+            source_meta["boardScopeSpaceId"] = canonical_space
 
     attachments = None
     if payload.attachments:
@@ -1054,8 +1618,15 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             else:
                 attachments.append({"value": str(item)})
 
+    _ensure_default_space(session)
+    if not space_id:
+        space_id = DEFAULT_SPACE_ID
+    if not session.get(Space, space_id):
+        space_id = DEFAULT_SPACE_ID
+
     entry = LogEntry(
         id=create_id("log"),
+        spaceId=space_id or DEFAULT_SPACE_ID,
         topicId=topic_id,
         taskId=task_id,
         relatedLogId=payload.relatedLogId,
@@ -1708,6 +2279,7 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
     agent_id = (payload.agentId or "main").strip() or "main"
     session_key = payload.sessionKey.strip()
     message = payload.message.strip()
+    space_scope_id = _normalize_space_id(getattr(payload, "spaceId", None))
     attachment_ids = [str(att_id).strip() for att_id in (payload.attachmentIds or []) if str(att_id).strip()]
     if not session_key:
         raise HTTPException(status_code=400, detail="sessionKey is required")
@@ -1767,20 +2339,30 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
                         }
                     )
 
+            source_meta: dict[str, Any] = {
+                "sessionKey": session_key,
+                "channel": "openclaw",
+                "requestId": request_id,
+                "messageId": request_id,
+            }
+            if space_scope_id:
+                source_meta["boardScopeSpaceId"] = space_scope_id
+
             payload_log = LogAppend(
-            topicId=topic_id,
-            taskId=task_id,
-            type="conversation",
-            content=message,
-            summary=_clip(_sanitize_log_text(message), 160),
-            raw=None,
-            createdAt=created_at,
-            agentId="user",
-            agentLabel="User",
-            source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id, "messageId": request_id},
-            attachments=attachments_meta,
-            classificationStatus="pending",
-        )
+                spaceId=space_scope_id,
+                topicId=topic_id,
+                taskId=task_id,
+                type="conversation",
+                content=message,
+                summary=_clip(_sanitize_log_text(message), 160),
+                raw=None,
+                createdAt=created_at,
+                agentId="user",
+                agentLabel="User",
+                source=source_meta,
+                attachments=attachments_meta,
+                classificationStatus="pending",
+            )
             entry = append_log_entry(session, payload_log, idempotency_key=f"openclaw-chat:user:{request_id}")
 
             # Best-effort ownership marker (useful for cleanup/analytics). Do not fail the send
@@ -2040,11 +2622,275 @@ def admin_start_fresh_replay(
     return {"ok": True, "resetAt": timestamp, "integrationLevel": payload.integrationLevel}
 
 
+@app.get("/api/spaces", response_model=List[SpaceOut], tags=["spaces"])
+def list_spaces():
+    """List spaces (deterministic order)."""
+    with get_session() as session:
+        spaces = _list_spaces(session)
+        spaces.sort(key=lambda item: (0 if item.id == DEFAULT_SPACE_ID else 1, item.name.lower(), item.id))
+        return spaces
+
+
+@app.post("/api/spaces", dependencies=[Depends(require_token)], response_model=SpaceOut, tags=["spaces"])
+def upsert_space(payload: SpaceUpsert = Body(...)):
+    """Create or update a space."""
+    with get_session() as session:
+        _ensure_default_space(session)
+        stamp = now_iso()
+        candidate_id = _normalize_space_id(payload.id) if payload.id is not None else None
+        if candidate_id:
+            row = session.get(Space, candidate_id)
+            if row:
+                row.name = payload.name
+                if "color" in payload.model_fields_set:
+                    if payload.color is None:
+                        row.color = None
+                    else:
+                        normalized = _normalize_hex_color(payload.color)
+                        if not normalized:
+                            raise HTTPException(status_code=400, detail="Invalid color (expected #RRGGBB)")
+                        row.color = normalized
+                row.updatedAt = stamp
+                session.add(row)
+                session.commit()
+                session.refresh(row)
+                _publish_space_upserted(row)
+                return row
+            space_id = candidate_id
+        else:
+            space_id = create_id("space")
+
+        normalized_color = _normalize_hex_color(payload.color) if payload.color is not None else None
+        if payload.color is not None and not normalized_color:
+            raise HTTPException(status_code=400, detail="Invalid color (expected #RRGGBB)")
+        row = Space(
+            id=space_id,
+            name=payload.name,
+            color=normalized_color,
+            connectivity={},
+            createdAt=stamp,
+            updatedAt=stamp,
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        _publish_space_upserted(row)
+        return row
+
+
+@app.patch(
+    "/api/spaces/{space_id}/connectivity",
+    dependencies=[Depends(require_token)],
+    response_model=SpaceOut,
+    tags=["spaces"],
+)
+def patch_space_connectivity(space_id: str, payload: SpaceConnectivityPatch = Body(...)):
+    """Patch outbound connectivity toggles for one source space."""
+    normalized_id = _normalize_space_id(space_id)
+    if not normalized_id:
+        raise HTTPException(status_code=400, detail="space_id is required")
+    with get_session() as session:
+        _ensure_default_space(session)
+        touched = False
+        row = session.get(Space, normalized_id)
+        if not row:
+            row = _ensure_space_row(session, space_id=normalized_id, name=_space_display_name_from_id(normalized_id))
+            touched = True
+
+        spaces = _list_spaces(session)
+        valid_ids = {str(item.id) for item in spaces}
+        if touched:
+            session.commit()
+            row = session.get(Space, normalized_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Space not found")
+
+        connectivity = _normalize_connectivity(getattr(row, "connectivity", None))
+        for raw_target, enabled in payload.connectivity.items():
+            target = _normalize_space_id(raw_target)
+            if not target:
+                continue
+            if target == normalized_id:
+                continue
+            if target not in valid_ids:
+                continue
+            connectivity[target] = bool(enabled)
+
+        row.connectivity = connectivity
+        row.updatedAt = now_iso()
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        _publish_space_upserted(row)
+        return row
+
+
+@app.get("/api/spaces/allowed", response_model=SpaceAllowedResponse, tags=["spaces"])
+def get_allowed_spaces(
+    spaceId: str = Query(..., min_length=1, description="Source space id to resolve connectivity for."),
+):
+    with get_session() as session:
+        resolved_source = _normalize_space_id(spaceId) or DEFAULT_SPACE_ID
+        allowed = sorted(_allowed_space_ids_for_source(session, resolved_source))
+        if resolved_source not in allowed:
+            resolved_source = DEFAULT_SPACE_ID
+        return {"spaceId": resolved_source, "allowedSpaceIds": allowed}
+
+
+@app.post("/api/spaces/{space_id}/cleanup-tag", dependencies=[Depends(require_token)], tags=["spaces"])
+def cleanup_space_tag(space_id: str):
+    """Remove one space tag association from every topic.
+
+    This removes tags that resolve to `space_id`, and re-homes topics currently owned by
+    that space to the next derived tag space (or default) to keep scope queries consistent.
+    """
+
+    normalized_id = _normalize_space_id(space_id)
+    if not normalized_id:
+        raise HTTPException(status_code=400, detail="space_id is required")
+    if normalized_id == DEFAULT_SPACE_ID:
+        raise HTTPException(status_code=400, detail="Cannot cleanup default space tag")
+
+    stamp = now_iso()
+    with get_session() as session:
+        _ensure_default_space(session)
+
+        topics = session.exec(select(Topic)).all()
+        prior_space_by_topic_id: dict[str, str] = {}
+        changed_topic_ids: list[str] = []
+        removed_tag_count = 0
+
+        for topic in topics:
+            topic_id = str(getattr(topic, "id", "") or "").strip()
+            if not topic_id:
+                continue
+
+            prior_space_id = _space_id_for_topic(topic)
+            prior_tags = _normalize_tags(topic.tags or [])
+            next_tags: list[str] = []
+            removed_for_topic = 0
+
+            for raw_tag in prior_tags:
+                mapped = _topic_space_candidates_from_tags([raw_tag])
+                mapped_space_id = mapped[0][0] if mapped else None
+                if mapped_space_id == normalized_id:
+                    removed_for_topic += 1
+                    continue
+                next_tags.append(raw_tag)
+
+            touched = False
+            if removed_for_topic > 0:
+                topic.tags = next_tags
+                removed_tag_count += removed_for_topic
+                touched = True
+
+            if prior_space_id == normalized_id:
+                resolved_space_id = _resolve_space_id_from_topic_tags(
+                    session,
+                    topic.tags or next_tags,
+                    fallback_space_id=DEFAULT_SPACE_ID,
+                )
+                if resolved_space_id != prior_space_id:
+                    topic.spaceId = resolved_space_id
+                touched = True
+
+            if not touched:
+                continue
+
+            prior_space_by_topic_id[topic_id] = prior_space_id
+            topic.updatedAt = stamp
+            session.add(topic)
+            changed_topic_ids.append(topic_id)
+
+        if changed_topic_ids:
+            session.commit()
+            changed_topics = session.exec(select(Topic).where(Topic.id.in_(changed_topic_ids))).all()
+
+            propagated = False
+            for topic in changed_topics:
+                topic_id = str(getattr(topic, "id", "") or "").strip()
+                if not topic_id:
+                    continue
+                previous_space = prior_space_by_topic_id.get(topic_id)
+                if not previous_space:
+                    continue
+                if _space_id_for_topic(topic) == previous_space:
+                    continue
+                _propagate_topic_space(session, topic, stamp=stamp)
+                propagated = True
+
+            if propagated:
+                session.commit()
+                changed_topics = session.exec(select(Topic).where(Topic.id.in_(changed_topic_ids))).all()
+
+            for topic in changed_topics:
+                event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
+                topic_text = " ".join(
+                    [
+                        str(topic.name or "").strip(),
+                        str(topic.description or "").strip(),
+                        " ".join(
+                            [
+                                str(t).strip()
+                                for t in (topic.tags or [])
+                                if str(t).strip() and not str(t).strip().lower().startswith("system:")
+                            ]
+                        ),
+                    ]
+                ).strip()
+                enqueue_reindex_request({"op": "upsert", "kind": "topic", "id": topic.id, "text": topic_text})
+
+        space_rows = session.exec(select(Space)).all()
+        touched_spaces: list[str] = []
+        for row in space_rows:
+            row_id = str(getattr(row, "id", "") or "").strip()
+            if not row_id:
+                continue
+            connectivity = _normalize_connectivity(getattr(row, "connectivity", None))
+            if normalized_id not in connectivity:
+                continue
+            del connectivity[normalized_id]
+            row.connectivity = connectivity
+            row.updatedAt = stamp
+            session.add(row)
+            touched_spaces.append(row_id)
+
+        if touched_spaces:
+            session.commit()
+            for row_id in touched_spaces:
+                refreshed = session.get(Space, row_id)
+                if refreshed:
+                    _publish_space_upserted(refreshed)
+
+        return {
+            "ok": True,
+            "spaceId": normalized_id,
+            "updatedTopicCount": len(changed_topic_ids),
+            "removedTagCount": removed_tag_count,
+        }
+
+
 @app.get("/api/topics", response_model=List[TopicOut], tags=["topics"])
-def list_topics():
+def list_topics(
+    sessionKey: str | None = Query(default=None, description="Session key continuity scope (source.sessionKey)."),
+    spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
+    allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
+):
     """List topics (pinned first, newest activity first)."""
     with get_session() as session:
         topics = session.exec(select(Topic)).all()
+        resolved_source_space_id = _resolve_source_space_id(
+            session,
+            explicit_space_id=spaceId,
+            session_key=sessionKey,
+        )
+        allowed_space_ids = _resolve_allowed_space_ids(
+            session,
+            source_space_id=resolved_source_space_id,
+            allowed_space_ids_raw=allowedSpaceIds,
+        )
+        if allowed_space_ids is not None:
+            topics = [item for item in topics if _topic_matches_allowed_spaces(item, allowed_space_ids)]
         # Most recently updated first, then manual order, then pinned first.
         topics.sort(key=lambda t: t.updatedAt, reverse=True)
         topics.sort(key=lambda t: getattr(t, "sortIndex", 0))
@@ -2074,6 +2920,18 @@ def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
         stamp = now_iso()
         touched = False
         reindex_needed = False
+        prior_space_id = _space_id_for_topic(topic)
+
+        if "spaceId" in fields:
+            normalized_space_id = _normalize_space_id(payload.spaceId)
+            if not normalized_space_id:
+                raise HTTPException(status_code=400, detail="spaceId is required")
+            _ensure_default_space(session)
+            target_space = session.get(Space, normalized_space_id)
+            if not target_space:
+                raise HTTPException(status_code=400, detail="spaceId not found")
+            topic.spaceId = normalized_space_id
+            touched = True
 
         if "name" in fields:
             name = (payload.name or "").strip()
@@ -2140,7 +2998,20 @@ def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
                 touched = True
 
         if "tags" in fields:
-            topic.tags = payload.tags or []
+            next_tags = _normalize_tags(payload.tags or [])
+            topic.tags = next_tags
+            for resolved_space_id, label in _topic_space_candidates_from_tags(next_tags):
+                _ensure_space_row(
+                    session,
+                    space_id=resolved_space_id,
+                    name=label if resolved_space_id != DEFAULT_SPACE_ID else DEFAULT_SPACE_NAME,
+                )
+            if "spaceId" not in fields:
+                topic.spaceId = _resolve_space_id_from_topic_tags(
+                    session,
+                    next_tags,
+                    fallback_space_id=DEFAULT_SPACE_ID,
+                )
             reindex_needed = True
             touched = True
 
@@ -2161,9 +3032,16 @@ def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
         if touched:
             topic.updatedAt = stamp
 
+        space_changed = _space_id_for_topic(topic) != prior_space_id
+
         session.add(topic)
         session.commit()
         session.refresh(topic)
+        if space_changed:
+            _propagate_topic_space(session, topic, stamp=stamp)
+            session.commit()
+            session.refresh(topic)
+        _publish_space_upserted(session.get(Space, _space_id_for_topic(topic)))
         event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
 
         if reindex_needed:
@@ -2293,11 +3171,21 @@ def upsert_topic(
 ):
     """Create or update a topic."""
     with get_session() as session:
+        _ensure_default_space(session)
         topic = session.get(Topic, payload.id) if payload.id else None
         timestamp = now_iso()
         fields = payload.model_fields_set
         if topic:
+            prior_space_id = _space_id_for_topic(topic)
             topic.name = payload.name or topic.name
+            if "spaceId" in fields:
+                normalized_space_id = _normalize_space_id(payload.spaceId)
+                if not normalized_space_id:
+                    raise HTTPException(status_code=400, detail="spaceId is required")
+                target_space = session.get(Space, normalized_space_id)
+                if not target_space:
+                    raise HTTPException(status_code=400, detail="spaceId not found")
+                topic.spaceId = normalized_space_id
             if "color" in fields:
                 if payload.color is None:
                     topic.color = None
@@ -2314,7 +3202,19 @@ def upsert_topic(
             if "snoozedUntil" in fields:
                 topic.snoozedUntil = payload.snoozedUntil
             if "tags" in fields:
-                topic.tags = payload.tags or []
+                topic.tags = _normalize_tags(payload.tags or [])
+                for resolved_space_id, label in _topic_space_candidates_from_tags(topic.tags or []):
+                    _ensure_space_row(
+                        session,
+                        space_id=resolved_space_id,
+                        name=label if resolved_space_id != DEFAULT_SPACE_ID else DEFAULT_SPACE_NAME,
+                    )
+                if "spaceId" not in fields:
+                    topic.spaceId = _resolve_space_id_from_topic_tags(
+                        session,
+                        topic.tags or [],
+                        fallback_space_id=DEFAULT_SPACE_ID,
+                    )
             if "parentId" in fields:
                 topic.parentId = payload.parentId
             if "pinned" in fields:
@@ -2332,11 +3232,33 @@ def upsert_topic(
                 topic.status = "snoozed"
 
             topic.updatedAt = timestamp
+            session.add(topic)
+            session.commit()
+            session.refresh(topic)
+            if _space_id_for_topic(topic) != prior_space_id:
+                _propagate_topic_space(session, topic, stamp=timestamp)
+                session.commit()
+                session.refresh(topic)
+            _publish_space_upserted(session.get(Space, _space_id_for_topic(topic)))
         else:
             actor = str(x_clawboard_actor or "").strip().lower()
             created_by = "classifier" if actor == "classifier" else "user"
-            duplicate = _find_similar_topic(session, payload.name)
+            if "spaceId" in fields:
+                requested_space_id = _normalize_space_id(payload.spaceId)
+                if not requested_space_id:
+                    raise HTTPException(status_code=400, detail="spaceId is required")
+                target_space = session.get(Space, requested_space_id)
+                if not target_space:
+                    raise HTTPException(status_code=400, detail="spaceId not found")
+            else:
+                requested_space_id = _resolve_space_id_from_topic_tags(
+                    session,
+                    payload.tags or [],
+                    fallback_space_id=DEFAULT_SPACE_ID,
+                )
+            duplicate = _find_similar_topic(session, payload.name, space_id=requested_space_id)
             if duplicate:
+                duplicate_prior_space_id = _space_id_for_topic(duplicate)
                 if "color" in fields:
                     if payload.color is None:
                         duplicate.color = None
@@ -2354,8 +3276,16 @@ def upsert_topic(
                 if "description" in fields and payload.description is not None and not duplicate.description:
                     duplicate.description = payload.description
                 if "tags" in fields and payload.tags:
-                    merged = list(dict.fromkeys([*(duplicate.tags or []), *payload.tags]))
+                    merged = _normalize_tags([*(duplicate.tags or []), *payload.tags])
                     duplicate.tags = merged
+                    for resolved_space_id, label in _topic_space_candidates_from_tags(duplicate.tags or []):
+                        _ensure_space_row(
+                            session,
+                            space_id=resolved_space_id,
+                            name=label if resolved_space_id != DEFAULT_SPACE_ID else DEFAULT_SPACE_NAME,
+                        )
+                elif "tags" in fields:
+                    duplicate.tags = []
                 if "priority" in fields and payload.priority is not None:
                     duplicate.priority = payload.priority
                 if "status" in fields:
@@ -2364,6 +3294,20 @@ def upsert_topic(
                     duplicate.snoozedUntil = payload.snoozedUntil
                 if "pinned" in fields:
                     duplicate.pinned = payload.pinned
+                if "spaceId" in fields:
+                    normalized_space_id = _normalize_space_id(payload.spaceId)
+                    if not normalized_space_id:
+                        raise HTTPException(status_code=400, detail="spaceId is required")
+                    target_space = session.get(Space, normalized_space_id)
+                    if not target_space:
+                        raise HTTPException(status_code=400, detail="spaceId not found")
+                    duplicate.spaceId = normalized_space_id
+                elif "tags" in fields:
+                    duplicate.spaceId = _resolve_space_id_from_topic_tags(
+                        session,
+                        duplicate.tags or [],
+                        fallback_space_id=DEFAULT_SPACE_ID,
+                    )
 
                 normalized_status = normalize_topic_status(duplicate.status) or "active"
                 if "snoozedUntil" in fields and payload.snoozedUntil is None and "status" not in fields:
@@ -2380,6 +3324,11 @@ def upsert_topic(
                 session.add(duplicate)
                 session.commit()
                 session.refresh(duplicate)
+                if _space_id_for_topic(duplicate) != duplicate_prior_space_id:
+                    _propagate_topic_space(session, duplicate, stamp=timestamp)
+                    session.commit()
+                    session.refresh(duplicate)
+                _publish_space_upserted(session.get(Space, _space_id_for_topic(duplicate)))
                 event_hub.publish({"type": "topic.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
                 topic_text = " ".join(
                     [
@@ -2411,8 +3360,12 @@ def upsert_topic(
                 resolved_snoozed_until = None
             elif resolved_snoozed_until is not None and resolved_status != "snoozed":
                 resolved_status = "snoozed"
+            resolved_space_id = _normalize_space_id(requested_space_id) or DEFAULT_SPACE_ID
+            if resolved_space_id == DEFAULT_SPACE_ID:
+                _ensure_default_space(session)
             topic = Topic(
                 id=payload.id or create_id("topic"),
+                spaceId=resolved_space_id,
                 name=payload.name,
                 createdBy=created_by,
                 sortIndex=sort_index,
@@ -2421,15 +3374,22 @@ def upsert_topic(
                 priority=payload.priority or "medium",
                 status=resolved_status,
                 snoozedUntil=resolved_snoozed_until,
-                tags=payload.tags or [],
+                tags=_normalize_tags(payload.tags or []),
                 parentId=payload.parentId,
                 pinned=payload.pinned or False,
                 createdAt=timestamp,
                 updatedAt=timestamp,
             )
-        session.add(topic)
-        session.commit()
-        session.refresh(topic)
+            for resolved_tag_space_id, label in _topic_space_candidates_from_tags(topic.tags or []):
+                _ensure_space_row(
+                    session,
+                    space_id=resolved_tag_space_id,
+                    name=label if resolved_tag_space_id != DEFAULT_SPACE_ID else DEFAULT_SPACE_NAME,
+                )
+            session.add(topic)
+            session.commit()
+            session.refresh(topic)
+            _publish_space_upserted(session.get(Space, _space_id_for_topic(topic)))
         event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
         topic_text = " ".join(
             [
@@ -2510,11 +3470,30 @@ def list_tasks(
         default=None,
         description="Filter tasks by topic ID.",
         example="topic-1",
-    )
+    ),
+    sessionKey: str | None = Query(default=None, description="Session key continuity scope (source.sessionKey)."),
+    spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
+    allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
 ):
     """List tasks (pinned first, newest activity first)."""
     with get_session() as session:
         tasks = session.exec(select(Task)).all()
+        resolved_source_space_id = _resolve_source_space_id(
+            session,
+            explicit_space_id=spaceId,
+            session_key=sessionKey,
+        )
+        allowed_space_ids = _resolve_allowed_space_ids(
+            session,
+            source_space_id=resolved_source_space_id,
+            allowed_space_ids_raw=allowedSpaceIds,
+        )
+        if allowed_space_ids is not None:
+            topic_by_id = _load_topics_by_ids(
+                session,
+                [str(getattr(task, "topicId", "") or "").strip() for task in tasks],
+            )
+            tasks = [item for item in tasks if _task_matches_allowed_spaces(item, allowed_space_ids, topic_by_id)]
         if topicId:
             tasks = [t for t in tasks if t.topicId == topicId]
         tasks.sort(key=lambda t: t.updatedAt, reverse=True)
@@ -2545,6 +3524,20 @@ def patch_task(task_id: str, payload: TaskPatch = Body(...)):
         stamp = now_iso()
         touched = False
         reindex_needed = False
+        space_changed = False
+
+        if "spaceId" in fields:
+            normalized_space_id = _normalize_space_id(payload.spaceId)
+            if not normalized_space_id:
+                raise HTTPException(status_code=400, detail="spaceId is required")
+            _ensure_default_space(session)
+            target_space = session.get(Space, normalized_space_id)
+            if not target_space:
+                raise HTTPException(status_code=400, detail="spaceId not found")
+            if _space_id_for_task(task) != normalized_space_id:
+                space_changed = True
+            task.spaceId = normalized_space_id
+            touched = True
 
         if "title" in fields:
             title = (payload.title or "").strip()
@@ -2572,6 +3565,10 @@ def patch_task(task_id: str, payload: TaskPatch = Body(...)):
                 if not parent:
                     raise HTTPException(status_code=400, detail="topicId not found")
                 task.topicId = payload.topicId
+                parent_space_id = _space_id_for_topic(parent)
+                if _space_id_for_task(task) != parent_space_id:
+                    task.spaceId = parent_space_id
+                    space_changed = True
             else:
                 task.topicId = None
             touched = True
@@ -2599,7 +3596,7 @@ def patch_task(task_id: str, payload: TaskPatch = Body(...)):
             touched = True
 
         if "tags" in fields:
-            task.tags = payload.tags or []
+            task.tags = _normalize_tags(payload.tags or [])
             touched = True
             reindex_needed = True
 
@@ -2615,6 +3612,15 @@ def patch_task(task_id: str, payload: TaskPatch = Body(...)):
         session.add(task)
         session.commit()
         session.refresh(task)
+        if space_changed:
+            task_space_id = _space_id_for_task(task)
+            scoped_logs = session.exec(select(LogEntry).where(LogEntry.taskId == task.id)).all()
+            for scoped_log in scoped_logs:
+                scoped_log.spaceId = task_space_id
+                scoped_log.updatedAt = stamp
+                session.add(scoped_log)
+            session.commit()
+            session.refresh(task)
         event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
 
         if reindex_needed:
@@ -2707,6 +3713,7 @@ def upsert_task(
 ):
     """Create or update a task."""
     with get_session() as session:
+        _ensure_default_space(session)
         task = session.get(Task, payload.id) if payload.id else None
         timestamp = now_iso()
         fields = payload.model_fields_set
@@ -2721,6 +3728,19 @@ def upsert_task(
                         task.color = normalized_color
             if "topicId" in fields:
                 task.topicId = payload.topicId
+                if payload.topicId:
+                    parent = session.get(Topic, payload.topicId)
+                    if not parent:
+                        raise HTTPException(status_code=400, detail="topicId not found")
+                    task.spaceId = _space_id_for_topic(parent)
+            if "spaceId" in fields and ("topicId" not in fields or not payload.topicId):
+                normalized_space_id = _normalize_space_id(payload.spaceId)
+                if not normalized_space_id:
+                    raise HTTPException(status_code=400, detail="spaceId is required")
+                target_space = session.get(Space, normalized_space_id)
+                if not target_space:
+                    raise HTTPException(status_code=400, detail="spaceId not found")
+                task.spaceId = normalized_space_id
             if "status" in fields and payload.status is not None:
                 task.status = payload.status
             if "priority" in fields:
@@ -2730,12 +3750,24 @@ def upsert_task(
             if "pinned" in fields:
                 task.pinned = payload.pinned
             if "tags" in fields:
-                task.tags = payload.tags or []
+                task.tags = _normalize_tags(payload.tags or [])
             if "snoozedUntil" in fields:
                 task.snoozedUntil = payload.snoozedUntil
             task.updatedAt = timestamp
         else:
-            duplicate = _find_similar_task(session, payload.topicId, payload.title)
+            parent_space_id_for_create = None
+            if payload.topicId:
+                parent_for_create = session.get(Topic, payload.topicId)
+                if not parent_for_create:
+                    raise HTTPException(status_code=400, detail="topicId not found")
+                parent_space_id_for_create = _space_id_for_topic(parent_for_create)
+            requested_space_id = parent_space_id_for_create or _normalize_space_id(payload.spaceId) or DEFAULT_SPACE_ID
+            duplicate = _find_similar_task(
+                session,
+                payload.topicId,
+                payload.title,
+                space_id=requested_space_id,
+            )
             if duplicate:
                 if "color" in fields:
                     if payload.color is None:
@@ -2753,6 +3785,19 @@ def upsert_task(
                     duplicate.color = _auto_pick_color(f"task:{duplicate.id}:{duplicate.title}", used_colors, 21.0)
                 if "status" in fields and payload.status is not None:
                     duplicate.status = payload.status
+                if "topicId" in fields and payload.topicId:
+                    parent = session.get(Topic, payload.topicId)
+                    if not parent:
+                        raise HTTPException(status_code=400, detail="topicId not found")
+                    duplicate.spaceId = _space_id_for_topic(parent)
+                elif "spaceId" in fields and ("topicId" not in fields or not payload.topicId):
+                    normalized_space_id = _normalize_space_id(payload.spaceId)
+                    if not normalized_space_id:
+                        raise HTTPException(status_code=400, detail="spaceId is required")
+                    target_space = session.get(Space, normalized_space_id)
+                    if not target_space:
+                        raise HTTPException(status_code=400, detail="spaceId not found")
+                    duplicate.spaceId = normalized_space_id
                 if "priority" in fields:
                     duplicate.priority = payload.priority
                 if "dueDate" in fields:
@@ -2760,13 +3805,22 @@ def upsert_task(
                 if "pinned" in fields:
                     duplicate.pinned = payload.pinned
                 if "tags" in fields:
-                    duplicate.tags = payload.tags or []
+                    duplicate.tags = _normalize_tags(payload.tags or [])
                 if "snoozedUntil" in fields:
                     duplicate.snoozedUntil = payload.snoozedUntil
                 duplicate.updatedAt = timestamp
                 session.add(duplicate)
                 session.commit()
                 session.refresh(duplicate)
+                if "topicId" in fields or "spaceId" in fields:
+                    duplicate_space_id = _space_id_for_task(duplicate)
+                    scoped_logs = session.exec(select(LogEntry).where(LogEntry.taskId == duplicate.id)).all()
+                    for scoped_log in scoped_logs:
+                        scoped_log.spaceId = duplicate_space_id
+                        scoped_log.updatedAt = timestamp
+                        session.add(scoped_log)
+                    session.commit()
+                    session.refresh(duplicate)
                 event_hub.publish({"type": "task.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
                 enqueue_reindex_request(
                     {
@@ -2799,8 +3853,13 @@ def upsert_task(
             if not resolved_color:
                 resolved_color = _auto_pick_color(f"task:{payload.id or ''}:{payload.title}", used_colors, 21.0)
             sort_index = _next_sort_index_for_new_task(session, payload.topicId, bool(payload.pinned or False))
+            resolved_space_id = requested_space_id
+            target_space = session.get(Space, resolved_space_id)
+            if not target_space:
+                raise HTTPException(status_code=400, detail="spaceId not found")
             task = Task(
                 id=payload.id or create_id("task"),
+                spaceId=resolved_space_id,
                 topicId=payload.topicId,
                 title=payload.title,
                 sortIndex=sort_index,
@@ -2810,13 +3869,22 @@ def upsert_task(
                 priority=payload.priority or "medium",
                 dueDate=payload.dueDate,
                 snoozedUntil=payload.snoozedUntil,
-                tags=payload.tags or [],
+                tags=_normalize_tags(payload.tags or []),
                 createdAt=timestamp,
                 updatedAt=timestamp,
             )
         session.add(task)
         session.commit()
         session.refresh(task)
+        if "topicId" in fields or "spaceId" in fields:
+            task_space_id = _space_id_for_task(task)
+            scoped_logs = session.exec(select(LogEntry).where(LogEntry.taskId == task.id)).all()
+            for scoped_log in scoped_logs:
+                scoped_log.spaceId = task_space_id
+                scoped_log.updatedAt = timestamp
+                session.add(scoped_log)
+            session.commit()
+            session.refresh(task)
         event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
         enqueue_reindex_request(
             {
@@ -2875,9 +3943,16 @@ def delete_task(task_id: str):
 def list_pending_conversations_for_classifier(
     limit: int = Query(default=500, ge=1, le=1000, description="Max results.", example=500),
     offset: int = Query(default=0, ge=0, description="Offset for pagination.", example=0),
+    spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
+    allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
 ):
     """List pending conversation logs without heavy fields (raw) for classifier polling."""
     with get_session() as session:
+        allowed_space_ids = _resolve_allowed_space_ids(
+            session,
+            source_space_id=spaceId,
+            allowed_space_ids_raw=allowedSpaceIds,
+        )
         query = (
             select(LogEntry)
             .options(defer(LogEntry.raw))
@@ -2888,10 +3963,16 @@ def list_pending_conversations_for_classifier(
                 # SQLite needs a deterministic tie-break when timestamps collide.
                 (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
             )
-            .offset(offset)
-            .limit(limit)
         )
-        return session.exec(query).all()
+        rows = session.exec(query).all()
+        if allowed_space_ids is not None:
+            topic_by_id, task_by_id = _load_related_maps_for_logs(session, rows)
+            rows = [row for row in rows if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id, task_by_id)]
+        if offset > 0:
+            rows = rows[offset:]
+        if limit >= 0:
+            rows = rows[:limit]
+        return rows
 
 
 @app.get(
@@ -3225,6 +4306,8 @@ def list_logs(
         description="Filter logs by classification status (pending|classified|failed).",
         example="pending",
     ),
+    spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
+    allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
     includeRaw: bool = Query(
         default=False,
         description="Include raw payload field (can be large).",
@@ -3235,6 +4318,11 @@ def list_logs(
 ):
     """List timeline entries (newest first)."""
     with get_session() as session:
+        allowed_space_ids = _resolve_allowed_space_ids(
+            session,
+            source_space_id=spaceId,
+            allowed_space_ids_raw=allowedSpaceIds,
+        )
         query = select(LogEntry)
         if not includeRaw:
             query = query.options(defer(LogEntry.raw))
@@ -3261,11 +4349,36 @@ def list_logs(
             query = query.where(LogEntry.type == type)
         if classificationStatus:
             query = query.where(LogEntry.classificationStatus == classificationStatus)
-        query = query.order_by(
+        ordered_query = query.order_by(
             LogEntry.createdAt.desc(),
             (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
-        ).offset(offset).limit(limit)
-        rows = session.exec(query).all()
+        )
+
+        if allowed_space_ids is None:
+            rows = session.exec(ordered_query.offset(offset).limit(limit)).all()
+            return [LogOut.model_validate(row) for row in rows]
+
+        rows: list[LogEntry] = []
+        skip = max(0, int(offset))
+        scan_offset = 0
+        page_size = max(120, min(1000, max(60, int(limit) * 3)))
+        while len(rows) < limit:
+            chunk = session.exec(ordered_query.offset(scan_offset).limit(page_size)).all()
+            if not chunk:
+                break
+            topic_by_id, task_by_id = _load_related_maps_for_logs(session, chunk)
+            for row in chunk:
+                if not _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id, task_by_id):
+                    continue
+                if skip > 0:
+                    skip -= 1
+                    continue
+                rows.append(row)
+                if len(rows) >= limit:
+                    break
+            scan_offset += len(chunk)
+            if len(chunk) < page_size:
+                break
         # Detach from session to avoid DetachedInstanceError during serialization.
         # This is especially important when columns are deferred (like 'raw').
         return [LogOut.model_validate(row) for row in rows]
@@ -3353,6 +4466,15 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
             raise HTTPException(status_code=404, detail="Log not found")
 
         fields = payload.model_fields_set
+        if "spaceId" in fields:
+            normalized_space_id = _normalize_space_id(payload.spaceId)
+            if not normalized_space_id:
+                raise HTTPException(status_code=400, detail="spaceId is required")
+            _ensure_default_space(session)
+            space = session.get(Space, normalized_space_id)
+            if not space:
+                raise HTTPException(status_code=400, detail="spaceId not found")
+            entry.spaceId = normalized_space_id
 
         if "topicId" in fields:
             entry.topicId = payload.topicId
@@ -3368,6 +4490,7 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
                     # Align topic to the task if topic wasn't explicitly patched.
                     entry.topicId = task.topicId
                 entry.taskId = task.id
+                entry.spaceId = _space_id_for_task(task)
             else:
                 entry.taskId = None
         if "relatedLogId" in fields:
@@ -3390,6 +4513,18 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
             task = session.get(Task, entry.taskId)
             if not task or task.topicId != entry.topicId:
                 entry.taskId = None
+
+        # Keep log space in sync with routed entity ownership.
+        if entry.taskId:
+            task = session.get(Task, entry.taskId)
+            if task:
+                entry.spaceId = _space_id_for_task(task)
+        elif entry.topicId:
+            topic = session.get(Topic, entry.topicId)
+            if topic:
+                entry.spaceId = _space_id_for_topic(topic)
+        elif not _normalize_space_id(getattr(entry, "spaceId", None)):
+            entry.spaceId = DEFAULT_SPACE_ID
 
         stamp = now_iso()
 
@@ -3682,6 +4817,8 @@ def list_changes(
         description="Include raw payload field (can be large).",
         example=False,
     ),
+    spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
+    allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
 ):
     """Return topics/tasks/logs changed since timestamp (ISO).
 
@@ -3689,9 +4826,30 @@ def list_changes(
     crash the container. This endpoint caps logs by default and is intended for incremental sync.
     """
     with get_session() as session:
+        allowed_space_ids = _resolve_allowed_space_ids(
+            session,
+            source_space_id=spaceId,
+            allowed_space_ids_raw=allowedSpaceIds,
+        )
         if not since:
-            topics = session.exec(select(Topic)).all()
-            tasks = session.exec(select(Task)).all()
+            space_query = select(Space)
+            topic_query = select(Topic)
+            task_query = select(Task)
+            if allowed_space_ids is not None:
+                space_query = space_query.where(Space.id.in_(list(allowed_space_ids)))
+            spaces = session.exec(space_query).all()
+            topics = session.exec(topic_query).all()
+            if allowed_space_ids is not None:
+                topics = [topic for topic in topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
+            topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in topics if getattr(topic, "id", None)}
+            tasks = session.exec(task_query).all()
+            if allowed_space_ids is not None:
+                parent_topics = _load_topics_by_ids(
+                    session,
+                    [str(getattr(task, "topicId", "") or "").strip() for task in tasks],
+                )
+                merged_topic_by_id = {**parent_topics, **topic_by_id}
+                tasks = [task for task in tasks if _task_matches_allowed_spaces(task, allowed_space_ids, merged_topic_by_id)]
             drafts = session.exec(select(Draft)).all()
             log_query = select(LogEntry).order_by(
                 LogEntry.createdAt.desc(),
@@ -3700,9 +4858,38 @@ def list_changes(
             if not includeRaw:
                 log_query = log_query.options(defer(LogEntry.raw))
             logs = session.exec(log_query).all()
+            if allowed_space_ids is not None:
+                seeded_tasks = {str(getattr(task, "id", "") or ""): task for task in tasks if getattr(task, "id", None)}
+                topic_by_id_for_logs, task_by_id_for_logs = _load_related_maps_for_logs(
+                    session,
+                    logs,
+                    seeded_topics=topic_by_id,
+                    seeded_tasks=seeded_tasks,
+                )
+                logs = [
+                    row
+                    for row in logs
+                    if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id_for_logs, task_by_id_for_logs)
+                ]
         else:
-            topics = session.exec(select(Topic).where(Topic.updatedAt >= since)).all()
-            tasks = session.exec(select(Task).where(Task.updatedAt >= since)).all()
+            space_query = select(Space).where(Space.updatedAt >= since)
+            topic_query = select(Topic).where(Topic.updatedAt >= since)
+            task_query = select(Task).where(Task.updatedAt >= since)
+            if allowed_space_ids is not None:
+                space_query = space_query.where(Space.id.in_(list(allowed_space_ids)))
+            spaces = session.exec(space_query).all()
+            topics = session.exec(topic_query).all()
+            if allowed_space_ids is not None:
+                topics = [topic for topic in topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
+            topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in topics if getattr(topic, "id", None)}
+            tasks = session.exec(task_query).all()
+            if allowed_space_ids is not None:
+                parent_topics = _load_topics_by_ids(
+                    session,
+                    [str(getattr(task, "topicId", "") or "").strip() for task in tasks],
+                )
+                merged_topic_by_id = {**parent_topics, **topic_by_id}
+                tasks = [task for task in tasks if _task_matches_allowed_spaces(task, allowed_space_ids, merged_topic_by_id)]
             drafts = session.exec(select(Draft).where(Draft.updatedAt >= since)).all()
             log_query = (
                 select(LogEntry)
@@ -3713,11 +4900,25 @@ def list_changes(
             if not includeRaw:
                 log_query = log_query.options(defer(LogEntry.raw))
             logs = session.exec(log_query).all()
+            if allowed_space_ids is not None:
+                seeded_tasks = {str(getattr(task, "id", "") or ""): task for task in tasks if getattr(task, "id", None)}
+                topic_by_id_for_logs, task_by_id_for_logs = _load_related_maps_for_logs(
+                    session,
+                    logs,
+                    seeded_topics=topic_by_id,
+                    seeded_tasks=seeded_tasks,
+                )
+                logs = [
+                    row
+                    for row in logs
+                    if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id_for_logs, task_by_id_for_logs)
+                ]
 
         if not includeRaw:
             for row in logs:
                 row.raw = None
 
+        spaces.sort(key=lambda s: s.updatedAt, reverse=True)
         topics.sort(key=lambda t: t.updatedAt, reverse=True)
         tasks.sort(key=lambda t: t.updatedAt, reverse=True)
         drafts.sort(key=lambda d: d.updatedAt, reverse=True)
@@ -3731,7 +4932,14 @@ def list_changes(
                 deleted_log_ids = []
 
         # Preserve query ordering for logs (it may include SQLite rowid tiebreaks).
-        return {"topics": topics, "tasks": tasks, "logs": logs, "drafts": drafts, "deletedLogIds": deleted_log_ids}
+        return {
+            "spaces": spaces,
+            "topics": topics,
+            "tasks": tasks,
+            "logs": logs,
+            "drafts": drafts,
+            "deletedLogIds": deleted_log_ids,
+        }
 
 
 @app.post(
@@ -3792,11 +5000,30 @@ def clawgraph(
     minEdgeWeight: float = Query(default=0.16, ge=0.0, le=2.0, description="Edge weight threshold."),
     limitLogs: int = Query(default=2400, ge=100, le=20000, description="Recent log window used for graph build."),
     includePending: bool = Query(default=True, description="Include pending logs in graph extraction."),
+    spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
+    allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
 ):
     """Build and return an entity-relationship graph from topics/tasks/logs."""
     with get_session() as session:
-        topics = session.exec(select(Topic)).all()
-        tasks = session.exec(select(Task)).all()
+        allowed_space_ids = _resolve_allowed_space_ids(
+            session,
+            source_space_id=spaceId,
+            allowed_space_ids_raw=allowedSpaceIds,
+        )
+        all_topics = session.exec(select(Topic)).all()
+        all_topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in all_topics if getattr(topic, "id", None)}
+        topics = (
+            [topic for topic in all_topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
+            if allowed_space_ids is not None
+            else all_topics
+        )
+        all_tasks = session.exec(select(Task)).all()
+        tasks = (
+            [task for task in all_tasks if _task_matches_allowed_spaces(task, allowed_space_ids, all_topic_by_id)]
+            if allowed_space_ids is not None
+            else all_tasks
+        )
+        all_task_by_id = {str(getattr(task, "id", "") or ""): task for task in all_tasks if getattr(task, "id", None)}
         # Raw payloads can be very large; exclude from bulk graph extraction.
         log_query = select(LogEntry).options(defer(LogEntry.raw))
         if not includePending:
@@ -3807,6 +5034,12 @@ def clawgraph(
             (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
         ).limit(limitLogs)
         logs = session.exec(log_query).all()
+        if allowed_space_ids is not None:
+            logs = [
+                entry
+                for entry in logs
+                if _log_matches_allowed_spaces(entry, allowed_space_ids, all_topic_by_id, all_task_by_id)
+            ]
 
         graph = build_clawgraph(
             topics,
@@ -3825,6 +5058,7 @@ def _search_impl(
     query: str,
     *,
     topic_id: str | None,
+    allowed_space_ids: set[str] | None,
     session_key: str | None,
     include_pending: bool,
     limit_topics: int,
@@ -3845,8 +5079,20 @@ def _search_impl(
     effective_limit_tasks = max(1, min(int(limit_tasks), max(1, SEARCH_EFFECTIVE_LIMIT_TASKS)))
     effective_limit_logs = max(10, min(int(limit_logs), max(10, SEARCH_EFFECTIVE_LIMIT_LOGS)))
 
-    topics = session.exec(select(Topic)).all()
-    tasks = session.exec(select(Task)).all()
+    all_topics = session.exec(select(Topic)).all()
+    all_topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in all_topics if getattr(topic, "id", None)}
+    topics = (
+        [topic for topic in all_topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
+        if allowed_space_ids is not None
+        else all_topics
+    )
+    all_tasks = session.exec(select(Task)).all()
+    tasks = (
+        [task for task in all_tasks if _task_matches_allowed_spaces(task, allowed_space_ids, all_topic_by_id)]
+        if allowed_space_ids is not None
+        else all_tasks
+    )
+    all_task_by_id = {str(getattr(task, "id", "") or ""): task for task in all_tasks if getattr(task, "id", None)}
     # Never load the entire log table into memory for search.
     # This endpoint is used from the UI and must remain safe for large instances.
     window_multiplier = max(1, SEARCH_WINDOW_MULTIPLIER)
@@ -3864,12 +5110,21 @@ def _search_impl(
         log_query = log_query.where(LogEntry.topicId == topic_id)
     if not include_pending:
         log_query = log_query.where(LogEntry.classificationStatus == "classified")
+    log_fetch_limit = window_logs
+    if allowed_space_ids is not None:
+        log_fetch_limit = min(max(window_logs * 4, window_logs + 320), max(window_logs, SEARCH_WINDOW_MAX_LOGS))
     log_query = log_query.order_by(
         LogEntry.createdAt.desc(),
         LogEntry.updatedAt.desc(),
         (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
-    ).limit(window_logs)
+    ).limit(log_fetch_limit)
     logs = session.exec(log_query).all()
+    if allowed_space_ids is not None:
+        logs = [
+            entry
+            for entry in logs
+            if _log_matches_allowed_spaces(entry, allowed_space_ids, all_topic_by_id, all_task_by_id)
+        ][:window_logs]
     recent_log_ids = [str(entry.id or "").strip() for entry in logs if getattr(entry, "id", None)]
     preview_scan_cap_base = max(0, int(SEARCH_LOG_CONTENT_PREVIEW_SCAN_LIMIT))
     preview_dynamic_cap = max(80, min(320, effective_limit_logs * 2))
@@ -4606,6 +5861,8 @@ def _task_rank(task: Task, now: datetime) -> tuple:
 def context(
     q: str | None = Query(default=None, description="Current user input/query."),
     sessionKey: str | None = Query(default=None, description="Session key for continuity (source.sessionKey)."),
+    spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
+    allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
     mode: str = Query(default="auto", description="auto|cheap|full|patient"),
     includePending: bool = Query(default=True, description="Include pending logs in recall."),
     maxChars: int = Query(default=2200, ge=400, le=12000, description="Hard cap for returned block size."),
@@ -4642,6 +5899,17 @@ def context(
         lines.append(f"Mode: {effective_mode}")
 
     with get_session() as session:
+        resolved_source_space_id = _resolve_source_space_id(
+            session,
+            explicit_space_id=spaceId,
+            session_key=sessionKey,
+        )
+        allowed_space_ids = _resolve_allowed_space_ids(
+            session,
+            source_space_id=resolved_source_space_id,
+            allowed_space_ids_raw=allowedSpaceIds,
+        )
+
         routing_items: list[dict[str, Any]] = []
         if sessionKey:
             row = session.get(SessionRoutingMemory, sessionKey)
@@ -4671,6 +5939,18 @@ def context(
                     (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
                 ).limit(max(20, timelineLimit * 5))
                 rows = session.exec(query_logs).all()
+                if allowed_space_ids is not None:
+                    topic_by_id_for_timeline, task_by_id_for_timeline = _load_related_maps_for_logs(session, rows)
+                    rows = [
+                        entry
+                        for entry in rows
+                        if _log_matches_allowed_spaces(
+                            entry,
+                            allowed_space_ids,
+                            topic_by_id_for_timeline,
+                            task_by_id_for_timeline,
+                        )
+                    ]
                 for entry in rows:
                     if _is_command_log(entry):
                         continue
@@ -4697,9 +5977,20 @@ def context(
                     data["timeline"] = timeline
                     layers.append("A:timeline")
 
-        topics = session.exec(select(Topic)).all()
+        all_topics = session.exec(select(Topic)).all()
+        all_topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in all_topics if getattr(topic, "id", None)}
+        topics = (
+            [topic for topic in all_topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
+            if allowed_space_ids is not None
+            else all_topics
+        )
         topic_by_id = {t.id: t for t in topics}
-        tasks = session.exec(select(Task)).all()
+        all_tasks = session.exec(select(Task)).all()
+        tasks = (
+            [task for task in all_tasks if _task_matches_allowed_spaces(task, allowed_space_ids, all_topic_by_id)]
+            if allowed_space_ids is not None
+            else all_tasks
+        )
         tasks_by_id = {t.id: t for t in tasks}
 
         visible_topics = [t for t in topics if _topic_visible(t, now_dt)]
@@ -4846,6 +6137,7 @@ def context(
                 session,
                 normalized_query,
                 topic_id=None,
+                allowed_space_ids=allowed_space_ids,
                 session_key=sessionKey,
                 include_pending=includePending,
                 limit_topics=limit_topics,
@@ -4918,6 +6210,8 @@ def search(
     q: str = Query(..., min_length=1, description="Natural language query."),
     topicId: str | None = Query(default=None, description="Restrict search to one topic ID."),
     sessionKey: str | None = Query(default=None, description="Session key continuity boost (source.sessionKey)."),
+    spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
+    allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
     includePending: bool = Query(default=True, description="Include pending logs in matching."),
     limitTopics: int = Query(default=24, ge=1, le=800, description="Max topic matches."),
     limitTasks: int = Query(default=48, ge=1, le=2000, description="Max task matches."),
@@ -4963,10 +6257,21 @@ def search(
         allow_deep_content_scan = False
     try:
         with get_session() as session:
+            resolved_source_space_id = _resolve_source_space_id(
+                session,
+                explicit_space_id=spaceId,
+                session_key=sessionKey,
+            )
+            allowed_space_ids = _resolve_allowed_space_ids(
+                session,
+                source_space_id=resolved_source_space_id,
+                allowed_space_ids_raw=allowedSpaceIds,
+            )
             result = _search_impl(
                 session,
                 query,
                 topic_id=topicId,
+                allowed_space_ids=allowed_space_ids,
                 session_key=sessionKey,
                 include_pending=includePending,
                 limit_topics=effective_limit_topics,

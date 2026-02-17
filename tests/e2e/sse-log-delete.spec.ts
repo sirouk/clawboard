@@ -1,11 +1,15 @@
 import { expect, test } from "@playwright/test";
 
 test("deleting a log emits SSE and removes it from other open clients", async ({ browser, request }) => {
+  test.skip(
+    process.env.PLAYWRIGHT_USE_EXTERNAL_SERVER !== "1",
+    "Requires external Clawboard/OpenClaw server with live SSE fanout."
+  );
   test.setTimeout(120_000);
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:8010";
   const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3010";
   const token = process.env.PLAYWRIGHT_TOKEN ?? "";
-  expect(token, "PLAYWRIGHT_TOKEN env var is required for external-server SSE test").toBeTruthy();
+  test.skip(!token, "PLAYWRIGHT_TOKEN env var is required for external-server SSE test");
 
   const suffix = Date.now();
   const headers = { "X-Clawboard-Token": token };

@@ -34,7 +34,10 @@ test.describe("mobile topic chat fullscreen", () => {
     }
 
     await page.goto("/u");
-    await page.getByPlaceholder("Search topics, tasks, or messages").waitFor();
+    await page
+      .locator('input[placeholder="Search topics, tasks, or messages"]:visible')
+      .first()
+      .waitFor();
 
     const topicCardHeader = page.locator("div[role='button']").filter({ hasText: topicName }).first();
     await expect(topicCardHeader).toBeVisible();
@@ -125,6 +128,8 @@ test.describe("mobile topic chat fullscreen", () => {
 
     await page.getByRole("button", { name: "Close chat" }).click();
     await expect(page.getByRole("button", { name: "Close chat" })).toHaveCount(0);
-    await expect(page.getByPlaceholder("Search topics, tasks, or messages")).toBeVisible();
+    await expect(
+      page.locator('input[placeholder="Search topics, tasks, or messages"]:visible').first()
+    ).toBeVisible();
   });
 });

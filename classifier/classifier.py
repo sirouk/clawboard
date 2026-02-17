@@ -9,6 +9,7 @@ import time
 import shutil
 import signal
 import uuid
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 try:
@@ -141,6 +142,11 @@ SESSION_ROUTING_ENABLED = (os.environ.get("CLASSIFIER_SESSION_ROUTING_ENABLED", 
     "off",
 }
 SESSION_ROUTING_PROMPT_ITEMS = int(os.environ.get("CLASSIFIER_SESSION_ROUTING_PROMPT_ITEMS", "4"))
+
+_SPACE_SCOPE_ALLOWED_IDS: ContextVar[tuple[str, ...] | None] = ContextVar(
+    "classifier_space_scope_allowed_ids",
+    default=None,
+)
 
 # Audit file retention/rotation (size-based). These logs are useful in production, but must be bounded.
 CREATION_AUDIT_MAX_BYTES = int(os.environ.get("CLASSIFIER_CREATION_AUDIT_MAX_BYTES", str(8 * 1024 * 1024)))
@@ -1765,10 +1771,181 @@ def _record_classifier_audit(payload: dict) -> None:
         pass
 
 
+def _space_scope_params(params: dict | None = None) -> dict:
+    out = dict(params or {})
+    scoped = _SPACE_SCOPE_ALLOWED_IDS.get()
+    if scoped:
+        out["allowedSpaceIds"] = ",".join(scoped)
+    return out
+
+
+def _space_scope_source_id() -> str | None:
+    scoped = _SPACE_SCOPE_ALLOWED_IDS.get()
+    if not scoped:
+        return None
+    first = str(scoped[0] or "").strip()
+    return first or None
+
+
+def _space_id_from_tag_label(tag: str) -> str | None:
+    raw = str(tag or "").strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered.startswith("system:"):
+        return None
+    if lowered.startswith("space:"):
+        raw = raw.split(":", 1)[1].strip()
+    slug = re.sub(r"[^a-z0-9]+", "-", str(raw or "").strip().lower()).strip("-")
+    if not slug:
+        return None
+    if slug in {"default", "global", "all", "all-spaces"}:
+        return "space-default"
+    return f"space-{slug}"
+
+
+def _topic_source_space_id(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    direct = str(payload.get("spaceId") or "").strip()
+    if direct:
+        return direct
+    tags = payload.get("tags")
+    if isinstance(tags, list):
+        for raw_tag in tags:
+            resolved = _space_id_from_tag_label(str(raw_tag or ""))
+            if resolved:
+                return resolved
+    return None
+
+
+def _resolve_allowed_space_ids_for_session(session_key: str) -> tuple[str, ...] | None:
+    if not requests:
+        return None
+    sk = str(session_key or "").strip()
+    if not sk:
+        return None
+
+    topic_id, task_id = _parse_board_session_key(sk)
+    if not topic_id and not task_id:
+        return None
+
+    source_space_id: str | None = None
+    try:
+        log_res = requests.get(
+            f"{CLAWBOARD_API_BASE}/api/log",
+            params={
+                "sessionKey": sk,
+                "type": "conversation",
+                "limit": 12,
+                "offset": 0,
+                "includeRaw": 0,
+            },
+            headers=headers_clawboard(),
+            timeout=8,
+        )
+        if log_res.ok:
+            rows = log_res.json()
+            if isinstance(rows, list):
+                for entry in rows:
+                    if not isinstance(entry, dict):
+                        continue
+                    source = entry.get("source")
+                    if isinstance(source, dict):
+                        scoped = str(source.get("boardScopeSpaceId") or "").strip()
+                        if scoped:
+                            source_space_id = scoped
+                            break
+                if not source_space_id:
+                    for entry in rows:
+                        if not isinstance(entry, dict):
+                            continue
+                        agent_id = str(entry.get("agentId") or "").strip().lower()
+                        candidate = str(entry.get("spaceId") or "").strip()
+                        if agent_id == "user" and candidate:
+                            source_space_id = candidate
+                            break
+                if not source_space_id:
+                    for entry in rows:
+                        if not isinstance(entry, dict):
+                            continue
+                        candidate = str(entry.get("spaceId") or "").strip()
+                        if candidate:
+                            source_space_id = candidate
+                            break
+
+        if task_id:
+            task_res = requests.get(
+                f"{CLAWBOARD_API_BASE}/api/tasks/{task_id}",
+                headers=headers_clawboard(),
+                timeout=8,
+            )
+            if task_res.ok:
+                payload = task_res.json()
+                if not source_space_id:
+                    source_space_id = str(payload.get("spaceId") or "").strip() or None
+        if not source_space_id and topic_id:
+            topic_res = requests.get(
+                f"{CLAWBOARD_API_BASE}/api/topics/{topic_id}",
+                headers=headers_clawboard(),
+                timeout=8,
+            )
+            if topic_res.ok:
+                payload = topic_res.json()
+                source_space_id = _topic_source_space_id(payload)
+    except Exception:
+        source_space_id = None
+
+    if not source_space_id:
+        return None
+
+    try:
+        allowed_res = requests.get(
+            f"{CLAWBOARD_API_BASE}/api/spaces/allowed",
+            params={"spaceId": source_space_id},
+            headers=headers_clawboard(),
+            timeout=8,
+        )
+        allowed_res.raise_for_status()
+        payload = allowed_res.json()
+        ids = payload.get("allowedSpaceIds")
+        if not isinstance(ids, list):
+            return (source_space_id,)
+        unique: list[str] = []
+        seen: set[str] = set()
+        # Preserve source space as the first slot so creation helpers can target it.
+        for candidate in [source_space_id, *[str(value or "").strip() for value in ids]]:
+            text = str(candidate or "").strip()
+            if not text:
+                continue
+            if text in seen:
+                continue
+            seen.add(text)
+            unique.append(text)
+        if not unique:
+            return (source_space_id,)
+        return tuple(unique)
+    except Exception:
+        return (source_space_id,)
+
+
+def _classify_session_scoped(session_key: str) -> None:
+    scope = _resolve_allowed_space_ids_for_session(session_key)
+    if not scope:
+        classify_session(session_key)
+        return
+
+    token = _SPACE_SCOPE_ALLOWED_IDS.set(scope)
+    try:
+        classify_session(session_key)
+    finally:
+        _SPACE_SCOPE_ALLOWED_IDS.reset(token)
+
+
 def list_logs(params: dict):
     r = requests.get(
         f"{CLAWBOARD_API_BASE}/api/log",
-        params=params,
+        params=_space_scope_params(params),
         headers=headers_clawboard(),
         timeout=15,
     )
@@ -1781,10 +1958,12 @@ def list_pending_conversations(limit=500, offset=0):
     # Skip classifier/agent internal convo-like logs that can be present.
     r = requests.get(
         f"{CLAWBOARD_API_BASE}/api/classifier/pending",
-        params={
+        params=_space_scope_params(
+            {
             "limit": limit,
             "offset": offset,
-        },
+            }
+        ),
         headers=headers_clawboard(),
         timeout=15,
     )
@@ -1880,7 +2059,12 @@ def list_notes_by_related_ids(related_ids: list[str], limit: int = 200):
 
 
 def list_topics():
-    r = requests.get(f"{CLAWBOARD_API_BASE}/api/topics", headers=headers_clawboard(), timeout=15)
+    r = requests.get(
+        f"{CLAWBOARD_API_BASE}/api/topics",
+        params=_space_scope_params(),
+        headers=headers_clawboard(),
+        timeout=15,
+    )
     r.raise_for_status()
     return r.json()
 
@@ -1888,7 +2072,7 @@ def list_topics():
 def list_tasks(topic_id: str):
     r = requests.get(
         f"{CLAWBOARD_API_BASE}/api/tasks",
-        params={"topicId": topic_id},
+        params=_space_scope_params({"topicId": topic_id}),
         headers=headers_clawboard(),
         timeout=15,
     )
@@ -1938,6 +2122,9 @@ def upsert_topic(topic_id: str | None, name: str, *, tags: list[str] | None = No
     payload: dict = {"name": name}
     if topic_id:
         payload["id"] = topic_id
+    source_space_id = _space_scope_source_id()
+    if source_space_id and not topic_id:
+        payload["spaceId"] = source_space_id
     if tags is not None:
         payload["tags"] = tags
     if status is not None:
@@ -1977,6 +2164,9 @@ def upsert_task(task_id: str | None, topic_id: str, title: str, status: str = "t
     payload = {"topicId": topic_id, "title": title, "status": status}
     if task_id:
         payload["id"] = task_id
+    source_space_id = _space_scope_source_id()
+    if source_space_id:
+        payload["spaceId"] = source_space_id
     r = requests.post(
         f"{CLAWBOARD_API_BASE}/api/tasks",
         headers=headers_clawboard(),
@@ -4736,7 +4926,7 @@ def main():
                     break
                 try:
                     start = time.time()
-                    _run_with_timeout(MAX_SESSION_SECONDS, classify_session, sk)
+                    _run_with_timeout(MAX_SESSION_SECONDS, _classify_session_scoped, sk)
                     if LOG_TIMING:
                         elapsed = time.time() - start
                         print(f"classifier: classified {sk} in {elapsed:.2f}s")
