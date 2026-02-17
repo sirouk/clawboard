@@ -505,6 +505,108 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertTrue(notes, "Expected curated notes for the matched log")
         self.assertIn("note sentinel", str(notes[0].get("content") or "").lower())
 
+    def test_search_linked_notes_are_emitted_and_weight_scores(self):
+        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        read_headers = {"Host": "localhost:8010"}
+
+        topic = self.client.post("/api/topics", json={"name": "Notes Weight Topic"}, headers=write_headers).json()
+        task = self.client.post(
+            "/api/tasks",
+            json={"topicId": topic["id"], "title": "Notes Weight Task", "status": "todo"},
+            headers=write_headers,
+        ).json()
+        conversation = self.client.post(
+            "/api/log",
+            json={
+                "topicId": topic["id"],
+                "taskId": task["id"],
+                "type": "conversation",
+                "summary": "review retirement plan options",
+                "content": "Compare retirement plan options and contribution limits this quarter.",
+                "createdAt": now_iso(),
+                "agentId": "user",
+                "agentLabel": "User",
+            },
+            headers=write_headers,
+        ).json()
+        note = self.client.post(
+            "/api/log",
+            json={
+                "topicId": topic["id"],
+                "taskId": task["id"],
+                "type": "note",
+                "relatedLogId": conversation["id"],
+                "summary": "curated follow-up note",
+                "content": "Track employer match thresholds in this workstream.",
+                "createdAt": now_iso(),
+                "agentId": "assistant",
+                "agentLabel": "Assistant",
+            },
+            headers=write_headers,
+        ).json()
+
+        mocked_result = {
+            "query": "retirement plan options",
+            "mode": "mock",
+            "topics": [
+                {
+                    "id": topic["id"],
+                    "score": 0.5,
+                    "vectorScore": 0.5,
+                    "bm25Score": 0.1,
+                    "lexicalScore": 0.1,
+                    "rrfScore": 0.0,
+                    "rerankScore": 0.0,
+                }
+            ],
+            "tasks": [
+                {
+                    "id": task["id"],
+                    "score": 0.45,
+                    "vectorScore": 0.45,
+                    "bm25Score": 0.1,
+                    "lexicalScore": 0.1,
+                    "rrfScore": 0.0,
+                    "rerankScore": 0.0,
+                }
+            ],
+            "logs": [
+                {
+                    "id": conversation["id"],
+                    "score": 0.6,
+                    "vectorScore": 0.6,
+                    "bm25Score": 0.1,
+                    "lexicalScore": 0.1,
+                    "rrfScore": 0.0,
+                    "rerankScore": 0.0,
+                }
+            ],
+        }
+
+        with patch("app.main.semantic_search", return_value=mocked_result):
+            res = self.client.get(
+                "/api/search",
+                params={"q": "retirement plan options", "limitTopics": 10, "limitTasks": 10, "limitLogs": 50},
+                headers=read_headers,
+            )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+
+        notes = payload.get("notes") or []
+        self.assertTrue(any(str(item.get("id") or "") == note["id"] for item in notes), "Expected linked note row in output")
+
+        topics = payload.get("topics") or []
+        tasks = payload.get("tasks") or []
+        logs = payload.get("logs") or []
+        self.assertTrue(topics)
+        self.assertTrue(tasks)
+        self.assertTrue(logs)
+        self.assertGreater(float(topics[0].get("noteWeight") or 0.0), 0.0)
+        self.assertGreater(float(tasks[0].get("noteWeight") or 0.0), 0.0)
+        self.assertGreater(float(logs[0].get("noteWeight") or 0.0), 0.0)
+        self.assertEqual(int(logs[0].get("noteCount") or 0), 1)
+
     def test_search_passes_content_snippets_into_semantic_payload(self):
         write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}

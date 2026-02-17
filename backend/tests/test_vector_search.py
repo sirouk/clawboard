@@ -281,6 +281,92 @@ class VectorSearchHybridTests(unittest.TestCase):
         self.assertIn("log-real", log_ids)
         self.assertNotIn("log-tool", log_ids)
 
+    def test_semantic_search_excludes_system_and_import_logs_by_default(self):
+        topics = [{"id": "topic-ops", "name": "Discord Ops", "description": "Reliability"}]
+        tasks: list[dict] = []
+        logs = [
+            {
+                "id": "log-system",
+                "topicId": "topic-ops",
+                "taskId": None,
+                "type": "system",
+                "summary": "system envelope",
+                "content": "system envelope",
+                "raw": "",
+            },
+            {
+                "id": "log-import",
+                "topicId": "topic-ops",
+                "taskId": None,
+                "type": "import",
+                "summary": "import envelope",
+                "content": "import envelope",
+                "raw": "",
+            },
+            {
+                "id": "log-real",
+                "topicId": "topic-ops",
+                "taskId": None,
+                "type": "conversation",
+                "summary": "Investigate discord retry loop",
+                "content": "Gateway retries after reconnect still spike.",
+                "raw": "",
+            },
+        ]
+
+        result = vs.semantic_search(
+            "discord retry loop",
+            topics,
+            tasks,
+            logs,
+            topic_limit=3,
+            task_limit=3,
+            log_limit=10,
+        )
+
+        log_ids = [row["id"] for row in result["logs"]]
+        self.assertIn("log-real", log_ids)
+        self.assertNotIn("log-system", log_ids)
+        self.assertNotIn("log-import", log_ids)
+
+    def test_semantic_search_excludes_memory_action_logs_by_default(self):
+        topics = [{"id": "topic-ops", "name": "Discord Ops", "description": "Reliability"}]
+        tasks: list[dict] = []
+        logs = [
+            {
+                "id": "log-memory-tool",
+                "topicId": "topic-ops",
+                "taskId": None,
+                "type": "action",
+                "summary": "Tool result: memory_search",
+                "content": "Tool result: memory_search retrieved 4 snippets",
+                "raw": "",
+            },
+            {
+                "id": "log-real",
+                "topicId": "topic-ops",
+                "taskId": None,
+                "type": "conversation",
+                "summary": "Investigate retry diagnostics output",
+                "content": "Investigate retry diagnostics output from gateway.",
+                "raw": "",
+            },
+        ]
+
+        result = vs.semantic_search(
+            "retry diagnostics",
+            topics,
+            tasks,
+            logs,
+            topic_limit=3,
+            task_limit=3,
+            log_limit=10,
+        )
+
+        log_ids = [row["id"] for row in result["logs"]]
+        self.assertIn("log-real", log_ids)
+        self.assertNotIn("log-memory-tool", log_ids)
+
     def test_semantic_search_can_include_tool_call_logs_with_flag(self):
         topics = [{"id": "topic-ops", "name": "Discord Ops", "description": "Reliability"}]
         tasks: list[dict] = []

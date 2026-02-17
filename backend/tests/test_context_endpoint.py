@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -210,6 +211,21 @@ class ContextEndpointTests(unittest.TestCase):
         self.assertEqual(payload.get("mode"), "patient")
         self.assertIn("B:semantic", payload.get("layers", []))
         self.assertIn("semantic", (payload.get("data") or {}))
+
+    def test_context_auto_low_signal_skips_semantic_layer(self):
+        session_key = "channel:testcontext"
+        with patch("app.main._search_impl") as search_mock:
+            res = self.client.get(
+                "/api/context",
+                params={"q": "ok", "sessionKey": session_key, "mode": "auto"},
+                headers={"Host": "localhost:8010"},
+            )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertEqual(payload.get("mode"), "auto")
+        self.assertNotIn("B:semantic", payload.get("layers", []))
+        self.assertNotIn("semantic", (payload.get("data") or {}))
+        search_mock.assert_not_called()
 
     def test_patch_task_without_title(self):
         headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}

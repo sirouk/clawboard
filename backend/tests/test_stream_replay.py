@@ -6,6 +6,7 @@ import queue
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -27,6 +28,10 @@ except Exception:
     EventHub = None  # type: ignore[assignment]
     event_hub = None  # type: ignore[assignment]
     _API_TESTS_AVAILABLE = False
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 @unittest.skipUnless(_API_TESTS_AVAILABLE, "FastAPI/SQLModel test dependencies are not installed.")
@@ -79,6 +84,39 @@ class StreamReplayTests(unittest.TestCase):
         self.assertEqual(frames[1]["id"], second["eventId"])
         self.assertEqual(frames[1]["data"]["type"], "topic.updated")
         self.assertEqual(frames[1]["data"]["data"], {"name": "bravo"})
+
+    def test_reconnect_plus_changes_reconcile_recovers_topic_updates(self):
+        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        read_headers = {"Host": "localhost:8010"}
+
+        since = now_iso()
+        prior = event_hub.publish({"type": "log.appended", "data": {"id": "seed"}})
+
+        created = self.client.post("/api/topics", json={"name": "SSE Reconcile Topic"}, headers=write_headers)
+        self.assertEqual(created.status_code, 200, created.text)
+        topic = created.json()
+
+        with self.client.stream(
+            "GET",
+            "/api/stream",
+            headers={"last-event-id": prior["eventId"]},
+        ) as response:
+            frames = self._collect_sse_frames(response, 2)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(frames[0]["data"], {})
+        self.assertEqual(frames[1]["data"]["type"], "topic.upserted")
+        self.assertEqual(str(frames[1]["data"]["data"]["id"]), str(topic["id"]))
+
+        changes = self.client.get(
+            "/api/changes",
+            params={"since": since},
+            headers=read_headers,
+        )
+        self.assertEqual(changes.status_code, 200, changes.text)
+        payload = changes.json()
+        topics = payload.get("topics") or []
+        self.assertTrue(any(str(item.get("id") or "") == str(topic["id"]) for item in topics))
 
     def test_stale_cursor_returns_stream_reset(self):
         event_hub._next_id = 11  # type: ignore[attr-defined]
