@@ -14,7 +14,7 @@ import {
   type ClawgraphNodeType,
 } from "@/lib/clawgraph";
 import { cn } from "@/lib/cn";
-import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam } from "@/lib/url";
+import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam, withSpaceParam } from "@/lib/url";
 import type { Space, Task, Topic } from "@/lib/types";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
@@ -678,8 +678,16 @@ export function ClawgraphLive() {
 
   const selectedTask = useMemo(() => taskFromNode(selectedNode, tasks), [selectedNode, tasks]);
 
-  const selectedTopicUrl = selectedTopic ? withRevealParam(buildTopicUrl(selectedTopic, topics)) : null;
-  const selectedTaskUrl = selectedTask ? withRevealParam(buildTaskUrl(selectedTask, topics)) : null;
+  const selectedTopicUrl = selectedTopic
+    ? withSpaceParam(withRevealParam(buildTopicUrl(selectedTopic, topics)), selectedTopic.spaceId)
+    : null;
+  const selectedTaskUrl = selectedTask
+    ? withSpaceParam(
+        withRevealParam(buildTaskUrl(selectedTask, topics)),
+        String(selectedTask.spaceId ?? "").trim() ||
+          String(topics.find((topic) => topic.id === selectedTask.topicId)?.spaceId ?? "").trim()
+      )
+    : null;
 
   const connectedEdgeRows = useMemo(() => {
     if (!selectedNodeId || !selectedNode) return [] as Array<{
@@ -694,11 +702,17 @@ export function ClawgraphLive() {
       const oppositeNode = displayNodeById.get(oppositeNodeId) ?? nodeById.get(oppositeNodeId) ?? null;
       const oppositeTopic = topicFromNode(oppositeNode, topics);
       const oppositeTask = taskFromNode(oppositeNode, tasks);
+      const oppositeTaskSpaceId =
+        String(oppositeTask?.spaceId ?? "").trim() ||
+        String(topics.find((topic) => topic.id === oppositeTask?.topicId)?.spaceId ?? "").trim();
+      const selectedTaskSpaceId =
+        String(selectedTask?.spaceId ?? "").trim() ||
+        String(topics.find((topic) => topic.id === selectedTask?.topicId)?.spaceId ?? "").trim();
       let href = withRevealParam(UNIFIED_BASE);
       if (oppositeTask) {
-        href = withRevealParam(buildTaskUrl(oppositeTask, topics));
+        href = withSpaceParam(withRevealParam(buildTaskUrl(oppositeTask, topics)), oppositeTaskSpaceId);
       } else if (oppositeTopic) {
-        href = withRevealParam(buildTopicUrl(oppositeTopic, topics));
+        href = withSpaceParam(withRevealParam(buildTopicUrl(oppositeTopic, topics)), oppositeTopic.spaceId);
       } else {
         const queryHint = oppositeNode?.label ?? selectedNode.label;
         const base = selectedTask
@@ -706,7 +720,9 @@ export function ClawgraphLive() {
           : selectedTopic
             ? buildTopicUrl(selectedTopic, topics)
             : UNIFIED_BASE;
-        href = withRevealParam(queryHint ? `${base}?q=${encodeURIComponent(queryHint)}` : base);
+        const baseWithQuery = queryHint ? `${base}?q=${encodeURIComponent(queryHint)}` : base;
+        const fallbackSpaceId = selectedTask ? selectedTaskSpaceId : selectedTopic?.spaceId;
+        href = withSpaceParam(withRevealParam(baseWithQuery), fallbackSpaceId);
       }
 
       return {

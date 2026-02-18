@@ -9,8 +9,8 @@ usage() {
   cat <<'USAGE'
 Usage: bash tests/load_or_remove_fixtures.sh [load|remove]
 
-  load   - load tests/fixtures/portal.json into the API SQLite database
-  remove - clear the API SQLite database
+  load   - load tests/fixtures/portal.json into the API database
+  remove - clear the API database
 USAGE
 }
 

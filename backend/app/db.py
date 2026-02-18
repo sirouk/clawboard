@@ -17,7 +17,7 @@ try:  # pragma: no cover
 except Exception:  # pragma: no cover
     NullPool = None  # type: ignore
 
-DATABASE_URL = os.getenv("CLAWBOARD_DB_URL", "sqlite:///./data/clawboard.db")
+DATABASE_URL = os.getenv("CLAWBOARD_DB_URL", "postgresql+psycopg://clawboard:clawboard@db:5432/clawboard")
 
 # SQLite busy timeout (seconds). Keep it low so ingest requests fail fast under write contention,
 # allowing upstream queues/retries (OpenClaw logger + classifier) to recover without stalling.
@@ -76,7 +76,54 @@ def _normalize_space_connectivity(value: object) -> dict[str, bool]:
     return out
 
 
+def _ensure_runtime_indexes() -> None:
+    """Create non-model indexes required for retrieval/classifier performance."""
+    source_session_key_index = (
+        "CREATE INDEX IF NOT EXISTS ix_logentry_source_session_key "
+        "ON logentry(json_extract(source, '$.sessionKey'));"
+        if DATABASE_URL.startswith("sqlite")
+        else "CREATE INDEX IF NOT EXISTS ix_logentry_source_session_key "
+        "ON logentry ((source ->> 'sessionKey'));"
+    )
+    statements = [
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_logentry_idempotency_key "
+        'ON logentry("idempotencyKey") WHERE "idempotencyKey" IS NOT NULL;',
+        source_session_key_index,
+        "CREATE INDEX IF NOT EXISTS ix_logentry_status_type_created_at "
+        'ON logentry("classificationStatus", "type", "createdAt");',
+        "CREATE INDEX IF NOT EXISTS ix_logentry_topic_created_at "
+        'ON logentry("topicId", "createdAt");',
+        "CREATE INDEX IF NOT EXISTS ix_logentry_task_created_at "
+        'ON logentry("taskId", "createdAt");',
+        "CREATE INDEX IF NOT EXISTS ix_logentry_related_created_at "
+        'ON logentry("relatedLogId", "createdAt");',
+        "CREATE INDEX IF NOT EXISTS ix_logentry_space_created_at "
+        'ON logentry("spaceId", "createdAt");',
+        "CREATE INDEX IF NOT EXISTS ix_logentry_updated_created_at "
+        'ON logentry("updatedAt", "createdAt");',
+        "CREATE INDEX IF NOT EXISTS ix_logentry_created_at "
+        'ON logentry("createdAt");',
+        "CREATE INDEX IF NOT EXISTS ix_sessionroutingmemory_updated_at "
+        'ON sessionroutingmemory("updatedAt");',
+        "CREATE INDEX IF NOT EXISTS ix_topic_space_updated_at "
+        'ON topic("spaceId", "updatedAt");',
+        "CREATE INDEX IF NOT EXISTS ix_topic_created_at "
+        'ON topic("createdAt");',
+        "CREATE INDEX IF NOT EXISTS ix_task_space_updated_at "
+        'ON task("spaceId", "updatedAt");',
+        "CREATE INDEX IF NOT EXISTS ix_task_created_at "
+        'ON task("createdAt");',
+    ]
+    with engine.connect() as conn:
+        for statement in statements:
+            conn.exec_driver_sql(statement)
+        conn.commit()
+
+
 def init_db() -> None:
+    # Ensure SQLModel metadata is populated regardless of import order.
+    from . import models as _models  # noqa: F401
+
     if DATABASE_URL.startswith("sqlite"):
         db_path = DATABASE_URL.replace("sqlite:///", "", 1)
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -383,6 +430,9 @@ def init_db() -> None:
                     )
 
             conn.commit()
+
+    # Non-model indexes are required on both SQLite and Postgres.
+    _ensure_runtime_indexes()
 
     # Backfill missing topic/task colors once so existing instances get stable hues.
     try:

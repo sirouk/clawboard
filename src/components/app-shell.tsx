@@ -13,7 +13,7 @@ import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { formatRelativeTime } from "@/lib/format";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
-import { buildTaskUrl, buildTopicUrl, withRevealParam } from "@/lib/url";
+import { buildTaskUrl, buildTopicUrl, withRevealParam, withSpaceParam } from "@/lib/url";
 import { apiFetch, getApiBase } from "@/lib/api";
 import type { Space, Task, Topic } from "@/lib/types";
 
@@ -1345,7 +1345,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                                {filteredTasksForSearch.map((task) => {
 	                                  const selected = task.id === activeBoardIds.taskId;
 	                                  const href = buildTaskUrl(task, topics);
-	                                  const destination = withRevealParam(href, true);
+	                                  const taskSpaceId =
+	                                    String(task.spaceId ?? "").trim() ||
+	                                    String(topicsById.get(String(task.topicId ?? ""))?.spaceId ?? "").trim();
+	                                  const destination = withSpaceParam(withRevealParam(href, true), taskSpaceId);
 	                                  return (
 	                                    <button
 	                                      key={task.id}
@@ -1390,7 +1393,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                                const go = () => {
 			                                  // Search mode: unchanged (single click navigates + reveals).
 			                                  if (normalizedTopicSearch.length > 0) {
-			                                    router.push(withRevealParam(href, true));
+			                                    router.push(withSpaceParam(withRevealParam(href, true), topic.spaceId));
 			                                    return;
 			                                  }
 

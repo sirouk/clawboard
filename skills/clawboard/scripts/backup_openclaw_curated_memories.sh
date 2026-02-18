@@ -29,6 +29,86 @@ CRED_ENV="$OPENCLAW_DIR/credentials/clawboard-memory-backup.env"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXPORT_CLAWBOARD_HELPER="$SCRIPT_DIR/export_clawboard_backup.py"
 
+INTERACTIVE=0
+VERBOSE=0
+NO_PUSH=0
+
+ARG_WORKSPACE_PATH=""
+ARG_BACKUP_DIR=""
+ARG_REPO_URL=""
+ARG_REPO_SSH_URL=""
+ARG_AUTH_METHOD=""
+ARG_DEPLOY_KEY_PATH=""
+ARG_GITHUB_USER=""
+ARG_GITHUB_PAT=""
+ARG_REMOTE_NAME=""
+ARG_BRANCH=""
+ARG_INCLUDE_OPENCLAW_CONFIG=""
+ARG_INCLUDE_OPENCLAW_SKILLS=""
+ARG_INCLUDE_CLAWBOARD_STATE=""
+ARG_CLAWBOARD_DIR=""
+ARG_CLAWBOARD_API_URL=""
+ARG_INCLUDE_CLAWBOARD_ATTACHMENTS=""
+ARG_INCLUDE_CLAWBOARD_ENV=""
+ARG_CLAWBOARD_TOKEN=""
+ARG_CLAWBOARD_ATTACHMENTS_DIR=""
+ARG_SWEEP_ORPHAN_ATTACHMENTS=""
+ARG_ORPHAN_ATTACHMENT_MAX_AGE_DAYS=""
+ARG_ORPHAN_ATTACHMENT_SWEEP_MODE=""
+
+usage() {
+  cat <<'EOF'
+Usage:
+  backup_openclaw_curated_memories.sh [options]
+
+Modes:
+  (default) non-interactive run for cron/automation
+  --interactive              Prompt for missing/overridden values before backup
+
+General options:
+  -h, --help                Show this help
+  --verbose                 Print extra run details
+  --no-push                 Commit locally but do not push
+
+Config source options:
+  --credentials-json PATH   Override credentials JSON path
+  --credentials-env PATH    Override credentials env path
+
+Runtime override options:
+  --workspace-path PATH
+  --backup-dir PATH
+  --repo-url URL
+  --repo-ssh-url URL
+  --auth-method ssh|pat
+  --deploy-key-path PATH
+  --github-user USER
+  --github-pat TOKEN
+  --remote-name NAME
+  --branch NAME
+  --clawboard-dir PATH
+  --clawboard-api-url URL
+  --clawboard-token TOKEN
+  --clawboard-attachments-dir PATH
+  --orphan-max-age-days N
+  --orphan-sweep-mode report|prune
+
+Boolean toggles:
+  --include-openclaw-config | --exclude-openclaw-config
+  --include-openclaw-skills | --exclude-openclaw-skills
+  --include-clawboard-state | --exclude-clawboard-state
+  --include-clawboard-attachments | --exclude-clawboard-attachments
+  --include-clawboard-env | --exclude-clawboard-env
+  --sweep-orphan-attachments | --no-sweep-orphan-attachments
+
+Notes:
+  - Cron should call this script with no args.
+  - With attachments enabled, orphan attachment files in the backup snapshot
+    (not referenced by export/attachments.json) are pruned when older than
+    orphan-max-age-days (default: 14).
+  - Source attachments are never deleted by this script.
+EOF
+}
+
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
 }
@@ -88,6 +168,438 @@ read_env_value() {
   printf "%s" "$line"
 }
 
+read_flag_value() {
+  local flag="$1"
+  local value="${2:-}"
+  [[ -n "$value" ]] || die "Missing value for $flag"
+  printf "%s" "$value"
+}
+
+prompt_value() {
+  local prompt="$1"
+  local current="${2:-}"
+  local secret="${3:-0}"
+  local answer=""
+
+  if [[ "$secret" == "1" ]]; then
+    if [[ -n "$current" ]]; then
+      read -r -s -p "$prompt [set; Enter to keep]: " answer
+    else
+      read -r -s -p "$prompt: " answer
+    fi
+    printf "\n"
+  else
+    read -r -p "$prompt [${current}]: " answer
+  fi
+
+  if [[ -z "$answer" ]]; then
+    printf "%s" "$current"
+  else
+    printf "%s" "$answer"
+  fi
+}
+
+# bash 3.2 compatibility (macOS default /bin/bash): no ${var,,}
+lc() { tr '[:upper:]' '[:lower:]' <<<"${1:-}"; }
+
+# Booleans are stored as JSON true/false; our json_get returns a JSON string for non-strings.
+# Accept: true/false/"true"/"false"/1/0/yes/no
+as_bool() {
+  local v="${1:-}"
+  v="${v//\"/}"
+  case "$(lc "$v")" in
+    true|1|yes|y) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+prompt_bool() {
+  local prompt="$1"
+  local current="${2:-false}"
+  local hint="y/N"
+  local answer=""
+  if as_bool "$current"; then
+    hint="Y/n"
+  fi
+  while true; do
+    read -r -p "$prompt [$hint]: " answer
+    if [[ -z "$answer" ]]; then
+      if as_bool "$current"; then
+        printf "true"
+      else
+        printf "false"
+      fi
+      return 0
+    fi
+    case "$(lc "$answer")" in
+      y|yes|true|1)
+        printf "true"
+        return 0
+        ;;
+      n|no|false|0)
+        printf "false"
+        return 0
+        ;;
+      *)
+        say "Please answer yes or no."
+        ;;
+    esac
+  done
+}
+
+apply_arg_overrides() {
+  [[ -n "$ARG_WORKSPACE_PATH" ]] && WORKSPACE_PATH="$ARG_WORKSPACE_PATH"
+  [[ -n "$ARG_BACKUP_DIR" ]] && BACKUP_DIR="$ARG_BACKUP_DIR"
+  [[ -n "$ARG_REPO_URL" ]] && REPO_URL="$ARG_REPO_URL"
+  [[ -n "$ARG_REPO_SSH_URL" ]] && REPO_SSH_URL="$ARG_REPO_SSH_URL"
+  [[ -n "$ARG_AUTH_METHOD" ]] && AUTH_METHOD="$ARG_AUTH_METHOD"
+  [[ -n "$ARG_DEPLOY_KEY_PATH" ]] && DEPLOY_KEY_PATH="$ARG_DEPLOY_KEY_PATH"
+  [[ -n "$ARG_GITHUB_USER" ]] && GITHUB_USER="$ARG_GITHUB_USER"
+  [[ -n "$ARG_GITHUB_PAT" ]] && GITHUB_PAT="$ARG_GITHUB_PAT"
+  [[ -n "$ARG_REMOTE_NAME" ]] && REMOTE_NAME="$ARG_REMOTE_NAME"
+  [[ -n "$ARG_BRANCH" ]] && BRANCH="$ARG_BRANCH"
+  [[ -n "$ARG_INCLUDE_OPENCLAW_CONFIG" ]] && INCLUDE_OPENCLAW_CONFIG="$ARG_INCLUDE_OPENCLAW_CONFIG"
+  [[ -n "$ARG_INCLUDE_OPENCLAW_SKILLS" ]] && INCLUDE_OPENCLAW_SKILLS="$ARG_INCLUDE_OPENCLAW_SKILLS"
+  [[ -n "$ARG_INCLUDE_CLAWBOARD_STATE" ]] && INCLUDE_CLAWBOARD_STATE="$ARG_INCLUDE_CLAWBOARD_STATE"
+  [[ -n "$ARG_CLAWBOARD_DIR" ]] && CLAWBOARD_DIR="$ARG_CLAWBOARD_DIR"
+  [[ -n "$ARG_CLAWBOARD_API_URL" ]] && CLAWBOARD_API_URL="$ARG_CLAWBOARD_API_URL"
+  [[ -n "$ARG_INCLUDE_CLAWBOARD_ATTACHMENTS" ]] && INCLUDE_CLAWBOARD_ATTACHMENTS="$ARG_INCLUDE_CLAWBOARD_ATTACHMENTS"
+  [[ -n "$ARG_INCLUDE_CLAWBOARD_ENV" ]] && INCLUDE_CLAWBOARD_ENV="$ARG_INCLUDE_CLAWBOARD_ENV"
+  [[ -n "$ARG_CLAWBOARD_TOKEN" ]] && CLAWBOARD_TOKEN="$ARG_CLAWBOARD_TOKEN"
+  [[ -n "$ARG_CLAWBOARD_ATTACHMENTS_DIR" ]] && CLAWBOARD_ATTACHMENTS_DIR="$ARG_CLAWBOARD_ATTACHMENTS_DIR"
+  [[ -n "$ARG_SWEEP_ORPHAN_ATTACHMENTS" ]] && SWEEP_ORPHAN_ATTACHMENTS="$ARG_SWEEP_ORPHAN_ATTACHMENTS"
+  [[ -n "$ARG_ORPHAN_ATTACHMENT_MAX_AGE_DAYS" ]] && ORPHAN_ATTACHMENT_MAX_AGE_DAYS="$ARG_ORPHAN_ATTACHMENT_MAX_AGE_DAYS"
+  [[ -n "$ARG_ORPHAN_ATTACHMENT_SWEEP_MODE" ]] && ORPHAN_ATTACHMENT_SWEEP_MODE="$ARG_ORPHAN_ATTACHMENT_SWEEP_MODE"
+  return 0
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --interactive)
+        INTERACTIVE=1
+        ;;
+      --verbose)
+        VERBOSE=1
+        ;;
+      --no-push)
+        NO_PUSH=1
+        ;;
+      --credentials-json=*)
+        CRED_JSON="${1#*=}"
+        ;;
+      --credentials-json)
+        shift
+        CRED_JSON="$(read_flag_value --credentials-json "${1:-}")"
+        ;;
+      --credentials-env=*)
+        CRED_ENV="${1#*=}"
+        ;;
+      --credentials-env)
+        shift
+        CRED_ENV="$(read_flag_value --credentials-env "${1:-}")"
+        ;;
+      --workspace-path=*)
+        ARG_WORKSPACE_PATH="${1#*=}"
+        ;;
+      --workspace-path)
+        shift
+        ARG_WORKSPACE_PATH="$(read_flag_value --workspace-path "${1:-}")"
+        ;;
+      --backup-dir=*)
+        ARG_BACKUP_DIR="${1#*=}"
+        ;;
+      --backup-dir)
+        shift
+        ARG_BACKUP_DIR="$(read_flag_value --backup-dir "${1:-}")"
+        ;;
+      --repo-url=*)
+        ARG_REPO_URL="${1#*=}"
+        ;;
+      --repo-url)
+        shift
+        ARG_REPO_URL="$(read_flag_value --repo-url "${1:-}")"
+        ;;
+      --repo-ssh-url=*)
+        ARG_REPO_SSH_URL="${1#*=}"
+        ;;
+      --repo-ssh-url)
+        shift
+        ARG_REPO_SSH_URL="$(read_flag_value --repo-ssh-url "${1:-}")"
+        ;;
+      --auth-method=*)
+        ARG_AUTH_METHOD="${1#*=}"
+        ;;
+      --auth-method)
+        shift
+        ARG_AUTH_METHOD="$(read_flag_value --auth-method "${1:-}")"
+        ;;
+      --deploy-key-path=*)
+        ARG_DEPLOY_KEY_PATH="${1#*=}"
+        ;;
+      --deploy-key-path)
+        shift
+        ARG_DEPLOY_KEY_PATH="$(read_flag_value --deploy-key-path "${1:-}")"
+        ;;
+      --github-user=*)
+        ARG_GITHUB_USER="${1#*=}"
+        ;;
+      --github-user)
+        shift
+        ARG_GITHUB_USER="$(read_flag_value --github-user "${1:-}")"
+        ;;
+      --github-pat=*)
+        ARG_GITHUB_PAT="${1#*=}"
+        ;;
+      --github-pat)
+        shift
+        ARG_GITHUB_PAT="$(read_flag_value --github-pat "${1:-}")"
+        ;;
+      --remote-name=*)
+        ARG_REMOTE_NAME="${1#*=}"
+        ;;
+      --remote-name)
+        shift
+        ARG_REMOTE_NAME="$(read_flag_value --remote-name "${1:-}")"
+        ;;
+      --branch=*)
+        ARG_BRANCH="${1#*=}"
+        ;;
+      --branch)
+        shift
+        ARG_BRANCH="$(read_flag_value --branch "${1:-}")"
+        ;;
+      --clawboard-dir=*)
+        ARG_CLAWBOARD_DIR="${1#*=}"
+        ;;
+      --clawboard-dir)
+        shift
+        ARG_CLAWBOARD_DIR="$(read_flag_value --clawboard-dir "${1:-}")"
+        ;;
+      --clawboard-api-url=*)
+        ARG_CLAWBOARD_API_URL="${1#*=}"
+        ;;
+      --clawboard-api-url)
+        shift
+        ARG_CLAWBOARD_API_URL="$(read_flag_value --clawboard-api-url "${1:-}")"
+        ;;
+      --clawboard-token=*)
+        ARG_CLAWBOARD_TOKEN="${1#*=}"
+        ;;
+      --clawboard-token)
+        shift
+        ARG_CLAWBOARD_TOKEN="$(read_flag_value --clawboard-token "${1:-}")"
+        ;;
+      --clawboard-attachments-dir=*)
+        ARG_CLAWBOARD_ATTACHMENTS_DIR="${1#*=}"
+        ;;
+      --clawboard-attachments-dir)
+        shift
+        ARG_CLAWBOARD_ATTACHMENTS_DIR="$(read_flag_value --clawboard-attachments-dir "${1:-}")"
+        ;;
+      --orphan-max-age-days=*)
+        ARG_ORPHAN_ATTACHMENT_MAX_AGE_DAYS="${1#*=}"
+        ;;
+      --orphan-max-age-days)
+        shift
+        ARG_ORPHAN_ATTACHMENT_MAX_AGE_DAYS="$(read_flag_value --orphan-max-age-days "${1:-}")"
+        ;;
+      --orphan-sweep-mode=*)
+        ARG_ORPHAN_ATTACHMENT_SWEEP_MODE="${1#*=}"
+        ;;
+      --orphan-sweep-mode)
+        shift
+        ARG_ORPHAN_ATTACHMENT_SWEEP_MODE="$(read_flag_value --orphan-sweep-mode "${1:-}")"
+        ;;
+      --include-openclaw-config)
+        ARG_INCLUDE_OPENCLAW_CONFIG="true"
+        ;;
+      --exclude-openclaw-config|--no-include-openclaw-config)
+        ARG_INCLUDE_OPENCLAW_CONFIG="false"
+        ;;
+      --include-openclaw-skills)
+        ARG_INCLUDE_OPENCLAW_SKILLS="true"
+        ;;
+      --exclude-openclaw-skills|--no-include-openclaw-skills)
+        ARG_INCLUDE_OPENCLAW_SKILLS="false"
+        ;;
+      --include-clawboard-state)
+        ARG_INCLUDE_CLAWBOARD_STATE="true"
+        ;;
+      --exclude-clawboard-state|--no-include-clawboard-state)
+        ARG_INCLUDE_CLAWBOARD_STATE="false"
+        ;;
+      --include-clawboard-attachments)
+        ARG_INCLUDE_CLAWBOARD_ATTACHMENTS="true"
+        ;;
+      --exclude-clawboard-attachments|--no-include-clawboard-attachments)
+        ARG_INCLUDE_CLAWBOARD_ATTACHMENTS="false"
+        ;;
+      --include-clawboard-env)
+        ARG_INCLUDE_CLAWBOARD_ENV="true"
+        ;;
+      --exclude-clawboard-env|--no-include-clawboard-env)
+        ARG_INCLUDE_CLAWBOARD_ENV="false"
+        ;;
+      --sweep-orphan-attachments)
+        ARG_SWEEP_ORPHAN_ATTACHMENTS="true"
+        ;;
+      --no-sweep-orphan-attachments)
+        ARG_SWEEP_ORPHAN_ATTACHMENTS="false"
+        ;;
+      *)
+        die "Unknown argument: $1 (use --help)"
+        ;;
+    esac
+    shift
+  done
+}
+
+sweep_orphan_attachments_in_backup() {
+  local backup_root="$1"
+  local attachments_dir="$2"
+  local attachments_manifest="$3"
+  local report_path="$4"
+  local max_age_days="$5"
+  local sweep_mode="$6"
+  local summary=""
+  local tracked="0"
+  local total_files="0"
+  local orphaned="0"
+  local eligible="0"
+  local deleted="0"
+  local status="ok"
+
+  case "$attachments_dir" in
+    "$backup_root"/*) ;;
+    *)
+      die "Refusing orphan sweep outside backup dir: $attachments_dir"
+      ;;
+  esac
+
+  summary="$(
+    python3 - "$attachments_dir" "$attachments_manifest" "$report_path" "$max_age_days" "$sweep_mode" <<'PY'
+import json
+import pathlib
+import sys
+import time
+from datetime import datetime, timezone
+
+attachments_dir = pathlib.Path(sys.argv[1])
+attachments_manifest = pathlib.Path(sys.argv[2])
+report_path = pathlib.Path(sys.argv[3])
+max_age_days = int(sys.argv[4])
+sweep_mode = (sys.argv[5] or "prune").strip().lower()
+if sweep_mode not in {"report", "prune"}:
+    sweep_mode = "prune"
+cutoff_ts = time.time() - (max_age_days * 86400)
+now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+tracked_ids = set()
+status = "ok"
+
+raw = []
+if attachments_manifest.exists():
+    try:
+        raw = json.loads(attachments_manifest.read_text(encoding="utf-8"))
+    except Exception:
+        status = "manifest-parse-error"
+else:
+    status = "missing-manifest"
+
+if isinstance(raw, list):
+    for row in raw:
+        if isinstance(row, dict):
+            item_id = str(row.get("id") or "").strip()
+            if item_id:
+                tracked_ids.add(item_id)
+
+orphaned = 0
+deleted = 0
+eligible = 0
+total_files = 0
+sample_orphans = []
+
+if attachments_dir.exists() and attachments_dir.is_dir():
+    candidates = sorted([p for p in attachments_dir.iterdir() if p.is_file()], key=lambda p: p.name)
+else:
+    candidates = []
+    if status == "ok":
+        status = "missing-attachments-dir"
+    else:
+        status = f"{status}+missing-attachments-dir"
+
+for candidate in candidates:
+    total_files += 1
+    if candidate.name in tracked_ids:
+        continue
+    orphaned += 1
+    mtime = None
+    age_days = None
+    try:
+        st = candidate.stat()
+        mtime = st.st_mtime
+        age_days = round((time.time() - mtime) / 86400, 2)
+    except FileNotFoundError:
+        continue
+
+    is_eligible = mtime is not None and mtime <= cutoff_ts
+    if is_eligible:
+        eligible += 1
+    if len(sample_orphans) < 50:
+        sample_orphans.append(
+            {
+                "id": candidate.name,
+                "ageDays": age_days,
+                "eligibleForPrune": bool(is_eligible),
+            }
+        )
+
+    if sweep_mode == "prune" and is_eligible:
+        try:
+            candidate.unlink()
+            deleted += 1
+        except FileNotFoundError:
+            pass
+
+report_payload = {
+    "generatedAt": now_iso,
+    "mode": sweep_mode,
+    "maxAgeDays": max_age_days,
+    "status": status,
+    "counts": {
+        "tracked": len(tracked_ids),
+        "files": total_files,
+        "orphaned": orphaned,
+        "eligibleForPrune": eligible,
+        "deleted": deleted,
+        "keptOrphans": orphaned - deleted,
+    },
+    "sampleOrphans": sample_orphans,
+    "notes": [
+        "This report is generated from backup snapshot files.",
+        "Source attachment files are never deleted by this backup script.",
+    ],
+}
+report_path.parent.mkdir(parents=True, exist_ok=True)
+report_path.write_text(json.dumps(report_payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+print(f"{len(tracked_ids)}|{total_files}|{orphaned}|{eligible}|{deleted}|{status}")
+PY
+  )"
+  IFS='|' read -r tracked total_files orphaned eligible deleted status <<<"$summary"
+  if [[ "$VERBOSE" == "1" || "${orphaned:-0}" != "0" || "${deleted:-0}" != "0" ]]; then
+    say "Orphan attachment sweep: status=$status mode=$sweep_mode tracked=$tracked files=$total_files orphaned=$orphaned eligible=$eligible deleted=$deleted (older than ${max_age_days}d; source attachments untouched)"
+    say "Orphan attachment report: $report_path"
+  fi
+}
+
+parse_args "$@"
+
 # --- Load config ---
 if [[ -f "$CRED_JSON" ]]; then
   WORKSPACE_PATH="$(json_get "$CRED_JSON" '.workspacePath')"
@@ -108,6 +620,10 @@ if [[ -f "$CRED_JSON" ]]; then
   INCLUDE_CLAWBOARD_ATTACHMENTS="$(json_get "$CRED_JSON" '.includeClawboardAttachments')"
   INCLUDE_CLAWBOARD_ENV="$(json_get "$CRED_JSON" '.includeClawboardEnv')"
   CLAWBOARD_TOKEN="$(json_get "$CRED_JSON" '.clawboardToken')"
+  CLAWBOARD_ATTACHMENTS_DIR="$(json_get "$CRED_JSON" '.clawboardAttachmentsDir')"
+  SWEEP_ORPHAN_ATTACHMENTS="$(json_get "$CRED_JSON" '.sweepOrphanAttachments')"
+  ORPHAN_ATTACHMENT_MAX_AGE_DAYS="$(json_get "$CRED_JSON" '.orphanAttachmentMaxAgeDays')"
+  ORPHAN_ATTACHMENT_SWEEP_MODE="$(json_get "$CRED_JSON" '.orphanAttachmentSweepMode')"
 else
   load_env_file "$CRED_ENV"
   WORKSPACE_PATH="${WORKSPACE_PATH:-}"
@@ -128,6 +644,10 @@ else
   INCLUDE_CLAWBOARD_ATTACHMENTS="${INCLUDE_CLAWBOARD_ATTACHMENTS:-}"
   INCLUDE_CLAWBOARD_ENV="${INCLUDE_CLAWBOARD_ENV:-}"
   CLAWBOARD_TOKEN="${CLAWBOARD_BACKUP_TOKEN:-${CLAWBOARD_TOKEN:-}}"
+  CLAWBOARD_ATTACHMENTS_DIR="${CLAWBOARD_ATTACHMENTS_DIR:-}"
+  SWEEP_ORPHAN_ATTACHMENTS="${SWEEP_ORPHAN_ATTACHMENTS:-}"
+  ORPHAN_ATTACHMENT_MAX_AGE_DAYS="${ORPHAN_ATTACHMENT_MAX_AGE_DAYS:-}"
+  ORPHAN_ATTACHMENT_SWEEP_MODE="${ORPHAN_ATTACHMENT_SWEEP_MODE:-}"
 fi
 
 # Env file values override JSON for secrets/runtime configuration.
@@ -135,25 +655,72 @@ load_env_file "$CRED_ENV"
 CLAWBOARD_TOKEN="${CLAWBOARD_BACKUP_TOKEN:-${CLAWBOARD_TOKEN:-}}"
 CLAWBOARD_API_URL="${CLAWBOARD_BACKUP_API_URL:-${CLAWBOARD_API_URL:-}}"
 CLAWBOARD_DIR="${CLAWBOARD_BACKUP_DIR:-${CLAWBOARD_DIR:-}}"
+CLAWBOARD_ATTACHMENTS_DIR="${CLAWBOARD_BACKUP_ATTACHMENTS_DIR:-${CLAWBOARD_ATTACHMENTS_DIR:-}}"
+SWEEP_ORPHAN_ATTACHMENTS="${CLAWBOARD_BACKUP_SWEEP_ORPHAN_ATTACHMENTS:-${SWEEP_ORPHAN_ATTACHMENTS:-}}"
+ORPHAN_ATTACHMENT_MAX_AGE_DAYS="${CLAWBOARD_BACKUP_ORPHAN_ATTACHMENT_MAX_AGE_DAYS:-${ORPHAN_ATTACHMENT_MAX_AGE_DAYS:-}}"
+ORPHAN_ATTACHMENT_SWEEP_MODE="${CLAWBOARD_BACKUP_ORPHAN_SWEEP_MODE:-${ORPHAN_ATTACHMENT_SWEEP_MODE:-}}"
+
+apply_arg_overrides
 
 REMOTE_NAME="${REMOTE_NAME:-origin}"
 BRANCH="${BRANCH:-main}"
 AUTH_METHOD="${AUTH_METHOD:-ssh}"
 CLAWBOARD_API_URL="${CLAWBOARD_API_URL:-http://localhost:8010}"
+SWEEP_ORPHAN_ATTACHMENTS="${SWEEP_ORPHAN_ATTACHMENTS:-true}"
+ORPHAN_ATTACHMENT_MAX_AGE_DAYS="${ORPHAN_ATTACHMENT_MAX_AGE_DAYS:-14}"
+ORPHAN_ATTACHMENT_SWEEP_MODE="${ORPHAN_ATTACHMENT_SWEEP_MODE:-prune}"
 
-# bash 3.2 compatibility (macOS default /bin/bash): no ${var,,}
-lc() { tr '[:upper:]' '[:lower:]' <<<"${1:-}"; }
+if [[ "$INTERACTIVE" == "1" ]]; then
+  [[ -t 0 ]] || die "--interactive requires a TTY"
+  say "Interactive mode enabled. Press Enter to keep the shown value."
 
-# Booleans are stored as JSON true/false; our json_get returns a JSON string for non-strings.
-# Accept: true/false/"true"/"false"/1/0/yes/no
-as_bool() {
-  local v="${1:-}"
-  v="${v//\"/}"
-  case "$(lc "$v")" in
-    true|1|yes|y) return 0 ;;
-    *) return 1 ;;
+  WORKSPACE_PATH="$(prompt_value "workspacePath" "${WORKSPACE_PATH:-}")"
+  BACKUP_DIR="$(prompt_value "backupDir" "${BACKUP_DIR:-}")"
+  AUTH_METHOD="$(prompt_value "authMethod (ssh|pat)" "${AUTH_METHOD:-ssh}")"
+  REMOTE_NAME="$(prompt_value "remoteName" "${REMOTE_NAME:-origin}")"
+  BRANCH="$(prompt_value "branch" "${BRANCH:-main}")"
+
+  case "$(lc "$AUTH_METHOD")" in
+    ssh)
+      REPO_SSH_URL="$(prompt_value "repoSshUrl" "${REPO_SSH_URL:-}")"
+      DEPLOY_KEY_PATH="$(prompt_value "deployKeyPath" "${DEPLOY_KEY_PATH:-}")"
+      ;;
+    pat)
+      REPO_URL="$(prompt_value "repoUrl" "${REPO_URL:-}")"
+      GITHUB_USER="$(prompt_value "githubUser" "${GITHUB_USER:-}")"
+      GITHUB_PAT="$(prompt_value "githubPat" "${GITHUB_PAT:-}" 1)"
+      ;;
+    *)
+      die "Unknown authMethod: ${AUTH_METHOD}. Expected 'ssh' or 'pat'."
+      ;;
   esac
-}
+
+  INCLUDE_OPENCLAW_CONFIG="$(prompt_bool "Include OpenClaw config backups?" "${INCLUDE_OPENCLAW_CONFIG:-false}")"
+  INCLUDE_OPENCLAW_SKILLS="$(prompt_bool "Include OpenClaw skills backups?" "${INCLUDE_OPENCLAW_SKILLS:-false}")"
+  INCLUDE_CLAWBOARD_STATE="$(prompt_bool "Include Clawboard state export?" "${INCLUDE_CLAWBOARD_STATE:-false}")"
+
+  if as_bool "${INCLUDE_CLAWBOARD_STATE:-}"; then
+    CLAWBOARD_API_URL="$(prompt_value "clawboardApiUrl" "${CLAWBOARD_API_URL:-http://localhost:8010}")"
+    CLAWBOARD_DIR="$(prompt_value "clawboardDir (optional)" "${CLAWBOARD_DIR:-}")"
+    CLAWBOARD_TOKEN="$(prompt_value "clawboardToken" "${CLAWBOARD_TOKEN:-}" 1)"
+    INCLUDE_CLAWBOARD_ATTACHMENTS="$(prompt_bool "Include Clawboard attachments dir?" "${INCLUDE_CLAWBOARD_ATTACHMENTS:-true}")"
+    INCLUDE_CLAWBOARD_ENV="$(prompt_bool "Include Clawboard .env in backup?" "${INCLUDE_CLAWBOARD_ENV:-false}")"
+    if as_bool "${INCLUDE_CLAWBOARD_ATTACHMENTS:-}"; then
+      CLAWBOARD_ATTACHMENTS_DIR="$(prompt_value "clawboardAttachmentsDir override (optional)" "${CLAWBOARD_ATTACHMENTS_DIR:-}")"
+      SWEEP_ORPHAN_ATTACHMENTS="$(prompt_bool "Sweep orphaned backup attachments?" "${SWEEP_ORPHAN_ATTACHMENTS:-true}")"
+      if as_bool "${SWEEP_ORPHAN_ATTACHMENTS:-}"; then
+        ORPHAN_ATTACHMENT_MAX_AGE_DAYS="$(prompt_value "orphan attachment max age days" "${ORPHAN_ATTACHMENT_MAX_AGE_DAYS:-14}")"
+        ORPHAN_ATTACHMENT_SWEEP_MODE="$(prompt_value "orphan sweep mode (report|prune)" "${ORPHAN_ATTACHMENT_SWEEP_MODE:-prune}")"
+      fi
+    fi
+  fi
+
+  proceed="$(prompt_bool "Proceed with backup run now?" "true")"
+  if ! as_bool "$proceed"; then
+    say "Canceled."
+    exit 0
+  fi
+fi
 
 [[ -n "${WORKSPACE_PATH:-}" ]] || die "workspacePath not configured. Run setup-openclaw-memory-backup.sh first."
 [[ -d "$WORKSPACE_PATH" ]] || die "workspacePath does not exist: $WORKSPACE_PATH"
@@ -175,6 +742,16 @@ case "$(lc "${AUTH_METHOD:-}")" in
     die "Unknown authMethod: ${AUTH_METHOD}. Expected 'ssh' or 'pat'."
     ;;
 esac
+
+if as_bool "${SWEEP_ORPHAN_ATTACHMENTS:-}"; then
+  [[ "$ORPHAN_ATTACHMENT_MAX_AGE_DAYS" =~ ^[0-9]+$ ]] || die "orphan attachment max age must be a non-negative integer."
+  case "$(lc "$ORPHAN_ATTACHMENT_SWEEP_MODE")" in
+    report|prune) ;;
+    *)
+      die "orphan sweep mode must be 'report' or 'prune'."
+      ;;
+  esac
+fi
 
 need_cmd git
 need_cmd rsync
@@ -360,6 +937,19 @@ rm -rf "$STAGE_DIR"
 
 cd "$BACKUP_DIR"
 
+if as_bool "${INCLUDE_CLAWBOARD_STATE:-}" \
+  && as_bool "${INCLUDE_CLAWBOARD_ATTACHMENTS:-}" \
+  && as_bool "${SWEEP_ORPHAN_ATTACHMENTS:-}"; then
+  ORPHAN_REPORT_PATH="$BACKUP_DIR/clawboard/export/orphan_attachments_report.json"
+  sweep_orphan_attachments_in_backup \
+    "$BACKUP_DIR" \
+    "$BACKUP_DIR/clawboard/attachments" \
+    "$BACKUP_DIR/clawboard/export/attachments.json" \
+    "$ORPHAN_REPORT_PATH" \
+    "$ORPHAN_ATTACHMENT_MAX_AGE_DAYS" \
+    "$ORPHAN_ATTACHMENT_SWEEP_MODE"
+fi
+
 if [[ -z "$(git status --porcelain)" ]]; then
   # Silent success: cron should not notify when there is nothing new.
   exit 0
@@ -385,6 +975,11 @@ if ! git rev-parse --verify "$BRANCH" >/dev/null 2>&1; then
   git checkout -b "$BRANCH" >/dev/null
 else
   git checkout "$BRANCH" >/dev/null
+fi
+
+if [[ "$NO_PUSH" == "1" ]]; then
+  say "Backed up changes locally (push skipped): $(git rev-parse --short HEAD)"
+  exit 0
 fi
 
 # Push

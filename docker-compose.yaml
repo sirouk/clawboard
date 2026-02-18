@@ -6,22 +6,22 @@ services:
     env_file:
       - .env
     environment:
-      # Store SQLite DB on a Docker-managed volume (more reliable than bind mounts on macOS).
-      CLAWBOARD_DB_URL: ${CLAWBOARD_DB_URL:-sqlite:////db/clawboard.db}
+      CLAWBOARD_DB_URL: ${CLAWBOARD_DB_URL:-postgresql+psycopg://clawboard:clawboard@db:5432/clawboard}
       CLAWBOARD_CORS_ORIGINS: "*"
       CLAWBOARD_REINDEX_QUEUE_PATH: /app/data/reindex-queue.jsonl
+      CLAWBOARD_VECTOR_REQUIRE_QDRANT: ${CLAWBOARD_VECTOR_REQUIRE_QDRANT:-1}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-clawboard_embeddings}
       QDRANT_API_KEY: ${QDRANT_API_KEY:-}
       OPENCLAW_GATEWAY_IDENTITY_DIR: /root/.openclaw
       # CLAWBOARD_TOKEN is read from .env via env_file
     volumes:
-      - clawboard_api_db:/db
       - ./data:/app/data
       - ${HOME}/.openclaw:/root/.openclaw:ro
     ports:
       - "8010:8000"
     depends_on:
+      - db
       - qdrant
     networks:
       - edge
@@ -35,6 +35,7 @@ services:
       - .env
     environment:
       CLAWBOARD_API_BASE: http://api:8000
+      CLAWBOARD_VECTOR_REQUIRE_QDRANT: ${CLAWBOARD_VECTOR_REQUIRE_QDRANT:-1}
       OPENCLAW_BASE_URL: ${OPENCLAW_BASE_URL:-http://host.docker.internal:18789}
       OPENCLAW_MODEL: ${OPENCLAW_MODEL:-openai-codex/gpt-5.2}
       # "auto" uses the OpenClaw LLM when credentials are configured; "off" forces heuristic mode.
@@ -75,11 +76,17 @@ services:
         # Optional default UI token, also baked into browser bundle.
         NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN: ${NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN:-}
         NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE: ${NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE:-50}
+    env_file:
+      - .env
     environment:
       # IMPORTANT: this is used client-side; must be reachable from the browser.
       NEXT_PUBLIC_CLAWBOARD_API_BASE: ${CLAWBOARD_PUBLIC_API_BASE:-http://localhost:8010}
       NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN: ${NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN:-}
       NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE: ${NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE:-50}
+      # Next.js /api proxy target (server-side only, never exposed to browser JS).
+      CLAWBOARD_SERVER_API_BASE: ${CLAWBOARD_SERVER_API_BASE:-http://api:8000}
+      # Optional fallback header token for server-side proxy forwarding.
+      CLAWBOARD_SERVER_API_TOKEN: ${CLAWBOARD_TOKEN:-}
     depends_on:
       - api
     ports:
@@ -97,6 +104,10 @@ services:
       NEXT_PUBLIC_CLAWBOARD_API_BASE: ${CLAWBOARD_PUBLIC_API_BASE:-http://localhost:8010}
       NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN: ${NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN:-}
       NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE: ${NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE:-50}
+      # Next.js /api proxy target (server-side only, never exposed to browser JS).
+      CLAWBOARD_SERVER_API_BASE: ${CLAWBOARD_SERVER_API_BASE:-http://api:8000}
+      # Optional fallback header token for server-side proxy forwarding.
+      CLAWBOARD_SERVER_API_TOKEN: ${CLAWBOARD_TOKEN:-}
       # Docker Desktop file watching can be flaky; polling is slower but reliable.
       WATCHPACK_POLLING: ${CLAWBOARD_WEB_WATCHPACK_POLLING:-true}
       WATCHPACK_POLLING_INTERVAL: ${CLAWBOARD_WEB_WATCHPACK_POLLING_INTERVAL:-1000}
@@ -116,7 +127,6 @@ services:
 
   db:
     image: postgres:16
-    profiles: ["scale"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-clawboard}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clawboard}
@@ -152,7 +162,6 @@ networks:
     driver: bridge
 
 volumes:
-  clawboard_api_db:
   clawboard_web_node_modules:
   clawboard_web_next_cache:
   clawboard_classifier_cache:

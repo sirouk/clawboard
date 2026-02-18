@@ -48,7 +48,7 @@ def seed_from_fixture(session, fixture: dict):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Seed Clawboard demo data into SQLite.")
+    parser = argparse.ArgumentParser(description="Seed Clawboard demo data into the configured runtime database.")
     parser.add_argument("--fixture", default="/tmp/portal.json", help="Path to fixture JSON")
     parser.add_argument("--reset", action="store_true", help="Reset database before seeding")
     parser.add_argument("--reset-only", action="store_true", help="Only reset database")

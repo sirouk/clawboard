@@ -423,6 +423,19 @@ upsert_env_value() {
   mv "$temp_file" "$file_path"
 }
 
+remove_env_key() {
+  local file_path="$1"
+  local key="$2"
+  local temp_file
+  [ -f "$file_path" ] || return 0
+  temp_file="$(mktemp "${file_path}.tmp.XXXXXX")"
+  awk -v key="$key" '
+    $0 ~ "^[[:space:]]*" key "=" { next }
+    { print }
+  ' "$file_path" > "$temp_file"
+  mv "$temp_file" "$file_path"
+}
+
 read_env_value_from_file() {
   local file_path="$1"
   local key="$2"
@@ -1031,8 +1044,18 @@ log_info "Writing CLAWBOARD_PUBLIC_API_BASE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" "$ACCESS_API_URL"
 log_info "Writing CLAWBOARD_PUBLIC_WEB_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_WEB_URL" "$ACCESS_WEB_URL"
+if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SERVER_API_BASE" >/dev/null 2>&1; then
+  SERVER_API_BASE_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SERVER_API_BASE" || true)"
+else
+  SERVER_API_BASE_VALUE="http://api:8000"
+fi
+SERVER_API_BASE_VALUE="$(normalize_http_url "$SERVER_API_BASE_VALUE")"
+log_info "Writing CLAWBOARD_SERVER_API_BASE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SERVER_API_BASE" "$SERVER_API_BASE_VALUE"
 log_info "Writing OPENCLAW_BASE_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_BASE_URL" "$OPENCLAW_BASE_URL_VALUE"
+# Legacy compatibility key used by removed Next.js Prisma storage path.
+remove_env_key "$INSTALL_DIR/.env" "DATABASE_URL"
 
 # Web hot reload (dev web service).
 WEB_HOT_RELOAD_VALUE=""

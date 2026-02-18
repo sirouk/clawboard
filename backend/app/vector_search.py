@@ -4,7 +4,6 @@ import json
 import math
 import os
 import re
-import sqlite3
 import threading
 import time
 import uuid
@@ -26,7 +25,6 @@ except Exception:  # pragma: no cover - optional dependency
     TextEmbedding = None  # type: ignore[assignment]
 
 
-EMBED_DB_PATH = os.getenv("CLAWBOARD_VECTOR_DB_PATH", "./data/classifier_embeddings.db")
 EMBED_MODEL = os.getenv("CLAWBOARD_VECTOR_MODEL", "BAAI/bge-small-en-v1.5")
 
 QDRANT_URL = (os.getenv("CLAWBOARD_QDRANT_URL") or os.getenv("QDRANT_URL") or "").rstrip("/")
@@ -37,9 +35,6 @@ QDRANT_COLLECTION = os.getenv(
 QDRANT_DIM = int(os.getenv("CLAWBOARD_QDRANT_DIM", os.getenv("QDRANT_DIM", "384")))
 QDRANT_TIMEOUT = float(os.getenv("CLAWBOARD_QDRANT_TIMEOUT", "2.6"))
 QDRANT_API_KEY = os.getenv("CLAWBOARD_QDRANT_API_KEY") or os.getenv("QDRANT_API_KEY")
-QDRANT_SEED_MAX = int(os.getenv("CLAWBOARD_QDRANT_SEED_MAX", "10000"))
-QDRANT_SEED_RETRY_BASE_SECONDS = float(os.getenv("CLAWBOARD_QDRANT_SEED_RETRY_BASE_SECONDS", "20") or "20")
-QDRANT_SEED_RETRY_MAX_SECONDS = float(os.getenv("CLAWBOARD_QDRANT_SEED_RETRY_MAX_SECONDS", "900") or "900")
 
 RRF_K = int(os.getenv("CLAWBOARD_RRF_K", "60"))
 RERANK_TOP_N = int(os.getenv("CLAWBOARD_RERANK_TOP_N", "64"))
@@ -59,20 +54,22 @@ SEARCH_SOURCE_TOPK_MAX = int(os.getenv("CLAWBOARD_SEARCH_SOURCE_TOPK_MAX", "960"
 EMBED_QUERY_CACHE_SIZE = int(os.getenv("CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE", "256") or "256")
 EMBED_TEXT_CACHE_SIZE = int(os.getenv("CLAWBOARD_SEARCH_EMBED_TEXT_CACHE_SIZE", "4096") or "4096")
 VECTOR_PREWARM = str(os.getenv("CLAWBOARD_VECTOR_PREWARM", "1") or "").strip().lower() in {"1", "true", "yes", "on"}
+VECTOR_REQUIRE_QDRANT = str(os.getenv("CLAWBOARD_VECTOR_REQUIRE_QDRANT", "0") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 _MODEL = None
 _MODEL_LOCK = threading.Lock()
 _MODEL_LOADING = False
 _MODEL_LAST_FAILURE_AT = 0.0
-_QDRANT_SEED_RETRY_STATE: dict[str, dict[str, float]] = {}
 _QDRANT_COLLECTION_READY = False
 _EMBED_QUERY_CACHE_LOCK = threading.Lock()
 _EMBED_QUERY_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
 _EMBED_TEXT_CACHE_LOCK = threading.Lock()
 _EMBED_TEXT_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
-# NOTE: Avoid caching all SQLite embedding rows in memory. It can easily exhaust RAM and
-# deadlock the API process on real instances. If we must fall back to SQLite (no Qdrant),
-# we stream rows and keep only a tiny top-k working set in memory.
 
 STOP_WORDS = {
     "the",
@@ -736,174 +733,17 @@ def _qdrant_topk(
     return dict(ranked[:limit])
 
 
-def _qdrant_seed_from_sqlite(*, kind_exact: str | None = None, kind_prefix: str | None = None) -> bool:
-    if not QDRANT_URL or np is None:
-        return False
-    vectors = _iter_sqlite_vectors(kind_exact=kind_exact, kind_prefix=kind_prefix)
-    first = next(vectors, None)
-    if not first:
-        return False
-    first_kind, first_id, first_vec = first
-    if not _ensure_qdrant_collection(dim_hint=int(first_vec.shape[0])):
-        return False
-    seed_limit = max(100, QDRANT_SEED_MAX)
-    batch_size = 256
-    points: list[dict] = []
-    ok = False
-
-    def flush() -> None:
-        nonlocal ok, points
-        if not points:
-            return
-        result = _qdrant_request(
-            "PUT",
-            f"/collections/{QDRANT_COLLECTION}/points?wait=true",
-            {"points": points},
-        )
-        if result is not None:
-            ok = True
-        points = []
-
-    def add_point(kind: str, item_id: str, vec) -> None:
-        kind_root = kind.split(":", 1)[0] if ":" in kind else kind
-        points.append(
-            {
-                "id": _qdrant_point_id(kind, item_id),
-                "vector": vec.astype(float).tolist(),
-                "payload": {
-                    "kind": kind,
-                    "kindRoot": kind_root,
-                    "id": item_id,
-                },
-            }
-        )
-
-    count = 0
-    add_point(first_kind, first_id, first_vec)
-    count += 1
-    for kind, item_id, vec in vectors:
-        if count >= seed_limit:
-            break
-        add_point(kind, item_id, vec)
-        count += 1
-        if len(points) >= batch_size:
-            flush()
-    flush()
-    return ok
-
-
-def _iter_sqlite_vectors(
-    *, kind_exact: str | None = None, kind_prefix: str | None = None
-) -> "Iterable[tuple[str, str, np.ndarray]]":
-    if np is None:
-        return iter(())
-    db_path = os.path.abspath(EMBED_DB_PATH)
-    if not os.path.exists(db_path):
-        return iter(())
-
-    query = "SELECT kind, id, vector, dim FROM embeddings"
-    params: list[object] = []
-    if kind_exact:
-        query += " WHERE kind = ?"
-        params.append(kind_exact)
-    elif kind_prefix:
-        query += " WHERE kind LIKE ?"
-        params.append(f"{kind_prefix}%")
-
-    def generator():
-        try:
-            conn = sqlite3.connect(db_path)
-        except Exception:
-            return
-        try:
-            try:
-                cursor = conn.execute(query, params)
-            except Exception:
-                return
-            for kind, item_id, blob, dim in cursor:
-                kind_text = str(kind)
-                try:
-                    vec = np.frombuffer(blob, dtype=np.float32, count=int(dim))
-                    if vec.size == 0:
-                        continue
-                    yield (kind_text, str(item_id), vec)
-                except Exception:
-                    continue
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-    return generator()
-
-
-def _sqlite_topk(query_vec, *, kind_exact: str | None = None, kind_prefix: str | None = None, limit: int = 120) -> dict[str, float]:
-    if np is None or query_vec is None:
-        return {}
-    try:
-        query_arr = np.asarray(query_vec, dtype=np.float32).reshape(-1)
-    except Exception:
-        return {}
-    if query_arr.size == 0:
-        return {}
-    q_norm = float(np.linalg.norm(query_arr))
-    if q_norm == 0.0:
-        return {}
-    # Stream vectors and keep only a small heap in memory.
-    heap: list[tuple[float, str]] = []
-    for _kind, item_id, vec in _iter_sqlite_vectors(kind_exact=kind_exact, kind_prefix=kind_prefix):
-        try:
-            vec_arr = np.asarray(vec, dtype=np.float32).reshape(-1)
-        except Exception:
-            continue
-        if vec_arr.size == 0 or vec_arr.size != query_arr.size:
-            continue
-        v_norm = float(np.linalg.norm(vec_arr))
-        if v_norm == 0.0:
-            continue
-        score = float(np.dot(query_arr, vec_arr) / (q_norm * v_norm))
-        if len(heap) < max(1, limit):
-            heapq.heappush(heap, (score, item_id))
-        elif score > heap[0][0]:
-            heapq.heapreplace(heap, (score, item_id))
-    if not heap:
-        return {}
-    heap.sort(key=lambda item: item[0], reverse=True)
-    return {item_id: float(score) for score, item_id in heap}
-
-
 def _vector_topk(query_vec, *, kind_exact: str | None = None, kind_prefix: str | None = None, limit: int = 120) -> tuple[dict[str, float], str]:
     if query_vec is None:
         return {}, "none"
+    if VECTOR_REQUIRE_QDRANT and not QDRANT_URL:
+        return {}, "qdrant-required"
     if QDRANT_URL:
         qdrant_scores = _qdrant_topk(query_vec, kind_exact=kind_exact, kind_prefix=kind_prefix, limit=limit)
         if qdrant_scores:
-            namespace = kind_exact or (f"{kind_prefix}*" if kind_prefix else "all")
-            _QDRANT_SEED_RETRY_STATE.pop(namespace, None)
             return qdrant_scores, "qdrant"
-        namespace = kind_exact or (f"{kind_prefix}*" if kind_prefix else "all")
-        now = time.time()
-        retry_state = _QDRANT_SEED_RETRY_STATE.get(namespace) or {}
-        next_retry_at = float(retry_state.get("nextRetryAt") or 0.0)
-        if now >= next_retry_at:
-            seeded = _qdrant_seed_from_sqlite(kind_exact=kind_exact, kind_prefix=kind_prefix)
-            if seeded:
-                _QDRANT_SEED_RETRY_STATE.pop(namespace, None)
-                retry_scores = _qdrant_topk(query_vec, kind_exact=kind_exact, kind_prefix=kind_prefix, limit=limit)
-                if retry_scores:
-                    return retry_scores, "qdrant"
-            failures = int(retry_state.get("failures") or 0) + 1
-            base_delay = max(5.0, float(QDRANT_SEED_RETRY_BASE_SECONDS))
-            max_delay = max(base_delay, float(QDRANT_SEED_RETRY_MAX_SECONDS))
-            retry_delay = min(max_delay, base_delay * (2 ** max(0, failures - 1)))
-            _QDRANT_SEED_RETRY_STATE[namespace] = {
-                "failures": float(failures),
-                "nextRetryAt": now + retry_delay,
-            }
-    sqlite_scores = _sqlite_topk(query_vec, kind_exact=kind_exact, kind_prefix=kind_prefix, limit=limit)
-    if sqlite_scores:
-        return sqlite_scores, "sqlite"
+        if VECTOR_REQUIRE_QDRANT:
+            return {}, "qdrant-required"
     return {}, "none"
 
 

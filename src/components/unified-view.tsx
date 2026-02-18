@@ -1184,6 +1184,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const chatLastScrollTopRef = useRef<Map<string, number>>(new Map());
   const taskLogHydratedRef = useRef<Set<string>>(new Set());
   const taskLogHydratingRef = useRef<Set<string>>(new Set());
+  const topicLogHydratedRef = useRef<Set<string>>(new Set());
+  const topicLogHydratingRef = useRef<Set<string>>(new Set());
 
   const CHAT_AUTO_SCROLL_THRESHOLD_PX = 24;
   const topicAutosaveTimerRef = useRef<number | null>(null);
@@ -1906,11 +1908,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       try {
         const merged: LogEntry[] = [];
         const pageSize = 400;
-        const maxRows = 4000;
         let offset = 0;
-        while (merged.length < maxRows) {
+        while (true) {
+          const params = new URLSearchParams({
+            taskId: id,
+            limit: String(pageSize),
+            offset: String(offset),
+          });
+          if (selectedSpaceId) params.set("spaceId", selectedSpaceId);
           const res = await apiFetch(
-            `/api/log?taskId=${encodeURIComponent(id)}&limit=${pageSize}&offset=${offset}`,
+            `/api/log?${params.toString()}`,
             { cache: "no-store" },
             token
           );
@@ -1929,7 +1936,48 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         taskLogHydratingRef.current.delete(id);
       }
     },
-    [setLogs, token]
+    [selectedSpaceId, setLogs, token]
+  );
+
+  const hydrateTopicLogs = useCallback(
+    async (topicId: string) => {
+      const id = String(topicId || "").trim();
+      if (!id || id === "unassigned") return;
+      if (topicLogHydratedRef.current.has(id)) return;
+      if (topicLogHydratingRef.current.has(id)) return;
+      topicLogHydratingRef.current.add(id);
+      try {
+        const merged: LogEntry[] = [];
+        const pageSize = 400;
+        let offset = 0;
+        while (true) {
+          const params = new URLSearchParams({
+            topicId: id,
+            limit: String(pageSize),
+            offset: String(offset),
+          });
+          if (selectedSpaceId) params.set("spaceId", selectedSpaceId);
+          const res = await apiFetch(
+            `/api/log?${params.toString()}`,
+            { cache: "no-store" },
+            token
+          );
+          if (!res.ok) break;
+          const rows = (await res.json().catch(() => [])) as LogEntry[];
+          if (!Array.isArray(rows) || rows.length === 0) break;
+          merged.push(...rows);
+          if (rows.length < pageSize) break;
+          offset += rows.length;
+        }
+        if (merged.length > 0) {
+          setLogs((prev) => mergeLogs(prev, merged));
+        }
+        topicLogHydratedRef.current.add(id);
+      } finally {
+        topicLogHydratingRef.current.delete(id);
+      }
+    },
+    [selectedSpaceId, setLogs, token]
   );
 
   const normalizedSearch = search.trim().toLowerCase();
@@ -2167,6 +2215,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   }, [pendingMessages]);
 
   useEffect(() => {
+    taskLogHydratedRef.current.clear();
+    topicLogHydratedRef.current.clear();
+  }, [selectedSpaceId, spaceVisibilityRevision]);
+
+  useEffect(() => {
     const targets = new Set<string>();
     for (const taskId of expandedTasksSafe) {
       if (taskId) targets.add(taskId);
@@ -2178,6 +2231,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       void hydrateTaskLogs(taskId);
     }
   }, [expandedTasksSafe, hydrateTaskLogs, mobileChatTarget, mobileLayer]);
+
+  useEffect(() => {
+    const targets = new Set<string>();
+    for (const topicId of expandedTopicChatsSafe) {
+      if (topicId && topicId !== "unassigned") targets.add(topicId);
+    }
+    if (mobileLayer === "chat" && mobileChatTarget?.kind === "topic" && mobileChatTarget.topicId && mobileChatTarget.topicId !== "unassigned") {
+      targets.add(mobileChatTarget.topicId);
+    }
+    for (const topicId of targets) {
+      void hydrateTopicLogs(topicId);
+    }
+  }, [expandedTopicChatsSafe, hydrateTopicLogs, mobileChatTarget, mobileLayer]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;

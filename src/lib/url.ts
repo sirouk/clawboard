@@ -51,3 +51,18 @@ export function withRevealParam(href: string, enabled = true) {
   const nextHref = nextQuery ? `${path}?${nextQuery}` : path;
   return hash ? `${nextHref}#${hash}` : nextHref;
 }
+
+export function withSpaceParam(href: string, spaceId?: string | null) {
+  const [withoutHash, hash = ""] = href.split("#", 2);
+  const [path, query = ""] = withoutHash.split("?", 2);
+  const params = new URLSearchParams(query);
+  const normalized = String(spaceId ?? "").trim();
+  if (normalized && normalized !== "space-default") {
+    params.set("space", normalized);
+  } else {
+    params.delete("space");
+  }
+  const nextQuery = params.toString();
+  const nextHref = nextQuery ? `${path}?${nextQuery}` : path;
+  return hash ? `${nextHref}#${hash}` : nextHref;
+}

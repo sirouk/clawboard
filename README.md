@@ -69,9 +69,9 @@ Statuses are how the system tracks state:
 ## Architecture
 
 - `web` (Next.js): operator UI and API proxy routes.
-- `api` (FastAPI + SQLite): source-of-truth store and retrieval endpoints.
+- `api` (FastAPI + Postgres): source-of-truth store and retrieval endpoints.
 - `classifier` (Python worker): async topic/task classification and embedding updates.
-- `qdrant` (optional but recommended): vector index for dense retrieval.
+- `qdrant` (required for production): primary vector index for dense retrieval.
 - `extensions/clawboard-logger`: OpenClaw plugin for capture and context hook integration.
 
 ## OpenClaw Complement Model
@@ -160,6 +160,15 @@ Health checks:
 ```bash
 curl -s http://localhost:8010/api/health
 curl -s http://localhost:8010/api/config
+```
+
+Legacy SQLite to Postgres migration helper (one-time, older installs only):
+
+```bash
+docker compose run --rm -v "$PWD":/workspace -w /workspace api \
+  python /workspace/scripts/migrate_sqlite_to_postgres.py --dry-run
+docker compose run --rm -v "$PWD":/workspace -w /workspace api \
+  python /workspace/scripts/migrate_sqlite_to_postgres.py --yes --truncate-target
 ```
 
 ## Testing

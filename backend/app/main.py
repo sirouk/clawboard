@@ -468,7 +468,10 @@ def _infer_space_id_from_session_key(session: Any, session_key: str | None) -> s
     if base_session_key and base_session_key != normalized_session_key:
         session_candidates.append(base_session_key)
 
-    session_expr = func.json_extract(LogEntry.source, "$.sessionKey")
+    if DATABASE_URL.startswith("sqlite"):
+        session_expr = func.json_extract(LogEntry.source, "$.sessionKey")
+    else:
+        session_expr = LogEntry.source["sessionKey"].as_string()
     for candidate in session_candidates:
         query = (
             select(LogEntry)
@@ -4918,6 +4921,9 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
             raise HTTPException(status_code=404, detail="Log not found")
 
         fields = payload.model_fields_set
+        classifier_patch = bool(
+            {"classificationStatus", "classificationAttempts", "classificationError"} & set(fields)
+        )
         if "spaceId" in fields:
             normalized_space_id = _normalize_space_id(payload.spaceId)
             if not normalized_space_id:
@@ -4929,20 +4935,42 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
             entry.spaceId = normalized_space_id
 
         if "topicId" in fields:
-            entry.topicId = payload.topicId
+            requested_topic_id = str(payload.topicId or "").strip()
+            if requested_topic_id:
+                topic = session.get(Topic, requested_topic_id)
+                if topic:
+                    entry.topicId = topic.id
+                    entry.spaceId = _space_id_for_topic(topic)
+                else:
+                    # Classifier retries can carry stale scoped IDs from old boards; keep patch idempotent.
+                    entry.topicId = None
+                    if "taskId" not in fields:
+                        entry.taskId = None
+            else:
+                entry.topicId = None
+                if "taskId" not in fields:
+                    entry.taskId = None
         if "taskId" in fields:
             if payload.taskId:
                 task = session.get(Task, payload.taskId)
                 if not task:
-                    raise HTTPException(status_code=400, detail="Task not found")
-                if "topicId" in fields:
-                    if task.topicId != entry.topicId:
-                        raise HTTPException(status_code=400, detail="Task does not belong to selected topic")
+                    if classifier_patch:
+                        entry.taskId = None
+                        if "topicId" not in fields:
+                            entry.topicId = None
+                    else:
+                        raise HTTPException(status_code=400, detail="Task not found")
                 else:
-                    # Align topic to the task if topic wasn't explicitly patched.
-                    entry.topicId = task.topicId
-                entry.taskId = task.id
-                entry.spaceId = _space_id_for_task(task)
+                    if "topicId" in fields:
+                        if entry.topicId and task.topicId != entry.topicId:
+                            raise HTTPException(status_code=400, detail="Task does not belong to selected topic")
+                        if not entry.topicId:
+                            entry.topicId = task.topicId
+                    else:
+                        # Align topic to the task if topic wasn't explicitly patched.
+                        entry.topicId = task.topicId
+                    entry.taskId = task.id
+                    entry.spaceId = _space_id_for_task(task)
             else:
                 entry.taskId = None
         if "relatedLogId" in fields:

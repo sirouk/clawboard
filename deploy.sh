@@ -149,8 +149,8 @@ Commands:
   logs [service]                       Tail logs
   pull [service]                       Pull images (if using registry images)
   test                                 Run full test suite (npm run test:all)
-  demo-load                            Load demo data into SQLite
-  demo-clear                           Clear SQLite data via seed helper
+  demo-load                            Load demo data into the API database
+  demo-clear                           Clear API data via seed helper
 
   token-show                           Show masked backend/frontend token values
   token-be [value|--generate]          Set CLAWBOARD_TOKEN in .env
@@ -163,7 +163,6 @@ Commands:
   ensure-plugin                        Install/enable clawboard-logger plugin in OpenClaw
   bootstrap [args...]                  Run scripts/bootstrap_openclaw.sh with passthrough args
 
-  vector-cleanup [--dry-run]           Run one-time vector cleanup script
 
 If no command is provided, an interactive menu is shown.
 USAGE
@@ -329,17 +328,17 @@ reset_data() {
   if [ "${1:-}" = "--yes" ]; then
     force=true
   fi
-  confirm_or_abort "This will delete local Clawboard data under data/ and reset Docker DB volume(s). Continue?" "$force"
+  confirm_or_abort "This will delete local Clawboard data under data/ (Postgres + Qdrant) and remove any legacy SQLite DB volume. Continue?" "$force"
   down
 
-  # API DB defaults to sqlite:////db/clawboard.db on the named Docker volume.
-  # Remove that volume here so reset-data truly starts from a blank database.
+  # Legacy cleanup: older deployments used a named SQLite volume for /db/clawboard.db.
+  # Remove it if present so reset-data is fully clean across old/new layouts.
   project_name="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT_DIR")}"
   for api_db_volume in "${project_name}_clawboard_api_db" "clawboard_api_db"; do
     docker volume rm -f "$api_db_volume" >/dev/null 2>&1 || true
   done
 
-  # Wipe all local bind-mounted state (vectors, queues, locks, attachments, etc.).
+  # Wipe all local bind-mounted state (Postgres, vectors, queues, locks, attachments, etc.).
   rm -rf "$DATA_DIR"
   mkdir -p "$DATA_DIR/qdrant" "$DATA_DIR/postgres"
   echo "Local data reset complete."
@@ -495,10 +494,6 @@ bootstrap_openclaw() {
   bash "$ROOT_DIR/scripts/bootstrap_openclaw.sh" --dir "$ROOT_DIR" "$@"
 }
 
-vector_cleanup() {
-  python3 "$ROOT_DIR/scripts/one_time_vector_cleanup.py" "$@"
-}
-
 run_interactive() {
   echo "Clawboard deploy menu"
   echo "1) Up (start only, no build)"
@@ -556,7 +551,6 @@ case "$cmd" in
   ensure-skill) ensure_skill ;;
   ensure-plugin) ensure_plugin ;;
   bootstrap) shift; bootstrap_openclaw "$@" ;;
-  vector-cleanup) shift; vector_cleanup "$@" ;;
   "") run_interactive ;;
   -h|--help) usage ;;
   *)

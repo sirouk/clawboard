@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import type { LogEntry, Task, Topic } from "@/lib/types";
 import { Badge, Button, Input, SearchInput, Select, TextArea } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
-import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam } from "@/lib/url";
+import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam, withSpaceParam } from "@/lib/url";
 import { useAppConfig } from "@/components/providers";
 import { apiFetch } from "@/lib/api";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
@@ -889,9 +889,10 @@ function LogRow({
     : resolvedTopic
       ? buildTopicUrl(resolvedTopic, topics)
       : UNIFIED_BASE;
+  const destinationSpaceId = String(entry.spaceId ?? "").trim() || String(resolvedTopic?.spaceId ?? "").trim();
 
   // Navigating from Logs should always "reveal" the selection in Unified View.
-  const destination = withRevealParam(destinationBase, true);
+  const destination = withSpaceParam(withRevealParam(destinationBase, true), destinationSpaceId);
 
   const canNavigate = Boolean(destination) && enableNavigation;
 

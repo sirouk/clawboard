@@ -72,6 +72,10 @@ def _sort_topics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda r: (str(r.get("id") or ""), str(r.get("name") or "")))
 
 
+def _sort_spaces(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(rows, key=lambda r: (str(r.get("id") or ""), str(r.get("name") or "")))
+
+
 def _sort_tasks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         rows,
@@ -91,6 +95,34 @@ def _sort_logs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             str(r.get("id") or ""),
         ),
     )
+
+
+def _collect_attachments(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in logs:
+        log_id = str(row.get("id") or "").strip()
+        attachments = row.get("attachments")
+        if not isinstance(attachments, list):
+            continue
+        for raw in attachments:
+            if not isinstance(raw, dict):
+                continue
+            att_id = str(raw.get("id") or "").strip()
+            if not att_id:
+                continue
+            item = by_id.get(att_id) or {}
+            item["id"] = att_id
+            item["fileName"] = str(raw.get("fileName") or item.get("fileName") or "")
+            item["mimeType"] = str(raw.get("mimeType") or item.get("mimeType") or "")
+            size = raw.get("sizeBytes")
+            if isinstance(size, int):
+                item["sizeBytes"] = size
+            elif "sizeBytes" not in item:
+                item["sizeBytes"] = 0
+            if log_id and not item.get("logId"):
+                item["logId"] = log_id
+            by_id[att_id] = item
+    return sorted(by_id.values(), key=lambda r: str(r.get("id") or ""))
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -125,6 +157,7 @@ def main(argv: list[str]) -> int:
     token = (args.token or "").strip()
 
     config = _http_json(args.api_base, "/api/config", token=token)
+    spaces = _sort_spaces(_http_json(args.api_base, "/api/spaces", token=token) or [])
     topics = _sort_topics(_http_json(args.api_base, "/api/topics", token=token) or [])
     tasks = _sort_tasks(
         _fetch_paged(
@@ -144,20 +177,25 @@ def main(argv: list[str]) -> int:
             extra=log_extra,
         )
     )
+    attachments = _collect_attachments(logs)
 
     _write_json(out_dir / "config.json", config)
+    _write_json(out_dir / "spaces.json", spaces)
     _write_json(out_dir / "topics.json", topics)
     _write_json(out_dir / "tasks.json", tasks)
+    _write_json(out_dir / "attachments.json", attachments)
     _write_jsonl(out_dir / "logs.jsonl", logs)
     _write_json(
         out_dir / "manifest.json",
         {
-            "version": 1,
+            "version": 2,
             "apiBase": args.api_base.rstrip("/"),
             "counts": {
+                "spaces": len(spaces),
                 "topics": len(topics),
                 "tasks": len(tasks),
                 "logs": len(logs),
+                "attachments": len(attachments),
             },
             "includeRaw": bool(args.include_raw),
             "newestLogCreatedAt": str(logs[-1].get("createdAt") if logs else ""),
@@ -169,9 +207,11 @@ def main(argv: list[str]) -> int:
             {
                 "ok": True,
                 "outDir": str(out_dir),
+                "spaces": len(spaces),
                 "topics": len(topics),
                 "tasks": len(tasks),
                 "logs": len(logs),
+                "attachments": len(attachments),
             },
             sort_keys=True,
         )
