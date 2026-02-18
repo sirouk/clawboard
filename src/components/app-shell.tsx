@@ -197,6 +197,7 @@ const BOARD_TOPICS_EXPANDED_KEY = "clawboard.board.topics.navExpanded";
 const BOARD_SPACES_EXPANDED_KEY = "clawboard.board.spaces.navExpanded";
 const BOARD_TOPICS_SEARCH_KEY = "clawboard.board.topics.search";
 const BOARD_TOPICS_TASKS_EXPANDED_KEY = "clawboard.board.topics.tasksExpanded";
+const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
 const HEADER_COMPACT_KEY = "clawboard.header.compact";
 const ACTIVE_SPACE_KEY = "clawboard.space.active";
 const NAV_SEARCH_TASKS_LIMIT = 5;
@@ -379,6 +380,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const boardTopicsExpanded = useLocalStorageItem(BOARD_TOPICS_EXPANDED_KEY) === "true";
   const topicPanelSearch = useLocalStorageItem(BOARD_TOPICS_SEARCH_KEY) ?? "";
   const topicTasksExpandedRaw = useLocalStorageItem(BOARD_TOPICS_TASKS_EXPANDED_KEY) ?? "";
+  const lastBoardUrlStored = useLocalStorageItem(BOARD_LAST_URL_KEY) ?? "";
   const compactHeader = useLocalStorageItem(HEADER_COMPACT_KEY) === "true";
   const activeSpaceIdStored = (useLocalStorageItem(ACTIVE_SPACE_KEY) ?? "").trim();
   useLocalStorageItem("clawboard.apiBase");
@@ -512,6 +514,12 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const isBoardRoute =
     pathname === "/" || pathname === "/dashboard" || pathname === "/u" || pathname.startsWith("/u");
   const showBoardTopics = isBoardRoute && boardTopicsExpanded && !collapsed;
+  const boardNavHref = useMemo(() => {
+    const candidate = String(lastBoardUrlStored || "").trim();
+    if (!candidate) return "/u";
+    if (!candidate.startsWith("/u")) return "/u";
+    return candidate;
+  }, [lastBoardUrlStored]);
 
   const hasToken = token.trim().length > 0;
   const readOnly = tokenRequired && !hasToken;
@@ -1048,7 +1056,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 		            <div className="min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
 		              <div className="flex items-center justify-between gap-2.5 lg:block">
 		                <div className="flex min-w-0 items-center gap-2.5 lg:mx-auto lg:w-fit lg:justify-center">
-		                  <Link href="/u" className="flex items-center justify-center">
+		                  <Link href={boardNavHref} className="flex items-center justify-center">
 			                    <div className={cn("relative transition-all", collapsed ? "h-8 w-8" : "h-8 w-8 lg:h-12 lg:w-12")}>
 			                      <Image
 			                        src="/clawboard-mark.png"
@@ -1092,11 +1100,12 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 				              </div>
 	              <nav className="mt-1.5 grid grid-cols-5 gap-1 lg:hidden">
 	                {mobilePrimaryItems.map((item) => {
+	                  const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
 	                  const active = isItemActive(item.href);
 	                  return (
                     <Link
                       key={item.href}
-                      href={item.href}
+                      href={resolvedHref}
                       onClick={() => setMobileMenuOpen(false)}
 	                      className={cn(
 	                        "flex h-9 flex-col items-center justify-center gap-0.5 rounded-[var(--radius-sm)] px-1 py-1 text-[9px] transition",
@@ -1136,11 +1145,12 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                      />
 	                      <div className="absolute right-0 top-[108%] z-[90] min-w-[160px] rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] p-2 shadow-[0_16px_40px_rgba(0,0,0,0.45)]">
 	                        {mobileOverflowItems.map((item) => {
+                            const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
 	                          const active = isItemActive(item.href);
 	                          return (
                             <Link
                               key={item.href}
-                              href={item.href}
+                              href={resolvedHref}
                               onClick={() => setMobileMenuOpen(false)}
                               className={cn(
                                 "flex items-center gap-2 rounded-[var(--radius-sm)] px-3 py-2 text-xs transition",
@@ -1265,6 +1275,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
               )}
 		              <nav className="mt-6 hidden gap-3 lg:flex lg:flex-col">
 		                {NAV_ITEMS.map((item) => {
+                      const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
 		                  const active = isItemActive(item.href);
 		                  const isBoardItem = item.href === "/u";
 		                  const expanded = isBoardItem && showBoardTopics;
@@ -1272,7 +1283,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                  const navLink = (
 	                    <Link
 	                      key={item.href}
-	                      href={item.href}
+	                      href={resolvedHref}
 		                      onClick={(event) => {
 		                        const isToggleItem = isBoardItem;
 		                        if (!isToggleItem) return;
@@ -1488,7 +1499,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
               )}
             >
               <div className="mr-auto grid w-full max-w-[1280px] grid-cols-[auto_1fr_auto] items-center gap-4">
-                <Link href="/u" className={cn("flex items-center gap-3", compactHeader ? "py-1" : "")}>
+                <Link href={boardNavHref} className={cn("flex items-center gap-3", compactHeader ? "py-1" : "")}>
                   <div
                     aria-hidden="true"
                     className={cn(

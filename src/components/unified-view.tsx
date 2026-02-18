@@ -80,6 +80,7 @@ const TOPIC_VIEW_KEY = "clawboard.unified.topicView";
 const SHOW_SNOOZED_TASKS_KEY = "clawboard.unified.showSnoozedTasks";
 const FILTERS_DRAWER_OPEN_KEY = "clawboard.unified.filtersDrawerOpen";
 const ACTIVE_SPACE_KEY = "clawboard.space.active";
+const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
 
 const TOPIC_VIEWS = ["active", "snoozed", "archived", "all"] as const;
 type TopicView = (typeof TOPIC_VIEWS)[number];
@@ -969,6 +970,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (selectedSpaceId) return;
     setLocalStorageItem(ACTIVE_SPACE_KEY, "");
   }, [activeSpaceIdStored, hydrated, selectedSpaceId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!(pathname === basePath || pathname.startsWith(`${basePath}/`))) return;
+    const next = `${window.location.pathname}${window.location.search}`;
+    if (!next.startsWith("/u")) return;
+    setLocalStorageItem(BOARD_LAST_URL_KEY, next);
+  }, [basePath, pathname, searchParams]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -3968,6 +3977,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       scrollMemory.current[currentKey] = window.scrollY;
       scrollMemory.current[nextUrl] = window.scrollY;
       if (currentKey === nextUrl) return;
+      suppressNextUrlSyncRef.current = true;
+      setLocalStorageItem(BOARD_LAST_URL_KEY, nextUrl);
       if (mode === "replace") {
         window.history.replaceState({ clawboard: true }, "", nextUrl);
       } else {

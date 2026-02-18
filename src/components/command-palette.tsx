@@ -6,6 +6,7 @@ import { Input } from "@/components/ui";
 import type { Topic } from "@/lib/types";
 import { buildTopicUrl, UNIFIED_BASE, withRevealParam } from "@/lib/url";
 import { apiFetch } from "@/lib/api";
+import { useLocalStorageItem } from "@/lib/local-storage";
 
 type ActionItem = {
   label: string;
@@ -13,20 +14,17 @@ type ActionItem = {
   meta?: string;
 };
 
-const BASE_ACTIONS: ActionItem[] = [
-  { label: "Board (Unified)", href: UNIFIED_BASE },
-  { label: "Graph", href: "/graph" },
-  { label: "Dashboard (Legacy)", href: "/dashboard" },
-  { label: "Stats", href: "/stats" },
-  { label: "Providers", href: "/providers" },
-  { label: "Settings", href: "/settings" },
-];
-
 export function CommandPalette() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [topics, setTopics] = useState<Topic[]>([]);
+  const boardHrefStored = useLocalStorageItem("clawboard.board.lastUrl") ?? "";
+  const boardHref = useMemo(() => {
+    const candidate = String(boardHrefStored || "").trim();
+    if (!candidate.startsWith("/u")) return UNIFIED_BASE;
+    return candidate;
+  }, [boardHrefStored]);
 
   useEffect(() => {
     if (!open) return;
@@ -45,6 +43,14 @@ export function CommandPalette() {
   }, [open]);
 
   const actions = useMemo(() => {
+    const baseActions: ActionItem[] = [
+      { label: "Board (Unified)", href: boardHref },
+      { label: "Graph", href: "/graph" },
+      { label: "Dashboard (Legacy)", href: "/dashboard" },
+      { label: "Stats", href: "/stats" },
+      { label: "Providers", href: "/providers" },
+      { label: "Settings", href: "/settings" },
+    ];
     const normalized = query.trim().toLowerCase();
     const topicActions = topics.map((topic) => ({
       label: `Topic: ${topic.name}`,
@@ -52,10 +58,10 @@ export function CommandPalette() {
 
       meta: "topic",
     }));
-    const all = [...BASE_ACTIONS, ...topicActions];
+    const all = [...baseActions, ...topicActions];
     if (!normalized) return all;
     return all.filter((item) => item.label.toLowerCase().includes(normalized));
-  }, [query, topics]);
+  }, [boardHref, query, topics]);
 
   if (!open) return null;
 
