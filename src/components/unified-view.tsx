@@ -79,6 +79,7 @@ const isTaskStatusFilter = (value: string): value is TaskStatusFilter =>
 const TOPIC_VIEW_KEY = "clawboard.unified.topicView";
 const SHOW_SNOOZED_TASKS_KEY = "clawboard.unified.showSnoozedTasks";
 const FILTERS_DRAWER_OPEN_KEY = "clawboard.unified.filtersDrawerOpen";
+const FILTERS_DRAWER_OPEN_DEFAULT = false;
 const ACTIVE_SPACE_KEY = "clawboard.space.active";
 const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
 
@@ -820,7 +821,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [initialUrlState] = useState(() => getInitialUnifiedUrlState(basePath));
   const twoColumn = useLocalStorageItem("clawboard.unified.twoColumn") !== "false";
   const filtersDrawerOpenStored = useLocalStorageItem(FILTERS_DRAWER_OPEN_KEY);
-  const filtersDrawerOpen = filtersDrawerOpenStored === "true";
+  const filtersDrawerOpen =
+    filtersDrawerOpenStored === null ? FILTERS_DRAWER_OPEN_DEFAULT : filtersDrawerOpenStored === "true";
   const storedTopicView = (useLocalStorageItem(TOPIC_VIEW_KEY) ?? "").trim().toLowerCase();
   const topicView: TopicView = isTopicView(storedTopicView) ? storedTopicView : "active";
   const showSnoozedTasks = useLocalStorageItem(SHOW_SNOOZED_TASKS_KEY) === "true";
@@ -869,6 +871,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const toggleTwoColumn = () => {
     setLocalStorageItem("clawboard.unified.twoColumn", twoColumn ? "false" : "true");
   };
+  useEffect(() => {
+    if (filtersDrawerOpenStored !== null) return;
+    setLocalStorageItem(FILTERS_DRAWER_OPEN_KEY, FILTERS_DRAWER_OPEN_DEFAULT ? "true" : "false");
+  }, [filtersDrawerOpenStored]);
   const toggleFiltersDrawer = () => {
     setLocalStorageItem(FILTERS_DRAWER_OPEN_KEY, filtersDrawerOpen ? "false" : "true");
   };
