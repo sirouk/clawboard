@@ -816,7 +816,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const searchParams = useSearchParams();
   const scrollMemory = useRef<Record<string, number>>({});
   const restoreScrollOnNextSyncRef = useRef(false);
-  const suppressNextUrlSyncRef = useRef(false);
+  const skipNextUrlSyncUrlRef = useRef<string | null>(null);
   const [initialUrlState] = useState(() => getInitialUnifiedUrlState(basePath));
   const twoColumn = useLocalStorageItem("clawboard.unified.twoColumn") !== "false";
   const filtersDrawerOpenStored = useLocalStorageItem(FILTERS_DRAWER_OPEN_KEY);
@@ -2668,7 +2668,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       )
     );
     if (!mdUp && transitionedToDone) {
-      suppressNextUrlSyncRef.current = true;
       mobileDoneCollapseTaskIdRef.current = taskId;
       setExpandedTasks((prev) => {
         if (!prev.has(taskId)) return prev;
@@ -3857,6 +3856,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         closeMobileChatLayer();
         return;
       }
+      skipNextUrlSyncUrlRef.current = null;
       restoreScrollOnNextSyncRef.current = true;
       syncFromUrl();
     };
@@ -3867,12 +3867,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   // Next router navigation (router.push / Link) does not trigger popstate.
   // Sync our internal expanded state when pathname/search params change.
   useEffect(() => {
-    if (suppressNextUrlSyncRef.current) {
-      suppressNextUrlSyncRef.current = false;
+    const currentKey = currentUrlKey();
+    if (skipNextUrlSyncUrlRef.current === currentKey) {
+      skipNextUrlSyncUrlRef.current = null;
       return;
     }
+    skipNextUrlSyncUrlRef.current = null;
     syncFromUrl();
-  }, [pathname, searchParams, syncFromUrl]);
+  }, [currentUrlKey, pathname, searchParams, syncFromUrl]);
 
   useEffect(() => {
     if (!autoFocusTopicId) return;
@@ -3977,7 +3979,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       scrollMemory.current[currentKey] = window.scrollY;
       scrollMemory.current[nextUrl] = window.scrollY;
       if (currentKey === nextUrl) return;
-      suppressNextUrlSyncRef.current = true;
+      skipNextUrlSyncUrlRef.current = nextUrl;
       setLocalStorageItem(BOARD_LAST_URL_KEY, nextUrl);
       if (mode === "replace") {
         window.history.replaceState({ clawboard: true }, "", nextUrl);
