@@ -24,6 +24,7 @@ say() { printf "%s\n" "$*"; }
 die() { say "ERROR: $*" >&2; exit 2; }
 
 OPENCLAW_DIR="${OPENCLAW_DIR:-$HOME/.openclaw}"
+OPENCLAW_JSON="${OPENCLAW_JSON:-$OPENCLAW_DIR/openclaw.json}"
 CRED_JSON="$OPENCLAW_DIR/credentials/clawboard-memory-backup.json"
 CRED_ENV="$OPENCLAW_DIR/credentials/clawboard-memory-backup.env"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +35,7 @@ VERBOSE=0
 NO_PUSH=0
 
 ARG_WORKSPACE_PATH=""
+ARG_WORKSPACE_PATHS_JSON=""
 ARG_BACKUP_DIR=""
 ARG_REPO_URL=""
 ARG_REPO_SSH_URL=""
@@ -76,6 +78,7 @@ Config source options:
 
 Runtime override options:
   --workspace-path PATH
+  --workspace-paths-json JSON
   --backup-dir PATH
   --repo-url URL
   --repo-ssh-url URL
@@ -247,8 +250,349 @@ prompt_bool() {
   done
 }
 
+derive_backup_scope_from_openclaw() {
+  [[ -f "$OPENCLAW_JSON" ]] || return 0
+  local resolved
+  resolved="$(
+    python3 - "$OPENCLAW_JSON" "$OPENCLAW_DIR" "$HOME" "${OPENCLAW_PROFILE:-}" <<'PY'
+import json
+import os
+import re
+import shlex
+import sys
+
+cfg_path = sys.argv[1]
+openclaw_dir = os.path.abspath(os.path.expanduser(sys.argv[2]))
+home_dir = os.path.abspath(os.path.expanduser(sys.argv[3]))
+profile = (sys.argv[4] or "").strip()
+
+def q(value: str) -> str:
+    return shlex.quote(value)
+
+def profile_workspace(base_dir: str, profile_name: str) -> str:
+    raw = (profile_name or "").strip()
+    if not raw or raw.lower() == "default":
+        return os.path.join(base_dir, "workspace")
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-")
+    if not safe:
+        return os.path.join(base_dir, "workspace")
+    return os.path.join(base_dir, f"workspace-{safe}")
+
+default_ws = profile_workspace(openclaw_dir, profile)
+
+def norm(value: str) -> str:
+    p = os.path.expanduser((value or "").strip())
+    if not p:
+        return ""
+    return os.path.abspath(p)
+
+def norm_id(value: str) -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return "main"
+    raw = re.sub(r"[^a-z0-9-]+", "-", raw)
+    raw = re.sub(r"^-+", "", raw)
+    raw = re.sub(r"-+$", "", raw)
+    return raw[:64] or "main"
+
+cfg = {}
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        parsed = json.load(f)
+        if isinstance(parsed, dict):
+            cfg = parsed
+except Exception:
+    cfg = {}
+
+agents = ((cfg.get("agents") or {}).get("list") or [])
+entries = [entry for entry in agents if isinstance(entry, dict)]
+indexed_entries = list(enumerate(entries))
+default_indexed = [pair for pair in indexed_entries if pair[1].get("default") is True]
+default_index, default_entry = default_indexed[0] if default_indexed else (indexed_entries[0] if indexed_entries else (-1, {}))
+main_indexed = [pair for pair in indexed_entries if norm_id(str(pair[1].get("id") or "")) == "main"]
+chosen_index, chosen_entry = main_indexed[0] if main_indexed else (default_index, default_entry)
+
+workspace = ""
+if isinstance(chosen_entry, dict):
+    candidate = chosen_entry.get("workspace")
+    if isinstance(candidate, str) and candidate.strip():
+        workspace = candidate.strip()
+
+if not workspace:
+    candidate = (((cfg.get("agents") or {}).get("defaults") or {}).get("workspace"))
+    if isinstance(candidate, str) and candidate.strip():
+        workspace = candidate.strip()
+
+if not workspace:
+    candidate = ((cfg.get("agents") or {}).get("workspace"))
+    if isinstance(candidate, str) and candidate.strip():
+        workspace = candidate.strip()
+
+if not workspace:
+    candidate = ((cfg.get("agent") or {}).get("workspace"))
+    if isinstance(candidate, str) and candidate.strip():
+        workspace = candidate.strip()
+
+if not workspace:
+    candidate = cfg.get("workspace")
+    if isinstance(candidate, str) and candidate.strip():
+        workspace = candidate.strip()
+
+if not workspace:
+    workspace = default_ws
+
+workspace = norm(workspace)
+if workspace == openclaw_dir:
+    workspace = default_ws
+
+workspaces = []
+if workspace:
+    workspaces.append(workspace)
+
+for entry in entries:
+    candidate = entry.get("workspace")
+    if isinstance(candidate, str) and candidate.strip():
+        resolved = norm(candidate)
+    else:
+        resolved = workspace
+    if resolved and resolved not in workspaces:
+        workspaces.append(resolved)
+
+qmd_paths = []
+memory_cfg = cfg.get("memory") if isinstance(cfg.get("memory"), dict) else {}
+qmd_cfg = memory_cfg.get("qmd") if isinstance(memory_cfg.get("qmd"), dict) else {}
+raw_qmd_paths = qmd_cfg.get("paths") if isinstance(qmd_cfg.get("paths"), list) else []
+
+for raw in raw_qmd_paths:
+    if not isinstance(raw, dict):
+        continue
+    path_value = raw.get("path")
+    if not isinstance(path_value, str) or not path_value.strip():
+        continue
+    expanded = os.path.expanduser(path_value.strip())
+    resolved = os.path.abspath(expanded if os.path.isabs(expanded) else os.path.join(workspace, expanded))
+    item = {"path": resolved}
+    name = str(raw.get("name") or "").strip()
+    pattern = str(raw.get("pattern") or "").strip()
+    if name:
+        item["name"] = name
+    if pattern:
+        item["pattern"] = pattern
+    qmd_paths.append(item)
+
+print("DERIVED_MAIN_WORKSPACE=" + q(workspace))
+print("DERIVED_WORKSPACE_PATHS_JSON=" + q(json.dumps(workspaces, separators=(",", ":"))))
+print("DERIVED_QMD_PATHS_JSON=" + q(json.dumps(qmd_paths, separators=(",", ":"))))
+PY
+  )" || return 1
+  eval "$resolved"
+}
+
+resolve_backup_scope() {
+  derive_backup_scope_from_openclaw || true
+
+  local resolved
+  resolved="$(
+    python3 - \
+      "${WORKSPACE_PATH:-}" \
+      "${WORKSPACE_PATHS_JSON:-}" \
+      "${QMD_PATHS_JSON:-}" \
+      "${DERIVED_MAIN_WORKSPACE:-}" \
+      "${DERIVED_WORKSPACE_PATHS_JSON:-[]}" \
+      "${DERIVED_QMD_PATHS_JSON:-[]}" <<'PY'
+import json
+import os
+import shlex
+import sys
+
+primary = sys.argv[1]
+raw_workspace_paths = sys.argv[2]
+raw_qmd_paths = sys.argv[3]
+derived_main = sys.argv[4]
+derived_workspaces = sys.argv[5]
+derived_qmd_paths = sys.argv[6]
+
+def q(value: str) -> str:
+    return shlex.quote(value)
+
+def norm(value: str) -> str:
+    p = os.path.expanduser((value or "").strip())
+    if not p:
+        return ""
+    return os.path.abspath(p)
+
+def parse_json(value: str, fallback):
+    if not isinstance(value, str) or not value.strip():
+        return fallback
+    try:
+        parsed = json.loads(value)
+        return parsed
+    except Exception:
+        return fallback
+
+primary_path = norm(primary) or norm(derived_main)
+workspace_paths = []
+
+def add_workspace(value):
+    path = ""
+    if isinstance(value, str):
+        path = norm(value)
+    elif isinstance(value, dict):
+        path = norm(str(value.get("path") or ""))
+    if path and path not in workspace_paths:
+        workspace_paths.append(path)
+
+if primary_path:
+    add_workspace(primary_path)
+
+for raw in parse_json(raw_workspace_paths, []):
+    add_workspace(raw)
+
+for raw in parse_json(derived_workspaces, []):
+    add_workspace(raw)
+
+if not primary_path and workspace_paths:
+    primary_path = workspace_paths[0]
+
+if primary_path and primary_path not in workspace_paths:
+    workspace_paths.insert(0, primary_path)
+
+qmd_paths = []
+seen_qmd = set()
+
+def add_qmd_entry(raw):
+    if isinstance(raw, str):
+        candidate = {"path": raw}
+    elif isinstance(raw, dict):
+        candidate = dict(raw)
+    else:
+        return
+    raw_path = str(candidate.get("path") or "").strip()
+    if not raw_path:
+        return
+    expanded = os.path.expanduser(raw_path)
+    if os.path.isabs(expanded):
+        resolved_path = os.path.abspath(expanded)
+    elif primary_path:
+        resolved_path = os.path.abspath(os.path.join(primary_path, expanded))
+    else:
+        resolved_path = os.path.abspath(expanded)
+
+    name = str(candidate.get("name") or "").strip()
+    pattern = str(candidate.get("pattern") or "").strip()
+    dedupe = (resolved_path, name, pattern)
+    if dedupe in seen_qmd:
+        return
+    seen_qmd.add(dedupe)
+
+    item = {"path": resolved_path}
+    if name:
+        item["name"] = name
+    if pattern:
+        item["pattern"] = pattern
+    qmd_paths.append(item)
+
+for raw in parse_json(raw_qmd_paths, []):
+    add_qmd_entry(raw)
+for raw in parse_json(derived_qmd_paths, []):
+    add_qmd_entry(raw)
+
+print("WORKSPACE_PATH=" + q(primary_path))
+print("WORKSPACE_PATHS_JSON=" + q(json.dumps(workspace_paths, separators=(",", ":"))))
+print("QMD_PATHS_JSON=" + q(json.dumps(qmd_paths, separators=(",", ":"))))
+PY
+  )" || die "Failed to resolve backup scope from OpenClaw config."
+
+  eval "$resolved"
+}
+
+json_array_paths_to_lines() {
+  local raw_json="${1:-[]}"
+  python3 - "$raw_json" <<'PY'
+import json
+import sys
+
+raw = sys.argv[1]
+try:
+    data = json.loads(raw) if raw.strip() else []
+except Exception:
+    data = []
+if not isinstance(data, list):
+    data = []
+
+for item in data:
+    if isinstance(item, str) and item.strip():
+        print(item.strip())
+    elif isinstance(item, dict):
+        path = str(item.get("path") or "").strip()
+        if path:
+            print(path)
+PY
+}
+
+qmd_paths_to_tsv() {
+  local raw_json="${1:-[]}"
+  python3 - "$raw_json" <<'PY'
+import json
+import sys
+
+raw = sys.argv[1]
+try:
+    data = json.loads(raw) if raw.strip() else []
+except Exception:
+    data = []
+if not isinstance(data, list):
+    data = []
+
+for item in data:
+    if not isinstance(item, dict):
+        continue
+    path = str(item.get("path") or "").strip()
+    if not path:
+        continue
+    name = str(item.get("name") or "").strip()
+    pattern = str(item.get("pattern") or "").strip()
+    print(f"{path}\t{name}\t{pattern}")
+PY
+}
+
+path_slug() {
+  local value="$1"
+  python3 - "$value" <<'PY'
+import hashlib
+import re
+import sys
+
+raw = (sys.argv[1] or "").strip()
+base = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-").lower()
+if not base:
+    base = "path"
+if len(base) > 40:
+    base = base[:40]
+digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+print(f"{base}-{digest}")
+PY
+}
+
+copy_curated_workspace() {
+  local source_workspace="$1"
+  local target_root="$2"
+  local p
+
+  for p in "${RSYNC_WORKSPACE[@]}"; do
+    if [[ -e "$source_workspace/$p" ]]; then
+      rsync -a --prune-empty-dirs \
+        --exclude ".DS_Store" \
+        "$source_workspace/$p" \
+        "$target_root/" \
+        >/dev/null
+    fi
+  done
+}
+
 apply_arg_overrides() {
   [[ -n "$ARG_WORKSPACE_PATH" ]] && WORKSPACE_PATH="$ARG_WORKSPACE_PATH"
+  [[ -n "$ARG_WORKSPACE_PATHS_JSON" ]] && WORKSPACE_PATHS_JSON="$ARG_WORKSPACE_PATHS_JSON"
   [[ -n "$ARG_BACKUP_DIR" ]] && BACKUP_DIR="$ARG_BACKUP_DIR"
   [[ -n "$ARG_REPO_URL" ]] && REPO_URL="$ARG_REPO_URL"
   [[ -n "$ARG_REPO_SSH_URL" ]] && REPO_SSH_URL="$ARG_REPO_SSH_URL"
@@ -309,6 +653,13 @@ parse_args() {
       --workspace-path)
         shift
         ARG_WORKSPACE_PATH="$(read_flag_value --workspace-path "${1:-}")"
+        ;;
+      --workspace-paths-json=*)
+        ARG_WORKSPACE_PATHS_JSON="${1#*=}"
+        ;;
+      --workspace-paths-json)
+        shift
+        ARG_WORKSPACE_PATHS_JSON="$(read_flag_value --workspace-paths-json "${1:-}")"
         ;;
       --backup-dir=*)
         ARG_BACKUP_DIR="${1#*=}"
@@ -603,6 +954,8 @@ parse_args "$@"
 # --- Load config ---
 if [[ -f "$CRED_JSON" ]]; then
   WORKSPACE_PATH="$(json_get "$CRED_JSON" '.workspacePath')"
+  WORKSPACE_PATHS_JSON="$(json_get "$CRED_JSON" '.workspacePaths')"
+  QMD_PATHS_JSON="$(json_get "$CRED_JSON" '.qmdPaths')"
   BACKUP_DIR="$(json_get "$CRED_JSON" '.backupDir')"
   REPO_URL="$(json_get "$CRED_JSON" '.repoUrl')"
   REPO_SSH_URL="$(json_get "$CRED_JSON" '.repoSshUrl')"
@@ -627,6 +980,8 @@ if [[ -f "$CRED_JSON" ]]; then
 else
   load_env_file "$CRED_ENV"
   WORKSPACE_PATH="${WORKSPACE_PATH:-}"
+  WORKSPACE_PATHS_JSON="${WORKSPACE_PATHS_JSON:-}"
+  QMD_PATHS_JSON="${QMD_PATHS_JSON:-}"
   BACKUP_DIR="${BACKUP_DIR:-}"
   REPO_URL="${REPO_URL:-}"
   REPO_SSH_URL="${REPO_SSH_URL:-}"
@@ -655,12 +1010,15 @@ load_env_file "$CRED_ENV"
 CLAWBOARD_TOKEN="${CLAWBOARD_BACKUP_TOKEN:-${CLAWBOARD_TOKEN:-}}"
 CLAWBOARD_API_URL="${CLAWBOARD_BACKUP_API_URL:-${CLAWBOARD_API_URL:-}}"
 CLAWBOARD_DIR="${CLAWBOARD_BACKUP_DIR:-${CLAWBOARD_DIR:-}}"
+WORKSPACE_PATHS_JSON="${OPENCLAW_BACKUP_WORKSPACE_PATHS_JSON:-${WORKSPACE_PATHS_JSON:-}}"
+QMD_PATHS_JSON="${OPENCLAW_BACKUP_QMD_PATHS_JSON:-${QMD_PATHS_JSON:-}}"
 CLAWBOARD_ATTACHMENTS_DIR="${CLAWBOARD_BACKUP_ATTACHMENTS_DIR:-${CLAWBOARD_ATTACHMENTS_DIR:-}}"
 SWEEP_ORPHAN_ATTACHMENTS="${CLAWBOARD_BACKUP_SWEEP_ORPHAN_ATTACHMENTS:-${SWEEP_ORPHAN_ATTACHMENTS:-}}"
 ORPHAN_ATTACHMENT_MAX_AGE_DAYS="${CLAWBOARD_BACKUP_ORPHAN_ATTACHMENT_MAX_AGE_DAYS:-${ORPHAN_ATTACHMENT_MAX_AGE_DAYS:-}}"
 ORPHAN_ATTACHMENT_SWEEP_MODE="${CLAWBOARD_BACKUP_ORPHAN_SWEEP_MODE:-${ORPHAN_ATTACHMENT_SWEEP_MODE:-}}"
 
 apply_arg_overrides
+resolve_backup_scope
 
 REMOTE_NAME="${REMOTE_NAME:-origin}"
 BRANCH="${BRANCH:-main}"
@@ -723,7 +1081,23 @@ if [[ "$INTERACTIVE" == "1" ]]; then
 fi
 
 [[ -n "${WORKSPACE_PATH:-}" ]] || die "workspacePath not configured. Run setup-openclaw-memory-backup.sh first."
-[[ -d "$WORKSPACE_PATH" ]] || die "workspacePath does not exist: $WORKSPACE_PATH"
+if [[ ! -d "$WORKSPACE_PATH" ]]; then
+  fallback_workspace=""
+  while IFS= read -r candidate_workspace; do
+    [[ -n "$candidate_workspace" ]] || continue
+    if [[ -d "$candidate_workspace" ]]; then
+      fallback_workspace="$candidate_workspace"
+      break
+    fi
+  done < <(json_array_paths_to_lines "${WORKSPACE_PATHS_JSON:-[]}")
+
+  if [[ -n "$fallback_workspace" ]]; then
+    say "WARN: workspacePath does not exist: $WORKSPACE_PATH (using $fallback_workspace)"
+    WORKSPACE_PATH="$fallback_workspace"
+  else
+    die "workspacePath does not exist: $WORKSPACE_PATH"
+  fi
+fi
 
 [[ -n "${BACKUP_DIR:-}" ]] || die "backupDir not configured. Run setup-openclaw-memory-backup.sh first."
 
@@ -820,25 +1194,108 @@ RSYNC_WORKSPACE=(
   "memory"
 )
 
-for p in "${RSYNC_WORKSPACE[@]}"; do
-  if [[ -e "$WORKSPACE_PATH/$p" ]]; then
-    if [[ -d "$WORKSPACE_PATH/$p" ]]; then
-      # directory
-      rsync -a --prune-empty-dirs \
-        --exclude ".DS_Store" \
-        "$WORKSPACE_PATH/$p" \
-        "$STAGE_DIR/" \
-        >/dev/null
-    else
-      # file
-      rsync -a --prune-empty-dirs \
-        --exclude ".DS_Store" \
-        "$WORKSPACE_PATH/$p" \
-        "$STAGE_DIR/" \
-        >/dev/null
+# Primary workspace stays at backup root for backwards compatibility.
+copy_curated_workspace "$WORKSPACE_PATH" "$STAGE_DIR"
+
+# Derive a unique list of workspace paths for fallback + multi-agent memory.
+WORKSPACE_PATH_LIST=("$WORKSPACE_PATH")
+while IFS= read -r ws_path; do
+  [[ -n "$ws_path" ]] || continue
+  seen=0
+  for existing_ws in "${WORKSPACE_PATH_LIST[@]}"; do
+    if [[ "$existing_ws" == "$ws_path" ]]; then
+      seen=1
+      break
     fi
+  done
+  if [[ "$seen" -eq 0 ]]; then
+    WORKSPACE_PATH_LIST+=("$ws_path")
+  fi
+done < <(json_array_paths_to_lines "${WORKSPACE_PATHS_JSON:-[]}")
+
+has_primary_ws=0
+for existing_ws in "${WORKSPACE_PATH_LIST[@]}"; do
+  if [[ "$existing_ws" == "$WORKSPACE_PATH" ]]; then
+    has_primary_ws=1
+    break
   fi
 done
+if [[ "$has_primary_ws" -eq 0 ]]; then
+  WORKSPACE_PATH_LIST=("$WORKSPACE_PATH" "${WORKSPACE_PATH_LIST[@]}")
+fi
+
+# Back up curated files from additional agent workspaces under agent-workspaces/<slug>/.
+extra_workspace_count=0
+for ws_path in "${WORKSPACE_PATH_LIST[@]}"; do
+  [[ -n "$ws_path" ]] || continue
+  [[ "$ws_path" == "$WORKSPACE_PATH" ]] && continue
+  if [[ ! -d "$ws_path" ]]; then
+    [[ "$VERBOSE" == "1" ]] && say "Skipping missing workspace from scope: $ws_path"
+    continue
+  fi
+
+  ws_slug="$(path_slug "$ws_path")"
+  ws_dest="$STAGE_DIR/agent-workspaces/$ws_slug"
+  mkdir -p "$ws_dest"
+  copy_curated_workspace "$ws_path" "$ws_dest"
+  printf "%s\n" "$ws_path" > "$ws_dest/.workspace-path"
+  extra_workspace_count=$((extra_workspace_count + 1))
+done
+
+# Back up explicit QMD memory paths (if configured) as markdown snapshots.
+qmd_paths_count=0
+while IFS=$'\t' read -r qmd_path qmd_name qmd_pattern; do
+  [[ -n "$qmd_path" ]] || continue
+
+  # Default workspace memory paths are already captured by curated workspace copies.
+  skip_default_qmd_path=0
+  for ws_path in "${WORKSPACE_PATH_LIST[@]}"; do
+    if [[ "$qmd_path" == "$ws_path/memory" || "$qmd_path" == "$ws_path/MEMORY.md" ]]; then
+      skip_default_qmd_path=1
+      break
+    fi
+  done
+  [[ "$skip_default_qmd_path" -eq 1 ]] && continue
+
+  if [[ ! -e "$qmd_path" ]]; then
+    [[ "$VERBOSE" == "1" ]] && say "Skipping missing qmd path from scope: $qmd_path"
+    continue
+  fi
+
+  qmd_label="$qmd_path"
+  [[ -n "$qmd_name" ]] && qmd_label="$qmd_name"
+  qmd_slug="$(path_slug "$qmd_label")"
+  qmd_dest="$STAGE_DIR/qmd-paths/$qmd_slug"
+  mkdir -p "$qmd_dest"
+
+  if [[ -f "$qmd_path" ]]; then
+    rsync -a "$qmd_path" "$qmd_dest/" >/dev/null
+  elif [[ -d "$qmd_path" ]]; then
+    rsync -a --prune-empty-dirs \
+      --exclude ".DS_Store" \
+      --include "*/" \
+      --include "*.md" \
+      --exclude "*" \
+      "$qmd_path/" \
+      "$qmd_dest/" \
+      >/dev/null
+  fi
+
+  {
+    printf "path=%s\n" "$qmd_path"
+    printf "name=%s\n" "$qmd_name"
+    printf "pattern=%s\n" "$qmd_pattern"
+  } > "$qmd_dest/.qmd-source"
+
+  qmd_paths_count=$((qmd_paths_count + 1))
+done < <(qmd_paths_to_tsv "${QMD_PATHS_JSON:-[]}")
+
+if [[ "$VERBOSE" == "1" ]]; then
+  say "Workspace scope: primary=$WORKSPACE_PATH, total=${#WORKSPACE_PATH_LIST[@]}, extra=$extra_workspace_count"
+  if [[ "$qmd_paths_count" -gt 0 ]]; then
+    say "Backed up explicit qmd paths: $qmd_paths_count"
+  fi
+fi
 
 # --- B) Selected OpenClaw files (optional) ---
 if as_bool "${INCLUDE_OPENCLAW_CONFIG:-}"; then
@@ -874,7 +1331,41 @@ if as_bool "${INCLUDE_CLAWBOARD_STATE:-}"; then
     case "$CLAWBOARD_DIR" in
       "~/"*) CLAWBOARD_DIR="$HOME/${CLAWBOARD_DIR#~/}" ;;
     esac
-    [[ -d "$CLAWBOARD_DIR" ]] || die "clawboardDir does not exist: $CLAWBOARD_DIR"
+  fi
+
+  if [[ -n "${CLAWBOARD_DIR:-}" && ! -d "$CLAWBOARD_DIR" ]]; then
+    fallback_clawboard_dir=""
+    for candidate in \
+      "$WORKSPACE_PATH/projects/clawboard" \
+      "$WORKSPACE_PATH/project/clawboard"
+    do
+      if [[ -f "$candidate/deploy.sh" && -f "$candidate/docker-compose.yaml" ]]; then
+        fallback_clawboard_dir="$candidate"
+        break
+      fi
+    done
+
+    if [[ -z "$fallback_clawboard_dir" ]]; then
+      for ws_path in "${WORKSPACE_PATH_LIST[@]}"; do
+        for candidate in \
+          "$ws_path/projects/clawboard" \
+          "$ws_path/project/clawboard"
+        do
+          if [[ -f "$candidate/deploy.sh" && -f "$candidate/docker-compose.yaml" ]]; then
+            fallback_clawboard_dir="$candidate"
+            break
+          fi
+        done
+        [[ -n "$fallback_clawboard_dir" ]] && break
+      done
+    fi
+
+    if [[ -n "$fallback_clawboard_dir" ]]; then
+      say "WARN: clawboardDir does not exist: $CLAWBOARD_DIR (using $fallback_clawboard_dir)"
+      CLAWBOARD_DIR="$fallback_clawboard_dir"
+    else
+      die "clawboardDir does not exist: $CLAWBOARD_DIR"
+    fi
   fi
 
   if [[ -z "${CLAWBOARD_TOKEN:-}" && -n "${CLAWBOARD_DIR:-}" && -f "$CLAWBOARD_DIR/.env" ]]; then

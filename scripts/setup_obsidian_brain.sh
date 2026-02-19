@@ -12,10 +12,39 @@ set -euo pipefail
 #   bash scripts/setup_obsidian_brain.sh
 
 USE_COLOR=true
+NON_INTERACTIVE=false
+SYNC_OPENCLAW_DOCS_ONLY=false
+OPENCLAW_DOCS_SYNC_MODE="${OBSIDIAN_OPENCLAW_DOCS_SYNC_MODE:-ask}"
+OPENCLAW_DOCS_CRON_MODE="${OBSIDIAN_OPENCLAW_DOCS_CRON_MODE:-ask}"
 for arg in "$@"; do
-  if [ "$arg" = "--no-color" ]; then
-    USE_COLOR=false
-  fi
+  case "$arg" in
+    --no-color)
+      USE_COLOR=false
+      ;;
+    --non-interactive)
+      NON_INTERACTIVE=true
+      ;;
+    --sync-openclaw-docs)
+      OPENCLAW_DOCS_SYNC_MODE="always"
+      ;;
+    --skip-openclaw-docs-sync)
+      OPENCLAW_DOCS_SYNC_MODE="never"
+      ;;
+    --install-openclaw-docs-sync-cron)
+      OPENCLAW_DOCS_CRON_MODE="always"
+      ;;
+    --skip-openclaw-docs-sync-cron)
+      OPENCLAW_DOCS_CRON_MODE="never"
+      ;;
+    --sync-openclaw-docs-only)
+      SYNC_OPENCLAW_DOCS_ONLY=true
+      NON_INTERACTIVE=true
+      OPENCLAW_DOCS_SYNC_MODE="always"
+      if [ "$OPENCLAW_DOCS_CRON_MODE" = "ask" ]; then
+        OPENCLAW_DOCS_CRON_MODE="never"
+      fi
+      ;;
+  esac
 done
 
 if [ "$USE_COLOR" = true ]; then
@@ -40,6 +69,64 @@ die() { log_error "$1"; exit 1; }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 need_cmd() { has_cmd "$1" || die "Missing required command: $1"; }
+to_lc() { printf "%s" "${1:-}" | tr '[:upper:]' '[:lower:]'; }
+
+normalize_mode() {
+  case "$(to_lc "${1:-}")" in
+    always|yes|y|true|1) printf "%s" "always" ;;
+    never|no|n|false|0) printf "%s" "never" ;;
+    *) printf "%s" "ask" ;;
+  esac
+}
+
+can_prompt_user() {
+  [ "${NON_INTERACTIVE:-false}" != "true" ] &&
+    [ -t 0 ] &&
+    [ -t 1 ] &&
+    [ -r /dev/tty ] &&
+    [ -w /dev/tty ]
+}
+
+ask_yes_no() {
+  local prompt="$1"
+  local default="$2"
+  local answer=""
+
+  if ! can_prompt_user; then
+    [ "$default" = "yes" ]
+    return $?
+  fi
+
+  while true; do
+    if [ "$default" = "yes" ]; then
+      printf "%s [Y/n]: " "$prompt" > /dev/tty
+    else
+      printf "%s [y/N]: " "$prompt" > /dev/tty
+    fi
+
+    if ! IFS= read -r answer < /dev/tty; then
+      [ "$default" = "yes" ]
+      return $?
+    fi
+
+    answer="$(to_lc "$answer")"
+    case "$answer" in
+      "")
+        [ "$default" = "yes" ]
+        return $?
+        ;;
+      y|yes)
+        return 0
+        ;;
+      n|no)
+        return 1
+        ;;
+      *)
+        printf "Please answer y or n.\n" > /dev/tty
+        ;;
+    esac
+  done
+}
 
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
 if [ "$OPENCLAW_HOME" != "/" ]; then
@@ -49,6 +136,12 @@ OPENCLAW_CONFIG_PATH="$OPENCLAW_HOME/openclaw.json"
 OBSIDIAN_UBUNTU_INSTALLER_URL="${OBSIDIAN_UBUNTU_INSTALLER_URL:-https://raw.githubusercontent.com/oviniciusfeitosa/obsidian-ubuntu-installer/main/install.sh}"
 OBSIDIAN_RELEASES_API="https://api.github.com/repos/obsidianmd/obsidian-releases/releases/latest"
 BUN_INSTALLER_URL="${BUN_INSTALLER_URL:-https://bun.sh/install}"
+OPENCLAW_DOCS_REPO_URL="${OPENCLAW_DOCS_REPO_URL:-https://github.com/openclaw/openclaw.git}"
+OPENCLAW_DOCS_ARCHIVE_URL="${OPENCLAW_DOCS_ARCHIVE_URL:-https://codeload.github.com/openclaw/openclaw/tar.gz/refs/heads/main}"
+OPENCLAW_DOCS_DIRNAME="${OPENCLAW_DOCS_DIRNAME:-openclaw-docs}"
+OPENCLAW_DOCS_SYNC_EVERY="${OBSIDIAN_OPENCLAW_DOCS_SYNC_EVERY:-6h}"
+SETUP_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SETUP_SCRIPT_PATH="$SETUP_SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 
 MAIN_AGENT_ID=""
 MAIN_AGENT_NAME=""
@@ -1090,6 +1183,206 @@ refresh_memory_indexes() {
   done
 }
 
+openclaw_docs_target_dir() {
+  printf "%s" "${OBSIDIAN_VAULT_DIR%/}/$OPENCLAW_DOCS_DIRNAME"
+}
+
+sync_openclaw_docs_into_obsidian() {
+  local docs_target tmpdir repo_dir rc md_count
+  docs_target="$(openclaw_docs_target_dir)"
+  mkdir -p "$OBSIDIAN_VAULT_DIR"
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/openclaw-docs-sync.XXXXXX")"
+  repo_dir=""
+
+  if has_cmd git; then
+    log_info "Fetching OpenClaw docs via git..."
+    set +e
+    git clone --depth 1 --filter=blob:none --sparse "$OPENCLAW_DOCS_REPO_URL" "$tmpdir/repo" >/dev/null 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      set +e
+      git -C "$tmpdir/repo" sparse-checkout set docs >/dev/null 2>&1
+      rc=$?
+      set -e
+      if [ "$rc" -eq 0 ] && [ -d "$tmpdir/repo/docs" ]; then
+        repo_dir="$tmpdir/repo"
+      else
+        rm -rf "$tmpdir/repo"
+        set +e
+        git clone --depth 1 "$OPENCLAW_DOCS_REPO_URL" "$tmpdir/repo" >/dev/null 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -eq 0 ] && [ -d "$tmpdir/repo/docs" ]; then
+          repo_dir="$tmpdir/repo"
+        fi
+      fi
+    fi
+  fi
+
+  if [ -z "$repo_dir" ]; then
+    need_cmd curl
+    need_cmd tar
+    log_info "Fetching OpenClaw docs archive from GitHub..."
+    curl -fsSL "$OPENCLAW_DOCS_ARCHIVE_URL" -o "$tmpdir/openclaw-docs.tar.gz"
+    tar -xzf "$tmpdir/openclaw-docs.tar.gz" -C "$tmpdir"
+    repo_dir="$(find "$tmpdir" -mindepth 1 -maxdepth 1 -type d -name 'openclaw-*' | head -n1 || true)"
+  fi
+
+  if [ -z "$repo_dir" ] || [ ! -d "$repo_dir/docs" ]; then
+    rm -rf "$tmpdir"
+    die "Failed to fetch openclaw/docs from GitHub."
+  fi
+
+  md_count="$(
+    python3 - "$repo_dir/docs" "$docs_target" <<'PY'
+import os
+import shutil
+import sys
+
+src_root = os.path.abspath(sys.argv[1])
+dst_root = os.path.abspath(sys.argv[2])
+
+if os.path.exists(dst_root):
+    shutil.rmtree(dst_root)
+os.makedirs(dst_root, exist_ok=True)
+
+count = 0
+for root, _dirs, files in os.walk(src_root):
+    rel = os.path.relpath(root, src_root)
+    for name in files:
+        if not name.lower().endswith(".md"):
+            continue
+        src_file = os.path.join(root, name)
+        dst_dir = dst_root if rel == "." else os.path.join(dst_root, rel)
+        os.makedirs(dst_dir, exist_ok=True)
+        shutil.copy2(src_file, os.path.join(dst_dir, name))
+        count += 1
+
+print(count)
+PY
+  )"
+  rm -rf "$tmpdir"
+  log_success "Synced OpenClaw docs into $docs_target (clean replace, markdown-only: ${md_count} files)."
+}
+
+install_openclaw_docs_sync_cron() {
+  need_cmd openclaw
+  need_cmd python3
+
+  local job_name job_every job_session job_message existing_id cron_ok needle script_cmd
+  job_name="Obsidian: sync OpenClaw docs"
+  job_every="$OPENCLAW_DOCS_SYNC_EVERY"
+  job_session="isolated"
+  needle="--sync-openclaw-docs-only"
+  printf -v script_cmd '%q' "$SETUP_SCRIPT_PATH"
+  job_message="Refresh OpenClaw docs in Obsidian now. Execute: bash $script_cmd --sync-openclaw-docs-only --no-color . Replace openclaw-docs on every run to keep it clean. Reply NO_REPLY if successful; only report failures."
+
+  existing_id=""
+  existing_id="$(
+    python3 - "$job_name" "$needle" <<'PY'
+import json
+import subprocess
+import sys
+
+name = str(sys.argv[1] or "")
+needle = str(sys.argv[2] or "")
+
+try:
+    raw = subprocess.check_output(["openclaw", "cron", "list", "--json"], stderr=subprocess.DEVNULL)
+    data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+except Exception:
+    print("", end="")
+    sys.exit(0)
+
+jobs = data.get("jobs") if isinstance(data, dict) else []
+jobs = jobs or []
+
+for job in jobs:
+    if not isinstance(job, dict):
+        continue
+    if str(job.get("sessionTarget") or "").strip() != "isolated":
+        continue
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    message = str(payload.get("message") or "")
+    if str(job.get("name") or "") != name and needle not in message:
+        continue
+    print(job.get("id") or job.get("jobId") or "", end="")
+    break
+PY
+  )"
+
+  cron_ok=0
+  if [ -n "$existing_id" ]; then
+    log_info "Updating existing OpenClaw docs sync cron: $existing_id"
+    if openclaw cron edit "$existing_id" \
+      --name "$job_name" \
+      --every "$job_every" \
+      --session "$job_session" \
+      --no-deliver \
+      --message "$job_message" \
+      --enable >/dev/null 2>&1; then
+      cron_ok=1
+    fi
+  else
+    log_info "Creating OpenClaw docs sync cron (every $job_every)..."
+    if openclaw cron add \
+      --name "$job_name" \
+      --every "$job_every" \
+      --session "$job_session" \
+      --no-deliver \
+      --message "$job_message" >/dev/null 2>&1; then
+      cron_ok=1
+    fi
+  fi
+
+  if [ "$cron_ok" -eq 1 ]; then
+    log_success "OpenClaw docs sync cron installed/updated (every $job_every)."
+  else
+    log_warn "Could not install/update OpenClaw docs sync cron automatically."
+    log_warn "Manual command: openclaw cron add --name \"$job_name\" --every \"$job_every\" --session \"$job_session\" --no-deliver --message \"$job_message\""
+  fi
+}
+
+maybe_offer_openclaw_docs_sync() {
+  local sync_mode cron_mode
+  sync_mode="$(normalize_mode "${OPENCLAW_DOCS_SYNC_MODE:-ask}")"
+  cron_mode="$(normalize_mode "${OPENCLAW_DOCS_CRON_MODE:-ask}")"
+
+  if [ "$sync_mode" = "always" ]; then
+    sync_openclaw_docs_into_obsidian
+  elif [ "$sync_mode" = "ask" ]; then
+    if can_prompt_user; then
+      if ask_yes_no "Sync OpenClaw docs into $(openclaw_docs_target_dir) now?" "no"; then
+        sync_openclaw_docs_into_obsidian
+      else
+        log_info "Skipped OpenClaw docs sync."
+      fi
+    else
+      log_info "No interactive terminal detected; skipping OpenClaw docs sync prompt."
+      log_info "Manual sync: bash $SETUP_SCRIPT_PATH --sync-openclaw-docs-only --no-color"
+    fi
+  fi
+
+  if [ "$cron_mode" = "always" ]; then
+    install_openclaw_docs_sync_cron
+    return 0
+  fi
+
+  if [ "$cron_mode" = "ask" ]; then
+    if can_prompt_user; then
+      if ask_yes_no "Install/update OpenClaw docs sync cron (every $OPENCLAW_DOCS_SYNC_EVERY)?" "no"; then
+        install_openclaw_docs_sync_cron
+      else
+        log_info "Skipped OpenClaw docs sync cron setup."
+      fi
+    else
+      log_info "No interactive terminal detected; skipping OpenClaw docs cron prompt."
+      log_info "Manual cron setup: bash $SETUP_SCRIPT_PATH --sync-openclaw-docs --install-openclaw-docs-sync-cron --non-interactive --no-color"
+    fi
+  fi
+}
+
 main() {
   log_info "Resolving main agent and workspace from $OPENCLAW_CONFIG_PATH..."
   detect_main_agent_and_workspace
@@ -1102,6 +1395,21 @@ main() {
   OBSIDIAN_VAULT_DIR="$QMD_MEMORY_DIR"
   log_success "Main thinking vault path ready: $OBSIDIAN_VAULT_DIR"
   log_success "Default memory path ready: $MAIN_AGENT_WORKSPACE/memory"
+
+  if [ "$SYNC_OPENCLAW_DOCS_ONLY" = "true" ]; then
+    local docs_only_cron_mode
+    sync_openclaw_docs_into_obsidian
+    docs_only_cron_mode="$(normalize_mode "${OPENCLAW_DOCS_CRON_MODE:-ask}")"
+    if [ "$docs_only_cron_mode" = "always" ]; then
+      install_openclaw_docs_sync_cron
+    fi
+    echo ""
+    log_success "OpenClaw docs sync complete."
+    echo "Main agent id: $MAIN_AGENT_ID"
+    echo "Main workspace: $MAIN_AGENT_WORKSPACE"
+    echo "Docs path: $(openclaw_docs_target_dir)"
+    return 0
+  fi
 
   # Cleanup from older script versions that used <workspace>/obsidian-brain.
   if [ -d "$MAIN_AGENT_WORKSPACE/obsidian-brain" ]; then
@@ -1116,6 +1424,7 @@ main() {
   configure_openclaw_memory
   ensure_memory_search_defaults
   refresh_memory_indexes
+  maybe_offer_openclaw_docs_sync
 
   echo ""
   log_success "Obsidian brain setup complete."
@@ -1124,6 +1433,7 @@ main() {
   echo "Main workspace: $MAIN_AGENT_WORKSPACE"
   echo "Main Obsidian vault path: $OBSIDIAN_VAULT_DIR"
   echo "Main qmd thinking path: $QMD_MEMORY_DIR"
+  echo "OpenClaw docs sync target: $(openclaw_docs_target_dir)"
 }
 
 main "$@"

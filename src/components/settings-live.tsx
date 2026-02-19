@@ -168,6 +168,8 @@ export function SettingsLive() {
   const [savingDefaultVisibility, setSavingDefaultVisibility] = useState(false);
   const [cleanupArmedSpaceId, setCleanupArmedSpaceId] = useState<string | null>(null);
   const [cleanupSpaceId, setCleanupSpaceId] = useState<string | null>(null);
+  const [backfillArmed, setBackfillArmed] = useState(false);
+  const [backfillRunning, setBackfillRunning] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testPwaPending, setTestPwaPending] = useState(false);
@@ -275,6 +277,56 @@ export function SettingsLive() {
       setError(err instanceof Error ? err.message : "Failed to save settings.");
     } finally {
       setSavingGeneral(false);
+    }
+  };
+
+  const startFullBackfillReplay = async () => {
+    if (readOnly) {
+      setError("Token required to start full backfill replay.");
+      return;
+    }
+    setBackfillRunning(true);
+    setBackfillArmed(false);
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await apiFetch(
+        "/api/admin/start-fresh-replay",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            integrationLevel: "full",
+          }),
+        },
+        localToken.trim()
+      );
+      const payload = (await res.json().catch(() => null)) as { detail?: unknown; resetAt?: unknown } | null;
+      if (!res.ok) {
+        const detail = payload?.detail;
+        const message =
+          typeof detail === "string" && detail.trim()
+            ? detail.trim()
+            : "Failed to start full backfill replay.";
+        throw new Error(message);
+      }
+      setIntegrationLevel("full");
+      setLocalIntegration("full");
+      const resetAt = typeof payload?.resetAt === "string" ? payload.resetAt.trim() : "";
+      if (resetAt) {
+        const stamp = Number.isNaN(Date.parse(resetAt)) ? resetAt : new Date(resetAt).toLocaleString();
+        setMessage(
+          `Full backfill replay started (${stamp}). Logs are now pending while classifier rebuilds topics and tasks.`
+        );
+      } else {
+        setMessage("Full backfill replay started. Logs are now pending while classifier rebuilds topics and tasks.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start full backfill replay.");
+    } finally {
+      setBackfillRunning(false);
     }
   };
 
@@ -556,6 +608,62 @@ export function SettingsLive() {
           {readOnly ? (
             <span className="text-xs text-[rgb(var(--claw-warning))]">
               Token required to apply write-side settings and space visibility changes.
+            </span>
+          ) : null}
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex-wrap items-start gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Backfill Replay</h2>
+            <p className="mt-1 text-sm text-[rgb(var(--claw-muted))]">
+              Rebuild Clawboard routing from existing logs by clearing derived topics/tasks and reclassifying history.
+            </p>
+          </div>
+          <Badge tone={localIntegration === "full" ? "accent2" : "muted"}>{localIntegration === "full" ? "Full mode" : "Not full mode"}</Badge>
+        </CardHeader>
+        <div className="space-y-3 text-xs text-[rgb(var(--claw-muted))]">
+          <p>
+            Modes: <span className="text-[rgb(var(--claw-text))]">manual</span> (UI-first),{" "}
+            <span className="text-[rgb(var(--claw-text))]">write</span> (live logging),{" "}
+            <span className="text-[rgb(var(--claw-text))]">full</span> (write + replay/backfill workflows).
+          </p>
+          <p className="text-[rgb(var(--claw-warning))]">
+            This action is destructive to derived state: existing topics/tasks are deleted, then classifier rebuilds them from logs.
+          </p>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {backfillArmed ? (
+            <>
+              <Button
+                variant="secondary"
+                className="border-[rgba(239,68,68,0.45)] text-[rgb(var(--claw-danger))]"
+                disabled={backfillRunning || readOnly}
+                onClick={() => {
+                  void startFullBackfillReplay();
+                }}
+              >
+                {backfillRunning ? "Starting..." : "Confirm full backfill replay"}
+              </Button>
+              <Button variant="ghost" disabled={backfillRunning} onClick={() => setBackfillArmed(false)}>
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <Button
+              variant="secondary"
+              disabled={backfillRunning || readOnly}
+              onClick={() => {
+                setBackfillArmed(true);
+              }}
+            >
+              Start full backfill replay
+            </Button>
+          )}
+          {readOnly ? (
+            <span className="text-xs text-[rgb(var(--claw-warning))]">
+              Token required to run admin replay actions.
             </span>
           ) : null}
         </div>

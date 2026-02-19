@@ -18,6 +18,7 @@ const DEFAULT_CONTEXT_LOG_LIMIT = 6;
 const CLAWBOARD_CONTEXT_BEGIN = "[CLAWBOARD_CONTEXT_BEGIN]";
 const CLAWBOARD_CONTEXT_END = "[CLAWBOARD_CONTEXT_END]";
 const IGNORE_SESSION_PREFIXES = getIgnoreSessionPrefixesFromEnv(process.env);
+const REPLY_DIRECTIVE_TAG_RE = /(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*/gi;
 
 function normalizeBaseUrl(url) {
   return url.replace(/\/$/, "");
@@ -30,14 +31,20 @@ function sanitizeMessageContent(content) {
     /Clawboard continuity hook is active for this turn\.[\s\S]*?Prioritize curated user notes when present\.\s*/gi,
     ""
   );
+  text = text.replace(REPLY_DIRECTIVE_TAG_RE, " ");
   text = text.replace(/^\s*summary\s*[:\-]\s*/gim, "");
   text = text.replace(/^\[Discord [^\]]+\]\s*/gim, "");
   // OpenClaw/CLI transcripts sometimes include a local-time prefix like:
   // "[Sun 2026-02-08 09:01 EST] ..." which pollutes classifier/search signals.
   text = text.replace(/^\[[A-Za-z]{3}\s+\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?\s+[A-Za-z]{2,5}\]\s*/gim, "");
   text = text.replace(/\[message[_\s-]?id:[^\]]+\]/gi, "");
+  text = text.replace(/[ \t]{2,}/g, " ");
   text = text.replace(/\n{3,}/g, "\n\n");
   return text.trim();
+}
+
+function shouldSuppressReplyDirectivesForSession(sessionKey) {
+  return Boolean(sessionKey && isBoardSessionKey(sessionKey));
 }
 
 function summarize(content) {
@@ -1195,13 +1202,18 @@ export default function register(api) {
     const context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, primaryMode);
     if (!context)
       return;
-    const prependContext = [
+    const prependLines = [
       CLAWBOARD_CONTEXT_BEGIN,
       "Clawboard continuity hook is active for this turn. The block below already comes from Clawboard retrieval. Do not claim Clawboard is unavailable unless this block explicitly says retrieval failed.",
       "Use this Clawboard retrieval context merged with existing OpenClaw memory/turn context. Prioritize curated user notes when present.",
-      context,
-      CLAWBOARD_CONTEXT_END
-    ].join("\n");
+    ];
+    if (shouldSuppressReplyDirectivesForSession(sessionKeyForContext)) {
+      prependLines.push(
+        "This session is Clawboard UI-native. Reply in plain text and never emit [[reply_to_current]] or [[reply_to:<id>]] tags."
+      );
+    }
+    prependLines.push(context, CLAWBOARD_CONTEXT_END);
+    const prependContext = prependLines.join("\n");
     return {
       prependContext
     };
@@ -1683,3 +1695,16 @@ export default function register(api) {
     }
   });
 }
+
+// Export utility functions for testing
+export {
+  normalizeBaseUrl,
+  sanitizeMessageContent,
+  summarize,
+  dedupeFingerprint,
+  truncateRaw,
+  clip,
+  normalizeWhitespace,
+  tokenSet,
+  lexicalSimilarity
+};

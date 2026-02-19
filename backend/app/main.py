@@ -1312,6 +1312,12 @@ def _sanitize_log_text(value: str | None) -> str:
     if not value:
         return ""
     text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = re.sub(
+        r"(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(r"^\s*summary\s*[:\-]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE)
     text = re.sub(r"^\[Discord [^\]]+\]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE)
     text = re.sub(r"\[message[_\s-]?id:[^\]]+\]", "", text, flags=re.IGNORECASE)
@@ -5305,6 +5311,8 @@ def _build_changes_payload(
     include_raw: bool,
     allowed_space_ids: set[str] | None,
 ) -> dict[str, Any]:
+    # `limit_logs <= 0` means "no cap" (return all matching logs).
+    effective_limit_logs = int(limit_logs or 0)
     if not since:
         space_query = select(Space)
         topic_query = select(Topic)
@@ -5328,7 +5336,9 @@ def _build_changes_payload(
         log_query = select(LogEntry).order_by(
             LogEntry.createdAt.desc(),
             (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
-        ).limit(limit_logs)
+        )
+        if effective_limit_logs > 0:
+            log_query = log_query.limit(effective_limit_logs)
         if not include_raw:
             log_query = log_query.options(defer(LogEntry.raw))
         logs = session.exec(log_query).all()
@@ -5369,8 +5379,9 @@ def _build_changes_payload(
             select(LogEntry)
             .where(LogEntry.updatedAt >= since)
             .order_by(LogEntry.updatedAt.desc(), LogEntry.createdAt.desc(), LogEntry.id.desc())
-            .limit(limit_logs)
         )
+        if effective_limit_logs > 0:
+            log_query = log_query.limit(effective_limit_logs)
         if not include_raw:
             log_query = log_query.options(defer(LogEntry.raw))
         logs = session.exec(log_query).all()
@@ -5423,11 +5434,11 @@ def list_changes(
         example="2026-02-02T10:05:00.000Z",
     ),
     limitLogs: int = Query(
-        default=2000,
+        default=0,
         ge=0,
         le=20000,
-        description="Safety cap for logs returned (prevents large-memory full dumps).",
-        example=2000,
+        description="Safety cap for logs returned (0 disables cap).",
+        example=0,
     ),
     includeRaw: bool = Query(
         default=False,
@@ -5439,8 +5450,8 @@ def list_changes(
 ):
     """Return topics/tasks/logs changed since timestamp (ISO).
 
-    NOTE: For large instances, returning *all* logs can exhaust memory in the API process and
-    crash the container. This endpoint caps logs by default and is intended for incremental sync.
+    NOTE: Returning *all* logs can be heavy on large instances.
+    Use `limitLogs` to apply a safety cap when needed.
     """
     with get_session() as session:
         allowed_space_ids = _resolve_allowed_space_ids(
@@ -5458,7 +5469,8 @@ def list_changes(
                 allowed_space_ids=allowed_space_ids,
             )
 
-        if not since and not includeRaw:
+        # Avoid precompiling uncapped snapshots to keep memory bounded.
+        if not since and not includeRaw and limitLogs > 0:
             revision = _changes_revision_token(session)
             payload, _cached = _get_or_build_precompiled(
                 namespace="changes",

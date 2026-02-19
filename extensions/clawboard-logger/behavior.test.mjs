@@ -167,6 +167,112 @@ test("message_sending logs assistant row; message_sent does not duplicate it (IN
   }
 });
 
+test("before_agent_start adds no-reply-directive hint for board sessions", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, _options = {}) => {
+      if (String(url).includes("/api/context")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { block: "board context block" };
+          },
+          async text() {
+            return '{"block":"board context block"}';
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {};
+        },
+        async text() {
+          return "{}";
+        },
+      };
+    };
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("before_agent_start");
+    assert.equal(typeof handler, "function");
+
+    const result = await handler(
+      {
+        prompt: "What should I do next?",
+        messages: [],
+      },
+      {
+        sessionKey: "clawboard:topic:topic-123",
+        conversationId: "clawboard:topic:topic-123",
+      }
+    );
+
+    const prependContext = String(result?.prependContext || "");
+    assert.ok(prependContext.includes("board context block"));
+    assert.ok(prependContext.includes("never emit [[reply_to_current]] or [[reply_to:<id>]] tags"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("before_agent_start skips no-reply-directive hint for non-board sessions", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, _options = {}) => {
+      if (String(url).includes("/api/context")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { block: "generic context block" };
+          },
+          async text() {
+            return '{"block":"generic context block"}';
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {};
+        },
+        async text() {
+          return "{}";
+        },
+      };
+    };
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("before_agent_start");
+    assert.equal(typeof handler, "function");
+
+    const result = await handler(
+      {
+        prompt: "What should I do next?",
+        messages: [],
+      },
+      {
+        sessionKey: "channel:discord-123",
+        conversationId: "channel:discord-123",
+      }
+    );
+
+    const prependContext = String(result?.prependContext || "");
+    assert.ok(prependContext.includes("generic context block"));
+    assert.equal(prependContext.includes("never emit [[reply_to_current]] or [[reply_to:<id>]] tags"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("before_tool_call emits action log with tool call summary (ING-003)", async () => {
   const originalFetch = globalThis.fetch;
   try {

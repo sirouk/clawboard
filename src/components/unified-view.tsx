@@ -355,6 +355,10 @@ const CHAT_HEADER_BLURB_LIMIT = 56;
 
 function stripTransportNoise(value: string) {
   let text = (value ?? "").replace(/\r\n?/g, "\n").trim();
+  text = text.replace(
+    /(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*/gi,
+    " ",
+  );
   text = text.replace(/^\s*summary\s*[:\-]\s*/gim, "");
   text = text.replace(/^\[Discord [^\]]+\]\s*/gim, "");
   text = text.replace(/\[message[_\s-]?id:[^\]]+\]/gi, "");
