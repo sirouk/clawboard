@@ -49,6 +49,17 @@ OPENCLAW_SKILLS_DIR="$OPENCLAW_HOME/skills"
 # Explicit overrides:
 # - `--dir <path>` / `CLAWBOARD_DIR=<path>`
 # - `CLAWBOARD_PARENT_DIR=<path>` (repo goes under `<path>/clawboard`)
+resolve_default_openclaw_workspace_root() {
+  local profile="${OPENCLAW_PROFILE:-}"
+  local profile_lc
+  profile_lc="$(printf "%s" "$profile" | tr '[:upper:]' '[:lower:]')"
+  if [ -n "$profile" ] && [ "$profile_lc" != "default" ]; then
+    printf "%s" "$OPENCLAW_HOME/workspace-$profile"
+  else
+    printf "%s" "$OPENCLAW_HOME/workspace"
+  fi
+}
+
 detect_openclaw_workspace_root() {
   if [ -n "${OPENCLAW_WORKSPACE_DIR:-}" ]; then
     printf "%s" "${OPENCLAW_WORKSPACE_DIR}"
@@ -65,19 +76,74 @@ try:
 except Exception:
   sys.exit(0)
 
-# Newer configs: agents.defaults.workspace
-ws = (((data.get("agents") or {}).get("defaults") or {}).get("workspace"))
-if isinstance(ws, str) and ws.strip():
-  print(ws.strip(), end="")
-  sys.exit(0)
+# Resolve default agent id (mirrors OpenClaw behavior).
+agents = ((data.get("agents") or {}).get("list") or [])
+entries = [entry for entry in agents if isinstance(entry, dict)]
+default_entries = [entry for entry in entries if entry.get("default") is True]
+default_entry = default_entries[0] if default_entries else (entries[0] if entries else {})
+default_id = str(default_entry.get("id") or "main").strip().lower() if isinstance(default_entry, dict) else "main"
+
+# Prefer explicit main agent workspace if present.
+main_entry = next((entry for entry in entries if str(entry.get("id") or "").strip().lower() == "main"), None)
+chosen_entry = main_entry if isinstance(main_entry, dict) else default_entry
+chosen_id = str((chosen_entry or {}).get("id") or default_id).strip().lower()
+
+ws = ""
+if isinstance(chosen_entry, dict):
+  candidate = chosen_entry.get("workspace")
+  if isinstance(candidate, str) and candidate.strip():
+    ws = candidate.strip()
+
+# Newer configs: agents.defaults.workspace (for default agent when unset at agent level)
+if not ws and chosen_id == default_id:
+  candidate = (((data.get("agents") or {}).get("defaults") or {}).get("workspace"))
+  if isinstance(candidate, str) and candidate.strip():
+    ws = candidate.strip()
 
 # Older configs: top-level workspace
-ws = data.get("workspace")
-if isinstance(ws, str) and ws.strip():
-  print(ws.strip(), end="")
+if not ws:
+  candidate = data.get("workspace")
+  if isinstance(candidate, str) and candidate.strip():
+    ws = candidate.strip()
+
+if ws:
+  print(ws, end="")
 PY
   fi
 }
+
+ensure_openclaw_workspace_root_configured() {
+  if [ -n "${OPENCLAW_WORKSPACE_DIR:-}" ]; then
+    return 0
+  fi
+
+  local ws fallback
+  ws="$(detect_openclaw_workspace_root || true)"
+  ws="${ws//$'\r'/}"
+
+  if [ -n "$ws" ]; then
+    OPENCLAW_WORKSPACE_DIR="$ws"
+    return 0
+  fi
+
+  fallback="$(resolve_default_openclaw_workspace_root)"
+  OPENCLAW_WORKSPACE_DIR="$fallback"
+  log_info "No OpenClaw workspace configured; defaulting to $fallback"
+
+  if ! command -v openclaw >/dev/null 2>&1; then
+    log_warn "openclaw CLI not found; set agents.defaults.workspace manually if needed."
+    return 0
+  fi
+
+  # Keep workspace explicit for bootstrap auto-detection and consistency.
+  if openclaw config set agents.defaults.workspace "$fallback" >/dev/null 2>&1; then
+    log_success "Configured OpenClaw workspace: agents.defaults.workspace=$fallback"
+  else
+    log_warn "Failed to persist agents.defaults.workspace via openclaw config set."
+  fi
+}
+
+ensure_openclaw_workspace_root_configured
 
 DIR_EXPLICIT=false
 if [ -n "${CLAWBOARD_DIR:-}" ]; then
@@ -172,6 +238,14 @@ SKILL_INSTALL_MODE="${CLAWBOARD_SKILL_INSTALL_MODE:-symlink}"
 MEMORY_BACKUP_SETUP_MODE="${CLAWBOARD_MEMORY_BACKUP_SETUP:-ask}"
 MEMORY_BACKUP_SETUP_STATUS="not-run"
 MEMORY_BACKUP_SETUP_SCRIPT=""
+OBSIDIAN_MEMORY_SETUP_MODE="${CLAWBOARD_OBSIDIAN_MEMORY_SETUP:-ask}"
+OBSIDIAN_MEMORY_SETUP_STATUS="not-run"
+OBSIDIAN_BRAIN_SETUP_SCRIPT=""
+LOCAL_MEMORY_SETUP_SCRIPT=""
+OPENCLAW_HEAP_SETUP_MODE="${CLAWBOARD_OPENCLAW_HEAP_SETUP:-ask}"
+OPENCLAW_HEAP_SETUP_STATUS="not-run"
+OPENCLAW_HEAP_TARGET=""
+OPENCLAW_HEAP_MB="${CLAWBOARD_OPENCLAW_MAX_OLD_SPACE_MB:-6144}"
 
 SKIP_DOCKER=false
 SKIP_OPENCLAW=false
@@ -246,6 +320,14 @@ while [ $# -gt 0 ]; do
     --exclude-tool-call-logs) SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="0"; shift ;;
     --setup-memory-backup) MEMORY_BACKUP_SETUP_MODE="always"; shift ;;
     --skip-memory-backup-setup) MEMORY_BACKUP_SETUP_MODE="never"; shift ;;
+    --setup-obsidian-memory) OBSIDIAN_MEMORY_SETUP_MODE="always"; shift ;;
+    --skip-obsidian-memory-setup) OBSIDIAN_MEMORY_SETUP_MODE="never"; shift ;;
+    --setup-openclaw-heap) OPENCLAW_HEAP_SETUP_MODE="always"; shift ;;
+    --skip-openclaw-heap-setup) OPENCLAW_HEAP_SETUP_MODE="never"; shift ;;
+    --openclaw-max-old-space-mb)
+      [ $# -ge 2 ] || log_error "--openclaw-max-old-space-mb requires a value"
+      OPENCLAW_HEAP_MB="$2"; shift 2
+      ;;
     --skill-copy) SKILL_INSTALL_MODE="copy"; shift ;;
     --skill-symlink) SKILL_INSTALL_MODE="symlink"; shift ;;
     --update) UPDATE_REPO=true; shift ;;
@@ -275,6 +357,12 @@ Environment overrides:
                               Skill install strategy for \$OPENCLAW_HOME/skills (default: symlink)
   CLAWBOARD_MEMORY_BACKUP_SETUP=<ask|always|never>
                               Offer/run memory+Clawboard backup setup during bootstrap (default: ask)
+  CLAWBOARD_OBSIDIAN_MEMORY_SETUP=<ask|always|never>
+                              Offer/run Obsidian + memory tuning setup during bootstrap (default: ask)
+  CLAWBOARD_OPENCLAW_HEAP_SETUP=<ask|always|never>
+                              Offer/run OpenClaw launcher heap tuning at bootstrap end (default: ask)
+  CLAWBOARD_OPENCLAW_MAX_OLD_SPACE_MB=<int>
+                              Heap size for launcher patch (default: 6144)
   CLAWBOARD_ENV_WIZARD=<0|1>  Force disable/enable interactive .env connection wizard
   --api-url <url>      Clawboard API base (default: http://localhost:8010)
   --web-url <url>      Clawboard web URL (default: http://localhost:3010)
@@ -308,6 +396,16 @@ Environment overrides:
                       Run memory+Clawboard backup setup at the end of bootstrap (interactive)
   --skip-memory-backup-setup
                       Skip the memory+Clawboard backup setup prompt
+  --setup-obsidian-memory
+                      Run Obsidian + memory tuning setup at the end of bootstrap (interactive)
+  --skip-obsidian-memory-setup
+                      Skip the Obsidian + memory tuning setup prompt
+  --setup-openclaw-heap
+                      Apply OpenClaw launcher heap tuning at the end of bootstrap (interactive)
+  --skip-openclaw-heap-setup
+                      Skip the OpenClaw launcher heap tuning prompt
+  --openclaw-max-old-space-mb <int>
+                      Heap limit for launcher patch (default: 6144)
   --skill-copy         Install skill by copying files into \$OPENCLAW_HOME/skills
   --skill-symlink      Install skill as symlink to repo copy (default; best for local skill development)
   --no-backfill        Shortcut for --integration-level manual
@@ -361,6 +459,27 @@ case "$(printf "%s" "$MEMORY_BACKUP_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" i
     MEMORY_BACKUP_SETUP_MODE="ask"
     ;;
 esac
+
+case "$(printf "%s" "$OBSIDIAN_MEMORY_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" in
+  ask|always|never) OBSIDIAN_MEMORY_SETUP_MODE="$(printf "%s" "$OBSIDIAN_MEMORY_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" ;;
+  *)
+    log_warn "Invalid Obsidian memory setup mode: $OBSIDIAN_MEMORY_SETUP_MODE (expected ask|always|never). Using ask."
+    OBSIDIAN_MEMORY_SETUP_MODE="ask"
+    ;;
+esac
+
+case "$(printf "%s" "$OPENCLAW_HEAP_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" in
+  ask|always|never) OPENCLAW_HEAP_SETUP_MODE="$(printf "%s" "$OPENCLAW_HEAP_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" ;;
+  *)
+    log_warn "Invalid OpenClaw heap setup mode: $OPENCLAW_HEAP_SETUP_MODE (expected ask|always|never). Using ask."
+    OPENCLAW_HEAP_SETUP_MODE="ask"
+    ;;
+esac
+
+if ! [[ "$OPENCLAW_HEAP_MB" =~ ^[0-9]+$ ]] || [ "$OPENCLAW_HEAP_MB" -lt 1024 ] || [ "$OPENCLAW_HEAP_MB" -gt 65536 ]; then
+  log_warn "Invalid OpenClaw heap size: $OPENCLAW_HEAP_MB (expected 1024-65536). Using 6144."
+  OPENCLAW_HEAP_MB="6144"
+fi
 
 if [ "$INTEGRATION_LEVEL_EXPLICIT" = false ] && [ -t 0 ]; then
   echo ""
@@ -909,6 +1028,338 @@ maybe_run_chutes_fast_path() {
   return 0
 }
 
+resolve_obsidian_brain_setup_script() {
+  local workspace_root="${OPENCLAW_WORKSPACE_DIR:-}"
+  workspace_root="${workspace_root/#\~/$HOME}"
+
+  if [ -n "${OBSIDIAN_BRAIN_SETUP_SCRIPT:-}" ] && [ -f "$OBSIDIAN_BRAIN_SETUP_SCRIPT" ]; then
+    printf "%s" "$OBSIDIAN_BRAIN_SETUP_SCRIPT"
+    return 0
+  fi
+
+  if [ -f "$INSTALL_DIR/scripts/setup_obsidian_brain.sh" ]; then
+    OBSIDIAN_BRAIN_SETUP_SCRIPT="$INSTALL_DIR/scripts/setup_obsidian_brain.sh"
+  elif [ -n "$workspace_root" ] && [ -f "$workspace_root/projects/clawboard/scripts/setup_obsidian_brain.sh" ]; then
+    OBSIDIAN_BRAIN_SETUP_SCRIPT="$workspace_root/projects/clawboard/scripts/setup_obsidian_brain.sh"
+  elif [ -n "$workspace_root" ] && [ -f "$workspace_root/project/clawboard/scripts/setup_obsidian_brain.sh" ]; then
+    OBSIDIAN_BRAIN_SETUP_SCRIPT="$workspace_root/project/clawboard/scripts/setup_obsidian_brain.sh"
+  elif [ -f "$OPENCLAW_HOME/workspace/projects/clawboard/scripts/setup_obsidian_brain.sh" ]; then
+    OBSIDIAN_BRAIN_SETUP_SCRIPT="$OPENCLAW_HOME/workspace/projects/clawboard/scripts/setup_obsidian_brain.sh"
+  else
+    return 1
+  fi
+
+  printf "%s" "$OBSIDIAN_BRAIN_SETUP_SCRIPT"
+}
+
+resolve_local_memory_setup_script() {
+  local workspace_root="${OPENCLAW_WORKSPACE_DIR:-}"
+  workspace_root="${workspace_root/#\~/$HOME}"
+
+  if [ -n "${LOCAL_MEMORY_SETUP_SCRIPT:-}" ] && [ -f "$LOCAL_MEMORY_SETUP_SCRIPT" ]; then
+    printf "%s" "$LOCAL_MEMORY_SETUP_SCRIPT"
+    return 0
+  fi
+
+  if [ -f "$OPENCLAW_SKILLS_DIR/clawboard/scripts/setup-openclaw-local-memory.sh" ]; then
+    LOCAL_MEMORY_SETUP_SCRIPT="$OPENCLAW_SKILLS_DIR/clawboard/scripts/setup-openclaw-local-memory.sh"
+  elif [ -f "$INSTALL_DIR/skills/clawboard/scripts/setup-openclaw-local-memory.sh" ]; then
+    LOCAL_MEMORY_SETUP_SCRIPT="$INSTALL_DIR/skills/clawboard/scripts/setup-openclaw-local-memory.sh"
+  elif [ -n "$workspace_root" ] && [ -f "$workspace_root/projects/clawboard/skills/clawboard/scripts/setup-openclaw-local-memory.sh" ]; then
+    LOCAL_MEMORY_SETUP_SCRIPT="$workspace_root/projects/clawboard/skills/clawboard/scripts/setup-openclaw-local-memory.sh"
+  elif [ -n "$workspace_root" ] && [ -f "$workspace_root/project/clawboard/skills/clawboard/scripts/setup-openclaw-local-memory.sh" ]; then
+    LOCAL_MEMORY_SETUP_SCRIPT="$workspace_root/project/clawboard/skills/clawboard/scripts/setup-openclaw-local-memory.sh"
+  else
+    return 1
+  fi
+
+  printf "%s" "$LOCAL_MEMORY_SETUP_SCRIPT"
+}
+
+maybe_offer_obsidian_memory_setup() {
+  local mode="${1:-ask}"
+  local obsidian_script=""
+  local local_memory_script=""
+  local answer=""
+  local should_run=false
+  local rc=0
+  local -a obsidian_args
+  obsidian_args=()
+  if [ "$USE_COLOR" = false ]; then
+    obsidian_args+=(--no-color)
+  fi
+
+  case "$mode" in
+    never)
+      OBSIDIAN_MEMORY_SETUP_STATUS="skipped-mode-never"
+      return 0
+      ;;
+    always) should_run=true ;;
+    ask)
+      if [ ! -t 0 ]; then
+        OBSIDIAN_MEMORY_SETUP_STATUS="skipped-no-tty"
+        return 0
+      fi
+      printf "\nSet up Obsidian thinking vaults + memory tuning now? [Y/n]: "
+      read -r answer
+      case "$(printf "%s" "$answer" | tr '[:upper:]' '[:lower:]')" in
+        ""|y|yes) should_run=true ;;
+        *) should_run=false ;;
+      esac
+      ;;
+    *)
+      OBSIDIAN_MEMORY_SETUP_STATUS="skipped-invalid-mode"
+      return 0
+      ;;
+  esac
+
+  if [ "$should_run" = false ]; then
+    OBSIDIAN_MEMORY_SETUP_STATUS="skipped-by-user"
+    if obsidian_script="$(resolve_obsidian_brain_setup_script)"; then
+      log_warn "Obsidian/memory setup skipped. Recommended when ready: bash $obsidian_script"
+    else
+      log_warn "Obsidian/memory setup skipped. Run setup_obsidian_brain.sh later when available."
+    fi
+    return 0
+  fi
+
+  if ! obsidian_script="$(resolve_obsidian_brain_setup_script)"; then
+    OBSIDIAN_MEMORY_SETUP_STATUS="missing-script"
+    log_warn "Missing setup_obsidian_brain.sh. Cannot run Obsidian/memory setup."
+    return 0
+  fi
+  if ! local_memory_script="$(resolve_local_memory_setup_script)"; then
+    OBSIDIAN_MEMORY_SETUP_STATUS="missing-script"
+    log_warn "Missing setup-openclaw-local-memory.sh. Cannot run local memory tuning setup."
+    return 0
+  fi
+
+  log_info "Launching Obsidian thinking vault + qmd setup..."
+  if ! bash "$obsidian_script" "${obsidian_args[@]}"; then
+    rc=1
+    log_warn "setup_obsidian_brain.sh did not complete successfully."
+  fi
+
+  log_info "Launching local memory tuning setup..."
+  if ! bash "$local_memory_script"; then
+    rc=1
+    log_warn "setup-openclaw-local-memory.sh did not complete successfully."
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    OBSIDIAN_MEMORY_SETUP_STATUS="configured"
+    log_success "Obsidian + memory tuning setup completed."
+  else
+    OBSIDIAN_MEMORY_SETUP_STATUS="failed"
+    log_warn "Obsidian + memory tuning setup had errors. Re-run scripts when ready."
+  fi
+}
+
+resolve_openclaw_launcher_script() {
+  local openclaw_cmd="${1:-}"
+  local candidate=""
+  local resolved=""
+
+  if [ -z "$openclaw_cmd" ]; then
+    if ! command -v openclaw >/dev/null 2>&1; then
+      return 1
+    fi
+    openclaw_cmd="$(command -v openclaw)"
+  fi
+
+  openclaw_cmd="${openclaw_cmd%$'\r'}"
+  if [ -z "$openclaw_cmd" ] || [ ! -e "$openclaw_cmd" ]; then
+    return 1
+  fi
+
+  if [ -f "$openclaw_cmd" ]; then
+    candidate="$openclaw_cmd"
+  else
+    return 1
+  fi
+
+  if [ -L "$candidate" ] && command -v python3 >/dev/null 2>&1; then
+    resolved="$(python3 - "$candidate" <<'PY'
+import os, sys
+p = sys.argv[1]
+print(os.path.realpath(os.path.expanduser(p)))
+PY
+)"
+    resolved="${resolved//$'\r'/}"
+    if [ -n "$resolved" ] && [ -f "$resolved" ]; then
+      candidate="$resolved"
+    fi
+  fi
+
+  printf "%s" "$candidate"
+}
+
+apply_openclaw_heap_patch() {
+  local launcher_path="$1"
+  local heap_mb="$2"
+  need_cmd python3
+
+  python3 - "$launcher_path" "$heap_mb" <<'PY'
+import os
+import re
+import stat
+import sys
+
+path = os.path.abspath(os.path.expanduser(sys.argv[1]))
+heap_mb = str(sys.argv[2]).strip()
+
+if not path or not os.path.exists(path) or not os.path.isfile(path):
+    print("missing")
+    sys.exit(2)
+if not os.access(path, os.R_OK):
+    print("not-readable")
+    sys.exit(3)
+if not os.access(path, os.W_OK):
+    print("not-writable")
+    sys.exit(4)
+
+with open(path, "r", encoding="utf-8") as f:
+    original = f.read()
+
+if not re.search(r"^#!.*\b(?:bash|sh)\b", original.splitlines()[0] if original else "", re.IGNORECASE):
+    print("unsupported-launcher")
+    sys.exit(5)
+
+if "exec node " not in original:
+    print("unsupported-launcher")
+    sys.exit(5)
+
+desired_block = (
+    "# Keep doctor and other heavy commands from hitting Node's default ~2GB heap.\n"
+    "# Respect explicit user-provided max-old-space-size in NODE_OPTIONS.\n"
+    'if [[ "${NODE_OPTIONS:-}" != *"--max-old-space-size="* ]]; then\n'
+    f'  export NODE_OPTIONS="${{NODE_OPTIONS:+${{NODE_OPTIONS}} }}--max-old-space-size={heap_mb}"\n'
+    "fi\n"
+)
+
+commented_block_re = re.compile(
+    r"# Keep doctor and other heavy commands from hitting Node's default ~2GB heap\.\n"
+    r"# Respect explicit user-provided max-old-space-size in NODE_OPTIONS\.\n"
+    r"if \[\[ \"\$\{NODE_OPTIONS:-\}\" != \*\"--max-old-space-size=\"\* \]\]; then\n"
+    r"  export NODE_OPTIONS=\"\$\{NODE_OPTIONS:\+\$\{NODE_OPTIONS\} \}--max-old-space-size=\d+\"\n"
+    r"fi\n?",
+    re.MULTILINE,
+)
+generic_block_re = re.compile(
+    r"if \[\[ \"\$\{NODE_OPTIONS:-\}\" != \*\"--max-old-space-size=\"\* \]\]; then\n"
+    r"\s*export NODE_OPTIONS=\"[^\n\"]*--max-old-space-size=\d+\"\n"
+    r"fi\n?",
+    re.MULTILINE,
+)
+
+updated = original
+if commented_block_re.search(updated):
+    updated = commented_block_re.sub(desired_block, updated, count=1)
+elif generic_block_re.search(updated):
+    updated = generic_block_re.sub(desired_block, updated, count=1)
+else:
+    marker = "set -euo pipefail\n"
+    idx = updated.find(marker)
+    if idx == -1:
+        print("unsupported-launcher")
+        sys.exit(5)
+    insert_at = idx + len(marker)
+    prefix = updated[:insert_at]
+    suffix = updated[insert_at:]
+    if not prefix.endswith("\n\n"):
+        prefix = prefix + "\n"
+    updated = prefix + desired_block + "\n" + suffix.lstrip("\n")
+
+if updated == original:
+    print("already")
+    sys.exit(0)
+
+st = os.stat(path)
+tmp = f"{path}.tmp-{os.getpid()}"
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write(updated)
+os.chmod(tmp, stat.S_IMODE(st.st_mode))
+os.replace(tmp, path)
+print("patched")
+PY
+}
+
+maybe_offer_openclaw_heap_setup() {
+  local mode="${1:-ask}"
+  local answer=""
+  local should_run=false
+  local launcher_path=""
+  local patch_result=""
+
+  case "$mode" in
+    never)
+      OPENCLAW_HEAP_SETUP_STATUS="skipped-mode-never"
+      return 0
+      ;;
+    always) should_run=true ;;
+    ask)
+      if [ ! -t 0 ]; then
+        OPENCLAW_HEAP_SETUP_STATUS="skipped-no-tty"
+        return 0
+      fi
+      printf "\nTune OpenClaw launcher heap to --max-old-space-size=%s? [Y/n]: " "$OPENCLAW_HEAP_MB"
+      read -r answer
+      case "$(printf "%s" "$answer" | tr '[:upper:]' '[:lower:]')" in
+        ""|y|yes) should_run=true ;;
+        *) should_run=false ;;
+      esac
+      ;;
+    *)
+      OPENCLAW_HEAP_SETUP_STATUS="skipped-invalid-mode"
+      return 0
+      ;;
+  esac
+
+  if [ "$should_run" = false ]; then
+    OPENCLAW_HEAP_SETUP_STATUS="skipped-by-user"
+    return 0
+  fi
+
+  if ! launcher_path="$(resolve_openclaw_launcher_script)"; then
+    OPENCLAW_HEAP_SETUP_STATUS="openclaw-missing"
+    log_warn "openclaw launcher not found on PATH. Skipping heap patch."
+    return 0
+  fi
+  OPENCLAW_HEAP_TARGET="$launcher_path"
+
+  set +e
+  patch_result="$(apply_openclaw_heap_patch "$launcher_path" "$OPENCLAW_HEAP_MB" 2>/dev/null)"
+  local rc=$?
+  set -e
+
+  case "$patch_result" in
+    patched)
+      OPENCLAW_HEAP_SETUP_STATUS="configured"
+      log_success "Updated OpenClaw launcher heap setting at $launcher_path"
+      ;;
+    already)
+      OPENCLAW_HEAP_SETUP_STATUS="already-configured"
+      log_success "OpenClaw launcher heap setting already configured at $launcher_path"
+      ;;
+    not-writable)
+      OPENCLAW_HEAP_SETUP_STATUS="not-writable"
+      log_warn "OpenClaw launcher is not writable: $launcher_path"
+      ;;
+    unsupported-launcher)
+      OPENCLAW_HEAP_SETUP_STATUS="unsupported-launcher"
+      log_warn "OpenClaw launcher format is unsupported for automatic patching: $launcher_path"
+      ;;
+    missing|not-readable|*)
+      if [ "$rc" -eq 0 ]; then
+        OPENCLAW_HEAP_SETUP_STATUS="failed"
+      else
+        OPENCLAW_HEAP_SETUP_STATUS="failed"
+      fi
+      log_warn "Could not apply OpenClaw heap patch automatically."
+      ;;
+  esac
+}
+
 resolve_memory_backup_setup_script() {
   if [ -n "${MEMORY_BACKUP_SETUP_SCRIPT:-}" ] && [ -f "$MEMORY_BACKUP_SETUP_SCRIPT" ]; then
     printf "%s" "$MEMORY_BACKUP_SETUP_SCRIPT"
@@ -933,6 +1384,8 @@ maybe_offer_memory_backup_setup() {
   local setup_script=""
   local answer=""
   local should_run=false
+  local -a setup_args
+  setup_args=()
 
   case "$mode" in
     never)
@@ -975,8 +1428,12 @@ maybe_offer_memory_backup_setup() {
     return 0
   fi
 
+  if [ ! -t 0 ]; then
+    setup_args+=(--non-interactive)
+  fi
+
   log_info "Launching memory + Clawboard backup setup..."
-  if bash "$setup_script"; then
+  if bash "$setup_script" "${setup_args[@]}"; then
     MEMORY_BACKUP_SETUP_STATUS="configured"
     log_success "Memory + Clawboard backup setup completed."
   else
@@ -1464,9 +1921,23 @@ PY
       fi
     fi
 
+    maybe_offer_obsidian_memory_setup "$OBSIDIAN_MEMORY_SETUP_MODE"
+    if [ "$OBSIDIAN_MEMORY_SETUP_STATUS" = "configured" ]; then
+      log_info "Restarting OpenClaw gateway after Obsidian/memory setup..."
+      if openclaw gateway restart >/dev/null 2>&1; then
+        log_success "OpenClaw gateway restarted."
+      elif openclaw gateway start >/dev/null 2>&1; then
+        log_success "OpenClaw gateway started."
+      else
+        log_warn "Unable to restart OpenClaw gateway automatically. Run: openclaw gateway restart"
+      fi
+    fi
+
     maybe_offer_memory_backup_setup "$MEMORY_BACKUP_SETUP_MODE"
   fi
 fi
+
+maybe_offer_openclaw_heap_setup "$OPENCLAW_HEAP_SETUP_MODE"
 
 echo ""
 log_success "Bootstrap complete."
@@ -1505,6 +1976,67 @@ case "$MEMORY_BACKUP_SETUP_STATUS" in
     echo "               Recommended: bash $BACKUP_SETUP_HINT"
     ;;
 esac
+OBSIDIAN_SETUP_HINT="$INSTALL_DIR/scripts/setup_obsidian_brain.sh"
+LOCAL_MEMORY_SETUP_HINT="$OPENCLAW_SKILLS_DIR/clawboard/scripts/setup-openclaw-local-memory.sh"
+if obsidian_setup_path="$(resolve_obsidian_brain_setup_script 2>/dev/null)"; then
+  OBSIDIAN_SETUP_HINT="$obsidian_setup_path"
+fi
+if local_memory_setup_path="$(resolve_local_memory_setup_script 2>/dev/null)"; then
+  LOCAL_MEMORY_SETUP_HINT="$local_memory_setup_path"
+fi
+case "$OBSIDIAN_MEMORY_SETUP_STATUS" in
+  configured)
+    echo "Obsidian/Memory: configured (vaults + tuning setup complete)"
+    ;;
+  failed)
+    echo "Obsidian/Memory: setup attempted but did not complete"
+    echo "                 Rerun: bash $OBSIDIAN_SETUP_HINT"
+    echo "                 Then:  bash $LOCAL_MEMORY_SETUP_HINT"
+    ;;
+  missing-script)
+    echo "Obsidian/Memory: setup helper script(s) not found in this install"
+    ;;
+  skipped-mode-never|skipped-by-user|skipped-no-tty|skipped-invalid-mode|not-run)
+    echo "Obsidian/Memory: not configured in this run"
+    echo "                 Recommended: bash $OBSIDIAN_SETUP_HINT"
+    echo "                 Then:        bash $LOCAL_MEMORY_SETUP_HINT"
+    ;;
+esac
+case "$OPENCLAW_HEAP_SETUP_STATUS" in
+  configured)
+    echo "OpenClaw heap:  configured (${OPENCLAW_HEAP_MB}MB in launcher)"
+    if [ -n "$OPENCLAW_HEAP_TARGET" ]; then
+      echo "               file: $OPENCLAW_HEAP_TARGET"
+    fi
+    ;;
+  already-configured)
+    echo "OpenClaw heap:  already configured"
+    if [ -n "$OPENCLAW_HEAP_TARGET" ]; then
+      echo "               file: $OPENCLAW_HEAP_TARGET"
+    fi
+    ;;
+  not-writable)
+    echo "OpenClaw heap:  launcher is not writable"
+    if [ -n "$OPENCLAW_HEAP_TARGET" ]; then
+      echo "               file: $OPENCLAW_HEAP_TARGET"
+    fi
+    ;;
+  unsupported-launcher)
+    echo "OpenClaw heap:  launcher format unsupported for auto patch"
+    if [ -n "$OPENCLAW_HEAP_TARGET" ]; then
+      echo "               file: $OPENCLAW_HEAP_TARGET"
+    fi
+    ;;
+  openclaw-missing)
+    echo "OpenClaw heap:  openclaw not found on PATH"
+    ;;
+  skipped-mode-never|skipped-by-user|skipped-no-tty|skipped-invalid-mode|not-run)
+    echo "OpenClaw heap:  not configured in this run"
+    ;;
+  *)
+    echo "OpenClaw heap:  setup attempted but did not complete"
+    ;;
+esac
 echo "Security note: CLAWBOARD_TOKEN is required for all writes and non-localhost reads."
 echo "               Localhost reads can run tokenless. Keep network ACLs strict (no Funnel/public exposure)."
 echo ""
@@ -1512,5 +2044,10 @@ echo "If OpenClaw was not installed, run this later:"
 echo "  bash scripts/bootstrap_clawboard.sh --skip-docker --update"
 echo "Set up automated continuity + Clawboard backups:"
 echo "  bash $BACKUP_SETUP_HINT"
+echo "Set up Obsidian thinking vaults + memory tuning:"
+echo "  bash $OBSIDIAN_SETUP_HINT"
+echo "  bash $LOCAL_MEMORY_SETUP_HINT"
+echo "Tune OpenClaw launcher heap (idempotent patch helper via bootstrap):"
+echo "  bash scripts/bootstrap_clawboard.sh --setup-openclaw-heap --skip-docker --skip-skill --skip-plugin --skip-memory-backup-setup --skip-obsidian-memory-setup"
 echo "If you want Chutes before Clawboard skill wiring:"
 echo "  tmp=\$(mktemp -t add-chutes.sh.XXXXXX) && curl -fsSL $CHUTES_FAST_PATH_URL -o \"\$tmp\" && bash \"\$tmp\" && rm -f \"\$tmp\""

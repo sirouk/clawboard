@@ -4,7 +4,7 @@ set -euo pipefail
 # setup-openclaw-memory-backup.sh
 #
 # Interactive setup:
-# - Detect OpenClaw workspace path from ~/.openclaw/openclaw.json
+# - Detect OpenClaw workspace scope from ~/.openclaw/openclaw.json
 # - (Optional) Create a new private GitHub repo via `gh` (if available/auth'd)
 # - Prefer GitHub Deploy Key (SSH) for auth (recommended)
 #   - Generates a dedicated SSH keypair
@@ -13,6 +13,11 @@ set -euo pipefail
 # - Writes config to ~/.openclaw/credentials/clawboard-memory-backup.json (0600)
 # - Optionally includes full Clawboard state export + attachment files in each backup run
 # - Optionally installs an OpenClaw cron job (agentTurn) to run backup every 15m
+#
+# Non-interactive mode:
+# - Pass --non-interactive (or CLAWBOARD_MEMORY_BACKUP_NON_INTERACTIVE=1)
+# - Provide required values via env/flags (at minimum: repo URL unless using gh creation)
+# - Useful for bootstrap/CI flows where no stdin prompts should occur.
 
 say() { printf "%s\n" "$*"; }
 die() { say "ERROR: $*" >&2; exit 2; }
@@ -34,18 +39,282 @@ has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 # bash 3.2 compatibility (macOS default /bin/bash): no ${var,,}
 lc() { tr '[:upper:]' '[:lower:]' <<<"${1:-}"; }
+is_truthy() {
+  case "$(lc "${1:-}")" in
+    1|true|yes|y|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+NON_INTERACTIVE=false
+RUN_BACKUP_NOW=""
+INSTALL_CRON_PRESET=""
+CREATE_REPO_PRESET=""
+REPO_URL_PRESET=""
+REPO_SSH_URL_PRESET=""
+AUTH_METHOD_PRESET=""
+DEPLOY_KEY_PATH_PRESET=""
+GITHUB_USER_PRESET=""
+GITHUB_PAT_PRESET=""
+INCLUDE_OPENCLAW_CONFIG_PRESET=""
+INCLUDE_OPENCLAW_SKILLS_PRESET=""
+INCLUDE_CLAWBOARD_STATE_PRESET=""
+CLAWBOARD_DIR_PRESET=""
+CLAWBOARD_API_URL_PRESET=""
+INCLUDE_CLAWBOARD_ATTACHMENTS_PRESET=""
+INCLUDE_CLAWBOARD_ENV_PRESET=""
+CLAWBOARD_BACKUP_TOKEN_PRESET=""
+BACKUP_DIR_PRESET=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --non-interactive) NON_INTERACTIVE=true; shift ;;
+    --repo-url)
+      [ $# -ge 2 ] || die "--repo-url requires a value"
+      REPO_URL_PRESET="$2"; shift 2
+      ;;
+    --repo-ssh-url)
+      [ $# -ge 2 ] || die "--repo-ssh-url requires a value"
+      REPO_SSH_URL_PRESET="$2"; shift 2
+      ;;
+    --auth-method)
+      [ $# -ge 2 ] || die "--auth-method requires a value (ssh|pat)"
+      AUTH_METHOD_PRESET="$2"; shift 2
+      ;;
+    --deploy-key-path)
+      [ $# -ge 2 ] || die "--deploy-key-path requires a value"
+      DEPLOY_KEY_PATH_PRESET="$2"; shift 2
+      ;;
+    --github-user)
+      [ $# -ge 2 ] || die "--github-user requires a value"
+      GITHUB_USER_PRESET="$2"; shift 2
+      ;;
+    --github-pat)
+      [ $# -ge 2 ] || die "--github-pat requires a value"
+      GITHUB_PAT_PRESET="$2"; shift 2
+      ;;
+    --backup-dir)
+      [ $# -ge 2 ] || die "--backup-dir requires a value"
+      BACKUP_DIR_PRESET="$2"; shift 2
+      ;;
+    --clawboard-dir)
+      [ $# -ge 2 ] || die "--clawboard-dir requires a value"
+      CLAWBOARD_DIR_PRESET="$2"; shift 2
+      ;;
+    --clawboard-api-url)
+      [ $# -ge 2 ] || die "--clawboard-api-url requires a value"
+      CLAWBOARD_API_URL_PRESET="$2"; shift 2
+      ;;
+    --run-backup-now) RUN_BACKUP_NOW="Y"; shift ;;
+    --skip-run-backup-now) RUN_BACKUP_NOW="N"; shift ;;
+    --install-cron) INSTALL_CRON_PRESET="Y"; shift ;;
+    --skip-install-cron) INSTALL_CRON_PRESET="N"; shift ;;
+    --create-repo) CREATE_REPO_PRESET="y"; shift ;;
+    --no-create-repo) CREATE_REPO_PRESET="n"; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: setup-openclaw-memory-backup.sh [options]
+
+Options:
+  --non-interactive          Disable prompts; use env/flags.
+  --repo-url <https-url>     Backup repo URL (required in non-interactive unless --create-repo with gh auth).
+  --repo-ssh-url <ssh-url>   Optional SSH remote URL override.
+  --auth-method <ssh|pat>    Auth mode (default: ssh).
+  --deploy-key-path <path>   Deploy key path for ssh mode.
+  --github-user <user>       GitHub username for pat mode.
+  --github-pat <token>       GitHub PAT for pat mode.
+  --backup-dir <path>        Local backup clone dir.
+  --clawboard-dir <path>     Clawboard install path.
+  --clawboard-api-url <url>  Clawboard API base URL.
+  --run-backup-now           Run immediate validation backup.
+  --skip-run-backup-now      Skip immediate validation backup.
+  --install-cron             Install OpenClaw cron job.
+  --skip-install-cron        Skip OpenClaw cron install.
+  --create-repo              Create private repo via gh.
+  --no-create-repo           Do not create repo via gh.
+
+Env overrides:
+  CLAWBOARD_MEMORY_BACKUP_NON_INTERACTIVE=1
+  CLAWBOARD_BACKUP_* (repo/auth/include/cron presets)
+USAGE
+      exit 0
+      ;;
+    *)
+      die "Unknown option: $1 (run with --help)"
+      ;;
+  esac
+done
+
+if [ "$NON_INTERACTIVE" = false ] && is_truthy "${CLAWBOARD_MEMORY_BACKUP_NON_INTERACTIVE:-}"; then
+  NON_INTERACTIVE=true
+fi
 
 workspace_from_config() {
   [[ -f "$OPENCLAW_JSON" ]] || return 1
-  python3 - <<'PY' "$OPENCLAW_JSON"
-import json,sys
-p=sys.argv[1]
+  python3 - <<'PY' "$OPENCLAW_JSON" "$OPENCLAW_DIR" "$HOME" "${OPENCLAW_PROFILE:-}"
+import json
+import os
+import re
+import sys
+
+cfg_path = sys.argv[1]
+openclaw_dir = os.path.abspath(os.path.expanduser(sys.argv[2]))
+home_dir = os.path.abspath(os.path.expanduser(sys.argv[3]))
+profile = (sys.argv[4] or "").strip()
+
+def profile_workspace(base_dir: str, profile_name: str) -> str:
+    raw = (profile_name or "").strip()
+    if not raw or raw.lower() == "default":
+        return os.path.join(base_dir, "workspace")
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-")
+    if not safe:
+        return os.path.join(base_dir, "workspace")
+    return os.path.join(base_dir, f"workspace-{safe}")
+
+default_ws = profile_workspace(openclaw_dir, profile)
+
+def norm(value: str) -> str:
+    p = os.path.expanduser((value or "").strip())
+    if not p:
+        return ""
+    return os.path.abspath(p)
+
+def agent_id(entry: dict) -> str:
+    raw = str((entry or {}).get("id") or "").strip().lower()
+    return raw
+
+configured = False
+workspace = ""
+chosen_index = -1
+workspaces = []
+qmd_paths = []
+
 try:
-  d=json.load(open(p))
-  print(d.get('agents',{}).get('defaults',{}).get('workspace','') or '')
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        d = json.load(f)
 except Exception:
-  print('')
+    print(default_ws)
+    print("0")
+    print("-1")
+    print("[]")
+    print("[]")
+    sys.exit(0)
+
+agents = ((d.get("agents") or {}).get("list") or [])
+entries = [entry for entry in agents if isinstance(entry, dict)]
+indexed_entries = list(enumerate(entries))
+default_indexed = [pair for pair in indexed_entries if pair[1].get("default") is True]
+default_index, default_entry = default_indexed[0] if default_indexed else (indexed_entries[0] if indexed_entries else (-1, {}))
+main_indexed = [pair for pair in indexed_entries if agent_id(pair[1]) == "main"]
+chosen_index, chosen_entry = main_indexed[0] if main_indexed else (default_index, default_entry)
+
+if isinstance(chosen_entry, dict):
+    candidate = chosen_entry.get("workspace")
+    if isinstance(candidate, str) and candidate.strip():
+        workspace = candidate.strip()
+        configured = True
+
+if not workspace:
+    candidate = (((d.get("agents") or {}).get("defaults") or {}).get("workspace"))
+    if isinstance(candidate, str) and candidate.strip():
+        workspace = candidate.strip()
+        configured = True
+
+if not workspace:
+    candidate = ((d.get("agents") or {}).get("workspace"))
+    if isinstance(candidate, str) and candidate.strip():
+        workspace = candidate.strip()
+        configured = True
+
+if not workspace:
+    candidate = ((d.get("agent") or {}).get("workspace"))
+    if isinstance(candidate, str) and candidate.strip():
+        workspace = candidate.strip()
+        configured = True
+
+if not workspace:
+    candidate = d.get("workspace")
+    if isinstance(candidate, str) and candidate.strip():
+        workspace = candidate.strip()
+        configured = True
+
+if not workspace:
+    workspace = default_ws
+
+workspace = norm(workspace)
+if workspace == openclaw_dir:
+    workspace = default_ws
+    configured = False
+
+default_agent_workspace = workspace
+for entry in entries:
+    candidate = entry.get("workspace")
+    if isinstance(candidate, str) and candidate.strip():
+        resolved = norm(candidate)
+    else:
+        resolved = default_agent_workspace
+    if resolved and resolved not in workspaces:
+        workspaces.append(resolved)
+
+if workspace and workspace not in workspaces:
+    workspaces.insert(0, workspace)
+
+memory_cfg = d.get("memory") if isinstance(d.get("memory"), dict) else {}
+qmd_cfg = memory_cfg.get("qmd") if isinstance(memory_cfg.get("qmd"), dict) else {}
+raw_qmd_paths = qmd_cfg.get("paths") if isinstance(qmd_cfg.get("paths"), list) else []
+
+for raw in raw_qmd_paths:
+    if not isinstance(raw, dict):
+        continue
+    path_value = raw.get("path")
+    if not isinstance(path_value, str) or not path_value.strip():
+        continue
+    expanded = os.path.expanduser(path_value.strip())
+    resolved = os.path.abspath(expanded if os.path.isabs(expanded) else os.path.join(workspace, expanded))
+    qmd_paths.append(
+        {
+            "path": resolved,
+            "name": str(raw.get("name") or "").strip(),
+            "pattern": str(raw.get("pattern") or "").strip(),
+        }
+    )
+
+print(workspace)
+print("1" if configured else "0")
+print(str(chosen_index))
+print(json.dumps(workspaces, separators=(",", ":")))
+print(json.dumps(qmd_paths, separators=(",", ":")))
 PY
+}
+
+ensure_workspace_configured() {
+  local workspace_path="$1"
+  local configured="$2"
+  local agent_index="$3"
+  [[ "$configured" == "1" ]] && return 0
+
+  if ! has_cmd openclaw; then
+    say "WARN: openclaw CLI not found; using fallback workspace path without persisting config: $workspace_path"
+    return 0
+  fi
+
+  if [[ "$agent_index" =~ ^[0-9]+$ ]]; then
+    if openclaw config set "agents.list.${agent_index}.workspace" "$workspace_path" >/dev/null 2>&1; then
+      say "Configured OpenClaw workspace: agents.list.${agent_index}.workspace=$workspace_path"
+      return 0
+    fi
+  fi
+
+  if openclaw config set agents.defaults.workspace "$workspace_path" >/dev/null 2>&1; then
+    say "Configured OpenClaw workspace: agents.defaults.workspace=$workspace_path"
+    return 0
+  fi
+
+  if openclaw config set agent.workspace "$workspace_path" >/dev/null 2>&1; then
+    say "Configured OpenClaw workspace: agent.workspace=$workspace_path"
+  else
+    say "WARN: Failed to persist workspace in openclaw.json; continuing with $workspace_path"
+  fi
 }
 
 read_env_value() {
@@ -98,6 +367,15 @@ prompt() {
   local msg="$1"; shift
   local silent="${1:-0}"
   local val=""
+  if [ "$NON_INTERACTIVE" = true ]; then
+    val="${!var:-}"
+    if [[ -z "$val" && "$msg" == *"[default:"* ]]; then
+      val="${msg##*\[default: }"
+      val="${val%]*}"
+    fi
+    printf -v "$var" "%s" "$val"
+    return 0
+  fi
   if [[ "$silent" == "1" ]]; then
     read -r -s -p "$msg" val; echo ""
   else
@@ -108,21 +386,121 @@ prompt() {
 
 say "== Clawboard: OpenClaw curated memory backup setup =="
 
-WORKSPACE_PATH="$(workspace_from_config || true)"
-if [[ -z "$WORKSPACE_PATH" ]]; then
-  say "Could not find workspace in: $OPENCLAW_JSON"
-  prompt WORKSPACE_PATH "Enter your OpenClaw workspace path (e.g. /Users/<you>/clawd): "
+WORKSPACE_INFO="$(workspace_from_config || true)"
+WORKSPACE_PATH="$(printf "%s\n" "$WORKSPACE_INFO" | sed -n '1p')"
+WORKSPACE_CONFIGURED="$(printf "%s\n" "$WORKSPACE_INFO" | sed -n '2p')"
+WORKSPACE_AGENT_INDEX="$(printf "%s\n" "$WORKSPACE_INFO" | sed -n '3p')"
+WORKSPACE_PATHS_JSON="$(printf "%s\n" "$WORKSPACE_INFO" | sed -n '4p')"
+QMD_PATHS_JSON="$(printf "%s\n" "$WORKSPACE_INFO" | sed -n '5p')"
+
+if [[ -z "${WORKSPACE_PATH:-}" ]]; then
+  default_ws="$OPENCLAW_DIR/workspace"
+  if [[ -n "${OPENCLAW_PROFILE:-}" && "${OPENCLAW_PROFILE:-}" != "default" ]]; then
+    default_ws="$OPENCLAW_DIR/workspace-${OPENCLAW_PROFILE}"
+  fi
+  WORKSPACE_PATH="$default_ws"
+  WORKSPACE_CONFIGURED="0"
+  WORKSPACE_AGENT_INDEX="-1"
 fi
-[[ -d "$WORKSPACE_PATH" ]] || die "Workspace path does not exist: $WORKSPACE_PATH"
+
+if [[ -z "${WORKSPACE_PATHS_JSON:-}" ]]; then
+  WORKSPACE_PATHS_JSON="$(python3 - <<'PY' "$WORKSPACE_PATH"
+import json
+import sys
+print(json.dumps([sys.argv[1]], separators=(",", ":")))
+PY
+)"
+fi
+if [[ -z "${QMD_PATHS_JSON:-}" ]]; then
+  QMD_PATHS_JSON="[]"
+fi
+
+if [[ ! -d "$WORKSPACE_PATH" ]]; then
+  if [[ "$WORKSPACE_CONFIGURED" == "0" ]]; then
+    mkdir -p "$WORKSPACE_PATH"
+    say "Created fallback workspace path: $WORKSPACE_PATH"
+  else
+    die "Workspace path does not exist: $WORKSPACE_PATH"
+  fi
+fi
+
+ensure_workspace_configured "$WORKSPACE_PATH" "${WORKSPACE_CONFIGURED:-0}" "${WORKSPACE_AGENT_INDEX:--1}"
 
 mkdir -p "$CRED_DIR"
+
+# Presets for non-interactive/automated usage.
+if [ -z "$CREATE_REPO_PRESET" ]; then
+  CREATE_REPO_PRESET="${CLAWBOARD_BACKUP_CREATE_REPO:-}"
+fi
+if [ -z "$REPO_URL_PRESET" ]; then
+  REPO_URL_PRESET="${CLAWBOARD_BACKUP_REPO_URL:-}"
+fi
+if [ -z "$REPO_SSH_URL_PRESET" ]; then
+  REPO_SSH_URL_PRESET="${CLAWBOARD_BACKUP_REPO_SSH_URL:-}"
+fi
+if [ -z "$AUTH_METHOD_PRESET" ]; then
+  AUTH_METHOD_PRESET="${CLAWBOARD_BACKUP_AUTH_METHOD:-}"
+fi
+if [ -z "$DEPLOY_KEY_PATH_PRESET" ]; then
+  DEPLOY_KEY_PATH_PRESET="${CLAWBOARD_BACKUP_DEPLOY_KEY_PATH:-}"
+fi
+if [ -z "$GITHUB_USER_PRESET" ]; then
+  GITHUB_USER_PRESET="${CLAWBOARD_BACKUP_GITHUB_USER:-}"
+fi
+if [ -z "$GITHUB_PAT_PRESET" ]; then
+  GITHUB_PAT_PRESET="${CLAWBOARD_BACKUP_GITHUB_PAT:-}"
+fi
+if [ -z "$INCLUDE_OPENCLAW_CONFIG_PRESET" ]; then
+  INCLUDE_OPENCLAW_CONFIG_PRESET="${CLAWBOARD_BACKUP_INCLUDE_OPENCLAW_CONFIG:-}"
+fi
+if [ -z "$INCLUDE_OPENCLAW_SKILLS_PRESET" ]; then
+  INCLUDE_OPENCLAW_SKILLS_PRESET="${CLAWBOARD_BACKUP_INCLUDE_OPENCLAW_SKILLS:-}"
+fi
+if [ -z "$INCLUDE_CLAWBOARD_STATE_PRESET" ]; then
+  INCLUDE_CLAWBOARD_STATE_PRESET="${CLAWBOARD_BACKUP_INCLUDE_CLAWBOARD_STATE:-}"
+fi
+if [ -z "$CLAWBOARD_DIR_PRESET" ]; then
+  CLAWBOARD_DIR_PRESET="${CLAWBOARD_BACKUP_CLAWBOARD_DIR:-${CLAWBOARD_DIR:-}}"
+fi
+if [ -z "$CLAWBOARD_API_URL_PRESET" ]; then
+  CLAWBOARD_API_URL_PRESET="${CLAWBOARD_BACKUP_API_URL:-}"
+fi
+if [ -z "$INCLUDE_CLAWBOARD_ATTACHMENTS_PRESET" ]; then
+  INCLUDE_CLAWBOARD_ATTACHMENTS_PRESET="${CLAWBOARD_BACKUP_INCLUDE_ATTACHMENTS:-}"
+fi
+if [ -z "$INCLUDE_CLAWBOARD_ENV_PRESET" ]; then
+  INCLUDE_CLAWBOARD_ENV_PRESET="${CLAWBOARD_BACKUP_INCLUDE_CLAWBOARD_ENV:-}"
+fi
+if [ -z "$CLAWBOARD_BACKUP_TOKEN_PRESET" ]; then
+  CLAWBOARD_BACKUP_TOKEN_PRESET="${CLAWBOARD_BACKUP_TOKEN:-}"
+fi
+if [ -z "$BACKUP_DIR_PRESET" ]; then
+  BACKUP_DIR_PRESET="${CLAWBOARD_BACKUP_DIR:-}"
+fi
+if [ -z "$RUN_BACKUP_NOW" ]; then
+  RUN_BACKUP_NOW="${CLAWBOARD_BACKUP_RUN_NOW:-}"
+fi
+if [ -z "$INSTALL_CRON_PRESET" ]; then
+  INSTALL_CRON_PRESET="${CLAWBOARD_BACKUP_INSTALL_CRON:-}"
+fi
+
+if [ "$NON_INTERACTIVE" = true ]; then
+  [ -n "$CREATE_REPO_PRESET" ] || CREATE_REPO_PRESET="n"
+  [ -n "$INCLUDE_CLAWBOARD_STATE_PRESET" ] || INCLUDE_CLAWBOARD_STATE_PRESET="n"
+  [ -n "$RUN_BACKUP_NOW" ] || RUN_BACKUP_NOW="N"
+  [ -n "$INSTALL_CRON_PRESET" ] || INSTALL_CRON_PRESET="N"
+fi
 
 say ""
 say "Step 1: GitHub repo"
 say "We can create a *private* repo automatically if you have the GitHub CLI (gh) installed and authenticated."
 
 CREATE_REPO=""
-if has_cmd gh; then
+if [ -n "$CREATE_REPO_PRESET" ]; then
+  CREATE_REPO="$CREATE_REPO_PRESET"
+elif [ "$NON_INTERACTIVE" = true ]; then
+  CREATE_REPO="n"
+elif has_cmd gh; then
   # Check auth status quickly
   if gh auth status -h github.com >/dev/null 2>&1; then
     prompt CREATE_REPO "Create a new private repo now via gh? [y/N]: "
@@ -135,11 +513,14 @@ else
   CREATE_REPO="n"
 fi
 
-REPO_URL=""
-REPO_SSH_URL=""
+REPO_URL="$REPO_URL_PRESET"
+REPO_SSH_URL="$REPO_SSH_URL_PRESET"
 
 case "$(lc "${CREATE_REPO:-}")" in
-  y|yes)
+  y|yes|1|true)
+    if [ "$NON_INTERACTIVE" = true ]; then
+      die "Non-interactive + create-repo is not supported yet. Set CLAWBOARD_BACKUP_REPO_URL or pass --repo-url."
+    fi
     prompt REPO_OWNER "Repo owner (user or org): "
     prompt REPO_NAME "Repo name [default: openclaw-memories-backup]: "
     REPO_NAME="${REPO_NAME:-openclaw-memories-backup}"
@@ -159,8 +540,13 @@ case "$(lc "${CREATE_REPO:-}")" in
     say "  - You can leave it empty (no README needed)"
     say ""
     prompt REPO_URL "Paste the repo HTTPS URL (like https://github.com/OWNER/REPO.git): "
+    if [[ -z "$REPO_URL" && "$NON_INTERACTIVE" = true ]]; then
+      die "Non-interactive mode requires CLAWBOARD_BACKUP_REPO_URL (or --repo-url)."
+    fi
     [[ "$REPO_URL" == https://github.com/*/*.git ]] || die "Repo URL must look like: https://github.com/OWNER/REPO.git"
-    REPO_SSH_URL="${REPO_URL/https:\/\/github.com\//git@github.com:}"
+    if [[ -z "$REPO_SSH_URL" ]]; then
+      REPO_SSH_URL="${REPO_URL/https:\/\/github.com\//git@github.com:}"
+    fi
     ;;
 esac
 
@@ -169,12 +555,24 @@ say "Step 2: Auth method"
 say "Recommended: GitHub Deploy Key (SSH)."
 say " - You must enable *Allow write access* when adding the key (reminder: otherwise pushes will fail)."
 
-prompt AUTH_METHOD "Use Deploy Key (SSH) instead of PAT? [Y/n]: "
-case "$(lc "${AUTH_METHOD:-}")" in n|no) AUTH_METHOD="pat" ;; *) AUTH_METHOD="ssh" ;; esac
+AUTH_METHOD="${AUTH_METHOD_PRESET:-}"
+if [[ -z "$AUTH_METHOD" ]]; then
+  prompt AUTH_METHOD "Use Deploy Key (SSH) instead of PAT? [Y/n]: "
+fi
+case "$(lc "${AUTH_METHOD:-}")" in
+  n|no|pat) AUTH_METHOD="pat" ;;
+  y|yes|ssh|"") AUTH_METHOD="ssh" ;;
+  *)
+    if [ "$NON_INTERACTIVE" = true ]; then
+      die "Invalid auth method for non-interactive mode: $AUTH_METHOD (use ssh or pat)"
+    fi
+    AUTH_METHOD="ssh"
+    ;;
+esac
 
-GITHUB_USER=""
-GITHUB_PAT=""
-DEPLOY_KEY_PATH=""
+GITHUB_USER="$GITHUB_USER_PRESET"
+GITHUB_PAT="$GITHUB_PAT_PRESET"
+DEPLOY_KEY_PATH="$DEPLOY_KEY_PATH_PRESET"
 DEPLOY_PUB_PATH=""
 
 if [[ "$AUTH_METHOD" == "pat" ]]; then
@@ -187,6 +585,9 @@ if [[ "$AUTH_METHOD" == "pat" ]]; then
   say ""
   prompt GITHUB_USER "GitHub username (used for HTTPS auth): "
   prompt GITHUB_PAT "Paste the fine-grained PAT (input hidden): " 1
+  if [[ "$NON_INTERACTIVE" == true && ( -z "$GITHUB_USER" || -z "$GITHUB_PAT" ) ]]; then
+    die "Non-interactive pat mode requires both CLAWBOARD_BACKUP_GITHUB_USER and CLAWBOARD_BACKUP_GITHUB_PAT."
+  fi
 else
   say ""
   say "Deploy key (SSH) mode"
@@ -241,6 +642,8 @@ fi
 
 say ""
 say "Step 3: Choose what to back up (Option B buckets)."
+INCLUDE_OPENCLAW_CONFIG="$INCLUDE_OPENCLAW_CONFIG_PRESET"
+INCLUDE_OPENCLAW_SKILLS="$INCLUDE_OPENCLAW_SKILLS_PRESET"
 prompt INCLUDE_OPENCLAW_CONFIG "Include ~/.openclaw/openclaw.json* ? [Y/n]: "
 prompt INCLUDE_OPENCLAW_SKILLS "Include ~/.openclaw/skills/ ? [Y/n]: "
 
@@ -251,6 +654,7 @@ case "$(lc "${INCLUDE_OPENCLAW_SKILLS:-}")" in n|no) INCLUDE_OPENCLAW_SKILLS=fal
 say ""
 say "Step 4: Clawboard state backup"
 say "Recommended: include full Clawboard state export (config/topics/tasks/logs)."
+INCLUDE_CLAWBOARD_STATE="$INCLUDE_CLAWBOARD_STATE_PRESET"
 prompt INCLUDE_CLAWBOARD_STATE "Include Clawboard state export? [Y/n]: "
 case "$(lc "${INCLUDE_CLAWBOARD_STATE:-}")" in
   n|no)
@@ -263,6 +667,7 @@ case "$(lc "${INCLUDE_CLAWBOARD_STATE:-}")" in
     ;;
   *)
     INCLUDE_CLAWBOARD_STATE=true
+    CLAWBOARD_DIR="$CLAWBOARD_DIR_PRESET"
     DETECTED_CLAWBOARD_DIR="$(detect_clawboard_dir || true)"
     if [[ -n "$DETECTED_CLAWBOARD_DIR" ]]; then
       prompt CLAWBOARD_DIR "Clawboard install path [default: $DETECTED_CLAWBOARD_DIR]: "
@@ -280,9 +685,13 @@ case "$(lc "${INCLUDE_CLAWBOARD_STATE:-}")" in
         DEFAULT_CLAWBOARD_API_URL="http://localhost:8010"
       fi
     fi
+    CLAWBOARD_API_URL="$CLAWBOARD_API_URL_PRESET"
     prompt CLAWBOARD_API_URL "Clawboard API base URL [default: $DEFAULT_CLAWBOARD_API_URL]: "
     CLAWBOARD_API_URL="${CLAWBOARD_API_URL:-$DEFAULT_CLAWBOARD_API_URL}"
 
+    INCLUDE_CLAWBOARD_ATTACHMENTS="$INCLUDE_CLAWBOARD_ATTACHMENTS_PRESET"
+    INCLUDE_CLAWBOARD_ENV="$INCLUDE_CLAWBOARD_ENV_PRESET"
+    CLAWBOARD_BACKUP_TOKEN="$CLAWBOARD_BACKUP_TOKEN_PRESET"
     prompt INCLUDE_CLAWBOARD_ATTACHMENTS "Include Clawboard attachment files? [Y/n]: "
     prompt INCLUDE_CLAWBOARD_ENV "Include Clawboard .env (contains secrets)? [y/N]: "
     prompt CLAWBOARD_BACKUP_TOKEN "Optional Clawboard token override (hidden, blank=read CLAWBOARD_TOKEN from .env): " 1
@@ -293,6 +702,7 @@ case "$(lc "${INCLUDE_CLAWBOARD_STATE:-}")" in
 esac
 
 say ""
+BACKUP_DIR="$BACKUP_DIR_PRESET"
 prompt BACKUP_DIR "Local backup repo directory [default: $OPENCLAW_DIR/memory-backup-repo]: "
 BACKUP_DIR="${BACKUP_DIR:-$OPENCLAW_DIR/memory-backup-repo}"
 
@@ -321,6 +731,8 @@ chmod 600 "$CRED_ENV"
 cat >"$CRED_JSON" <<JSON
 {
   "workspacePath": "${WORKSPACE_PATH}",
+  "workspacePaths": ${WORKSPACE_PATHS_JSON},
+  "qmdPaths": ${QMD_PATHS_JSON},
   "backupDir": "${BACKUP_DIR}",
   "repoUrl": "${REPO_URL}",
   "repoSshUrl": "${REPO_SSH_URL}",
@@ -346,13 +758,31 @@ say "Wrote config: $CRED_JSON"
 say "Wrote env:    $CRED_ENV"
 
 say ""
-say "Running one backup now to validate..."
-"$(cd "$(dirname "$0")" && pwd)/backup_openclaw_curated_memories.sh"
+if [[ -z "$RUN_BACKUP_NOW" ]]; then
+  if [ "$NON_INTERACTIVE" = true ]; then
+    RUN_BACKUP_NOW="N"
+  else
+    RUN_BACKUP_NOW="Y"
+  fi
+fi
+case "$(lc "${RUN_BACKUP_NOW:-}")" in
+  y|yes)
+    say "Running one backup now to validate..."
+    "$(cd "$(dirname "$0")" && pwd)/backup_openclaw_curated_memories.sh"
+    ;;
+  *)
+    say "Skipping immediate backup validation run."
+    ;;
+esac
 
 say ""
 say "Optional: install an OpenClaw cron job to run every 15 minutes."
 say "If you say yes, we will create a Gateway cron job (isolated agent turn) that runs the backup script."
 
+INSTALL_CRON="$INSTALL_CRON_PRESET"
+if [[ -z "$INSTALL_CRON" && "$NON_INTERACTIVE" = true ]]; then
+  INSTALL_CRON="N"
+fi
 prompt INSTALL_CRON "Install OpenClaw cron (every 15m)? [Y/n]: "
 # default: yes
 INSTALL_CRON="${INSTALL_CRON:-Y}"
