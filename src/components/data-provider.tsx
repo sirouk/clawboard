@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Draft, LogEntry, Space, Task, Topic } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
 import { useLiveUpdates } from "@/lib/use-live-updates";
@@ -16,7 +16,19 @@ import {
   isUnreadConversationCandidate,
 } from "@/lib/attention-state";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
-import { PUSH_ENABLED_KEY, setPwaBadge, showPwaNotification } from "@/lib/pwa-utils";
+import {
+  CLAWBOARD_NOTIFICATION_CLICK_EVENT,
+  CLAWBOARD_NOTIFICATION_CLICK_MESSAGE_TYPE,
+  CLAWBOARD_NOTIFY_CHAT_PARAM,
+  CLAWBOARD_NOTIFY_TASK_PARAM,
+  CLAWBOARD_NOTIFY_TOPIC_PARAM,
+  PUSH_ENABLED_KEY,
+  closePwaNotificationsByTag,
+  parsePwaNotificationClickData,
+  setPwaBadge,
+  showPwaNotification,
+  type PwaNotificationClickData,
+} from "@/lib/pwa-utils";
 import { buildTaskUrl, buildTopicUrl } from "@/lib/url";
 
 type DataContextValue = {
@@ -25,6 +37,10 @@ type DataContextValue = {
   topicTags: string[];
   tasks: Task[];
   logs: LogEntry[];
+  unsnoozedTopicBadges: Record<string, number>;
+  unsnoozedTaskBadges: Record<string, number>;
+  chatSeenByKey: Record<string, string>;
+  unreadMessageCount: number;
   drafts: Record<string, Draft>;
   openclawTyping: Record<string, { typing: boolean; requestId?: string; updatedAt: string }>;
   hydrated: boolean;
@@ -38,6 +54,9 @@ type DataContextValue = {
   upsertTask: (task: Task) => void;
   appendLog: (log: LogEntry) => void;
   upsertDraft: (draft: Draft) => void;
+  markChatSeen: (chatKey: string, explicitSeenAt?: string) => void;
+  dismissUnsnoozedTopicBadge: (topicId: string) => void;
+  dismissUnsnoozedTaskBadge: (taskId: string) => void;
 };
 
 const DataContext = createContext<DataContextValue | null>(null);
@@ -55,6 +74,36 @@ function clipNotificationText(value: string, max = 140) {
   if (normalized.length <= max) return normalized;
   const safe = Math.max(1, max - 3);
   return `${normalized.slice(0, safe)}...`;
+}
+
+const UNSNOOZE_TOPIC_TAG_PREFIX = "clawboard-unsnooze-topic-";
+const UNSNOOZE_TASK_TAG_PREFIX = "clawboard-unsnooze-task-";
+const UNSNOOZE_TOPICS_SUMMARY_TAG = "clawboard-unsnooze-topics";
+const UNSNOOZE_TASKS_SUMMARY_TAG = "clawboard-unsnooze-tasks";
+const CHAT_TAG_PREFIX = "clawboard-chat-";
+const CHAT_SUMMARY_TAG = "clawboard-chat-summary";
+
+function unsnoozedTopicTag(topicId: string) {
+  return `${UNSNOOZE_TOPIC_TAG_PREFIX}${topicId}`;
+}
+
+function unsnoozedTaskTag(taskId: string) {
+  return `${UNSNOOZE_TASK_TAG_PREFIX}${taskId}`;
+}
+
+function chatTag(chatKey: string) {
+  return `${CHAT_TAG_PREFIX}${chatKey}`;
+}
+
+function readNotificationClickDataFromSearchParams(searchParams: URLSearchParams): PwaNotificationClickData {
+  const topicId = String(searchParams.get(CLAWBOARD_NOTIFY_TOPIC_PARAM) ?? "").trim();
+  const taskId = String(searchParams.get(CLAWBOARD_NOTIFY_TASK_PARAM) ?? "").trim();
+  const chatKey = String(searchParams.get(CLAWBOARD_NOTIFY_CHAT_PARAM) ?? "").trim();
+  const out: PwaNotificationClickData = {};
+  if (topicId) out.topicId = topicId;
+  if (taskId) out.taskId = taskId;
+  if (chatKey) out.chatKey = chatKey;
+  return out;
 }
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
@@ -115,6 +164,109 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       if (current && JSON.stringify(current) === JSON.stringify(draft)) return prev;
       return { ...prev, [key]: draft };
     });
+
+  const markChatSeen = useCallback(
+    (chatKey: string, explicitSeenAt?: string) => {
+      const key = String(chatKey ?? "").trim();
+      if (!key) return;
+
+      const candidate = String(explicitSeenAt ?? "").trim();
+      const candidateMs = Date.parse(candidate);
+      const previousSeenAt = chatSeenByKey[key] ?? "";
+      const hasExplicitSeenAt = candidate.length > 0 && Number.isFinite(candidateMs);
+
+      // For implicit "mark seen now" calls, avoid rewriting the timestamp once a chat
+      // already has a seen marker. Rewriting on every render can create update loops.
+      if (!hasExplicitSeenAt && previousSeenAt) return;
+
+      const seenAt = hasExplicitSeenAt ? candidate : new Date().toISOString();
+      if (previousSeenAt && previousSeenAt >= seenAt) return;
+
+      setLocalStorageItem(CHAT_SEEN_AT_KEY, JSON.stringify({ ...chatSeenByKey, [key]: seenAt }));
+      void closePwaNotificationsByTag([chatTag(key)]);
+    },
+    [chatSeenByKey]
+  );
+
+  const dismissUnsnoozedTopicBadge = useCallback(
+    (topicId: string) => {
+      const id = String(topicId || "").trim();
+      if (!id) return;
+      const updated: Record<string, number> = { ...unsnoozedTopicBadges };
+      if (!Object.prototype.hasOwnProperty.call(updated, id)) return;
+      delete updated[id];
+      setLocalStorageItem(UNSNOOZED_TOPICS_KEY, JSON.stringify(updated));
+
+      const tags = [unsnoozedTopicTag(id)];
+      if (Object.keys(updated).length === 0) tags.push(UNSNOOZE_TOPICS_SUMMARY_TAG);
+      void closePwaNotificationsByTag(tags);
+    },
+    [unsnoozedTopicBadges]
+  );
+
+  const dismissUnsnoozedTaskBadge = useCallback(
+    (taskId: string) => {
+      const id = String(taskId || "").trim();
+      if (!id) return;
+      const updated: Record<string, number> = { ...unsnoozedTaskBadges };
+      if (!Object.prototype.hasOwnProperty.call(updated, id)) return;
+      delete updated[id];
+      setLocalStorageItem(UNSNOOZED_TASKS_KEY, JSON.stringify(updated));
+
+      const tags = [unsnoozedTaskTag(id)];
+      if (Object.keys(updated).length === 0) tags.push(UNSNOOZE_TASKS_SUMMARY_TAG);
+      void closePwaNotificationsByTag(tags);
+    },
+    [unsnoozedTaskBadges]
+  );
+
+  const handleNotificationClickData = useCallback(
+    (rawData: unknown) => {
+      const data = parsePwaNotificationClickData(rawData);
+      if (data.topicId) dismissUnsnoozedTopicBadge(data.topicId);
+      if (data.taskId) dismissUnsnoozedTaskBadge(data.taskId);
+      if (data.chatKey) markChatSeen(data.chatKey);
+    },
+    [dismissUnsnoozedTaskBadge, dismissUnsnoozedTopicBadge, markChatSeen]
+  );
+
+  useEffect(() => {
+    const handleNotificationClick = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      handleNotificationClickData(customEvent.detail);
+    };
+
+    const handleServiceWorkerMessage = (event: MessageEvent) => {
+      const payload = event.data;
+      if (!payload || typeof payload !== "object") return;
+      const value = payload as { type?: unknown; data?: unknown };
+      const type = String(value.type ?? "").trim();
+      if (type !== CLAWBOARD_NOTIFICATION_CLICK_MESSAGE_TYPE) return;
+      handleNotificationClickData(value.data);
+    };
+
+    window.addEventListener(CLAWBOARD_NOTIFICATION_CLICK_EVENT, handleNotificationClick);
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.addEventListener("message", handleServiceWorkerMessage);
+    }
+
+    const currentUrl = new URL(window.location.href);
+    const fromUrl = readNotificationClickDataFromSearchParams(currentUrl.searchParams);
+    if (fromUrl.topicId || fromUrl.taskId || fromUrl.chatKey) {
+      handleNotificationClickData(fromUrl);
+      currentUrl.searchParams.delete(CLAWBOARD_NOTIFY_TOPIC_PARAM);
+      currentUrl.searchParams.delete(CLAWBOARD_NOTIFY_TASK_PARAM);
+      currentUrl.searchParams.delete(CLAWBOARD_NOTIFY_CHAT_PARAM);
+      window.history.replaceState(window.history.state, "", `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
+    }
+
+    return () => {
+      window.removeEventListener(CLAWBOARD_NOTIFICATION_CLICK_EVENT, handleNotificationClick);
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.removeEventListener("message", handleServiceWorkerMessage);
+      }
+    };
+  }, [handleNotificationClickData]);
 
   const reconcile = async (since?: string) => {
     const url = since ? `/api/changes?since=${encodeURIComponent(since)}` : "/api/changes";
@@ -270,6 +422,21 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   }, [pwaAttentionCount]);
 
   useEffect(() => {
+    if (Object.keys(unsnoozedTopicBadges).length > 0) return;
+    void closePwaNotificationsByTag([UNSNOOZE_TOPICS_SUMMARY_TAG]);
+  }, [unsnoozedTopicBadges]);
+
+  useEffect(() => {
+    if (Object.keys(unsnoozedTaskBadges).length > 0) return;
+    void closePwaNotificationsByTag([UNSNOOZE_TASKS_SUMMARY_TAG]);
+  }, [unsnoozedTaskBadges]);
+
+  useEffect(() => {
+    if (unreadMessageCount > 0) return;
+    void closePwaNotificationsByTag([CHAT_SUMMARY_TAG]);
+  }, [unreadMessageCount]);
+
+  useEffect(() => {
     const previous = prevTopicStatusRef.current;
     const next = new Map<string, { status: string; snoozedUntil: string | null }>();
     const additions: Topic[] = [];
@@ -312,8 +479,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         {
           title: `Topic unsnoozed: ${topic.name}`,
           body: "Activity resumed.",
-          tag: `clawboard-unsnooze-topic-${topic.id}`,
+          tag: unsnoozedTopicTag(topic.id),
           url,
+          data: { topicId: topic.id },
         },
         notificationsEnabled
       );
@@ -324,7 +492,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       {
         title: "Clawboard",
         body: `${additions.length} topics unsnoozed.`,
-        tag: "clawboard-unsnooze-topics",
+        tag: UNSNOOZE_TOPICS_SUMMARY_TAG,
         url: "/u",
       },
       notificationsEnabled
@@ -370,8 +538,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         {
           title: `Task unsnoozed: ${task.title}`,
           body: "Activity resumed.",
-          tag: `clawboard-unsnooze-task-${task.id}`,
+          tag: unsnoozedTaskTag(task.id),
           url,
+          data: { taskId: task.id },
         },
         notificationsEnabled
       );
@@ -382,7 +551,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       {
         title: "Clawboard",
         body: `${additions.length} tasks unsnoozed.`,
-        tag: "clawboard-unsnooze-tasks",
+        tag: UNSNOOZE_TASKS_SUMMARY_TAG,
         url: "/u",
       },
       notificationsEnabled
@@ -433,8 +602,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
             {
               title: `Task Chat: ${task.title}`,
               body,
-              tag: `clawboard-chat-${chatKey}`,
+              tag: chatTag(chatKey),
               url,
+              data: { chatKey },
             },
             notificationsEnabled
           );
@@ -449,8 +619,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
             {
               title: `Topic Chat: ${topic.name}`,
               body,
-              tag: `clawboard-chat-${chatKey}`,
+              tag: chatTag(chatKey),
               url,
+              data: { chatKey },
             },
             notificationsEnabled
           );
@@ -468,7 +639,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       {
         title: "Clawboard",
         body: `${unseenAdditions.length} unread messages in ${chatKeys.size} chats.`,
-        tag: "clawboard-chat-summary",
+        tag: CHAT_SUMMARY_TAG,
         url: "/u",
       },
       notificationsEnabled
@@ -494,6 +665,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       topicTags,
       tasks,
       logs,
+      unsnoozedTopicBadges,
+      unsnoozedTaskBadges,
+      chatSeenByKey,
+      unreadMessageCount,
       drafts,
       openclawTyping,
       hydrated,
@@ -507,8 +682,27 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       upsertTask,
       appendLog,
       upsertDraft,
+      markChatSeen,
+      dismissUnsnoozedTopicBadge,
+      dismissUnsnoozedTaskBadge,
     }),
-    [spaces, topics, topicTags, tasks, logs, drafts, openclawTyping, hydrated]
+    [
+      spaces,
+      topics,
+      topicTags,
+      tasks,
+      logs,
+      unsnoozedTopicBadges,
+      unsnoozedTaskBadges,
+      chatSeenByKey,
+      unreadMessageCount,
+      drafts,
+      openclawTyping,
+      hydrated,
+      markChatSeen,
+      dismissUnsnoozedTopicBadge,
+      dismissUnsnoozedTaskBadge,
+    ]
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

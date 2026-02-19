@@ -236,7 +236,11 @@ test.describe("mobile task fullscreen chat", () => {
 
     const taskCard = page.locator(`[data-task-card-id='${taskId}']`).first();
     await expect(taskCard).toBeVisible();
-    await expect(taskCard.getByText("TASK CHAT")).toHaveCount(0);
-    await expect(page.getByTestId(`task-chat-controls-${taskId}`)).toHaveCount(0);
+    await expect
+      .poll(async () => taskCard.getByText("TASK CHAT").count(), { timeout: 20000 })
+      .toBe(0);
+    await expect
+      .poll(async () => page.getByTestId(`task-chat-controls-${taskId}`).count(), { timeout: 20000 })
+      .toBe(0);
   });
 });

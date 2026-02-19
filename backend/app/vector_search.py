@@ -35,6 +35,8 @@ QDRANT_COLLECTION = os.getenv(
 QDRANT_DIM = int(os.getenv("CLAWBOARD_QDRANT_DIM", os.getenv("QDRANT_DIM", "384")))
 QDRANT_TIMEOUT = float(os.getenv("CLAWBOARD_QDRANT_TIMEOUT", "2.6"))
 QDRANT_API_KEY = os.getenv("CLAWBOARD_QDRANT_API_KEY") or os.getenv("QDRANT_API_KEY")
+QDRANT_SEED_RETRY_BASE_SECONDS = float(os.getenv("CLAWBOARD_QDRANT_SEED_RETRY_BASE_SECONDS", "45"))
+QDRANT_SEED_RETRY_MAX_SECONDS = float(os.getenv("CLAWBOARD_QDRANT_SEED_RETRY_MAX_SECONDS", "900"))
 
 RRF_K = int(os.getenv("CLAWBOARD_RRF_K", "60"))
 RERANK_TOP_N = int(os.getenv("CLAWBOARD_RERANK_TOP_N", "64"))
@@ -66,6 +68,7 @@ _MODEL_LOCK = threading.Lock()
 _MODEL_LOADING = False
 _MODEL_LAST_FAILURE_AT = 0.0
 _QDRANT_COLLECTION_READY = False
+_QDRANT_SEED_RETRY_STATE: dict[str, float] = {}
 _EMBED_QUERY_CACHE_LOCK = threading.Lock()
 _EMBED_QUERY_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
 _EMBED_TEXT_CACHE_LOCK = threading.Lock()
@@ -733,17 +736,52 @@ def _qdrant_topk(
     return dict(ranked[:limit])
 
 
+def _qdrant_seed_retry_hook(
+    *,
+    kind_exact: str | None = None,
+    kind_prefix: str | None = None,
+    limit: int = 240,
+) -> bool:
+    # Optional hook for custom self-healing flows when Qdrant returns empty results.
+    # Default behavior is a no-op.
+    _ = (kind_exact, kind_prefix, limit)
+    return False
+
+
+def _qdrant_seed_retry_key(*, kind_exact: str | None, kind_prefix: str | None) -> str:
+    return f"{kind_exact or ''}|{kind_prefix or ''}"
+
+
 def _vector_topk(query_vec, *, kind_exact: str | None = None, kind_prefix: str | None = None, limit: int = 120) -> tuple[dict[str, float], str]:
     if query_vec is None:
         return {}, "none"
-    if VECTOR_REQUIRE_QDRANT and not QDRANT_URL:
-        return {}, "qdrant-required"
-    if QDRANT_URL:
-        qdrant_scores = _qdrant_topk(query_vec, kind_exact=kind_exact, kind_prefix=kind_prefix, limit=limit)
-        if qdrant_scores:
-            return qdrant_scores, "qdrant"
+    if not QDRANT_URL:
         if VECTOR_REQUIRE_QDRANT:
             return {}, "qdrant-required"
+        return {}, "none"
+    qdrant_scores = _qdrant_topk(query_vec, kind_exact=kind_exact, kind_prefix=kind_prefix, limit=limit)
+    if qdrant_scores:
+        return qdrant_scores, "qdrant"
+    retry_key = _qdrant_seed_retry_key(kind_exact=kind_exact, kind_prefix=kind_prefix)
+    now = float(time.time())
+    next_allowed = float(_QDRANT_SEED_RETRY_STATE.get(retry_key, 0.0) or 0.0)
+    if now >= next_allowed:
+        seed_limit = max(int(limit) * 4, 240)
+        try:
+            seeded = bool(_qdrant_seed_retry_hook(kind_exact=kind_exact, kind_prefix=kind_prefix, limit=seed_limit))
+        except Exception:
+            seeded = False
+        backoff = max(1.0, float(QDRANT_SEED_RETRY_BASE_SECONDS or 1.0))
+        max_backoff = max(1.0, float(QDRANT_SEED_RETRY_MAX_SECONDS or backoff))
+        backoff = min(backoff, max_backoff)
+        _QDRANT_SEED_RETRY_STATE[retry_key] = now + backoff
+        if seeded:
+            retried_scores = _qdrant_topk(query_vec, kind_exact=kind_exact, kind_prefix=kind_prefix, limit=limit)
+            if retried_scores:
+                _QDRANT_SEED_RETRY_STATE.pop(retry_key, None)
+                return retried_scores, "qdrant"
+    if VECTOR_REQUIRE_QDRANT:
+        return {}, "qdrant-required"
     return {}, "none"
 
 
@@ -1132,8 +1170,6 @@ def semantic_search(
     if query_vec is not None and dense_backends:
         if any(backend == "qdrant" for backend in dense_backends):
             mode_parts.insert(0, "qdrant")
-        elif any(backend == "sqlite" for backend in dense_backends):
-            mode_parts.insert(0, "sqlite-vector")
 
     return {
         "query": q,

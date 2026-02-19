@@ -24,6 +24,12 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: __dirname
   },
+  // Keep more routes hot in dev so switching between Board/Graph/Logs/Settings
+  // does not repeatedly evict and recompile page bundles.
+  onDemandEntries: {
+    maxInactiveAge: 15 * 60 * 1000,
+    pagesBufferLength: 32,
+  },
   // Needed for Next dev server access via Tailscale / LAN hostnames.
   // Next expects *hostnames* (not full origins) that may hit the dev server.
   allowedDevOrigins: Array.from(

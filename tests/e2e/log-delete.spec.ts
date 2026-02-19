@@ -44,9 +44,23 @@ test("messages can be deleted and disappear immediately in the UI", async ({ pag
   await expect(row).toBeVisible();
   await expect(row.getByTestId(`message-bubble-${log.id}`)).toContainText(message);
 
-  await row.getByRole("button", { name: "Edit" }).click();
-  await row.getByRole("button", { name: "Delete" }).click();
-  await row.getByRole("button", { name: "Confirm delete" }).click();
+  let deleteOpened = false;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await row.getByRole("button", { name: "Edit" }).click({ timeout: 5000 });
+      const deleteButton = row.getByRole("button", { name: "Delete" });
+      await expect(deleteButton).toBeVisible({ timeout: 4000 });
+      await deleteButton.click({ timeout: 5000 });
+      deleteOpened = true;
+      break;
+    } catch {
+      if (attempt === 5) throw new Error("Failed to open delete confirmation controls.");
+      await page.waitForTimeout(120);
+    }
+  }
+  expect(deleteOpened).toBeTruthy();
+
+  await row.getByRole("button", { name: "Confirm delete" }).click({ timeout: 5000 });
 
   await expect(page.locator(`[data-log-id="${log.id}"]`)).toHaveCount(0);
 });

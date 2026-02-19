@@ -412,8 +412,7 @@ class VectorSearchHybridTests(unittest.TestCase):
     def test_vector_topk_retries_qdrant_seed_after_backoff(self):
         original_qdrant_url = vs.QDRANT_URL
         original_qdrant_topk = vs._qdrant_topk
-        original_seed = vs._qdrant_seed_from_sqlite
-        original_sqlite_topk = vs._sqlite_topk
+        original_seed = vs._qdrant_seed_retry_hook
         original_time = vs.time.time
         original_retry_state = dict(vs._QDRANT_SEED_RETRY_STATE)
         original_base = vs.QDRANT_SEED_RETRY_BASE_SECONDS
@@ -427,8 +426,7 @@ class VectorSearchHybridTests(unittest.TestCase):
         vs.QDRANT_SEED_RETRY_MAX_SECONDS = 300.0
         vs._QDRANT_SEED_RETRY_STATE.clear()
         vs._qdrant_topk = lambda *_args, **_kwargs: {}
-        vs._qdrant_seed_from_sqlite = lambda **_kwargs: (seed_calls.append(1) or False)
-        vs._sqlite_topk = lambda *_args, **_kwargs: {"doc-a": 0.42}
+        vs._qdrant_seed_retry_hook = lambda **_kwargs: (seed_calls.append(1) or False)
         vs.time.time = lambda: next(times)
 
         try:
@@ -438,20 +436,20 @@ class VectorSearchHybridTests(unittest.TestCase):
         finally:
             vs.QDRANT_URL = original_qdrant_url
             vs._qdrant_topk = original_qdrant_topk
-            vs._qdrant_seed_from_sqlite = original_seed
-            vs._sqlite_topk = original_sqlite_topk
+            vs._qdrant_seed_retry_hook = original_seed
             vs.time.time = original_time
             vs._QDRANT_SEED_RETRY_STATE.clear()
             vs._QDRANT_SEED_RETRY_STATE.update(original_retry_state)
             vs.QDRANT_SEED_RETRY_BASE_SECONDS = original_base
             vs.QDRANT_SEED_RETRY_MAX_SECONDS = original_max
 
-        self.assertEqual(first_backend, "sqlite")
-        self.assertEqual(second_backend, "sqlite")
-        self.assertEqual(third_backend, "sqlite")
-        self.assertEqual(first_scores.get("doc-a"), 0.42)
-        self.assertEqual(second_scores.get("doc-a"), 0.42)
-        self.assertEqual(third_scores.get("doc-a"), 0.42)
+        expected_backend = "qdrant-required" if vs.VECTOR_REQUIRE_QDRANT else "none"
+        self.assertEqual(first_backend, expected_backend)
+        self.assertEqual(second_backend, expected_backend)
+        self.assertEqual(third_backend, expected_backend)
+        self.assertEqual(first_scores, {})
+        self.assertEqual(second_scores, {})
+        self.assertEqual(third_scores, {})
         # First and third calls trigger seeding; second call is within backoff and skips it.
         self.assertEqual(len(seed_calls), 2)
 

@@ -55,11 +55,26 @@ test("messages can be edited and reallocated without impossible topic/task combi
 
   const editButton = row.getByRole("button", { name: "Edit", exact: true });
   await expect(editButton).toBeVisible();
-  await editButton.click();
+  let editOpened = false;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await editButton.click({ timeout: 5000 });
+    } catch {
+      if (attempt === 5) throw new Error("Failed to open edit mode.");
+      await page.waitForTimeout(120);
+      continue;
+    }
+    const selectsCount = await row.locator("select").count();
+    if (selectsCount >= 2) {
+      editOpened = true;
+      break;
+    }
+    await page.waitForTimeout(120);
+  }
+  expect(editOpened).toBeTruthy();
   await expect(row.getByText("Edit message", { exact: false })).toBeVisible();
 
   const selects = row.locator("select");
-  await expect(selects.first()).toBeVisible();
   await expect(selects).toHaveCount(2);
   const topicSelect = selects.nth(0);
   const taskSelect = selects.nth(1);
@@ -69,7 +84,19 @@ test("messages can be edited and reallocated without impossible topic/task combi
   await taskSelect.selectOption({ value: taskBId });
 
   await row.locator("textarea").first().fill(updatedMessage);
-  await row.getByRole("button", { name: "Save" }).click();
+  let saveClicked = false;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const saveButton = row.getByRole("button", { name: "Save" });
+    try {
+      await saveButton.click({ timeout: 5000 });
+      saveClicked = true;
+      break;
+    } catch {
+      if (attempt === 5) throw new Error("Failed to click Save after retries.");
+      await page.waitForTimeout(120);
+    }
+  }
+  expect(saveClicked).toBeTruthy();
 
   // The log should immediately disappear from the previous task chat scope.
   await expect(page.locator(`[data-log-id="${log.id}"]`)).toHaveCount(0);

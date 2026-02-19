@@ -9,7 +9,7 @@ from typing import Dict, List
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLASSIFICATION = ROOT / "CLASSIFICATION.md"
-DEFAULT_OUT = ROOT / "CLASSIFICATION_TRACE_MATRIX.md"
+DEFAULT_OUT = ROOT / "reports" / "classification_trace_matrix.md"
 
 SCENARIO_ID_RE = re.compile(r"^[A-Z]+-\d{3}$")
 FILE_PATH_RE = re.compile(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.(?:py|tsx|ts|js|md)")
@@ -189,6 +189,7 @@ def main() -> int:
         raise RuntimeError(f"Expected 77 scenario IDs in section 14, found {len(rows)}")
 
     out = _render_markdown(rows)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(out, encoding="utf-8")
 
     traced = sum(1 for row in rows if row.traced)

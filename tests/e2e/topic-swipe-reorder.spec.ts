@@ -20,15 +20,18 @@ test("topic swipe actions (snooze/archive/delete) and reorder work in unified vi
   await expect(cardB).toBeVisible();
 
   const swipeLeft = async (selector: string) => {
-    const target = page.locator(selector).first();
-    await target.scrollIntoViewIfNeeded();
-    await expect(target).toBeVisible();
-    let box = await target.boundingBox();
-    if (!box) {
-      for (let i = 0; i < 5 && !box; i += 1) {
-        await page.waitForTimeout(80);
+    let box: { x: number; y: number; width: number; height: number } | null = null;
+    for (let i = 0; i < 8; i += 1) {
+      const target = page.locator(selector).first();
+      try {
+        await target.waitFor({ state: "visible", timeout: 1200 });
+        await target.scrollIntoViewIfNeeded();
         box = await target.boundingBox();
+        if (box) break;
+      } catch {
+        // Topic rows can remount while filters/sse updates apply; retry against fresh locator.
       }
+      await page.waitForTimeout(80);
     }
     expect(box).toBeTruthy();
     if (!box) return;

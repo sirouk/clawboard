@@ -558,6 +558,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const toggleCollapsed = () => {
     setLocalStorageItem("clawboard.navCollapsed", collapsed ? "false" : "true");
   };
+  const navToggleLabel = collapsed ? "Expand navigation" : "Collapse navigation";
 
   const toggleCompactHeader = () => {
     setLocalStorageItem(HEADER_COMPACT_KEY, compactHeader ? "false" : "true");
@@ -1046,27 +1047,28 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="claw-ambient min-h-screen">
         <div className="flex min-h-screen flex-col lg:flex-row">
-			          <aside
+	                  <aside
                     data-claw-shell-nav="1"
-			            className={cn(
-			              "relative z-[80] border-b border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] px-3 py-2.5 lg:z-auto lg:min-h-screen lg:h-screen lg:border-b-0 lg:border-r lg:px-4 lg:py-6 transition-all lg:sticky lg:top-0 lg:self-start lg:flex lg:flex-col lg:overflow-hidden",
-			              collapsed ? "lg:w-20" : "lg:w-64"
-			            )}
-			          >
+				            className={cn(
+				              "relative z-[80] border-b border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] px-3 py-2.5 lg:z-auto lg:min-h-screen lg:h-screen lg:border-b-0 lg:border-r lg:px-4 lg:py-6 transition-all lg:sticky lg:top-0 lg:self-start lg:flex lg:flex-col lg:overflow-visible",
+				              collapsed ? "lg:w-20" : "lg:w-64"
+				            )}
+				          >
 		            <div className="min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
 		              <div className="flex items-center justify-between gap-2.5 lg:block">
 		                <div className="flex min-w-0 items-center gap-2.5 lg:mx-auto lg:w-fit lg:justify-center">
 		                  <Link href={boardNavHref} className="flex items-center justify-center">
-			                    <div className={cn("relative transition-all", collapsed ? "h-8 w-8" : "h-8 w-8 lg:h-12 lg:w-12")}>
-			                      <Image
-			                        src="/clawboard-mark.png"
-			                        alt="Clawboard"
-		                        width={iconSize}
-		                        height={iconSize}
-		                        priority
-		                        className="h-full w-full object-contain"
-		                      />
-		                    </div>
+				                    <div className={cn("relative transition-all", collapsed ? "h-8 w-8" : "h-8 w-8 lg:h-12 lg:w-12")}>
+				                      <Image
+				                        src="/clawboard-mark.png"
+				                        alt="Clawboard"
+			                        width={iconSize}
+			                        height={iconSize}
+			                        priority
+                                  unoptimized
+			                        className="h-full w-full object-contain"
+			                      />
+			                    </div>
 		                  </Link>
 				                  <div className="min-w-0 lg:hidden">
 				                    <div className="truncate text-xs font-semibold text-[rgb(var(--claw-text))]">{pageHeader.title}</div>
@@ -1465,32 +1467,47 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                      )}
 	                    </div>
 	                  );
-	                })}
-	              </nav>
-            </div>
-            <div className="mt-auto hidden lg:block space-y-4">
+		                })}
+		              </nav>
+	            </div>
               <button
-                className={cn(
-                  "flex items-center justify-center rounded-full border border-[rgb(var(--claw-border))] px-3 py-2 text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))] transition hover:text-[rgb(var(--claw-text))]",
-                  collapsed ? "h-10 w-10" : "w-full"
-                )}
+                type="button"
                 onClick={toggleCollapsed}
-                aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+                aria-label={navToggleLabel}
+                title={navToggleLabel}
+                aria-controls="clawboard-shell-content"
+                aria-expanded={!collapsed}
+                className={cn(
+                  "absolute right-0 top-1/2 z-[90] hidden h-11 w-5 -translate-y-1/2 translate-x-1/2 items-center justify-center rounded-full border border-[rgba(148,163,184,0.3)] bg-[rgba(10,12,16,0.68)] text-[rgb(var(--claw-muted))] shadow-[0_8px_24px_rgba(0,0,0,0.45)] backdrop-blur transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(255,90,45,0.32)] lg:flex",
+                  "opacity-55 hover:opacity-100 hover:text-[rgb(var(--claw-text))]"
+                )}
               >
-                {collapsed ? "›" : "‹"}
+                <svg
+                  viewBox="0 0 20 20"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                  className="h-3.5 w-3.5"
+                >
+                  <path d={collapsed ? "M8 5l5 5-5 5" : "M12 5l-5 5 5 5"} />
+                </svg>
               </button>
-              <a
-                href={docsHref}
-                target="_blank"
-                rel="noreferrer"
-                className="block text-center text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))] transition hover:text-[rgb(var(--claw-text))]"
-              >
-                API
-              </a>
-            </div>
-          </aside>
+	            <div className="mt-auto hidden lg:block">
+	              <a
+	                href={docsHref}
+	                target="_blank"
+	                rel="noreferrer"
+	                className="block text-center text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))] transition hover:text-[rgb(var(--claw-text))]"
+	              >
+	                API
+	              </a>
+	            </div>
+	          </aside>
 
-          <div className="flex-1">
+	          <div id="clawboard-shell-content" className="flex-1">
             <header
               ref={headerRef}
               className={cn(

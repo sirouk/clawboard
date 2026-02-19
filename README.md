@@ -223,7 +223,7 @@ This check blocks common leaks in tracked files:
 - Operator runbook: `design/operator-runbook.md`
 - Visual system spec: `design/visual-end-state-spec.md`
 - Testing guide: `TESTING.md`
-- Context details: `CONTEXT.md` and `CONTEXT_SPEC.md`
+- Context details: `CONTEXT.md`
 
 ## Thanks
 

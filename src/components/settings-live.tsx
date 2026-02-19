@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, CardHeader, Input, Select, Switch } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { useDataStore } from "@/components/data-provider";
 import { apiFetch, getApiBase, setApiBase } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { getSpaceDefaultVisibility } from "@/lib/space-visibility";
-import { usePwaNotifications, usePwaBadging } from "@/lib/pwa-utils";
+import { setPwaBadge, showPwaNotification, usePwaNotifications, usePwaBadging } from "@/lib/pwa-utils";
 import type { IntegrationLevel, Space, Topic } from "@/lib/types";
+
+const TEST_PWA_DELAY_MS = 3000;
 
 function deriveSpaceName(spaceId: string) {
   const normalized = String(spaceId || "").trim();
@@ -168,6 +170,9 @@ export function SettingsLive() {
   const [cleanupSpaceId, setCleanupSpaceId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [testPwaPending, setTestPwaPending] = useState(false);
+  const [testPwaStatus, setTestPwaStatus] = useState<string | null>(null);
+  const testPwaTimerRef = useRef<number | null>(null);
 
   useEffect(() => setLocalTitle(instanceTitle), [instanceTitle]);
   useEffect(() => setLocalIntegration(integrationLevel), [integrationLevel]);
@@ -215,6 +220,13 @@ export function SettingsLive() {
     if (cleanupArmedSpaceId === sourceSpaceId) return;
     setCleanupArmedSpaceId(null);
   }, [cleanupArmedSpaceId, sourceSpaceId]);
+  useEffect(() => {
+    return () => {
+      if (testPwaTimerRef.current === null) return;
+      window.clearTimeout(testPwaTimerRef.current);
+      testPwaTimerRef.current = null;
+    };
+  }, []);
 
   const sourceSpace = useMemo(
     () => spaces.find((space) => space.id === sourceSpaceId) ?? null,
@@ -454,6 +466,46 @@ export function SettingsLive() {
     }
   };
 
+  const queueTestPwaNotification = () => {
+    if (testPwaPending) return;
+    if (testPwaTimerRef.current !== null) {
+      window.clearTimeout(testPwaTimerRef.current);
+      testPwaTimerRef.current = null;
+    }
+
+    setTestPwaStatus(`Scheduled. Sending in ${Math.floor(TEST_PWA_DELAY_MS / 1000)} seconds...`);
+    setTestPwaPending(true);
+
+    testPwaTimerRef.current = window.setTimeout(() => {
+      testPwaTimerRef.current = null;
+      void (async () => {
+        try {
+          await setPwaBadge(1);
+          const sent = await showPwaNotification(
+            {
+              title: "Clawboard test ping",
+              body: "This is your delayed test notification + badge.",
+              tag: "clawboard-test-pwa",
+              data: { url: "/settings" },
+            },
+            pushEnabled
+          );
+          if (!sent) {
+            setTestPwaStatus("Could not send notification. Make sure push is allowed and granted.");
+            return;
+          }
+          setTestPwaStatus("Test notification sent. Badge set to 1.");
+        } catch {
+          setTestPwaStatus("Failed to send test notification.");
+        } finally {
+          setTestPwaPending(false);
+        }
+      })();
+    }, TEST_PWA_DELAY_MS);
+  };
+
+  const testPwaDisabled = testPwaPending || !pushSupported || pushPermission !== "granted" || !pushEnabled;
+
   return (
     <div className="space-y-4">
       <Card>
@@ -578,12 +630,12 @@ export function SettingsLive() {
           </div>
         </div>
 
-        <div className="grid grid-cols-2">
+        <div className="grid min-h-[22rem] grid-cols-2">
           <div className="min-w-0 border-r border-[rgb(var(--claw-border))]">
             <div className="border-b border-[rgb(var(--claw-border))] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))] sm:px-4">
               Space
             </div>
-            <div className="max-h-[56vh] overflow-y-auto overflow-x-hidden p-3 sm:p-3.5">
+            <div className="min-h-[20rem] max-h-[56vh] overflow-y-auto overflow-x-hidden p-3 sm:p-3.5">
               {spaces.length === 0 ? (
                 <p className="rounded-[var(--radius-sm)] border border-[rgb(var(--claw-border))] px-3 py-3 text-xs text-[rgb(var(--claw-muted))]">
                   Create a tagged topic to configure space visibility.
@@ -630,7 +682,7 @@ export function SettingsLive() {
             <div className="border-b border-[rgb(var(--claw-border))] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))] sm:px-4">
               Spaces visible from {sourceSpace?.name ?? "selected space"}
             </div>
-            <div className="max-h-[56vh] overflow-y-auto overflow-x-hidden p-3 sm:p-3.5">
+            <div className="min-h-[20rem] max-h-[56vh] overflow-y-auto overflow-x-hidden p-3 sm:p-3.5">
               {targets.length === 0 ? (
                 <p className="rounded-[var(--radius-sm)] border border-[rgb(var(--claw-border))] px-3 py-3 text-xs text-[rgb(var(--claw-muted))]">
                   Create another tagged topic to configure cross-space visibility.
@@ -767,6 +819,26 @@ export function SettingsLive() {
               <Badge tone={badgeSupported ? "success" : "warning"}>
                 {badgeSupported ? "Supported" : "Not Supported"}
               </Badge>
+            </div>
+          </div>
+
+          <div className="border-t border-[rgb(var(--claw-border))] pt-6">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex-1">
+                <h3 className="text-sm font-semibold">Test Notification + Badge</h3>
+                <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
+                  Click once to send a test notification and badge after 3 seconds.
+                  Native badge API is preferred; unsupported clients fall back to title count.
+                </p>
+                {testPwaStatus ? (
+                  <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">{testPwaStatus}</p>
+                ) : null}
+              </div>
+              <div className="flex flex-none items-center">
+                <Button size="sm" disabled={testPwaDisabled} onClick={queueTestPwaNotification}>
+                  {testPwaPending ? "Queued..." : "Send test in 3s"}
+                </Button>
+              </div>
             </div>
           </div>
         </div>

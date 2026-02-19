@@ -57,10 +57,9 @@ Primary source files:
 Related specs:
 - `README.md`
 - `CONTEXT.md`
-- `CONTEXT_SPEC.md`
+- `CONTEXT.md` (Context Contract Spec section)
 - `CLASSIFICATION.md`
-- `CLASSIFICATION_TEST_MATRIX.md`
-- `CLASSIFICATION_TRACE_MATRIX.md`
+- `CLASSIFICATION.md` (sections 16-17: coverage/trace matrices)
 - `OPENCLAW_CLAWBOARD_UML.md`
 - `TESTING.md`
 - `SEED.md`
@@ -517,8 +516,8 @@ High-level test suites:
 - e2e Playwright: `tests/e2e/*`
 
 Classification and routing traceability:
-- `CLASSIFICATION_TEST_MATRIX.md`: scenario-level behavioral assertions (`77/77 covered`).
-- `CLASSIFICATION_TRACE_MATRIX.md`: implementation-path trace coverage (`77/77 traced`).
+- `CLASSIFICATION.md` section 16: scenario-level behavioral assertions (`77/77 covered`).
+- `CLASSIFICATION.md` section 17: implementation-path trace coverage (`77/77 traced`).
 
 Core commands:
 - `npm run test:backend`
@@ -543,7 +542,7 @@ Non-goals:
 
 If you are new and want maximum signal fast:
 1. `README.md`
-2. `CONTEXT_SPEC.md`
+2. `CONTEXT.md`
 3. `CLASSIFICATION.md`
 4. `backend/app/main.py`
 5. `classifier/classifier.py`
@@ -604,10 +603,10 @@ If you are debugging a live issue:
 |---|---|---|
 | `README.md` | product purpose, architecture, operator entry points | `backend/app/main.py`, `src/components/*`, `extensions/clawboard-logger/index.ts` |
 | `CONTEXT.md` | context bridge and injection behavior | `backend/app/main.py::context`, `extensions/clawboard-logger/index.ts` |
-| `CONTEXT_SPEC.md` | formal two-layer context contract and invariants | `/api/context`, `_search_impl`, `backend/tests/test_context_endpoint.py` |
+| `CONTEXT.md` (Context Contract Spec section) | formal two-layer context contract and invariants | `/api/context`, `_search_impl`, `backend/tests/test_context_endpoint.py` |
 | `CLASSIFICATION.md` | classifier lifecycle, forcing, guardrails, replay | `classifier/classifier.py`, `/api/log` patch paths, replay endpoints |
-| `CLASSIFICATION_TEST_MATRIX.md` | scenario coverage commitments | `backend/tests/*`, `classifier/tests/*`, `tests/e2e/classification.spec.ts` |
-| `CLASSIFICATION_TRACE_MATRIX.md` | scenario-to-implementation trace | `classifier/classifier.py`, `backend/app/main.py` route/function mappings |
+| `CLASSIFICATION.md` section 16 | scenario coverage commitments | `backend/tests/*`, `classifier/tests/*`, `tests/e2e/classification.spec.ts` |
+| `CLASSIFICATION.md` section 17 | scenario-to-implementation trace | `classifier/classifier.py`, `backend/app/main.py` route/function mappings |
 | `OPENCLAW_CLAWBOARD_UML.md` | sequence and component topology | ingest path, board chat path, context/search/classifier sequences |
 | `TESTING.md` | validation command surface | npm scripts + pytest suites in repo |
 | `SEED.md` | bootstrap/auth and seed checks | `backend/app/db.py`, `/api/config`, `/api/spaces*` |
@@ -703,5 +702,5 @@ Routes currently implemented in `backend/app/main.py`:
    - `npm run test:classifier`
    - `npm run test:e2e`
 6. Re-check matrix docs for scenario coverage drift:
-   - `CLASSIFICATION_TEST_MATRIX.md`
-   - `CLASSIFICATION_TRACE_MATRIX.md`
+   - `CLASSIFICATION.md` section 16
+   - `CLASSIFICATION.md` section 17

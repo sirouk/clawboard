@@ -14,6 +14,7 @@
 /coverage
 /test-results
 /playwright-report
+/.perf-audit/
 /.nyc_output/
 /htmlcov/
 
@@ -64,6 +65,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 _purge-archive/
+.venv-tests/
 
 
 /tests/visual/routes.visual.spec.ts-snapshots/*
@@ -73,6 +75,7 @@ _purge-archive/
 /logs/
 /consensus/
 /.ralphie/
+/screenshots/
 
 # ralphie local files
 /completion_log/
@@ -91,6 +94,3 @@ completion_log/
 coverage/
 .nyc_output/
 htmlcov/
-screenshots/retry_u_page_v3.png
-screenshots/retry_u_page.png
-screenshots/unified_view_loaded.png

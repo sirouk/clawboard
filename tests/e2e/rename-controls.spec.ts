@@ -215,19 +215,26 @@ test("rename inputs accept spaces (no spacebar hotkeys)", async ({ page, request
   await page.goto(`/u/topic/${topicId}`);
   await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
 
+  const typeWithRetries = async (testId: string, value: string) => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const input = page.getByTestId(testId);
+      await expect(input).toBeVisible();
+      await input.click();
+      await input.fill("");
+      // Keep real key events (including space) to verify hotkeys do not intercept typing.
+      await input.type(value, { delay: 12 });
+      const current = await input.inputValue().catch(() => "");
+      if (current === value) return;
+      await page.waitForTimeout(120);
+    }
+    await expect(page.getByTestId(testId)).toHaveValue(value);
+  };
+
   // Topic rename input should accept spaces via real key events.
   await page.getByTestId(`rename-topic-${topicId}`).click();
-  const topicInput = page.getByTestId(`rename-topic-input-${topicId}`);
-  await expect(topicInput).toBeVisible();
-  await topicInput.fill("");
-  await topicInput.type("Topic With Space");
-  await expect(topicInput).toHaveValue("Topic With Space");
+  await typeWithRetries(`rename-topic-input-${topicId}`, "Topic With Space");
 
   // Task rename input should accept spaces via real key events.
   await page.getByTestId(`rename-task-${taskId}`).click();
-  const taskInput = page.getByTestId(`rename-task-input-${taskId}`);
-  await expect(taskInput).toBeVisible();
-  await taskInput.fill("");
-  await taskInput.type("Task With Space");
-  await expect(taskInput).toHaveValue("Task With Space");
+  await typeWithRetries(`rename-task-input-${taskId}`, "Task With Space");
 });

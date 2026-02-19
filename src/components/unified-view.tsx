@@ -38,13 +38,8 @@ import {
   topicSessionKey,
 } from "@/lib/board-session";
 import {
-  CHAT_SEEN_AT_KEY,
-  UNSNOOZED_TASKS_KEY,
-  UNSNOOZED_TOPICS_KEY,
   chatKeyForTask,
   chatKeyForTopic,
-  parseNumberMap,
-  parseStringMap,
 } from "@/lib/attention-state";
 import { Markdown } from "@/components/markdown";
 import { AttachmentStrip, type AttachmentLike } from "@/components/attachments";
@@ -119,8 +114,61 @@ function TypingDots({ className, dotClassName }: { className?: string; dotClassN
 const TASK_TIMELINE_LIMIT = 2;
 const TOPIC_TIMELINE_LIMIT = 4;
 type MessageDensity = "comfortable" | "compact";
-const TOPIC_FALLBACK_COLORS = ["#FF8A4A", "#4DA39E", "#6FA8FF", "#E0B35A", "#8BC17E", "#F17C8E"];
-const TASK_FALLBACK_COLORS = ["#4EA1FF", "#59C3A6", "#F4B55F", "#9A8BFF", "#F0897C", "#6FB8D8"];
+const TOPIC_FALLBACK_COLORS = [
+  "#FF8A4A", // Orange
+  "#4DA39E", // Teal
+  "#6FA8FF", // Blue
+  "#E0B35A", // Gold
+  "#8BC17E", // Green
+  "#F17C8E", // Pink
+  "#A37CF1", // Purple
+  "#7CF1A3", // Mint
+  "#F1A37C", // Peach
+  "#A3F17C", // Lime
+  "#7CA3F1", // Sky
+  "#F17CA3", // Rose
+  "#E67E22", // Pumpkin
+  "#2ECC71", // Emerald
+  "#3498DB", // River
+  "#9B59B6", // Amethyst
+  "#1ABC9C", // Turquoise
+  "#F1C40F", // Sunflower
+  "#E74C3C", // Alizarin
+  "#34495E", // Asphalt
+  "#95A5A6", // Concrete
+  "#D35400", // Carrot
+  "#27AE60", // Nephritis
+  "#2980B9", // Belize Hole
+  "#8E44AD", // Wisteria
+  "#16A085", // Green Sea
+  "#F39C12", // Orange
+  "#C0392B", // Pomegranate
+  "#2C3E50", // Midnight Blue
+  "#7F8C8D"  // Asbestos
+];
+const TASK_FALLBACK_COLORS = [
+  "#4EA1FF", // Blue
+  "#59C3A6", // Teal
+  "#F4B55F", // Orange
+  "#9A8BFF", // Purple
+  "#F0897C", // Coral
+  "#6FB8D8", // Sky
+  "#8BE9FD", // Cyan
+  "#50FA7B", // Green
+  "#FFB86C", // Orange
+  "#FF79C6", // Pink
+  "#BD93F9", // Purple
+  "#FF5555", // Red
+  "#F1FA8C", // Yellow
+  "#6272A4", // Muted Blue
+  "#FFB86C", // Orange
+  "#8BE9FD", // Cyan
+  "#50FA7B", // Green
+  "#FF79C6", // Pink
+  "#BD93F9", // Purple
+  "#FF5555", // Red
+  "#44475A"  // Selection
+];
 
 const TOPIC_ACTION_REVEAL_PX = 288;
 // New Topics/Tasks should float to the very top immediately after creation.
@@ -141,6 +189,15 @@ const UNIFIED_TOPICS_PAGE_SIZE = (() => {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function compareLogCreatedAtAsc(a: LogEntry, b: LogEntry) {
+  if (a.createdAt === b.createdAt) return a.id.localeCompare(b.id);
+  return a.createdAt < b.createdAt ? -1 : 1;
+}
+
+function compareLogCreatedAtDesc(a: LogEntry, b: LogEntry) {
+  return compareLogCreatedAtAsc(b, a);
 }
 
 function normalizeTagValue(value: string) {
@@ -714,7 +771,7 @@ function deriveTaskColor(topicColor: string, seed: string) {
   const h = hashString(seed);
   const towardWhite = (h & 1) === 0;
   const target = towardWhite ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
-  const t = 0.22 + (Math.abs(h) % 18) / 100;
+  const t = 0.35 + (Math.abs(h) % 25) / 100; // Increased contrast range for "drastically different"
   const mix = {
     r: base.r + (target.r - base.r) * t,
     g: base.g + (target.g - base.g) * t,
@@ -724,7 +781,7 @@ function deriveTaskColor(topicColor: string, seed: string) {
   const derived = `#${toHex(mix.r)}${toHex(mix.g)}${toHex(mix.b)}`.toUpperCase();
   const normalizedBase = normalizeHexColor(topicColor) ?? topicColor.toUpperCase();
   if (derived !== normalizedBase) return derived;
-  const t2 = Math.min(0.6, t + 0.15);
+  const t2 = Math.min(0.75, t + 0.25);
   const mix2 = {
     r: base.r + (target.r - base.r) * t2,
     g: base.g + (target.g - base.g) * t2,
@@ -797,6 +854,92 @@ function parseTaskPayload(value: unknown): Task | null {
   return task as Task;
 }
 
+function shuffleArray<T>(array: T[]): T[] {
+  const next = [...array];
+  for (let i = next.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [next[i], next[j]] = [next[j], next[i]];
+  }
+  return next;
+}
+
+export function ColorShuffleTrigger({ 
+  topics, 
+  tasks, 
+  onTopicsUpdate, 
+  onTasksUpdate,
+  token
+}: { 
+  topics: Topic[]; 
+  tasks: Task[]; 
+  onTopicsUpdate: (topics: Topic[]) => void;
+  onTasksUpdate: (tasks: Task[]) => void;
+  token?: string;
+}) {
+  const [shuffling, setShuffling] = useState(false);
+
+  const shuffle = async () => {
+    if (shuffling) return;
+    setShuffling(true);
+    
+    try {
+      const shuffledTopics = shuffleArray(TOPIC_FALLBACK_COLORS);
+      const nextTopics = [...topics];
+      const updatedTopics: Topic[] = [];
+
+      for (let i = 0; i < nextTopics.length; i++) {
+        const topic = nextTopics[i];
+        const newColor = shuffledTopics[i % shuffledTopics.length];
+        const updated = { ...topic, color: newColor };
+        nextTopics[i] = updated;
+        updatedTopics.push(updated);
+
+        // Update DB
+        await apiFetch("/api/topics", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: topic.id, name: topic.name, color: newColor }),
+        }, token);
+      }
+      onTopicsUpdate(nextTopics);
+
+      const nextTasks = [...tasks];
+      for (let i = 0; i < nextTasks.length; i++) {
+        const task = nextTasks[i];
+        const parentTopic = nextTopics.find(t => t.id === task.topicId);
+        const topicColor = parentTopic?.color || TOPIC_FALLBACK_COLORS[0];
+        const newColor = deriveTaskColor(topicColor, `task:${task.id}:${Date.now()}`);
+        const updated = { ...task, color: newColor };
+        nextTasks[i] = updated;
+
+        await apiFetch(`/api/tasks/${encodeURIComponent(task.id)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ color: newColor }),
+        }, token);
+      }
+      onTasksUpdate(nextTasks);
+    } finally {
+      setShuffling(false);
+    }
+  };
+
+  return (
+    <Button 
+      variant="secondary" 
+      size="sm" 
+      onClick={shuffle} 
+      disabled={shuffling}
+      className="gap-2"
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+        <path d="M4 4h7m-7 4h7m-7 4h7m4-8l3 3m0 0l3-3m-3 3v12" strokeLinecap="round" strokeLinejoin="round"/>
+      </svg>
+      {shuffling ? "Shuffling..." : "Shuffle Board Colors"}
+    </Button>
+  );
+}
+
 export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const { token, tokenRequired } = useAppConfig();
   const {
@@ -811,6 +954,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setTopics,
     setTasks,
     setLogs,
+    unsnoozedTopicBadges,
+    unsnoozedTaskBadges,
+    markChatSeen: markChatSeenInStore,
+    dismissUnsnoozedTopicBadge,
+    dismissUnsnoozedTaskBadge,
   } = useDataStore();
   const readOnly = tokenRequired && !token;
   const pathname = usePathname();
@@ -827,9 +975,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const topicView: TopicView = isTopicView(storedTopicView) ? storedTopicView : "active";
   const showSnoozedTasks = useLocalStorageItem(SHOW_SNOOZED_TASKS_KEY) === "true";
   const activeSpaceIdStored = (useLocalStorageItem(ACTIVE_SPACE_KEY) ?? "").trim();
-  const unsnoozedTopicsRaw = useLocalStorageItem(UNSNOOZED_TOPICS_KEY) ?? "{}";
-  const unsnoozedTasksRaw = useLocalStorageItem(UNSNOOZED_TASKS_KEY) ?? "{}";
-  const chatSeenRaw = useLocalStorageItem(CHAT_SEEN_AT_KEY) ?? "{}";
   const [mdUp, setMdUp] = useState(() => {
     if (typeof window === "undefined") return false;
     return window.matchMedia("(min-width: 768px)").matches;
@@ -844,15 +989,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   } = useUnifiedExpansionState(initialUrlState.topics, initialUrlState.tasks);
   const { expandedTopics, expandedTasks, expandedTopicChats, mobileLayer, mobileChatTarget } = expansionState;
   const showTwoColumns = twoColumn && mdUp;
-  const unsnoozedTopicBadges = useMemo<Record<string, number>>(
-    () => parseNumberMap(unsnoozedTopicsRaw),
-    [unsnoozedTopicsRaw]
-  );
-  const unsnoozedTaskBadges = useMemo<Record<string, number>>(
-    () => parseNumberMap(unsnoozedTasksRaw),
-    [unsnoozedTasksRaw]
-  );
-  const chatSeenByKey = useMemo<Record<string, string>>(() => parseStringMap(chatSeenRaw), [chatSeenRaw]);
   const [showRaw, setShowRaw] = useState(initialUrlState.raw);
   const [messageDensity, setMessageDensity] = useState<MessageDensity>(initialUrlState.density);
   const [search, setSearch] = useState(initialUrlState.search);
@@ -1628,87 +1764,28 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     []
   );
 
-  const prevTopicStatusRef = useRef<Map<string, { status: string; snoozedUntil: string | null }>>(new Map());
-  const prevTaskSnoozeRef = useRef<Map<string, string | null>>(new Map());
+  const prevUnsnoozedTopicIdsRef = useRef<Set<string>>(new Set());
+  const prevUnsnoozedTaskIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    const prev = prevTopicStatusRef.current;
-    const next = new Map<string, { status: string; snoozedUntil: string | null }>();
-    const additions: string[] = [];
-    for (const topic of topics) {
-      let status = String(topic.status ?? "active").trim().toLowerCase();
-      if (status === "paused") status = "snoozed";
-      const snoozedUntil = (topic.snoozedUntil ?? null) ? String(topic.snoozedUntil) : null;
-      next.set(topic.id, { status, snoozedUntil });
-      const before = prev.get(topic.id);
-      if (!before) continue;
-      if (before.status === "snoozed" && status === "active") {
-        additions.push(topic.id);
-      }
+    const prev = prevUnsnoozedTopicIdsRef.current;
+    const next = new Set(Object.keys(unsnoozedTopicBadges));
+    for (const topicId of next) {
+      if (!prev.has(topicId)) markBumped("topic", topicId);
     }
-    prevTopicStatusRef.current = next;
-
-    if (additions.length === 0) return;
-    const stamp = Date.now();
-    const updated: Record<string, number> = { ...unsnoozedTopicBadges };
-    for (const id of additions) {
-      updated[id] = stamp;
-      markBumped("topic", id);
-    }
-    setLocalStorageItem(UNSNOOZED_TOPICS_KEY, JSON.stringify(updated));
-  }, [markBumped, topics, unsnoozedTopicBadges]);
+    prevUnsnoozedTopicIdsRef.current = next;
+  }, [markBumped, unsnoozedTopicBadges]);
 
   useEffect(() => {
-    const prev = prevTaskSnoozeRef.current;
-    const next = new Map<string, string | null>();
-    const additions: string[] = [];
-    for (const task of tasks) {
-      const snoozedUntil = (task.snoozedUntil ?? null) ? String(task.snoozedUntil) : null;
-      next.set(task.id, snoozedUntil);
-      const before = prev.get(task.id);
-      if (!before) continue;
-      if (before && !snoozedUntil) {
-        // Snoozed -> unsnoozed (worker or activity).
-        additions.push(task.id);
-      }
+    const prev = prevUnsnoozedTaskIdsRef.current;
+    const next = new Set(Object.keys(unsnoozedTaskBadges));
+    for (const taskId of next) {
+      if (!prev.has(taskId)) markBumped("task", taskId);
     }
-    prevTaskSnoozeRef.current = next;
+    prevUnsnoozedTaskIdsRef.current = next;
+  }, [markBumped, unsnoozedTaskBadges]);
 
-    if (additions.length === 0) return;
-    const stamp = Date.now();
-    const updated: Record<string, number> = { ...unsnoozedTaskBadges };
-    for (const id of additions) {
-      updated[id] = stamp;
-      markBumped("task", id);
-    }
-    setLocalStorageItem(UNSNOOZED_TASKS_KEY, JSON.stringify(updated));
-  }, [markBumped, tasks, unsnoozedTaskBadges]);
-
-  const dismissUnsnoozedTopicBadge = useCallback(
-    (topicId: string) => {
-      const id = String(topicId || "").trim();
-      if (!id) return;
-      if (!Object.prototype.hasOwnProperty.call(unsnoozedTopicBadges, id)) return;
-      const updated: Record<string, number> = { ...unsnoozedTopicBadges };
-      delete updated[id];
-      setLocalStorageItem(UNSNOOZED_TOPICS_KEY, JSON.stringify(updated));
-    },
-    [unsnoozedTopicBadges]
-  );
-
-  const dismissUnsnoozedTaskBadge = useCallback(
-    (taskId: string) => {
-      const id = String(taskId || "").trim();
-      if (!id) return;
-      if (!Object.prototype.hasOwnProperty.call(unsnoozedTaskBadges, id)) return;
-      const updated: Record<string, number> = { ...unsnoozedTaskBadges };
-      delete updated[id];
-      setLocalStorageItem(UNSNOOZED_TASKS_KEY, JSON.stringify(updated));
-    },
-    [unsnoozedTaskBadges]
-  );
-
-	  const expandedTopicsSafe = useMemo(() => {
+		  const expandedTopicsSafe = useMemo(() => {
 	    const topicIds = new Set(topics.map((topic) => topic.id));
 	    if (tasks.some((task) => !task.topicId)) {
 	      topicIds.add("unassigned");
@@ -1798,93 +1875,83 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   }, [taskBumpAt, tasks]);
 
   const logsByTask = useMemo(() => {
+    const sorted = [...visibleLogs].sort(compareLogCreatedAtDesc);
     const map = new Map<string, LogEntry[]>();
-    for (const entry of visibleLogs) {
+    for (const entry of sorted) {
       if (!entry.taskId) continue;
       const list = map.get(entry.taskId) ?? [];
       list.push(entry);
       map.set(entry.taskId, list);
     }
-    for (const list of map.values()) {
-      list.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-    }
     return map;
   }, [visibleLogs]);
 
   const logsByTopic = useMemo(() => {
+    const sorted = [...visibleLogs].sort(compareLogCreatedAtDesc);
     const map = new Map<string, LogEntry[]>();
-    for (const entry of visibleLogs) {
+    for (const entry of sorted) {
       if (!entry.topicId) continue;
       const list = map.get(entry.topicId) ?? [];
       list.push(entry);
       map.set(entry.topicId, list);
-    }
-    for (const list of map.values()) {
-      list.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     }
     return map;
   }, [visibleLogs]);
 
   // Full logs map (includes pending) used for active Topic/Task chat panes.
   const logsByTaskAll = useMemo(() => {
+    const eligible = showRaw ? logs : logs.filter((entry) => !isCronEventLog(entry));
+    const sorted = [...eligible].sort(compareLogCreatedAtAsc);
     const map = new Map<string, LogEntry[]>();
-    for (const entry of logs) {
-      if (!showRaw && isCronEventLog(entry)) continue;
+    for (const entry of sorted) {
       if (!entry.taskId) continue;
       const list = map.get(entry.taskId) ?? [];
       list.push(entry);
       map.set(entry.taskId, list);
     }
-    for (const list of map.values()) {
-      list.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
-    }
     return map;
   }, [logs, showRaw]);
 
   const logsByTopicAll = useMemo(() => {
+    const eligible = showRaw ? logs : logs.filter((entry) => !isCronEventLog(entry));
+    const sorted = [...eligible].sort(compareLogCreatedAtAsc);
     const map = new Map<string, LogEntry[]>();
-    for (const entry of logs) {
-      if (!showRaw && isCronEventLog(entry)) continue;
+    for (const entry of sorted) {
       if (!entry.topicId) continue;
       const list = map.get(entry.topicId) ?? [];
       list.push(entry);
       map.set(entry.topicId, list);
     }
-    for (const list of map.values()) {
-      list.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
-    }
     return map;
   }, [logs, showRaw]);
 
-  const markChatSeen = useCallback(
-    (chatKey: string, explicitSeenAt?: string) => {
+  const topicRootLogsByTopic = useMemo(() => {
+    const map = new Map<string, LogEntry[]>();
+    for (const [topicId, rows] of logsByTopicAll.entries()) {
+      map.set(topicId, rows.filter((entry) => !entry.taskId));
+    }
+    return map;
+  }, [logsByTopicAll]);
+
+  const markVisibleChatSeen = useCallback(
+    (chatKey: string) => {
       const key = String(chatKey ?? "").trim();
       if (!key) return;
 
-      let seenAt = String(explicitSeenAt ?? "").trim();
-      if (!seenAt) {
-        if (key.startsWith("task:")) {
-          const taskId = key.slice("task:".length).trim();
-          const rows = taskId ? logsByTaskAll.get(taskId) ?? [] : [];
-          seenAt = rows.length > 0 ? String(rows[rows.length - 1]?.createdAt ?? "").trim() : "";
-        } else if (key.startsWith("topic:")) {
-          const topicId = key.slice("topic:".length).trim();
-          const rows = topicId ? logsByTopicAll.get(topicId) ?? [] : [];
-          for (let i = rows.length - 1; i >= 0; i -= 1) {
-            const entry = rows[i];
-            if (!entry || entry.taskId) continue;
-            seenAt = String(entry.createdAt ?? "").trim();
-            if (seenAt) break;
-          }
-        }
+      let seenAt = "";
+      if (key.startsWith("task:")) {
+        const taskId = key.slice("task:".length).trim();
+        const rows = taskId ? logsByTaskAll.get(taskId) ?? [] : [];
+        seenAt = rows.length > 0 ? String(rows[rows.length - 1]?.createdAt ?? "").trim() : "";
+      } else if (key.startsWith("topic:")) {
+        const topicId = key.slice("topic:".length).trim();
+        const rows = topicId ? topicRootLogsByTopic.get(topicId) ?? [] : [];
+        seenAt = rows.length > 0 ? String(rows[rows.length - 1]?.createdAt ?? "").trim() : "";
       }
-      if (!seenAt) return;
 
-      const previousSeenAt = chatSeenByKey[key] ?? "";
-      if (previousSeenAt && previousSeenAt >= seenAt) return;
-      setLocalStorageItem(CHAT_SEEN_AT_KEY, JSON.stringify({ ...chatSeenByKey, [key]: seenAt }));
+      markChatSeenInStore(key, seenAt || undefined);
     },
-    [chatSeenByKey, logsByTaskAll, logsByTopicAll]
+    [logsByTaskAll, markChatSeenInStore, topicRootLogsByTopic]
   );
 
   useEffect(() => {
@@ -1909,9 +1976,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
 
     for (const key of visibleChatKeys) {
-      markChatSeen(key);
+      markVisibleChatSeen(key);
     }
-  }, [expandedTasksSafe, expandedTopicChatsSafe, markChatSeen, mdUp, mobileChatTarget, mobileLayer]);
+  }, [expandedTasksSafe, expandedTopicChatsSafe, markVisibleChatSeen, mdUp, mobileChatTarget, mobileLayer]);
 
   const hydrateTaskLogs = useCallback(
     async (taskId: string) => {
@@ -2102,17 +2169,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (trimmed.startsWith("topic:")) {
         const topicId = trimmed.slice("topic:".length).trim();
         if (!topicId) return "";
-        const rows = logsByTopicAll.get(topicId) ?? [];
-        for (let i = rows.length - 1; i >= 0; i -= 1) {
-          const entry = rows[i];
-          if (!entry) continue;
-          if (!entry.taskId) return entry.id;
-        }
-        return "";
+        const rows = topicRootLogsByTopic.get(topicId) ?? [];
+        const last = rows.length > 0 ? rows[rows.length - 1] : null;
+        return last?.id ?? "";
       }
       return "";
     },
-    [logsByTaskAll, logsByTopicAll]
+    [logsByTaskAll, topicRootLogsByTopic]
   );
 
   useEffect(() => {
@@ -2425,6 +2488,24 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     },
     [normalizedSearch, semanticForQuery, semanticLogIds]
   );
+
+  const taskChatLogsByTask = useMemo(() => {
+    if (!normalizedSearch) return logsByTaskAll;
+    const map = new Map<string, LogEntry[]>();
+    for (const [taskId, rows] of logsByTaskAll.entries()) {
+      map.set(taskId, rows.filter(matchesLogSearchChat));
+    }
+    return map;
+  }, [logsByTaskAll, matchesLogSearchChat, normalizedSearch]);
+
+  const topicChatLogsByTopic = useMemo(() => {
+    if (!normalizedSearch) return topicRootLogsByTopic;
+    const map = new Map<string, LogEntry[]>();
+    for (const [topicId, rows] of topicRootLogsByTopic.entries()) {
+      map.set(topicId, rows.filter(matchesLogSearchChat));
+    }
+    return map;
+  }, [matchesLogSearchChat, normalizedSearch, topicRootLogsByTopic]);
 
   const matchesTaskSearch = useCallback((task: Task) => {
     if (revealSelection && revealedTaskIds.includes(task.id)) return true;
@@ -3927,8 +4008,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         if (topicId === "unassigned") continue;
         const key = chatKeyForTopic(topicId);
         if (Object.prototype.hasOwnProperty.call(prev, key)) continue;
-        const allTopic = logsByTopicAll.get(topicId) ?? [];
-        const all = allTopic.filter((entry) => !entry.taskId);
+        const all = topicRootLogsByTopic.get(topicId) ?? [];
         const start = computeDefaultChatStart(all, TOPIC_TIMELINE_LIMIT);
         if (start <= 0) continue;
         next[key] = start;
@@ -3936,7 +4016,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       }
       return changed ? next : prev;
     });
-  }, [expandedTasksSafe, expandedTopicChatsSafe, hydrated, logsByTaskAll, logsByTopicAll]);
+  }, [expandedTasksSafe, expandedTopicChatsSafe, hydrated, logsByTaskAll, topicRootLogsByTopic]);
 
   const pushUrl = useCallback(
     (
@@ -4542,8 +4622,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	          const blockedCount = taskList.filter((task) => task.status === "blocked").length;
 	          const lastActivity = logsByTopic.get(topicId)?.[0]?.createdAt ?? topic.updatedAt;
 	          const hasUnsnoozedBadge = Object.prototype.hasOwnProperty.call(unsnoozedTopicBadges, topicId);
-	          const topicLogsAll = logsByTopicAll.get(topicId) ?? [];
-	          const topicChatAllLogs = topicLogsAll.filter((entry) => !entry.taskId && matchesLogSearchChat(entry));
+	          const topicChatAllLogs = topicChatLogsByTopic.get(topicId) ?? [];
+	          const topicMatchesSearch =
+	            normalizedSearch.length > 0 &&
+	            `${topic.name} ${topic.description ?? ""}`.toLowerCase().includes(normalizedSearch);
 	          const topicChatBlurb = deriveChatHeaderBlurb(topicChatAllLogs);
 	          const showTasks = true;
 	          const isExpanded = expandedTopicsSafe.has(topicId);
@@ -5101,9 +5183,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                  {taskList
 	                    .filter((task) => {
 	                      if (!matchesStatusFilter(task)) return false;
-                      return matchesTaskSearch(task);
-                    })
-                    .map((task, taskIndex) => {
+	                      if (!normalizedSearch) return true;
+	                      if (topicMatchesSearch) return true;
+	                      return matchesTaskSearch(task);
+	                    })
+	                    .map((task, taskIndex) => {
                       if (
                         !mdUp &&
                         mobileLayer === "chat" &&
@@ -5112,13 +5196,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       ) {
                         return null;
                       }
-	                      if (normalizedSearch && !matchesTaskSearch(task) && !`${topic.name} ${topic.description ?? ""}`.toLowerCase().includes(normalizedSearch)) {
-	                        return null;
-	                      }
-	                      const taskLogs = logsByTaskAll.get(task.id) ?? [];
-                      const taskChatFullscreen =
-                        !mdUp &&
-                        mobileLayer === "chat" &&
+	                      const taskChatFullscreen =
+	                        !mdUp &&
+	                        mobileLayer === "chat" &&
                         mobileChatTarget?.kind === "task" &&
                         mobileChatTarget.taskId === task.id;
                       const taskExpanded = taskChatFullscreen || expandedTasksSafe.has(task.id);
@@ -5193,7 +5273,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                           </button>
                         </>
                       );
-                      const taskChatAllLogs = taskLogs.filter(matchesLogSearchChat);
+                      const taskChatAllLogs = taskChatLogsByTask.get(task.id) ?? [];
                       const taskChatBlurb = deriveChatHeaderBlurb(taskChatAllLogs);
 	                      const taskChatKey = chatKeyForTask(task.id);
                       const start = normalizedSearch
@@ -6462,6 +6542,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           </div>
         </div>
       )}
+
+      <div className="mt-8 flex justify-center border-t border-[rgba(255,255,255,0.06)] pt-8 pb-12">
+        <ColorShuffleTrigger 
+          topics={topics} 
+          tasks={tasks} 
+          onTopicsUpdate={setTopics} 
+          onTasksUpdate={setTasks} 
+          token={token}
+        />
+      </div>
 
       <SnoozeModal
         open={Boolean(snoozeTarget)}

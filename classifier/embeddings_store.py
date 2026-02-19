@@ -134,7 +134,8 @@ def delete_task_other_namespaces(item_id: str, keep_kind: str | None = None):
 
 
 def get_all(kind: str):
-    # SQLite mirror is retired; full scans are intentionally unsupported here.
+    # Full scans are intentionally unsupported for remote vector search.
+    _ = kind
     return []
 
 

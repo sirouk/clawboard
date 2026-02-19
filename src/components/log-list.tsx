@@ -7,6 +7,7 @@ import { Badge, Button, Input, SearchInput, Select, TextArea } from "@/component
 import { formatDateTime } from "@/lib/format";
 import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam, withSpaceParam } from "@/lib/url";
 import { useAppConfig } from "@/components/providers";
+import { useDataStore } from "@/components/data-provider";
 import { apiFetch } from "@/lib/api";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { compareLogsDesc } from "@/lib/live-utils";
@@ -182,6 +183,27 @@ function deriveMessageSummary(entry: LogEntry, message: string) {
   return fallback ? truncateText(fallback, SUMMARY_TRUNCATE_LIMIT) : "No summary";
 }
 
+function areLogsEquivalent(a: LogEntry[], b: LogEntry[]) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (left === right) continue;
+    if (left.id !== right.id) return false;
+    if ((left.updatedAt ?? "") !== (right.updatedAt ?? "")) return false;
+    if ((left.createdAt ?? "") !== (right.createdAt ?? "")) return false;
+    if ((left.topicId ?? "") !== (right.topicId ?? "")) return false;
+    if ((left.taskId ?? "") !== (right.taskId ?? "")) return false;
+    if ((left.type ?? "") !== (right.type ?? "")) return false;
+    if ((left.classificationStatus ?? "") !== (right.classificationStatus ?? "")) return false;
+    if (String(left.summary ?? "").length !== String(right.summary ?? "").length) return false;
+    if (String(left.content ?? "").length !== String(right.content ?? "").length) return false;
+    if (String(left.raw ?? "").length !== String(right.raw ?? "").length) return false;
+  }
+  return true;
+}
+
 export function LogList({
   logs: initialLogs,
   topics,
@@ -232,6 +254,7 @@ export function LogList({
   variant?: LogListVariant;
 }) {
   const { token, tokenRequired } = useAppConfig();
+  const { setLogs: setStoreLogs } = useDataStore();
   const [logs, setLogs] = useState<LogEntry[]>(initialLogs);
   const [tasksCache, setTasksCache] = useState<Record<string, Task[]>>({});
   const [tasksLoading, setTasksLoading] = useState<Record<string, boolean>>({});
@@ -263,6 +286,7 @@ export function LogList({
   const messageDensity = messageDensityOverride ?? localMessageDensity;
   const setMessageDensity =
     messageDensityOverride !== undefined ? onMessageDensityChange ?? (() => undefined) : setLocalMessageDensity;
+  const lastInitialLogsRef = useRef(initialLogs);
 
   const matchesLane = (entry: LogEntry, lane: LaneFilter) => {
     if (lane === "all") return true;
@@ -271,32 +295,40 @@ export function LogList({
   };
 
   useEffect(() => {
+    if (areLogsEquivalent(lastInitialLogsRef.current, initialLogs)) return;
+    lastInitialLogsRef.current = initialLogs;
     setLogs(initialLogs);
   }, [initialLogs]);
 
   useEffect(() => {
-    setSearch(initialSearch || "");
+    const next = initialSearch || "";
+    setSearch((prev) => (prev === next ? prev : next));
   }, [initialSearch]);
 
   useEffect(() => {
-    setTypeFilter(initialTypeFilter || "all");
+    const next = initialTypeFilter || "all";
+    setTypeFilter((prev) => (prev === next ? prev : next));
   }, [initialTypeFilter]);
 
   useEffect(() => {
-    setAgentFilter(initialAgentFilter || "all");
+    const next = initialAgentFilter || "all";
+    setAgentFilter((prev) => (prev === next ? prev : next));
   }, [initialAgentFilter]);
 
   useEffect(() => {
-    setTopicFilter(initialTopicFilter || "all");
+    const next = initialTopicFilter || "all";
+    setTopicFilter((prev) => (prev === next ? prev : next));
   }, [initialTopicFilter]);
 
   useEffect(() => {
-    setLaneFilter(initialLaneFilter || "all");
+    const next = initialLaneFilter || "all";
+    setLaneFilter((prev) => (prev === next ? prev : next));
   }, [initialLaneFilter]);
 
   useEffect(() => {
     if (!loadMoreEnabled) return;
-    setVisibleCount(initialVisibleCount!);
+    const next = initialVisibleCount!;
+    setVisibleCount((prev) => (prev === next ? prev : next));
   }, [agentFilter, groupByDay, initialVisibleCount, laneFilter, loadMoreEnabled, search, topicFilter, typeFilter]);
 
   const readOnly = tokenRequired && !token;
@@ -358,6 +390,7 @@ export function LogList({
     }
     const updated = (await res.json().catch(() => null)) as LogEntry | null;
     if (!updated) return { ok: false, error: "Failed to edit message." };
+    setStoreLogs((prev) => prev.map((item) => (item.id === entry.id ? updated : item)));
     setLogs((prev) => {
       const next = prev.map((item) => (item.id === entry.id ? updated : item));
       const scoped = scopeTopicId !== undefined || scopeTaskId !== undefined;
@@ -424,6 +457,7 @@ export function LogList({
 
     if (deletedIds.length > 0) {
       const deletedSet = new Set(deletedIds);
+      setStoreLogs((prev) => prev.filter((row) => !deletedSet.has(row.id)));
       setLogs((prev) => prev.filter((row) => !deletedSet.has(row.id)));
     }
 
@@ -598,9 +632,12 @@ export function LogList({
     }
     const data = await res.json().catch(() => null);
     if (data?.logs && Array.isArray(data.logs)) {
+      setStoreLogs(data.logs);
       setLogs(data.logs);
     } else {
-      setLogs((prev) => [{ ...(payload as LogEntry), id: `tmp-${Date.now()}`, createdAt: new Date().toISOString() }, ...prev]);
+      const optimistic = { ...(payload as LogEntry), id: `tmp-${Date.now()}`, createdAt: new Date().toISOString() };
+      setStoreLogs((prev) => [optimistic, ...prev]);
+      setLogs((prev) => [optimistic, ...prev]);
     }
     return { ok: true };
   };
@@ -617,6 +654,7 @@ export function LogList({
     const data = (await res.json().catch(() => null)) as { deletedIds?: string[] } | null;
     const deletedIds = Array.isArray(data?.deletedIds) ? data?.deletedIds.filter(Boolean) : [entry.id];
     const removed = new Set(deletedIds.length > 0 ? deletedIds : [entry.id]);
+    setStoreLogs((prev) => prev.filter((item) => !removed.has(item.id)));
     setLogs((prev) => prev.filter((item) => !removed.has(item.id)));
     return { ok: true };
   };
