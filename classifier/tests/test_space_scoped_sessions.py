@@ -46,6 +46,60 @@ class SpaceScopedSessionTests(unittest.TestCase):
         self.assertEqual(payload.get("offset"), 0)
         self.assertEqual(payload.get("allowedSpaceIds"), "space-one,space-two")
 
+    def test_negative_cache_keys_are_case_insensitive(self):
+        cache: dict[str, float] = {}
+        c._negative_cache_mark(cache, "TASK-AbC-123", ttl_seconds=300.0)
+        self.assertTrue(c._negative_cache_has(cache, "task-abc-123"))
+        self.assertTrue(c._negative_cache_has(cache, "TASK-ABC-123"))
+
+    def test_missing_session_cache_uses_session_base_key(self):
+        calls: list[str] = []
+
+        class _FakeResponse:
+            def __init__(self, *, ok: bool, status_code: int, body: object):
+                self.ok = ok
+                self.status_code = status_code
+                self._body = body
+
+            def json(self):
+                return self._body
+
+        def _fake_get(url, params=None, headers=None, timeout=None):
+            _ = (params, headers, timeout)
+            text = str(url)
+            calls.append(text)
+            if text.endswith("/api/log"):
+                return _FakeResponse(ok=True, status_code=200, body=[])
+            if "/api/tasks/" in text:
+                return _FakeResponse(ok=False, status_code=404, body={"detail": "missing"})
+            if "/api/topics/" in text:
+                return _FakeResponse(ok=False, status_code=404, body={"detail": "missing"})
+            if text.endswith("/api/spaces/allowed"):
+                return _FakeResponse(ok=True, status_code=200, body={"allowedSpaceIds": ["space-default"]})
+            raise AssertionError(f"unexpected classifier HTTP call: {text}")
+
+        fake_requests = types.SimpleNamespace(get=_fake_get)
+        c._MISSING_TASK_SCOPE_CACHE.clear()
+        c._MISSING_TOPIC_SCOPE_CACHE.clear()
+        c._MISSING_SESSION_SCOPE_CACHE.clear()
+        try:
+            with patch.object(c, "requests", fake_requests):
+                scoped_a = c._resolve_allowed_space_ids_for_session(
+                    "clawboard:task:topic-404-loop:task-404-loop|thread:one"
+                )
+                scoped_b = c._resolve_allowed_space_ids_for_session(
+                    "clawboard:task:topic-404-loop:task-404-loop|thread:two"
+                )
+        finally:
+            c._MISSING_TASK_SCOPE_CACHE.clear()
+            c._MISSING_TOPIC_SCOPE_CACHE.clear()
+            c._MISSING_SESSION_SCOPE_CACHE.clear()
+
+        self.assertIsNone(scoped_a)
+        self.assertIsNone(scoped_b)
+        self.assertEqual(len([call for call in calls if "/api/tasks/" in call]), 1)
+        self.assertEqual(len([call for call in calls if "/api/log" in call]), 1)
+
 
 class SpaceScopedApiForwardingTests(unittest.TestCase):
     def test_list_logs_forwards_allowed_space_ids(self):

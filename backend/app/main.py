@@ -23,15 +23,29 @@ from fastapi import FastAPI, Depends, Query, Body, HTTPException, Header, Backgr
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from typing import List, Any, Iterable, Callable
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, text, or_, and_
+from sqlalchemy import func, text, or_, and_, exists, case
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import defer
+from sqlalchemy.orm import defer, aliased
 from sqlmodel import select
 
 from .auth import ensure_read_access, ensure_write_access, is_token_configured, is_token_required, require_token
 from .db import DATABASE_URL, init_db, get_session
-from .models import Space, InstanceConfig, Topic, Task, LogEntry, DeletedLog, SessionRoutingMemory, IngestQueue, Attachment, Draft
+from .models import (
+    Space,
+    InstanceConfig,
+    Topic,
+    Task,
+    LogEntry,
+    DeletedLog,
+    SessionRoutingMemory,
+    IngestQueue,
+    OpenClawChatDispatchQueue,
+    Attachment,
+    Draft,
+    OpenClawGatewayHistoryCursor,
+    OpenClawGatewayHistorySyncState,
+)
 from .schemas import (
     SpaceOut,
     SpaceUpsert,
@@ -58,6 +72,8 @@ from .schemas import (
     ContextResponse,
     OpenClawChatRequest,
     OpenClawChatQueuedResponse,
+    OpenClawChatDispatchQuarantineRequest,
+    OpenClawChatDispatchQuarantineResponse,
     ReindexRequest,
     AttachmentOut,
     DraftUpsert,
@@ -1069,12 +1085,18 @@ def _metrics_revision_token(session: Any) -> str:
     topic_count, topic_max = _table_count_and_max_ts(session, Topic, Topic.updatedAt)
     task_count, task_max = _table_count_and_max_ts(session, Task, Task.updatedAt)
     log_count, log_max = _table_count_and_max_ts(session, LogEntry, LogEntry.updatedAt)
+    sync_state_count, sync_state_max = _table_count_and_max_ts(
+        session,
+        OpenClawGatewayHistorySyncState,
+        OpenClawGatewayHistorySyncState.updatedAt,
+    )
     audit_token = _file_revision_token(_creation_audit_path())
     return "|".join(
         [
             f"topic:{topic_count}:{topic_max}",
             f"task:{task_count}:{task_max}",
             f"log:{log_count}:{log_max}",
+            f"openclaw_history_sync:{sync_state_count}:{sync_state_max}",
             f"audit:{audit_token}",
         ]
     )
@@ -1308,10 +1330,56 @@ def _normalize_label(value: str | None) -> str:
     return text
 
 
+_OPENCLAW_UNTRUSTED_METADATA_PREFIX_RE = re.compile(
+    r"^\s*conversation info\s*\(untrusted metadata\)\s*:\s*",
+    flags=re.IGNORECASE,
+)
+_OPENCLAW_UNTRUSTED_METADATA_FENCED_RE = re.compile(
+    r"^\s*```(?:json)?\s*(\{[\s\S]*?\})\s*```",
+    flags=re.IGNORECASE,
+)
+_OPENCLAW_UNTRUSTED_METADATA_JSON_DECODER = json.JSONDecoder()
+
+
+def _extract_openclaw_untrusted_metadata_wrapper(value: str | None) -> tuple[dict[str, Any] | None, str]:
+    raw = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw:
+        return (None, "")
+    if not _OPENCLAW_UNTRUSTED_METADATA_PREFIX_RE.match(raw):
+        return (None, raw)
+
+    remainder = _OPENCLAW_UNTRUSTED_METADATA_PREFIX_RE.sub("", raw, count=1).lstrip()
+    metadata: dict[str, Any] | None = None
+    body = remainder
+
+    fenced = _OPENCLAW_UNTRUSTED_METADATA_FENCED_RE.match(remainder)
+    if fenced:
+        candidate = str(fenced.group(1) or "").strip()
+        if candidate:
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    metadata = parsed
+            except Exception:
+                metadata = None
+        body = remainder[fenced.end() :].strip()
+    elif remainder.startswith("{"):
+        try:
+            parsed, idx = _OPENCLAW_UNTRUSTED_METADATA_JSON_DECODER.raw_decode(remainder)
+            if isinstance(parsed, dict):
+                metadata = parsed
+                body = remainder[idx:].strip()
+        except Exception:
+            metadata = None
+
+    return (metadata, body)
+
+
 def _sanitize_log_text(value: str | None) -> str:
     if not value:
         return ""
     text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    _, text = _extract_openclaw_untrusted_metadata_wrapper(text)
     text = re.sub(
         r"(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*",
         " ",
@@ -1709,6 +1777,30 @@ def on_startup() -> None:
     if os.getenv("CLAWBOARD_DISABLE_SESSION_ROUTING_GC", "").strip() != "1":
         thread = threading.Thread(target=_session_routing_gc_worker, daemon=True)
         thread.start()
+    if os.getenv("OPENCLAW_CHAT_ASSISTANT_LOG_RECOVERY_DISABLE", "").strip() != "1":
+        thread = threading.Thread(
+            target=_recover_openclaw_assistant_log_checks,
+            name="clawboard-openclaw-watchdog-recover",
+            daemon=True,
+        )
+        thread.start()
+    if _openclaw_chat_dispatch_enabled():
+        worker_count = _openclaw_chat_dispatch_workers()
+        for worker_index in range(worker_count):
+            thread = threading.Thread(
+                target=_openclaw_chat_dispatch_worker,
+                kwargs={"worker_index": worker_index + 1},
+                name=f"clawboard-openclaw-dispatch-{worker_index + 1}",
+                daemon=True,
+            )
+            thread.start()
+    if _openclaw_gateway_history_sync_enabled():
+        thread = threading.Thread(
+            target=_openclaw_gateway_history_sync_worker,
+            name="clawboard-openclaw-history-sync",
+            daemon=True,
+        )
+        thread.start()
 
 
 @app.get("/api/health")
@@ -1746,6 +1838,543 @@ def _queue_worker() -> None:
         except Exception:
             pass
         time.sleep(poll_interval)
+
+
+def _openclaw_chat_dispatch_enabled() -> bool:
+    return os.getenv("OPENCLAW_CHAT_DISPATCH_DISABLE", "").strip() != "1"
+
+
+def _openclaw_chat_dispatch_poll_seconds() -> float:
+    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_POLL_SECONDS", "1.0").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 1.0
+    return max(0.2, min(30.0, value))
+
+
+def _openclaw_chat_dispatch_workers() -> int:
+    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_WORKERS", "4").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 4
+    return max(1, min(32, value))
+
+
+def _openclaw_chat_dispatch_hot_window_seconds() -> int:
+    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_HOT_WINDOW_SECONDS", "900").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 900
+    return max(30, min(604800, value))
+
+
+def _openclaw_chat_dispatch_stale_processing_seconds() -> float:
+    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_STALE_PROCESSING_SECONDS", "180").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 180.0
+    return max(10.0, min(86400.0, value))
+
+
+def _openclaw_chat_dispatch_max_retry_delay_seconds() -> float:
+    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_MAX_RETRY_DELAY_SECONDS", "300").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 300.0
+    return max(5.0, min(86400.0, value))
+
+
+def _openclaw_chat_dispatch_max_attempts() -> int:
+    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_MAX_ATTEMPTS", "0").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 0
+    return max(0, min(100000, value))
+
+
+def _openclaw_chat_dispatch_recovery_lookback_seconds() -> int:
+    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_RECOVERY_LOOKBACK_SECONDS", "604800").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 604800
+    return max(300, min(2592000, value))
+
+
+def _openclaw_chat_dispatch_recovery_max_rows() -> int:
+    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_RECOVERY_MAX_ROWS", "5000").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 5000
+    return max(100, min(50000, value))
+
+
+def _openclaw_chat_dispatch_recovery_interval_seconds() -> float:
+    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_RECOVERY_INTERVAL_SECONDS", "300").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 300.0
+    return max(30.0, min(3600.0, value))
+
+
+def _openclaw_chat_dispatch_auto_quarantine_enabled() -> bool:
+    return os.getenv("OPENCLAW_CHAT_DISPATCH_AUTO_QUARANTINE_DISABLE", "").strip() != "1"
+
+
+def _openclaw_chat_dispatch_auto_quarantine_seconds() -> int:
+    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_AUTO_QUARANTINE_SECONDS", "21600").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 21600
+    return max(0, min(60 * 60 * 24 * 30, value))
+
+
+def _openclaw_chat_dispatch_auto_quarantine_limit() -> int:
+    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_AUTO_QUARANTINE_LIMIT", "200").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 200
+    return max(10, min(5000, value))
+
+
+def _openclaw_chat_dispatch_auto_quarantine_synthetic_only() -> bool:
+    return os.getenv("OPENCLAW_CHAT_DISPATCH_AUTO_QUARANTINE_SYNTHETIC_ONLY", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _iso_after_seconds(base: datetime, seconds: float) -> str:
+    # Accept both positive and negative offsets (used for future schedules and past cutoffs).
+    return (base + timedelta(seconds=float(seconds or 0.0))).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _openclaw_chat_dispatch_backoff_seconds(attempts: int) -> float:
+    exponent = max(0, min(12, int(attempts or 0) - 1))
+    delay = float(2**exponent)
+    return max(1.0, min(_openclaw_chat_dispatch_max_retry_delay_seconds(), delay))
+
+
+def _openclaw_chat_dispatch_is_terminal_error(error_text: str) -> bool:
+    text = str(error_text or "").strip().lower()
+    if not text:
+        return False
+    terminal_tokens = [
+        "attachment missing on disk",
+        "unable to read attachment",
+        "attachment metadata missing",
+        "openclaw gateway token is required",
+        "openclaw_base_url is not configured",
+    ]
+    return any(token in text for token in terminal_tokens)
+
+
+def _enqueue_openclaw_chat_dispatch(
+    *,
+    request_id: str,
+    session_key: str,
+    agent_id: str,
+    sent_at: str,
+    message: str,
+    attachment_ids: list[str] | None = None,
+) -> None:
+    rid = str(request_id or "").strip()
+    key = str(session_key or "").strip()
+    msg = str(message or "")
+    if not rid or not key or not msg:
+        raise RuntimeError("dispatch queue requires request_id, session_key, and message")
+    attachment_list = [str(att_id).strip() for att_id in (attachment_ids or []) if str(att_id).strip()]
+    stamp = now_iso()
+    with get_session() as session:
+        existing = session.exec(select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == rid).limit(1)).first()
+        if existing is not None:
+            return
+        row = OpenClawChatDispatchQueue(
+            requestId=rid,
+            sessionKey=key,
+            agentId=str(agent_id or "main").strip() or "main",
+            sentAt=normalize_iso(sent_at) or stamp,
+            message=msg,
+            attachmentIds=attachment_list,
+            status="pending",
+            attempts=0,
+            nextAttemptAt=stamp,
+            claimedAt=None,
+            completedAt=None,
+            lastError=None,
+            createdAt=stamp,
+            updatedAt=stamp,
+        )
+        session.add(row)
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+
+
+_OPENCLAW_CHAT_DISPATCH_CLAIM_LOCK = threading.Lock()
+_OPENCLAW_CHAT_DISPATCH_PROCESS_STARTED_AT_ISO = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+    "+00:00", "Z"
+)
+
+
+def _openclaw_chat_dispatch_claim_next_job(now_iso_value: str) -> dict[str, Any] | None:
+    with _OPENCLAW_CHAT_DISPATCH_CLAIM_LOCK:
+        with get_session() as session:
+            prior = aliased(OpenClawChatDispatchQueue)
+            hot_cutoff_iso = _iso_after_seconds(datetime.now(timezone.utc), -float(_openclaw_chat_dispatch_hot_window_seconds()))
+            cold_backlog_rank = case((OpenClawChatDispatchQueue.sentAt < hot_cutoff_iso, 1), else_=0)
+            retry_rank = case((OpenClawChatDispatchQueue.status == "pending", 0), else_=1)
+            has_prior_undelivered = exists(
+                select(1)
+                .select_from(prior)
+                .where(prior.sessionKey == OpenClawChatDispatchQueue.sessionKey)
+                .where(prior.id < OpenClawChatDispatchQueue.id)
+                .where(prior.status.in_(["pending", "retry", "processing"]))
+            )
+            row = session.exec(
+                select(OpenClawChatDispatchQueue)
+                .where(OpenClawChatDispatchQueue.status.in_(["pending", "retry"]))
+                .where(OpenClawChatDispatchQueue.nextAttemptAt <= now_iso_value)
+                .where(~has_prior_undelivered)
+                .order_by(
+                    retry_rank.asc(),
+                    cold_backlog_rank.asc(),
+                    OpenClawChatDispatchQueue.nextAttemptAt.asc(),
+                    OpenClawChatDispatchQueue.createdAt.asc(),
+                    OpenClawChatDispatchQueue.id.asc(),
+                )
+                .limit(1)
+            ).first()
+            if row is None:
+                return None
+            row.status = "processing"
+            row.attempts = int(row.attempts or 0) + 1
+            row.claimedAt = now_iso_value
+            row.updatedAt = now_iso_value
+            session.add(row)
+            session.commit()
+            return {
+                "id": int(row.id),
+                "requestId": str(row.requestId or ""),
+                "sessionKey": str(row.sessionKey or ""),
+                "agentId": str(row.agentId or "main"),
+                "sentAt": str(row.sentAt or ""),
+                "message": str(row.message or ""),
+                "attachmentIds": list(row.attachmentIds or []),
+                "attempts": int(row.attempts or 0),
+            }
+
+
+def _openclaw_chat_dispatch_mark_sent(job_id: int, now_iso_value: str) -> None:
+    with get_session() as session:
+        row = session.get(OpenClawChatDispatchQueue, job_id)
+        if row is None:
+            return
+        row.status = "sent"
+        row.completedAt = now_iso_value
+        row.claimedAt = None
+        row.lastError = None
+        row.updatedAt = now_iso_value
+        session.add(row)
+        session.commit()
+
+
+def _openclaw_chat_dispatch_mark_retry(job_id: int, *, error: str, now_dt: datetime) -> None:
+    with get_session() as session:
+        row = session.get(OpenClawChatDispatchQueue, job_id)
+        if row is None:
+            return
+        attempts = int(row.attempts or 0)
+        delay_seconds = _openclaw_chat_dispatch_backoff_seconds(attempts)
+        row.status = "retry"
+        row.nextAttemptAt = _iso_after_seconds(now_dt, delay_seconds)
+        row.claimedAt = None
+        row.lastError = _clip(str(error or "").strip(), 1600)
+        row.updatedAt = now_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        session.add(row)
+        session.commit()
+
+
+def _openclaw_chat_dispatch_mark_failed(job_id: int, *, error: str, now_iso_value: str) -> None:
+    with get_session() as session:
+        row = session.get(OpenClawChatDispatchQueue, job_id)
+        if row is None:
+            return
+        row.status = "failed"
+        row.completedAt = now_iso_value
+        row.claimedAt = None
+        row.lastError = _clip(str(error or "").strip(), 1600)
+        row.updatedAt = now_iso_value
+        session.add(row)
+        session.commit()
+
+
+def _openclaw_chat_dispatch_recover_stale_processing_jobs(now_dt: datetime) -> int:
+    now_iso_value = now_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    cutoff_iso = _iso_after_seconds(now_dt, -_openclaw_chat_dispatch_stale_processing_seconds())
+    process_started_iso = str(_OPENCLAW_CHAT_DISPATCH_PROCESS_STARTED_AT_ISO or "").strip()
+    stale_predicates = [OpenClawChatDispatchQueue.claimedAt < cutoff_iso]
+    if process_started_iso:
+        # Any claim older than this process start belongs to a previous worker lifecycle.
+        stale_predicates.append(OpenClawChatDispatchQueue.claimedAt < process_started_iso)
+    with get_session() as session:
+        rows = session.exec(
+            select(OpenClawChatDispatchQueue)
+            .where(OpenClawChatDispatchQueue.status == "processing")
+            .where(OpenClawChatDispatchQueue.claimedAt.is_not(None))
+            .where(or_(*stale_predicates))
+            .order_by(OpenClawChatDispatchQueue.claimedAt.asc())
+            .limit(200)
+        ).all()
+        if not rows:
+            return 0
+        for row in rows:
+            row.status = "retry"
+            row.nextAttemptAt = now_iso_value
+            row.claimedAt = None
+            if not str(row.lastError or "").strip():
+                row.lastError = "Recovered stale processing dispatch row after restart/crash."
+            row.updatedAt = now_iso_value
+            session.add(row)
+        session.commit()
+        return len(rows)
+
+
+def _openclaw_chat_dispatch_auto_quarantine_stale_rows(now_dt: datetime) -> int:
+    """Fail stale synthetic/test rows so they cannot permanently block hot traffic."""
+    if not _openclaw_chat_dispatch_auto_quarantine_enabled():
+        return 0
+    older_than_seconds = _openclaw_chat_dispatch_auto_quarantine_seconds()
+    if older_than_seconds <= 0:
+        return 0
+    cutoff_iso = _iso_after_seconds(now_dt, -float(older_than_seconds))
+    stamp = now_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    synthetic_only = _openclaw_chat_dispatch_auto_quarantine_synthetic_only()
+    reason = "auto_quarantined:stale_dispatch_backlog"
+    quarantined = 0
+
+    with get_session() as session:
+        rows = session.exec(
+            select(OpenClawChatDispatchQueue)
+            .where(OpenClawChatDispatchQueue.status.in_(["pending", "retry", "processing"]))
+            .where(OpenClawChatDispatchQueue.createdAt <= cutoff_iso)
+            .order_by(OpenClawChatDispatchQueue.createdAt.asc(), OpenClawChatDispatchQueue.id.asc())
+            .limit(_openclaw_chat_dispatch_auto_quarantine_limit())
+        ).all()
+        if not rows:
+            return 0
+        for row in rows:
+            if synthetic_only and not _openclaw_chat_dispatch_row_looks_synthetic(row):
+                continue
+            row.status = "failed"
+            row.completedAt = stamp
+            row.claimedAt = None
+            row.nextAttemptAt = stamp
+            row.lastError = reason
+            row.updatedAt = stamp
+            session.add(row)
+            quarantined += 1
+        if quarantined > 0:
+            session.commit()
+    return quarantined
+
+
+def _openclaw_chat_dispatch_resolve_attachments(attachment_ids: list[str]) -> list[dict[str, Any]] | None:
+    ids = [str(att_id).strip() for att_id in attachment_ids if str(att_id).strip()]
+    if not ids:
+        return None
+    unique_ids: list[str] = []
+    seen: set[str] = set()
+    for att_id in ids:
+        if att_id in seen:
+            continue
+        seen.add(att_id)
+        unique_ids.append(att_id)
+    with get_session() as session:
+        rows = session.exec(select(Attachment).where(Attachment.id.in_(unique_ids))).all()
+    by_id = {row.id: row for row in rows}
+    missing = [att_id for att_id in unique_ids if att_id not in by_id]
+    if missing:
+        raise RuntimeError(f"attachment metadata missing: {', '.join(missing)}")
+    attachments_task: list[dict[str, Any]] = []
+    for att_id in unique_ids:
+        row = by_id[att_id]
+        attachments_task.append(
+            {
+                "id": row.id,
+                "fileName": row.fileName,
+                "mimeType": _normalize_mime_type(row.mimeType),
+                "sizeBytes": row.sizeBytes,
+                "storagePath": row.storagePath,
+            }
+        )
+    return attachments_task
+
+
+def _recover_openclaw_chat_dispatch_queue() -> int:
+    lookback_seconds = _openclaw_chat_dispatch_recovery_lookback_seconds()
+    max_rows = _openclaw_chat_dispatch_recovery_max_rows()
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=lookback_seconds)).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+    recovered = 0
+    with get_session() as session:
+        rows = (
+            session.exec(
+                select(LogEntry)
+                .where(LogEntry.type == "conversation")
+                .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "user")
+                .where(LogEntry.createdAt >= cutoff)
+                .order_by(LogEntry.createdAt.desc())
+                .limit(max_rows)
+            ).all()
+        )
+        for row in rows:
+            source = row.source if isinstance(row.source, dict) else None
+            if not source:
+                continue
+            if str(source.get("channel") or "").strip().lower() != "openclaw":
+                continue
+            request_id = str(source.get("requestId") or source.get("messageId") or "").strip()
+            session_key = str(source.get("sessionKey") or "").strip()
+            if not request_id or not session_key:
+                continue
+            if not request_id.lower().startswith("occhat-"):
+                continue
+            existing = session.exec(
+                select(OpenClawChatDispatchQueue.id).where(OpenClawChatDispatchQueue.requestId == request_id).limit(1)
+            ).first()
+            if existing is not None:
+                continue
+            if _openclaw_watchdog_has_terminal_system_log(session, request_id):
+                continue
+            if _openclaw_watchdog_has_assistant_by_request(session, request_id, row.createdAt):
+                continue
+            attachment_ids: list[str] = []
+            if isinstance(row.attachments, list):
+                for attachment_meta in row.attachments:
+                    if not isinstance(attachment_meta, dict):
+                        continue
+                    att_id = str(attachment_meta.get("id") or "").strip()
+                    if att_id:
+                        attachment_ids.append(att_id)
+            queue_row = OpenClawChatDispatchQueue(
+                requestId=request_id,
+                sessionKey=session_key,
+                agentId=str(source.get("agentId") or "main").strip() or "main",
+                sentAt=normalize_iso(str(row.createdAt or "")) or now_iso(),
+                message=str(row.content or ""),
+                attachmentIds=attachment_ids,
+                status="pending",
+                attempts=0,
+                nextAttemptAt=now_iso(),
+                claimedAt=None,
+                completedAt=None,
+                lastError=None,
+                createdAt=now_iso(),
+                updatedAt=now_iso(),
+            )
+            session.add(queue_row)
+            recovered += 1
+        if recovered > 0:
+            session.commit()
+    return recovered
+
+
+_OPENCLAW_CHAT_DISPATCH_MAINTENANCE_LOCK = threading.Lock()
+_OPENCLAW_CHAT_DISPATCH_LAST_RECOVERY_AT = 0.0
+
+
+def _openclaw_chat_dispatch_worker(*, worker_index: int = 1) -> None:
+    global _OPENCLAW_CHAT_DISPATCH_LAST_RECOVERY_AT
+    poll_seconds = _openclaw_chat_dispatch_poll_seconds()
+    max_attempts = _openclaw_chat_dispatch_max_attempts()
+
+    while True:
+        job: dict[str, Any] | None = None
+        now_dt = datetime.now(timezone.utc)
+        now_iso_value = now_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        try:
+            now_mono = time.monotonic()
+            if _OPENCLAW_CHAT_DISPATCH_MAINTENANCE_LOCK.acquire(blocking=False):
+                try:
+                    _openclaw_chat_dispatch_auto_quarantine_stale_rows(now_dt)
+                    _openclaw_chat_dispatch_recover_stale_processing_jobs(now_dt)
+                    if now_mono - _OPENCLAW_CHAT_DISPATCH_LAST_RECOVERY_AT >= _openclaw_chat_dispatch_recovery_interval_seconds():
+                        _recover_openclaw_chat_dispatch_queue()
+                        _OPENCLAW_CHAT_DISPATCH_LAST_RECOVERY_AT = now_mono
+                finally:
+                    _OPENCLAW_CHAT_DISPATCH_MAINTENANCE_LOCK.release()
+
+            job = _openclaw_chat_dispatch_claim_next_job(now_iso_value)
+            if job is None:
+                time.sleep(poll_seconds)
+                continue
+
+            base_url = os.getenv("OPENCLAW_BASE_URL", "http://127.0.0.1:18789").strip().rstrip("/")
+            gateway_token = (os.getenv("OPENCLAW_GATEWAY_TOKEN") or "").strip()
+            if not base_url:
+                raise RuntimeError("OPENCLAW_BASE_URL is not configured")
+            if not gateway_token:
+                raise RuntimeError("OPENCLAW_GATEWAY_TOKEN is required")
+
+            attachments = _openclaw_chat_dispatch_resolve_attachments(list(job.get("attachmentIds") or []))
+            _run_openclaw_chat(
+                str(job.get("requestId") or ""),
+                base_url=base_url,
+                token=gateway_token,
+                session_key=str(job.get("sessionKey") or ""),
+                agent_id=str(job.get("agentId") or "main"),
+                sent_at=str(job.get("sentAt") or ""),
+                message=str(job.get("message") or ""),
+                attachments=attachments,
+                raise_on_error=True,
+                log_errors=False,
+            )
+            _openclaw_chat_dispatch_mark_sent(int(job.get("id") or 0), now_iso_value)
+            time.sleep(0.05)
+            continue
+        except Exception as exc:
+            error_text = _clip(str(exc) or type(exc).__name__, 1600)
+            try:
+                if job is not None and int(job.get("id") or 0) > 0:
+                    attempts = int(job.get("attempts", 0) or 0)
+                    exhausted = max_attempts > 0 and attempts >= max_attempts
+                    terminal = exhausted or _openclaw_chat_dispatch_is_terminal_error(error_text)
+                    if terminal:
+                        _openclaw_chat_dispatch_mark_failed(int(job.get("id") or 0), error=error_text, now_iso_value=now_iso_value)
+                        detail = f"OpenClaw durable dispatch failed. requestId={str(job.get('requestId') or '')}"
+                        if exhausted:
+                            detail = (
+                                "OpenClaw durable dispatch exhausted retry attempts "
+                                f"({attempts}/{max_attempts}). requestId={str(job.get('requestId') or '')}"
+                            )
+                        _log_openclaw_chat_error(
+                            session_key=str(job.get("sessionKey") or ""),
+                            request_id=str(job.get("requestId") or ""),
+                            detail=detail,
+                            raw=error_text,
+                        )
+                    else:
+                        _openclaw_chat_dispatch_mark_retry(int(job.get("id") or 0), error=error_text, now_dt=now_dt)
+            except Exception:
+                pass
+            time.sleep(poll_seconds)
 
 
 def _snooze_worker() -> None:
@@ -1842,6 +2471,257 @@ def _find_by_idempotency(session, key: str):
     return session.exec(select(LogEntry).where(LogEntry.idempotencyKey == key)).first()
 
 
+def _base_session_key(value: str | None) -> str:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return ""
+    base = text_value.split("|", 1)[0].strip()
+    return base or text_value
+
+
+def _openclaw_request_id_base(value: str | None) -> str:
+    request_id = str(value or "").strip()
+    if not request_id:
+        return ""
+    if not request_id.lower().startswith("occhat-"):
+        return request_id
+    base = request_id.split(":", 1)[0].strip()
+    return base or request_id
+
+
+def _openclaw_identifier_match_terms(identifiers: Iterable[str]) -> tuple[list[str], list[str]]:
+    """Build exact + prefix terms so `occhat-...` matches retry suffix variants."""
+    exact_terms: list[str] = []
+    like_terms: list[str] = []
+    for value in identifiers:
+        identifier = str(value or "").strip()
+        if not identifier:
+            continue
+        if identifier not in exact_terms:
+            exact_terms.append(identifier)
+        if not identifier.lower().startswith("occhat-"):
+            continue
+        base = _openclaw_request_id_base(identifier)
+        if base and base not in exact_terms:
+            exact_terms.append(base)
+        prefix = f"{base}:%" if base else ""
+        if prefix and prefix not in like_terms:
+            like_terms.append(prefix)
+    return (exact_terms, like_terms)
+
+
+def _openclaw_request_attribution_lookback_seconds() -> int:
+    """How far back assistant logs may look for unresolved OpenClaw user request attribution."""
+    raw = str(os.getenv("OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS") or "").strip()
+    if not raw:
+        raise RuntimeError("OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS is required")
+    try:
+        value = int(raw)
+    except Exception:
+        raise RuntimeError("OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS must be an integer")
+    return max(60, min(7776000, value))
+
+
+def _openclaw_request_attribution_max_candidates() -> int:
+    """Cap candidate rows scanned when attaching requestId to unlabeled assistant rows."""
+    raw = str(os.getenv("OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES") or "").strip()
+    if not raw:
+        raise RuntimeError("OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES is required")
+    try:
+        value = int(raw)
+    except Exception:
+        raise RuntimeError("OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES must be an integer")
+    return max(1, min(200, value))
+
+
+def _canonical_openclaw_assistant_idempotency_key(
+    *,
+    payload: LogAppend,
+    source_meta: dict[str, Any] | None,
+) -> str | None:
+    if not source_meta:
+        return None
+    if str(payload.type or "").strip().lower() != "conversation":
+        return None
+    if str(payload.agentId or "").strip().lower() != "assistant":
+        return None
+    request_id = str(source_meta.get("requestId") or source_meta.get("messageId") or "").strip()
+    base_request_id = _openclaw_request_id_base(request_id)
+    if not base_request_id or not base_request_id.lower().startswith("occhat-"):
+        return None
+    return f"openclaw-assistant:{base_request_id}"
+
+
+def _canonical_board_scope_session_key(
+    *,
+    source_meta: dict[str, Any] | None,
+    session_key: str | None,
+) -> str:
+    if isinstance(source_meta, dict):
+        topic_id = str(source_meta.get("boardScopeTopicId") or "").strip()
+        task_id = str(source_meta.get("boardScopeTaskId") or "").strip()
+        if topic_id and task_id:
+            return f"clawboard:task:{topic_id}:{task_id}"
+        if topic_id:
+            return f"clawboard:topic:{topic_id}"
+
+    parsed_topic, parsed_task = _parse_board_session_key(str(session_key or ""))
+    if parsed_topic and parsed_task:
+        return f"clawboard:task:{parsed_topic}:{parsed_task}"
+    if parsed_topic:
+        return f"clawboard:topic:{parsed_topic}"
+    return ""
+
+
+def _find_existing_openclaw_user_request_log(
+    session: Any,
+    *,
+    payload: LogAppend,
+    source_meta: dict[str, Any] | None,
+) -> LogEntry | None:
+    if not source_meta:
+        return None
+    if str(payload.type or "").strip().lower() != "conversation":
+        return None
+    if str(payload.agentId or "").strip().lower() != "user":
+        return None
+
+    request_id = str(source_meta.get("requestId") or "").strip()
+    if not request_id or not request_id.lower().startswith("occhat-"):
+        return None
+
+    base_key = _base_session_key(str(source_meta.get("sessionKey") or "").strip())
+    query = (
+        select(LogEntry)
+        .where(LogEntry.type == "conversation")
+        .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "user")
+    )
+
+    if DATABASE_URL.startswith("sqlite"):
+        query = query.where(
+            text("(json_extract(source, '$.requestId') = :rid OR json_extract(source, '$.messageId') = :rid)")
+        ).params(rid=request_id)
+        if base_key:
+            query = query.where(
+                text(
+                    "(json_extract(source, '$.sessionKey') = :base_key OR "
+                    "json_extract(source, '$.sessionKey') LIKE :base_like)"
+                )
+            ).params(base_key=base_key, base_like=f"{base_key}|%")
+    else:
+        request_match = or_(
+            LogEntry.source["requestId"].as_string() == request_id,
+            LogEntry.source["messageId"].as_string() == request_id,
+        )
+        query = query.where(request_match)
+        if base_key:
+            source_session_expr = LogEntry.source["sessionKey"].as_string()
+            query = query.where(or_(source_session_expr == base_key, source_session_expr.like(f"{base_key}|%")))
+
+    return session.exec(query.limit(1)).first()
+
+
+def _maybe_attach_openclaw_request_id(
+    session: Any,
+    *,
+    payload: LogAppend,
+    source_meta: dict[str, Any] | None,
+    created_at: str,
+) -> None:
+    if not source_meta:
+        return
+    if str(payload.type or "").strip().lower() != "conversation":
+        return
+    if str(payload.agentId or "").strip().lower() != "assistant":
+        return
+    if str(source_meta.get("requestId") or "").strip():
+        return
+
+    message_id = str(source_meta.get("messageId") or "").strip()
+    if message_id and message_id.lower().startswith("occhat-"):
+        source_meta["requestId"] = message_id
+        return
+
+    session_key = str(source_meta.get("sessionKey") or "").strip()
+    base_key = _base_session_key(session_key)
+    board_scope_key = _canonical_board_scope_session_key(source_meta=source_meta, session_key=session_key)
+    candidate_session_keys = [key for key in [base_key, board_scope_key] if key]
+    candidate_session_keys = list(dict.fromkeys(candidate_session_keys))
+    if not candidate_session_keys:
+        return
+
+    channel_text = str(source_meta.get("channel") or "").strip().lower()
+    looks_like_board_session = any(bool(_parse_board_session_key(key)) for key in candidate_session_keys)
+    if channel_text and channel_text not in {"openclaw", "clawboard", "webchat"} and not looks_like_board_session:
+        return
+
+    lookback_seconds = _openclaw_request_attribution_lookback_seconds()
+    max_candidates = _openclaw_request_attribution_max_candidates()
+
+    created_ts = _iso_to_timestamp(created_at)
+    lower_bound: str | None = None
+    if created_ts is not None:
+        lower_bound_dt = datetime.fromtimestamp(max(0.0, created_ts - lookback_seconds), tz=timezone.utc)
+        lower_bound = lower_bound_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    query = (
+        select(LogEntry)
+        .where(LogEntry.type == "conversation")
+        .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "user")
+        .where(LogEntry.createdAt <= created_at)
+    )
+    if lower_bound:
+        query = query.where(LogEntry.createdAt >= lower_bound)
+
+    if DATABASE_URL.startswith("sqlite"):
+        session_parts: list[str] = []
+        session_params: dict[str, Any] = {}
+        for idx, key in enumerate(candidate_session_keys):
+            key_name = f"base_key_{idx}"
+            like_name = f"base_like_{idx}"
+            session_parts.append(
+                f"(json_extract(source, '$.sessionKey') = :{key_name} OR "
+                f"json_extract(source, '$.sessionKey') LIKE :{like_name})"
+            )
+            session_params[key_name] = key
+            session_params[like_name] = f"{key}|%"
+        if session_parts:
+            query = query.where(text("(" + " OR ".join(session_parts) + ")")).params(**session_params)
+        query = query.where(text("COALESCE(json_extract(source, '$.requestId'), '') <> ''"))
+        query = query.where(
+            text("lower(COALESCE(json_extract(source, '$.channel'), '')) IN ('', 'openclaw', 'clawboard', 'webchat')")
+        )
+    else:
+        source_session_expr = LogEntry.source["sessionKey"].as_string()
+        session_exprs = []
+        for key in candidate_session_keys:
+            session_exprs.append(source_session_expr == key)
+            session_exprs.append(source_session_expr.like(f"{key}|%"))
+        query = query.where(or_(*session_exprs))
+        query = query.where(func.coalesce(LogEntry.source["requestId"].as_string(), "") != "")
+        source_channel_expr = func.lower(func.coalesce(LogEntry.source["channel"].as_string(), ""))
+        query = query.where(source_channel_expr.in_(["", "openclaw", "clawboard", "webchat"]))
+
+    candidates = session.exec(query.order_by(LogEntry.createdAt.desc()).limit(max_candidates)).all()
+    resolved_request_id: str | None = None
+    for candidate in candidates:
+        source = candidate.source if isinstance(candidate.source, dict) else {}
+        request_id = str(source.get("requestId") or "").strip()
+        if not request_id:
+            continue
+        if _openclaw_watchdog_has_terminal_system_log(session, request_id):
+            continue
+        if _openclaw_watchdog_has_assistant_by_request(session, request_id, candidate.createdAt):
+            if not resolved_request_id:
+                resolved_request_id = request_id
+            continue
+        source_meta["requestId"] = request_id
+        return
+    if resolved_request_id:
+        source_meta["requestId"] = resolved_request_id
+        return
+
+
 def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = None) -> LogEntry:
     created_at = normalize_iso(payload.createdAt) or now_iso()
     # Use ingest time for updatedAt to guarantee stable ordering even when a source provides
@@ -1853,22 +2733,36 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         if existing:
             return existing
 
-    # Idempotency guard: if the source messageId is present, avoid duplicating
-    # logs when the logger retries / replays its queue.
-    # OpenClaw also uses requestId as an authoritative per-send identifier, and plugin rows can
-    # arrive with that identifier in `source.messageId`, so treat them as the same operation.
-    # NOTE: When an idempotency key is present (header or payload), the unique index on
-    # LogEntry.idempotencyKey is the canonical dedupe mechanism. The source.messageId
-    # fallback is only needed for legacy senders that omit idempotency keys.
-    if not idempotency_key and payload.source and isinstance(payload.source, dict):
-        msg_id_text = str(payload.source.get("messageId") or "").strip()
-        request_id_text = str(payload.source.get("requestId") or "").strip()
-        identifiers = [value for value in [msg_id_text, request_id_text] if value]
-        if identifiers and payload.type == "conversation":
-            channel = payload.source.get("channel")
+    source_meta = payload.source.copy() if isinstance(payload.source, dict) else None
+    _maybe_attach_openclaw_request_id(session, payload=payload, source_meta=source_meta, created_at=created_at)
+    canonical_assistant_idem = _canonical_openclaw_assistant_idempotency_key(payload=payload, source_meta=source_meta)
+    if canonical_assistant_idem:
+        idempotency_key = canonical_assistant_idem
+        existing = _find_by_idempotency(session, idempotency_key)
+        if existing:
+            return existing
+
+    existing_by_request = _find_existing_openclaw_user_request_log(
+        session,
+        payload=payload,
+        source_meta=source_meta,
+    )
+    if existing_by_request:
+        return existing_by_request
+
+    # Identifier-level dedupe remains necessary for assistant rows even when
+    # idempotency keys differ across ingestion paths (watchdog/history-sync vs
+    # logger replay). Keep legacy behavior for non-assistant rows to avoid
+    # changing duplicate-request recovery semantics.
+    agent_id_lower = str(payload.agentId or "").strip().lower()
+    if source_meta and (not idempotency_key or agent_id_lower == "assistant"):
+        msg_id_text = str(source_meta.get("messageId") or "").strip()
+        request_id_text = str(source_meta.get("requestId") or "").strip()
+        exact_identifiers, like_identifiers = _openclaw_identifier_match_terms([msg_id_text, request_id_text])
+        if (exact_identifiers or like_identifiers) and payload.type == "conversation":
+            channel = source_meta.get("channel")
             channel_text = str(channel).strip().lower() if isinstance(channel, str) else ""
             agent_id = (payload.agentId or "").strip()
-            unique_identifiers = list(dict.fromkeys(identifiers))
 
             query = select(LogEntry).where(LogEntry.type == payload.type)
             if agent_id:
@@ -1878,28 +2772,49 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 # Query matches either legacy messageId or OpenClaw requestId sent as messageId.
                 query_text_parts: list[str] = []
                 query_params = {}
-                for idx, identifier in enumerate(unique_identifiers):
-                    key = f"did_{idx}"
+                for idx, identifier in enumerate(exact_identifiers):
+                    key = f"eq_{idx}"
                     scope = "(1=1)"
                     if channel_text:
                         query_params["channel"] = channel_text
                         scope = "(" + " OR ".join(
-                            [
-                                f"json_extract(source, '$.channel') = :channel",
-                                "json_extract(source, '$.channel') IS NULL",
-                                "lower(json_extract(source, '$.channel')) = 'openclaw'",
-                            ]
-                        ) + ")"
+                                    [
+                                        f"json_extract(source, '$.channel') = :channel",
+                                        "json_extract(source, '$.channel') IS NULL",
+                                        "lower(json_extract(source, '$.channel')) = 'openclaw'",
+                                        "lower(json_extract(source, '$.channel')) = 'clawboard'",
+                                        "lower(json_extract(source, '$.channel')) = 'webchat'",
+                                    ]
+                                ) + ")"
                     query_text_parts.append(
                         f"((json_extract(source, '$.messageId') = :{key} OR "
                         f"json_extract(source, '$.requestId') = :{key}) AND {scope})"
                     )
                     query_params[key] = identifier
-                query = query.where(text(" OR ".join(query_text_parts))).params(**query_params)
+                for idx, identifier_like in enumerate(like_identifiers):
+                    key = f"like_{idx}"
+                    scope = "(1=1)"
+                    if channel_text:
+                        query_params["channel"] = channel_text
+                        scope = "(" + " OR ".join(
+                                    [
+                                        f"json_extract(source, '$.channel') = :channel",
+                                        "json_extract(source, '$.channel') IS NULL",
+                                        "lower(json_extract(source, '$.channel')) = 'openclaw'",
+                                        "lower(json_extract(source, '$.channel')) = 'clawboard'",
+                                        "lower(json_extract(source, '$.channel')) = 'webchat'",
+                                    ]
+                                ) + ")"
+                    query_text_parts.append(
+                        f"((json_extract(source, '$.messageId') LIKE :{key} OR "
+                        f"json_extract(source, '$.requestId') LIKE :{key}) AND {scope})"
+                    )
+                    query_params[key] = identifier_like
+                query = query.where(text("(" + " OR ".join(query_text_parts) + ")")).params(**query_params)
             else:
                 # Query matches either messageId or requestId by identifier.
                 message_matches = []
-                for identifier in unique_identifiers:
+                for identifier in exact_identifiers:
                     msg_cond = LogEntry.source["messageId"].as_string() == identifier
                     req_cond = LogEntry.source["requestId"].as_string() == identifier
                     if channel_text:
@@ -1907,6 +2822,22 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                             func.lower(LogEntry.source["channel"].as_string()) == channel_text,
                             LogEntry.source["channel"].is_(None),
                             func.lower(LogEntry.source["channel"].as_string()) == "openclaw",
+                            func.lower(LogEntry.source["channel"].as_string()) == "clawboard",
+                            func.lower(LogEntry.source["channel"].as_string()) == "webchat",
+                        )
+                        msg_cond = and_(msg_cond, channel_filter)
+                        req_cond = and_(req_cond, channel_filter)
+                    message_matches.append(or_(msg_cond, req_cond))
+                for identifier_like in like_identifiers:
+                    msg_cond = LogEntry.source["messageId"].as_string().like(identifier_like)
+                    req_cond = LogEntry.source["requestId"].as_string().like(identifier_like)
+                    if channel_text:
+                        channel_filter = or_(
+                            func.lower(LogEntry.source["channel"].as_string()) == channel_text,
+                            LogEntry.source["channel"].is_(None),
+                            func.lower(LogEntry.source["channel"].as_string()) == "openclaw",
+                            func.lower(LogEntry.source["channel"].as_string()) == "clawboard",
+                            func.lower(LogEntry.source["channel"].as_string()) == "webchat",
                         )
                         msg_cond = and_(msg_cond, channel_filter)
                         req_cond = and_(req_cond, channel_filter)
@@ -1918,7 +2849,6 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             if existing:
                 return existing
 
-    source_meta = payload.source.copy() if isinstance(payload.source, dict) else None
     space_id = _normalize_space_id(payload.spaceId)
     topic_id = payload.topicId
     task_id = payload.taskId
@@ -2218,13 +3148,49 @@ def _log_openclaw_chat_error(*, session_key: str, request_id: str, detail: str, 
             raw=_clip(raw or "", 5000) if raw else None,
             agentId="system",
             agentLabel="Clawboard",
-            source={"sessionKey": session_key, "channel": "clawboard", "requestId": request_id},
+            source={
+                "sessionKey": session_key,
+                "channel": "clawboard",
+                "requestId": request_id,
+                "requestTerminal": True,
+            },
             classificationStatus="classified",
         )
         with get_session() as session:
             append_log_entry(session, payload, idempotency_key=f"openclaw-chat:error:{request_id}")
     except Exception:
         # Non-fatal: if we can't log, the client will still see the HTTP error.
+        pass
+
+
+def _log_openclaw_chat_watchdog_warning(*, session_key: str, request_id: str, detail: str) -> None:
+    """Persist a throttled watchdog warning without terminating request tracking."""
+    window_seconds = max(60, int(_openclaw_chat_assistant_log_warn_interval_seconds()))
+    bucket = int(time.time() // window_seconds)
+    try:
+        payload = LogAppend(
+            type="system",
+            content=detail,
+            summary=_clip(detail, 160),
+            raw=None,
+            agentId="system",
+            agentLabel="Clawboard",
+            source={
+                "sessionKey": session_key,
+                "channel": "clawboard",
+                "requestId": request_id,
+                "watchdogMissingAssistant": True,
+                "requestTerminal": False,
+            },
+            classificationStatus="classified",
+        )
+        with get_session() as session:
+            append_log_entry(
+                session,
+                payload,
+                idempotency_key=f"openclaw-chat:watchdog:{request_id}:{bucket}",
+            )
+    except Exception:
         pass
 
 
@@ -2429,6 +3395,26 @@ def download_attachment(attachment_id: str):
     )
 
 
+_OPENCLAW_CHAT_SESSION_LOCKS: dict[str, threading.Lock] = {}
+_OPENCLAW_CHAT_SESSION_LOCKS_GUARD = threading.Lock()
+
+
+def _openclaw_chat_dispatch_session_key(session_key: str) -> str:
+    base_key = (str(session_key or "").split("|", 1)[0] or "").strip()
+    return base_key or str(session_key or "").strip()
+
+
+def _openclaw_chat_acquire_session_lock(session_key: str) -> threading.Lock:
+    key = _openclaw_chat_dispatch_session_key(session_key)
+    with _OPENCLAW_CHAT_SESSION_LOCKS_GUARD:
+        existing = _OPENCLAW_CHAT_SESSION_LOCKS.get(key)
+        if existing is not None:
+            return existing
+        lock = threading.Lock()
+        _OPENCLAW_CHAT_SESSION_LOCKS[key] = lock
+        return lock
+
+
 def _run_openclaw_chat(
     request_id: str,
     *,
@@ -2439,7 +3425,9 @@ def _run_openclaw_chat(
     sent_at: str,
     message: str,
     attachments: list[dict[str, Any]] | None = None,
-) -> None:
+    raise_on_error: bool = False,
+    log_errors: bool = True,
+) -> bool:
     """Dispatch a message to OpenClaw via the Gateway WebSocket (chat.send).
 
     Clawboard is an external client of the OpenClaw Gateway.
@@ -2447,6 +3435,53 @@ def _run_openclaw_chat(
 
     # NOTE: We intentionally do not use OpenResponses here; we speak directly to
     # the Gateway WS and call the same RPC method used by WebChat clients.
+    timeout_seconds = _openclaw_chat_timeout_seconds()
+    send_params: dict[str, Any] = {
+        "sessionKey": session_key,
+        "message": message,
+        "attachments": [],
+        "timeoutMs": int(timeout_seconds * 1000.0),
+        "idempotencyKey": _openclaw_chat_request_id_with_suffix(request_id),
+    }
+    send_timeout_seconds = _openclaw_chat_send_rpc_timeout_seconds()
+    lock = _openclaw_chat_acquire_session_lock(session_key)
+    lock.acquire()
+    typing_stopped = False
+
+    def _publish_typing_stop() -> None:
+        nonlocal typing_stopped
+        if typing_stopped:
+            return
+        event_hub.publish(
+            {
+                "type": "openclaw.typing",
+                "data": {"sessionKey": session_key, "requestId": request_id, "typing": False},
+                "eventTs": now_iso(),
+            }
+        )
+        typing_stopped = True
+
+    def _handle_failure(*, detail: str, raw: str | None = None, cause: Exception | None = None) -> bool:
+        # Failure path is terminal for this request from the UI perspective.
+        try:
+            _publish_typing_stop()
+        except Exception:
+            pass
+        raw_text = str(raw or "").strip()
+        if log_errors:
+            _log_openclaw_chat_error(
+                session_key=session_key,
+                request_id=request_id,
+                detail=detail,
+                raw=raw_text or None,
+            )
+        if raise_on_error:
+            message_text = raw_text or detail
+            if cause is not None:
+                raise RuntimeError(message_text) from cause
+            raise RuntimeError(message_text)
+        return False
+
     try:
         event_hub.publish(
             {
@@ -2466,22 +3501,18 @@ def _run_openclaw_chat(
                 storage_path = str(att.get("storagePath") or att_id).strip()
                 path = root / storage_path
                 if not path.exists():
-                    _log_openclaw_chat_error(
-                        session_key=session_key,
-                        request_id=request_id,
+                    return _handle_failure(
                         detail=f"OpenClaw chat failed: attachment missing on disk ({att_id}). requestId={request_id}",
+                        raw=f"attachment missing on disk ({att_id})",
                     )
-                    return
                 try:
                     data_bytes = path.read_bytes()
                 except Exception as exc:
-                    _log_openclaw_chat_error(
-                        session_key=session_key,
-                        request_id=request_id,
+                    return _handle_failure(
                         detail=f"OpenClaw chat failed: unable to read attachment ({att_id}). requestId={request_id}",
                         raw=str(exc),
+                        cause=exc,
                     )
-                    return
 
                 mime_type = _normalize_mime_type(str(att.get("mimeType") or "application/octet-stream"))
                 filename = _sanitize_attachment_filename(str(att.get("fileName") or "attachment"))
@@ -2493,48 +3524,233 @@ def _run_openclaw_chat(
                         "content": b64,
                     }
                 )
+        send_params["attachments"] = ws_attachments if ws_attachments else []
 
         payload = asyncio.run(
             gateway_rpc(
                 "chat.send",
-                {
-                    "sessionKey": session_key,
-                    "message": message,
-                    "attachments": ws_attachments if ws_attachments else [],
-                    "timeoutMs": int(float(os.getenv("OPENCLAW_CHAT_TIMEOUT_SECONDS", "120")) * 1000),
-                    "idempotencyKey": request_id,
-                },
+                send_params,
                 scopes=["operator.write"],
+                timeout_seconds=send_timeout_seconds,
             )
         )
+        status, run_id = _openclaw_chat_send_state(payload)
+        probe_seconds = _openclaw_chat_in_flight_probe_seconds()
+        if probe_seconds > 0 and status in {"started", "accepted", "in_flight"}:
+            poll_seconds = _openclaw_chat_in_flight_probe_poll_seconds()
+            deadline = time.monotonic() + probe_seconds
+            saw_progress = False
+            while True:
+                if _openclaw_chat_request_has_non_user_activity(
+                    request_id=request_id,
+                    sent_at=sent_at,
+                    session_key=session_key,
+                ):
+                    saw_progress = True
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(poll_seconds, remaining))
+
+            if not saw_progress:
+                probe_payload = asyncio.run(
+                    gateway_rpc(
+                        "chat.send",
+                        send_params,
+                        scopes=["operator.write"],
+                        timeout_seconds=min(120.0, send_timeout_seconds),
+                    )
+                )
+                probe_status, probe_run_id = _openclaw_chat_send_state(probe_payload)
+                if probe_status == "in_flight":
+                    abort_params: dict[str, Any] = {"sessionKey": session_key}
+                    if probe_run_id:
+                        abort_params["runId"] = probe_run_id
+                    try:
+                        asyncio.run(
+                            gateway_rpc(
+                                "chat.abort",
+                                abort_params,
+                                scopes=["operator.write"],
+                                timeout_seconds=15.0,
+                            )
+                        )
+                    except Exception:
+                        pass
+
+                    retry_payload = asyncio.run(
+                        gateway_rpc(
+                            "chat.send",
+                            {
+                                **send_params,
+                                "idempotencyKey": _openclaw_chat_request_id_with_suffix(
+                                    request_id,
+                                    suffix="retry-1",
+                                ),
+                            },
+                            scopes=["operator.write"],
+                            timeout_seconds=min(120.0, send_timeout_seconds),
+                        )
+                    )
+                    retry_status, retry_run_id = _openclaw_chat_send_state(retry_payload)
+                    if retry_status not in {"started", "accepted", "ok"}:
+                        raise RuntimeError(
+                            "OpenClaw chat appears stalled in-flight after no progress window, "
+                            f"abort+retry failed (status={retry_status or 'unknown'}, runId={retry_run_id or probe_run_id or run_id or 'n/a'}). "
+                            f"requestId={request_id}"
+                        )
+                    retry_grace_seconds = _openclaw_chat_in_flight_retry_grace_seconds()
+                    if retry_grace_seconds > 0 and retry_status in {"started", "accepted"}:
+                        retry_deadline = time.monotonic() + retry_grace_seconds
+                        recovered_after_retry = False
+                        while True:
+                            if _openclaw_chat_request_has_non_user_activity(
+                                request_id=request_id,
+                                sent_at=sent_at,
+                                session_key=session_key,
+                            ):
+                                recovered_after_retry = True
+                                break
+                            retry_remaining = retry_deadline - time.monotonic()
+                            if retry_remaining <= 0:
+                                break
+                            time.sleep(min(poll_seconds, retry_remaining))
+                        if not recovered_after_retry:
+                            raise RuntimeError(
+                                "OpenClaw chat remained stalled after abort+retry with no progress during retry grace window "
+                                f"({int(retry_grace_seconds)}s). requestId={request_id}"
+                            )
+
         # We don't need the response body; OpenClaw logs the conversation via plugins.
         _ = payload
         _schedule_openclaw_assistant_log_check(session_key=session_key, request_id=request_id, sent_at=sent_at)
+        return True
     except Exception as exc:
         raw = str(exc)
         if not raw:
             raw = f"{type(exc).__name__}"
         detail = f"OpenClaw chat failed. requestId={request_id}"
-        _log_openclaw_chat_error(
-            session_key=session_key,
-            request_id=request_id,
+        if "aborted" in raw.lower():
+            detail = (
+                "OpenClaw chat aborted before completion. "
+                f"Configured timeout is {int(timeout_seconds)} seconds "
+                "(OPENCLAW_CHAT_TIMEOUT_SECONDS). "
+                f"requestId={request_id}"
+            )
+        return _handle_failure(
             detail=detail,
             raw=raw,
+            cause=exc,
         )
     finally:
-        # Reliable termination: always broadcast typing: False once the gateway call returns or fails.
-        # This is now in the outer finally block to ensure it runs regardless of early returns or exceptions.
-        event_hub.publish(
-            {
-                "type": "openclaw.typing",
-                "data": {"sessionKey": session_key, "requestId": request_id, "typing": False},
-                "eventTs": now_iso(),
-            }
-        )
+        # Success path relies on assistant append -> openclaw.typing:false.
+        # We intentionally do not force typing:false here so long-running accepted/in-flight
+        # requests stay visible until a true terminal signal appears.
+        lock.release()
+
+
+def _openclaw_chat_send_state(payload: Any) -> tuple[str | None, str | None]:
+    if not isinstance(payload, dict):
+        return (None, None)
+    status_raw = payload.get("status")
+    run_id_raw = payload.get("runId")
+    status = str(status_raw or "").strip().lower() or None
+    run_id = str(run_id_raw or "").strip() or None
+    return (status, run_id)
+
+
+def _openclaw_chat_request_id_with_suffix(request_id: str, *, suffix: str | None = None) -> str:
+    rid = str(request_id or "").strip()
+    if not rid:
+        return ""
+    token = str(suffix or "").strip()
+    if not token:
+        return rid
+    normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", token).strip("-")
+    if not normalized:
+        return rid
+    return f"{rid}:{normalized}"
+
+
+def _openclaw_chat_request_has_non_user_activity(
+    *,
+    request_id: str,
+    sent_at: str,
+    session_key: str | None = None,
+) -> bool:
+    rid = str(request_id or "").strip()
+    sent = normalize_iso(sent_at)
+    rid_prefix = f"{rid}:%"
+    base_key = (str(session_key or "").split("|", 1)[0] or "").strip()
+    if not rid or not sent:
+        return False
+    try:
+        with get_session() as session:
+            query = select(LogEntry.id)
+            if DATABASE_URL.startswith("sqlite"):
+                query = query.where(
+                    text(
+                        "("
+                        "json_extract(source, '$.requestId') = :rid OR json_extract(source, '$.messageId') = :rid "
+                        "OR json_extract(source, '$.requestId') LIKE :rid_prefix "
+                        "OR json_extract(source, '$.messageId') LIKE :rid_prefix"
+                        ") "
+                        "AND lower(COALESCE(agentId, '')) <> 'user' "
+                        "AND lower(COALESCE(agentId, '')) <> 'system'"
+                    )
+                ).params(rid=rid, rid_prefix=rid_prefix)
+            else:
+                query = query.where(
+                    or_(
+                        LogEntry.source["requestId"].as_string() == rid,
+                        LogEntry.source["messageId"].as_string() == rid,
+                        LogEntry.source["requestId"].as_string().like(rid_prefix),
+                        LogEntry.source["messageId"].as_string().like(rid_prefix),
+                    )
+                )
+                query = query.where(func.lower(func.coalesce(LogEntry.agentId, "")) != "user")
+                query = query.where(func.lower(func.coalesce(LogEntry.agentId, "")) != "system")
+            query = query.where(LogEntry.createdAt >= sent).order_by(LogEntry.createdAt.desc()).limit(1)
+            if session.exec(query).first():
+                return True
+
+            # Some tool/action logs currently do not carry requestId/messageId. Fall back
+            # to unlabeled non-user activity in the same logical session.
+            if not base_key:
+                return False
+
+            fallback_query = select(LogEntry.id)
+            if DATABASE_URL.startswith("sqlite"):
+                fallback_query = fallback_query.where(
+                    text(
+                        "("
+                        "json_extract(source, '$.sessionKey') = :base_key "
+                        "OR json_extract(source, '$.sessionKey') LIKE :like_key"
+                        ") "
+                        "AND COALESCE(json_extract(source, '$.requestId'), '') = '' "
+                        "AND COALESCE(json_extract(source, '$.messageId'), '') = '' "
+                        "AND lower(COALESCE(agentId, '')) <> 'user' "
+                        "AND lower(COALESCE(agentId, '')) <> 'system'"
+                    )
+                ).params(base_key=base_key, like_key=f"{base_key}|%")
+            else:
+                session_expr = LogEntry.source["sessionKey"].as_string()
+                fallback_query = fallback_query.where(or_(session_expr == base_key, session_expr.like(f"{base_key}|%")))
+                fallback_query = fallback_query.where(func.coalesce(LogEntry.source["requestId"].as_string(), "") == "")
+                fallback_query = fallback_query.where(func.coalesce(LogEntry.source["messageId"].as_string(), "") == "")
+                fallback_query = fallback_query.where(func.lower(func.coalesce(LogEntry.agentId, "")) != "user")
+                fallback_query = fallback_query.where(func.lower(func.coalesce(LogEntry.agentId, "")) != "system")
+            fallback_query = (
+                fallback_query.where(LogEntry.createdAt >= sent).order_by(LogEntry.createdAt.desc()).limit(1)
+            )
+            return bool(session.exec(fallback_query).first())
+    except Exception:
+        return False
 
 
 def _openclaw_chat_assistant_log_grace_seconds() -> float:
-    """Seconds after a successful OpenClaw gateway call to wait for plugin logs."""
+    """Initial delay before the first assistant-log watchdog check."""
     raw = os.getenv("OPENCLAW_CHAT_ASSISTANT_LOG_GRACE_SECONDS", "30").strip()
     try:
         value = float(raw)
@@ -2543,6 +3759,397 @@ def _openclaw_chat_assistant_log_grace_seconds() -> float:
     if value <= 0:
         return 0.0
     return max(1.0, min(600.0, value))
+
+
+def _openclaw_chat_timeout_seconds() -> float:
+    """Gateway chat.send timeout window for long-running runs."""
+    raw = os.getenv("OPENCLAW_CHAT_TIMEOUT_SECONDS", "120").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 120.0
+    return max(5.0, min(604800.0, value))
+
+
+def _openclaw_chat_send_rpc_timeout_seconds() -> float:
+    """Timeout for each gateway RPC call (connect + chat.send/chat.abort request lifecycle)."""
+    raw = os.getenv("OPENCLAW_CHAT_SEND_RPC_TIMEOUT_SECONDS", "45").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 45.0
+    return max(5.0, min(900.0, value))
+
+
+def _openclaw_chat_in_flight_probe_seconds() -> float:
+    """Optional no-progress probe window before attempting abort/retry recovery."""
+    raw = str(os.getenv("OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS") or "").strip()
+    if not raw:
+        raise RuntimeError("OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS is required")
+    try:
+        value = float(raw)
+    except Exception:
+        raise RuntimeError("OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS must be a number")
+    return max(0.0, min(604800.0, value))
+
+
+def _openclaw_chat_in_flight_probe_poll_seconds() -> float:
+    """Polling interval while checking request progress in the DB."""
+    raw = os.getenv("OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS", "5").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 5.0
+    return max(0.5, min(60.0, value))
+
+
+def _openclaw_chat_in_flight_retry_grace_seconds() -> float:
+    """Post-retry grace window before failing the request as still stalled."""
+    raw = str(os.getenv("OPENCLAW_CHAT_IN_FLIGHT_RETRY_GRACE_SECONDS") or "").strip()
+    if not raw:
+        raise RuntimeError("OPENCLAW_CHAT_IN_FLIGHT_RETRY_GRACE_SECONDS is required")
+    try:
+        value = float(raw)
+    except Exception:
+        raise RuntimeError("OPENCLAW_CHAT_IN_FLIGHT_RETRY_GRACE_SECONDS must be a number")
+    return max(0.0, min(604800.0, value))
+
+
+def _openclaw_chat_assistant_log_poll_seconds() -> float:
+    """Polling interval while waiting for assistant logs to appear."""
+    raw = os.getenv("OPENCLAW_CHAT_ASSISTANT_LOG_POLL_SECONDS", "30").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 30.0
+    return max(5.0, min(3600.0, value))
+
+
+def _openclaw_chat_assistant_log_idle_seconds() -> float:
+    """Warn only after this much inactivity with no assistant output."""
+    raw = os.getenv("OPENCLAW_CHAT_ASSISTANT_LOG_IDLE_SECONDS", "900").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 900.0
+    return max(15.0, min(604800.0, value))
+
+
+def _openclaw_chat_assistant_log_warn_interval_seconds() -> float:
+    """Minimum interval between repeated watchdog missing-assistant warnings per request."""
+    raw = os.getenv("OPENCLAW_CHAT_ASSISTANT_LOG_WARN_INTERVAL_SECONDS", "1800").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 1800.0
+    return max(60.0, min(86400.0, value))
+
+
+def _openclaw_chat_assistant_log_recovery_lookback_seconds() -> float:
+    """Startup recovery lookback window for unresolved OpenClaw requestIds."""
+    raw = os.getenv("OPENCLAW_CHAT_ASSISTANT_LOG_RECOVERY_LOOKBACK_SECONDS", "604800").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 604800.0
+    return max(300.0, min(2592000.0, value))
+
+
+def _openclaw_chat_assistant_log_recovery_max_rows() -> int:
+    """Hard cap for startup watchdog recovery scans."""
+    raw = os.getenv("OPENCLAW_CHAT_ASSISTANT_LOG_RECOVERY_MAX_ROWS", "5000").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 5000
+    return max(100, min(50000, value))
+
+
+def _openclaw_chat_assistant_log_session_activity_window_seconds() -> float:
+    """Small fallback window for unlabeled session activity when requestId is absent.
+
+    Keep this tight so unrelated requests in busy sessions don't mask a missing response.
+    """
+    raw = os.getenv("OPENCLAW_CHAT_ASSISTANT_LOG_SESSION_ACTIVITY_WINDOW_SECONDS", "300").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 90.0
+    return max(0.0, min(1800.0, value))
+
+
+def _openclaw_gateway_history_sync_poll_seconds() -> float:
+    """Background poll interval for gateway history sync fallback."""
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_POLL_SECONDS", "45").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 45.0
+    return max(10.0, min(3600.0, value))
+
+
+def _openclaw_gateway_history_sync_active_minutes() -> int:
+    """sessions.list activeMinutes scope for sync candidates."""
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_ACTIVE_MINUTES", "10080").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 10080
+    return max(5, min(60 * 24 * 30, value))
+
+
+def _openclaw_gateway_history_sync_session_limit() -> int:
+    """Maximum sessions checked per sync cycle."""
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_SESSION_LIMIT", "200").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 200
+    return max(1, min(1000, value))
+
+
+def _openclaw_gateway_history_sync_cycle_budget_seconds() -> float:
+    """Hard per-cycle budget to prevent long-running sync passes under large backlogs."""
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_CYCLE_BUDGET_SECONDS", "30").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 30.0
+    return max(10.0, min(900.0, value))
+
+
+def _openclaw_gateway_history_sync_history_limit() -> int:
+    """chat.history limit for each session sync pass."""
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_HISTORY_LIMIT", "240").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 240
+    return max(20, min(1000, value))
+
+
+def _openclaw_gateway_history_sync_overlap_seconds() -> int:
+    """Replay overlap to tolerate non-monotonic writes/races near cursor boundaries."""
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_OVERLAP_SECONDS", "120").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 120
+    return max(0, min(3600, value))
+
+
+def _openclaw_gateway_history_sync_rpc_timeout_seconds() -> float:
+    """Per-RPC timeout for gateway history sync calls."""
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_RPC_TIMEOUT_SECONDS", "8").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 8.0
+    return max(5.0, min(300.0, value))
+
+
+def _openclaw_gateway_history_sync_cursor_seed_limit() -> int:
+    """How many persisted cursor sessions to sample as fallback each cycle."""
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_CURSOR_SEED_LIMIT", "8").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 8
+    return max(0, min(500, value))
+
+
+def _openclaw_gateway_history_sync_log_seed_limit() -> int:
+    """How many recent conversation sessions to seed each sync cycle."""
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_LOG_SEED_LIMIT", "8").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 8
+    return max(0, min(500, value))
+
+
+def _openclaw_gateway_history_sync_log_seed_lookback_seconds() -> int:
+    """How far back to scan recent logs for fallback session seeds."""
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_LOG_SEED_LOOKBACK_SECONDS", "1209600").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 1209600
+    return max(300, min(2592000, value))
+
+
+def _openclaw_gateway_history_sync_unresolved_seed_limit() -> int:
+    """How many unresolved request sessions to prioritize each cycle."""
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_UNRESOLVED_SEED_LIMIT", "16").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 16
+    return max(0, min(500, value))
+
+
+def _openclaw_gateway_history_sync_unresolved_lookback_seconds() -> int:
+    """Lookback window for unresolved request seed detection."""
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_UNRESOLVED_LOOKBACK_SECONDS", "604800").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 604800
+    return max(300, min(2592000, value))
+
+
+def _openclaw_gateway_history_sync_token() -> str:
+    override = (os.getenv("OPENCLAW_GATEWAY_HISTORY_TOKEN") or "").strip()
+    if override:
+        return override
+    return (os.getenv("OPENCLAW_GATEWAY_TOKEN") or "").strip()
+
+
+def _openclaw_gateway_history_sync_use_device_auth() -> bool | None:
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_USE_DEVICE_AUTH")
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    if not text:
+        return None
+    return text in {"1", "true", "yes", "on"}
+
+
+def _openclaw_gateway_history_sync_retry_without_device_auth() -> bool:
+    return _env_flag("OPENCLAW_GATEWAY_HISTORY_SYNC_RETRY_WITHOUT_DEVICE_AUTH", True)
+
+
+def _openclaw_gateway_history_sync_retry_with_write_scope() -> bool:
+    return _env_flag("OPENCLAW_GATEWAY_HISTORY_SYNC_RETRY_WITH_WRITE_SCOPE", True)
+
+
+def _openclaw_gateway_history_sync_sessions_list_enabled() -> bool:
+    return os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_SESSIONS_LIST_DISABLE", "").strip() != "1"
+
+
+def _openclaw_gateway_history_sync_error_log_interval_seconds() -> int:
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_ERROR_LOG_INTERVAL_SECONDS", "900").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 900
+    return max(60, min(86400, value))
+
+
+def _openclaw_gateway_history_sync_max_backoff_seconds() -> int:
+    raw = os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_MAX_BACKOFF_SECONDS", "600").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 600
+    return max(30, min(3600, value))
+
+
+def _openclaw_gateway_history_sync_enabled() -> bool:
+    if os.getenv("OPENCLAW_GATEWAY_HISTORY_SYNC_DISABLE", "").strip() == "1":
+        return False
+    return bool(_openclaw_gateway_history_sync_token())
+
+
+def _iso_to_timestamp(value: str | None) -> float | None:
+    normalized = normalize_iso(value)
+    if not normalized:
+        return None
+    try:
+        candidate = normalized.replace("Z", "+00:00") if normalized.endswith("Z") else normalized
+        return datetime.fromisoformat(candidate).timestamp()
+    except Exception:
+        return None
+
+
+def _openclaw_watchdog_has_terminal_system_log(session: Any, request_id: str) -> bool:
+    rid = str(request_id or "").strip()
+    if not rid:
+        return False
+    query = select(LogEntry.id)
+    if DATABASE_URL.startswith("sqlite"):
+        query = query.where(
+            text(
+                "json_extract(source, '$.requestId') = :rid "
+                "AND lower(agentId) = 'system' "
+                "AND lower(COALESCE(CAST(json_extract(source, '$.watchdogMissingAssistant') AS TEXT), '')) "
+                "NOT IN ('1', 'true', 'yes', 'on')"
+            )
+        ).params(rid=rid)
+    else:
+        warning_flag = func.lower(func.coalesce(LogEntry.source["watchdogMissingAssistant"].as_string(), ""))
+        query = query.where(
+            and_(
+                LogEntry.source["requestId"].as_string() == rid,
+                func.lower(LogEntry.agentId) == "system",
+                warning_flag.notin_(["1", "true", "yes", "on"]),
+            )
+        )
+    return bool(session.exec(query.limit(1)).first())
+
+
+def _openclaw_watchdog_warning_recent(session: Any, request_id: str, *, window_seconds: float) -> bool:
+    rid = str(request_id or "").strip()
+    if not rid:
+        return False
+    window = max(60.0, float(window_seconds or 60.0))
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    query = select(LogEntry.id)
+    if DATABASE_URL.startswith("sqlite"):
+        query = query.where(
+            text(
+                "json_extract(source, '$.requestId') = :rid "
+                "AND lower(agentId) = 'system' "
+                "AND lower(COALESCE(CAST(json_extract(source, '$.watchdogMissingAssistant') AS TEXT), '')) "
+                "IN ('1', 'true', 'yes', 'on')"
+            )
+        ).params(rid=rid)
+    else:
+        warning_flag = func.lower(func.coalesce(LogEntry.source["watchdogMissingAssistant"].as_string(), ""))
+        query = query.where(
+            and_(
+                LogEntry.source["requestId"].as_string() == rid,
+                func.lower(LogEntry.agentId) == "system",
+                warning_flag.in_(["1", "true", "yes", "on"]),
+            )
+        )
+    query = query.where(LogEntry.createdAt >= cutoff).limit(1)
+    return bool(session.exec(query).first())
+
+
+def _openclaw_watchdog_has_assistant_by_request(session: Any, request_id: str, sent_at: str) -> bool:
+    rid = str(request_id or "").strip()
+    rid_prefix = f"{rid}:%"
+    sent = normalize_iso(sent_at)
+    if not rid or not sent:
+        return False
+    query = select(LogEntry.id)
+    if DATABASE_URL.startswith("sqlite"):
+        query = query.where(
+            text(
+                "("
+                "json_extract(source, '$.requestId') = :rid OR json_extract(source, '$.messageId') = :rid "
+                "OR json_extract(source, '$.requestId') LIKE :rid_prefix "
+                "OR json_extract(source, '$.messageId') LIKE :rid_prefix"
+                ")"
+            )
+        ).params(rid=rid, rid_prefix=rid_prefix)
+    else:
+        query = query.where(
+            or_(
+                LogEntry.source["requestId"].as_string() == rid,
+                LogEntry.source["messageId"].as_string() == rid,
+                LogEntry.source["requestId"].as_string().like(rid_prefix),
+                LogEntry.source["messageId"].as_string().like(rid_prefix),
+            )
+        )
+    query = (
+        query.where(func.lower(LogEntry.agentId) == "assistant")
+        .where(LogEntry.createdAt >= sent)
+        .order_by(LogEntry.createdAt.desc())
+        .limit(1)
+    )
+    return bool(session.exec(query).first())
 
 
 class _OpenClawAssistantLogWatchdog:
@@ -2554,7 +4161,7 @@ class _OpenClawAssistantLogWatchdog:
 
     def __init__(self) -> None:
         self._cv = threading.Condition()
-        self._heap: list[tuple[float, str, str, str]] = []
+        self._heap: list[tuple[float, str, str, str, float, float]] = []
         self._thread = threading.Thread(target=self._run, name="clawboard-openclaw-watchdog", daemon=True)
         self._started = False
 
@@ -2565,13 +4172,32 @@ class _OpenClawAssistantLogWatchdog:
             self._started = True
             self._thread.start()
 
-    def schedule(self, *, session_key: str, request_id: str, sent_at: str, delay_seconds: float) -> None:
+    def schedule(
+        self,
+        *,
+        session_key: str,
+        request_id: str,
+        sent_at: str,
+        delay_seconds: float,
+        poll_seconds: float,
+        idle_seconds: float,
+    ) -> None:
         base_key = (str(session_key or "").split("|", 1)[0] or "").strip()
         if not base_key:
             return
         due = time.time() + max(0.0, float(delay_seconds))
         with self._cv:
-            heapq.heappush(self._heap, (due, base_key, str(request_id or "").strip(), str(sent_at or "").strip()))
+            heapq.heappush(
+                self._heap,
+                (
+                    due,
+                    base_key,
+                    str(request_id or "").strip(),
+                    str(sent_at or "").strip(),
+                    max(5.0, float(poll_seconds or 30.0)),
+                    max(15.0, float(idle_seconds or 900.0)),
+                ),
+            )
             self._cv.notify()
 
     def _run(self) -> None:
@@ -2579,40 +4205,69 @@ class _OpenClawAssistantLogWatchdog:
             with self._cv:
                 while not self._heap:
                     self._cv.wait()
-                due, base_key, request_id, sent_at = self._heap[0]
+                due, base_key, request_id, sent_at, poll_seconds, idle_seconds = self._heap[0]
                 now = time.time()
                 if due > now:
                     self._cv.wait(timeout=due - now)
                     continue
                 heapq.heappop(self._heap)
             try:
-                self._check(base_key=base_key, request_id=request_id, sent_at=sent_at)
+                retry_after = self._check(
+                    base_key=base_key,
+                    request_id=request_id,
+                    sent_at=sent_at,
+                    poll_seconds=poll_seconds,
+                    idle_seconds=idle_seconds,
+                )
+                if retry_after is not None and retry_after > 0:
+                    self.schedule(
+                        session_key=base_key,
+                        request_id=request_id,
+                        sent_at=sent_at,
+                        delay_seconds=retry_after,
+                        poll_seconds=poll_seconds,
+                        idle_seconds=idle_seconds,
+                    )
             except Exception:
                 # Never crash the watchdog thread.
-                pass
+                try:
+                    self.schedule(
+                        session_key=base_key,
+                        request_id=request_id,
+                        sent_at=sent_at,
+                        delay_seconds=max(5.0, poll_seconds),
+                        poll_seconds=poll_seconds,
+                        idle_seconds=idle_seconds,
+                    )
+                except Exception:
+                    pass
 
-    def _check(self, *, base_key: str, request_id: str, sent_at: str) -> None:
+    def _check(
+        self,
+        *,
+        base_key: str,
+        request_id: str,
+        sent_at: str,
+        poll_seconds: float = 30.0,
+        idle_seconds: float = 900.0,
+    ) -> float | None:
         if not base_key or not request_id or not sent_at:
-            return
+            return None
+        poll_seconds = max(5.0, float(poll_seconds or 30.0))
+        idle_seconds = max(15.0, float(idle_seconds or 900.0))
+        now_ts = time.time()
+        sent_ts = _iso_to_timestamp(sent_at) or now_ts
 
         try:
             with get_session() as session:
                 # If we already emitted a system terminal event for this requestId (error/warn), do nothing.
-                terminal_query = select(LogEntry.id)
-                if DATABASE_URL.startswith("sqlite"):
-                    terminal_query = terminal_query.where(
-                        text("json_extract(source, '$.requestId') = :rid AND lower(agentId) = 'system'")
-                    ).params(rid=request_id)
-                else:
-                    terminal_query = terminal_query.where(
-                        and_(
-                            LogEntry.source["requestId"].as_string() == request_id,
-                            func.lower(LogEntry.agentId) == "system",
-                        )
-                    )
-                terminal_query = terminal_query.limit(1)
-                if session.exec(terminal_query).first():
-                    return
+                if _openclaw_watchdog_has_terminal_system_log(session, request_id):
+                    return None
+
+                # Prefer requestId-specific assistant logs so overlapping sends in the same session
+                # don't satisfy this check accidentally.
+                if _openclaw_watchdog_has_assistant_by_request(session, request_id, sent_at):
+                    return None
 
                 # If any assistant log shows up for this session after the send, the logger plugin is working.
                 # Match exact session key, thread variant, and known board task/topic patterns.
@@ -2653,38 +4308,1390 @@ class _OpenClawAssistantLogWatchdog:
                     .limit(1)
                 )
                 if session.exec(query).first():
-                    return
-        except Exception:
-            return
+                    return None
 
-        _log_openclaw_chat_error(
-            session_key=base_key,
-            request_id=request_id,
-            detail=(
-                "OpenClaw gateway returned, but no assistant output was logged back to Clawboard yet. "
-                "Most common cause: clawboard-logger plugin is disabled or misconfigured (baseUrl/token). "
-                f"requestId={request_id}"
-            ),
-        )
+                # Long-running runs may emit activity for a while before final assistant text.
+                # Use requestId-first matching. Only fall back to unlabeled session activity in
+                # a short post-send window so unrelated requests don't mask this one.
+                request_activity_query = select(LogEntry.createdAt)
+                request_id_prefix = f"{request_id}:%"
+                if DATABASE_URL.startswith("sqlite"):
+                    request_activity_query = request_activity_query.where(
+                        text(
+                            "("
+                            "json_extract(source, '$.requestId') = :rid OR json_extract(source, '$.messageId') = :rid "
+                            "OR json_extract(source, '$.requestId') LIKE :rid_prefix "
+                            "OR json_extract(source, '$.messageId') LIKE :rid_prefix"
+                            ") "
+                            "AND lower(COALESCE(agentId, '')) <> 'user' "
+                            "AND lower(COALESCE(agentId, '')) <> 'system'"
+                        )
+                    ).params(rid=request_id, rid_prefix=request_id_prefix)
+                else:
+                    request_activity_query = request_activity_query.where(
+                        or_(
+                            LogEntry.source["requestId"].as_string() == request_id,
+                            LogEntry.source["messageId"].as_string() == request_id,
+                            LogEntry.source["requestId"].as_string().like(request_id_prefix),
+                            LogEntry.source["messageId"].as_string().like(request_id_prefix),
+                        )
+                    )
+                    request_activity_query = request_activity_query.where(func.lower(func.coalesce(LogEntry.agentId, "")) != "user")
+                    request_activity_query = request_activity_query.where(
+                        func.lower(func.coalesce(LogEntry.agentId, "")) != "system"
+                    )
+                request_activity_query = (
+                    request_activity_query.where(LogEntry.createdAt >= sent_at).order_by(LogEntry.createdAt.desc()).limit(1)
+                )
+                latest_request_activity = session.exec(request_activity_query).first()
+
+                baseline_ts = sent_ts
+                if latest_request_activity:
+                    latest_request_activity_ts = _iso_to_timestamp(str(latest_request_activity))
+                    if latest_request_activity_ts is not None:
+                        baseline_ts = max(sent_ts, latest_request_activity_ts)
+                else:
+                    fallback_window_seconds = _openclaw_chat_assistant_log_session_activity_window_seconds()
+                    if fallback_window_seconds > 0:
+                        fallback_query = select(LogEntry.createdAt)
+                        if DATABASE_URL.startswith("sqlite"):
+                            session_conditions = [
+                                "json_extract(source, '$.sessionKey') = :base_key",
+                                "json_extract(source, '$.sessionKey') LIKE :like_key",
+                            ]
+                            fallback_params: dict[str, Any] = {
+                                "base_key": base_key,
+                                "like_key": f"{base_key}|%",
+                            }
+                            if topic_id:
+                                session_conditions.append("json_extract(source, '$.sessionKey') LIKE :contains_topic_key")
+                                fallback_params["contains_topic_key"] = f"%:clawboard:topic:{topic_id}%"
+                            if task_id:
+                                session_conditions.append("json_extract(source, '$.sessionKey') LIKE :contains_task_key")
+                                fallback_params["contains_task_key"] = f"%:clawboard:task:{topic_id}:{task_id}%"
+                            fallback_query = fallback_query.where(
+                                text(
+                                    f"({' OR '.join(session_conditions)}) "
+                                    "AND COALESCE(json_extract(source, '$.requestId'), '') = '' "
+                                    "AND COALESCE(json_extract(source, '$.messageId'), '') = '' "
+                                    "AND lower(COALESCE(agentId, '')) <> 'user' "
+                                    "AND lower(COALESCE(agentId, '')) <> 'system'"
+                                )
+                            ).params(**fallback_params)
+                        else:
+                            expr = LogEntry.source["sessionKey"].as_string()
+                            session_exprs = [expr == base_key, expr.like(f"{base_key}|%")]
+                            if topic_id:
+                                session_exprs.append(expr.like(f"%:clawboard:topic:{topic_id}%"))
+                            if task_id:
+                                session_exprs.append(expr.like(f"%:clawboard:task:{topic_id}:{task_id}%"))
+                            fallback_query = fallback_query.where(or_(*session_exprs))
+                            fallback_query = fallback_query.where(
+                                func.coalesce(LogEntry.source["requestId"].as_string(), "") == ""
+                            )
+                            fallback_query = fallback_query.where(
+                                func.coalesce(LogEntry.source["messageId"].as_string(), "") == ""
+                            )
+                            fallback_query = fallback_query.where(
+                                func.lower(func.coalesce(LogEntry.agentId, "")) != "user"
+                            )
+                            fallback_query = fallback_query.where(
+                                func.lower(func.coalesce(LogEntry.agentId, "")) != "system"
+                            )
+                        fallback_query = (
+                            fallback_query.where(LogEntry.createdAt >= sent_at)
+                            .order_by(LogEntry.createdAt.desc())
+                            .limit(1)
+                        )
+                        latest_fallback_activity = session.exec(fallback_query).first()
+                        if latest_fallback_activity:
+                            latest_fallback_activity_ts = _iso_to_timestamp(str(latest_fallback_activity))
+                            if (
+                                latest_fallback_activity_ts is not None
+                                and latest_fallback_activity_ts >= sent_ts
+                                and (latest_fallback_activity_ts - sent_ts) <= fallback_window_seconds
+                            ):
+                                baseline_ts = max(sent_ts, latest_fallback_activity_ts)
+                idle_for = max(0.0, now_ts - baseline_ts)
+                if idle_for < idle_seconds:
+                    return max(5.0, min(poll_seconds, idle_seconds - idle_for))
+        except Exception:
+            return max(5.0, poll_seconds)
+
+        # One-shot fallback before warning: if plugin logs lagged/dropped, try
+        # pulling this session's gateway history and re-check request output.
+        if _openclaw_gateway_history_sync_enabled():
+            try:
+                sync_stats = _sync_openclaw_gateway_history_single_session(base_key)
+                changed = int(sync_stats.get("ingested") or 0) > 0 or int(sync_stats.get("cursorUpdated") or 0) > 0
+                if changed:
+                    with get_session() as session:
+                        if _openclaw_watchdog_has_terminal_system_log(session, request_id):
+                            return None
+                        if _openclaw_watchdog_has_assistant_by_request(session, request_id, sent_at):
+                            return None
+                    return max(5.0, poll_seconds)
+            except Exception:
+                pass
+
+        warn_interval = _openclaw_chat_assistant_log_warn_interval_seconds()
+        should_log_warning = True
+        try:
+            with get_session() as session:
+                if _openclaw_watchdog_warning_recent(session, request_id, window_seconds=warn_interval):
+                    should_log_warning = False
+        except Exception:
+            pass
+
+        if should_log_warning:
+            _log_openclaw_chat_watchdog_warning(
+                session_key=base_key,
+                request_id=request_id,
+                detail=(
+                    "OpenClaw gateway accepted the request, but no assistant output has been logged to Clawboard "
+                    f"for at least {int(idle_seconds)} seconds. The run may still be executing; Clawboard will keep "
+                    f"monitoring and retry history backfill. requestId={request_id}"
+                ),
+            )
+        return max(5.0, poll_seconds)
 
 
 _OPENCLAW_ASSISTANT_LOG_WATCHDOG: _OpenClawAssistantLogWatchdog | None = None
 _OPENCLAW_ASSISTANT_LOG_WATCHDOG_LOCK = threading.Lock()
 
 
-def _schedule_openclaw_assistant_log_check(*, session_key: str, request_id: str, sent_at: str) -> None:
-    grace = _openclaw_chat_assistant_log_grace_seconds()
-    if grace <= 0:
-        return
-
+def _get_openclaw_assistant_log_watchdog() -> _OpenClawAssistantLogWatchdog:
     global _OPENCLAW_ASSISTANT_LOG_WATCHDOG
     with _OPENCLAW_ASSISTANT_LOG_WATCHDOG_LOCK:
         if _OPENCLAW_ASSISTANT_LOG_WATCHDOG is None:
             _OPENCLAW_ASSISTANT_LOG_WATCHDOG = _OpenClawAssistantLogWatchdog()
             _OPENCLAW_ASSISTANT_LOG_WATCHDOG.start()
-        watchdog = _OPENCLAW_ASSISTANT_LOG_WATCHDOG
+        return _OPENCLAW_ASSISTANT_LOG_WATCHDOG
 
-    watchdog.schedule(session_key=session_key, request_id=request_id, sent_at=sent_at, delay_seconds=grace)
+
+def _schedule_openclaw_assistant_log_check(
+    *,
+    session_key: str,
+    request_id: str,
+    sent_at: str,
+    delay_override_seconds: float | None = None,
+) -> None:
+    grace = _openclaw_chat_assistant_log_grace_seconds()
+    if grace <= 0:
+        return
+    poll = _openclaw_chat_assistant_log_poll_seconds()
+    idle = _openclaw_chat_assistant_log_idle_seconds()
+    delay = grace if delay_override_seconds is None else max(0.0, float(delay_override_seconds))
+
+    watchdog = _get_openclaw_assistant_log_watchdog()
+
+    watchdog.schedule(
+        session_key=session_key,
+        request_id=request_id,
+        sent_at=sent_at,
+        delay_seconds=delay,
+        poll_seconds=poll,
+        idle_seconds=idle,
+    )
+
+
+def _recover_openclaw_assistant_log_checks() -> int:
+    """On process start, recover unresolved OpenClaw request checks from persisted user logs."""
+    grace = _openclaw_chat_assistant_log_grace_seconds()
+    if grace <= 0:
+        return 0
+    lookback_seconds = _openclaw_chat_assistant_log_recovery_lookback_seconds()
+    max_rows = _openclaw_chat_assistant_log_recovery_max_rows()
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=lookback_seconds)).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+    scheduled = 0
+    try:
+        with get_session() as session:
+            rows = (
+                session.exec(
+                    select(LogEntry)
+                    .where(LogEntry.type == "conversation")
+                    .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "user")
+                    .where(LogEntry.createdAt >= cutoff)
+                    .order_by(LogEntry.createdAt.desc())
+                    .limit(max_rows)
+                ).all()
+            )
+            candidates: dict[str, tuple[str, str]] = {}
+            for row in rows:
+                source = row.source if isinstance(row.source, dict) else None
+                if not source:
+                    continue
+                if str(source.get("channel") or "").strip().lower() != "openclaw":
+                    continue
+                request_id = str(source.get("requestId") or "").strip()
+                session_key = str(source.get("sessionKey") or "").strip()
+                sent_at = normalize_iso(str(row.createdAt or ""))
+                if not request_id or not session_key or not sent_at:
+                    continue
+                existing = candidates.get(request_id)
+                if existing is None or sent_at > existing[1]:
+                    candidates[request_id] = (session_key, sent_at)
+
+            if not candidates:
+                return 0
+
+            watchdog = _get_openclaw_assistant_log_watchdog()
+            now_ts = time.time()
+            poll = _openclaw_chat_assistant_log_poll_seconds()
+            idle = _openclaw_chat_assistant_log_idle_seconds()
+            for request_id, (session_key, sent_at) in candidates.items():
+                if _openclaw_watchdog_has_terminal_system_log(session, request_id):
+                    continue
+                if _openclaw_watchdog_has_assistant_by_request(session, request_id, sent_at):
+                    continue
+                sent_ts = _iso_to_timestamp(sent_at) or now_ts
+                elapsed = max(0.0, now_ts - sent_ts)
+                delay = max(0.0, grace - elapsed)
+                watchdog.schedule(
+                    session_key=session_key,
+                    request_id=request_id,
+                    sent_at=sent_at,
+                    delay_seconds=delay,
+                    poll_seconds=poll,
+                    idle_seconds=idle,
+                )
+                scheduled += 1
+    except Exception:
+        return 0
+    return scheduled
+
+
+_OPENCLAW_HISTORY_SYNC_STATE_ID = 1
+_OPENCLAW_HISTORY_SYNC_STATUS_SESSION_KEY = "clawboard:system:openclaw-history-sync"
+
+
+def _gateway_error_text(exc: Exception) -> str:
+    text = str(exc or "").strip()
+    if not text:
+        text = type(exc).__name__
+    return _clip(text, 1600)
+
+
+def _is_gateway_device_auth_error(message: str) -> bool:
+    text = str(message or "").lower()
+    return any(
+        token in text
+        for token in [
+            "not_paired",
+            "pairing required",
+            "device token mismatch",
+            "device auth",
+            "gateway token mismatch",
+        ]
+    )
+
+
+def _is_gateway_scope_error(message: str) -> bool:
+    text = str(message or "").lower()
+    return "missing scope" in text or ("scope" in text and "operator.read" in text)
+
+
+def _is_gateway_timeout_error(message: str) -> bool:
+    text = str(message or "").lower()
+    return "timeout" in text or "timed out" in text or "timeouterror" in text
+
+
+def _update_openclaw_gateway_history_sync_state(
+    *,
+    status: str,
+    ingested: int = 0,
+    sessions_scanned: int = 0,
+    cursor_updates: int = 0,
+    deferred_sessions: int = 0,
+    error: str | None = None,
+) -> None:
+    stamp = now_iso()
+    with get_session() as session:
+        row = session.get(OpenClawGatewayHistorySyncState, _OPENCLAW_HISTORY_SYNC_STATE_ID)
+        if row is None:
+            row = OpenClawGatewayHistorySyncState(
+                id=_OPENCLAW_HISTORY_SYNC_STATE_ID,
+                status="idle",
+                lastRunAt=None,
+                lastSuccessAt=None,
+                lastErrorAt=None,
+                lastError=None,
+                consecutiveFailures=0,
+                lastIngestedCount=0,
+                lastSessionCount=0,
+                lastCursorUpdateCount=0,
+                lastDeferredCount=0,
+                updatedAt=stamp,
+            )
+        row.status = str(status or "idle").strip().lower() or "idle"
+        row.lastRunAt = stamp
+        row.updatedAt = stamp
+        if row.status == "ok":
+            row.lastSuccessAt = stamp
+            row.lastError = None
+            row.consecutiveFailures = 0
+            row.lastIngestedCount = max(0, int(ingested or 0))
+            row.lastSessionCount = max(0, int(sessions_scanned or 0))
+            row.lastCursorUpdateCount = max(0, int(cursor_updates or 0))
+            row.lastDeferredCount = max(0, int(deferred_sessions or 0))
+        elif row.status == "degraded":
+            row.lastSuccessAt = stamp
+            row.lastErrorAt = stamp if error else row.lastErrorAt
+            row.lastError = _clip(str(error or "partial sync degradation"), 1600) if error else None
+            row.consecutiveFailures = 0
+            row.lastIngestedCount = max(0, int(ingested or 0))
+            row.lastSessionCount = max(0, int(sessions_scanned or 0))
+            row.lastCursorUpdateCount = max(0, int(cursor_updates or 0))
+            row.lastDeferredCount = max(0, int(deferred_sessions or 0))
+        else:
+            row.lastErrorAt = stamp
+            row.lastError = _clip(str(error or "unknown error"), 1600)
+            row.consecutiveFailures = max(1, int(row.consecutiveFailures or 0) + 1)
+            row.lastIngestedCount = max(0, int(ingested or 0))
+            row.lastSessionCount = max(0, int(sessions_scanned or 0))
+            row.lastCursorUpdateCount = max(0, int(cursor_updates or 0))
+            row.lastDeferredCount = max(0, int(deferred_sessions or 0))
+        session.add(row)
+        session.commit()
+
+
+def _log_openclaw_gateway_history_sync_failure(error_text: str, *, degraded: bool = False) -> None:
+    interval_seconds = _openclaw_gateway_history_sync_error_log_interval_seconds()
+    bucket = int(time.time() // max(1, interval_seconds))
+    digest = hashlib.sha1(error_text.encode("utf-8")).hexdigest()[:12]
+    request_id = f"oc-history-sync-{bucket}-{digest}"
+    if degraded:
+        detail = (
+            "OpenClaw gateway history sync is degraded; fallback backfill into Clawboard is only partially healthy. "
+            f"error={error_text}"
+        )
+    else:
+        detail = (
+            "OpenClaw gateway history sync is failing, so fallback backfill into Clawboard is degraded. "
+            f"error={error_text}"
+        )
+    payload = LogAppend(
+        type="system",
+        content=detail,
+        summary=_clip(detail, 160),
+        raw=None,
+        agentId="system",
+        agentLabel="Clawboard",
+        source={
+            "sessionKey": _OPENCLAW_HISTORY_SYNC_STATUS_SESSION_KEY,
+            "channel": "clawboard",
+            "requestId": request_id,
+            "messageId": request_id,
+        },
+        classificationStatus="classified",
+    )
+    try:
+        with get_session() as session:
+            append_log_entry(
+                session,
+                payload,
+                idempotency_key=f"openclaw-history-sync:error:{bucket}:{digest}",
+            )
+    except Exception:
+        pass
+
+
+def _run_gateway_rpc_sync(
+    method: str,
+    params: dict[str, Any],
+    *,
+    scopes: list[str] | None = None,
+    token_override: str | None = None,
+    use_device_auth_override: bool | None = None,
+    rpc_timeout_seconds: float | None = None,
+) -> Any:
+    """Call async gateway RPC from sync workers."""
+    try:
+        return asyncio.run(
+            gateway_rpc(
+                method,
+                params,
+                scopes=scopes,
+                token_override=token_override,
+                use_device_auth_override=use_device_auth_override,
+                timeout_seconds=rpc_timeout_seconds,
+            )
+        )
+    except RuntimeError as exc:
+        # Safety for rare contexts where an event loop already exists in this thread.
+        if "asyncio.run()" not in str(exc):
+            raise
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(
+            gateway_rpc(
+                method,
+                params,
+                scopes=scopes,
+                token_override=token_override,
+                use_device_auth_override=use_device_auth_override,
+                timeout_seconds=rpc_timeout_seconds,
+            )
+        )
+    finally:
+        loop.close()
+
+
+def _run_gateway_history_rpc_sync(method: str, params: dict[str, Any], *, scopes: list[str] | None = None) -> Any:
+    token = _openclaw_gateway_history_sync_token()
+    if not token:
+        raise RuntimeError("OPENCLAW_GATEWAY_HISTORY_SYNC is enabled but no gateway token is configured")
+
+    explicit_device_auth = _openclaw_gateway_history_sync_use_device_auth()
+    attempts: list[tuple[str, bool | None]] = [(token, explicit_device_auth)]
+    if explicit_device_auth is None and _openclaw_gateway_history_sync_retry_without_device_auth():
+        attempts.append((token, False))
+    rpc_timeout_seconds = _openclaw_gateway_history_sync_rpc_timeout_seconds()
+
+    last_exc: Exception | None = None
+    last_error_text = ""
+    for index, (attempt_token, device_override) in enumerate(attempts):
+        try:
+            return _run_gateway_rpc_sync(
+                method,
+                params,
+                scopes=scopes,
+                token_override=attempt_token,
+                use_device_auth_override=device_override,
+                rpc_timeout_seconds=rpc_timeout_seconds,
+            )
+        except Exception as exc:
+            last_exc = exc
+            last_error_text = _gateway_error_text(exc)
+            if (
+                _is_gateway_scope_error(last_error_text)
+                and _openclaw_gateway_history_sync_retry_with_write_scope()
+                and scopes
+                and any(str(scope).strip().lower() == "operator.read" for scope in scopes)
+            ):
+                try:
+                    return _run_gateway_rpc_sync(
+                        method,
+                        params,
+                        scopes=["operator.write"],
+                        token_override=attempt_token,
+                        use_device_auth_override=device_override,
+                        rpc_timeout_seconds=rpc_timeout_seconds,
+                    )
+                except Exception as scope_exc:
+                    last_exc = scope_exc
+                    last_error_text = _gateway_error_text(scope_exc)
+            if index + 1 >= len(attempts):
+                break
+            if _is_gateway_device_auth_error(last_error_text) or _is_gateway_scope_error(last_error_text):
+                continue
+            break
+    assert last_exc is not None
+    raise RuntimeError(f"{method} failed: {last_error_text or type(last_exc).__name__}") from last_exc
+
+
+def _openclaw_history_channel_from_session_key(session_key: str) -> str:
+    base = (str(session_key or "").split("|", 1)[0] or "").strip().lower()
+    if not base:
+        return "openclaw"
+    if base.startswith("channel:"):
+        token = (base.split(":", 1)[1] if ":" in base else "").split(":", 1)[0].strip()
+        return token or "openclaw"
+    if base.startswith("agent:"):
+        parts = [part.strip().lower() for part in base.split(":")]
+        if len(parts) >= 3:
+            token = parts[2]
+            if token in {"main", "subagent", "cron", "hook", "node", "global", "unknown"}:
+                return "openclaw"
+            return token or "openclaw"
+    token = base.split(":", 1)[0].strip()
+    if token in {"main", "subagent", "cron", "hook", "node", "global", "unknown"}:
+        return "openclaw"
+    return token or "openclaw"
+
+
+def _openclaw_history_message_timestamp_ms(message: dict[str, Any]) -> int | None:
+    def _from_raw(raw: Any) -> int | None:
+        if isinstance(raw, (int, float)):
+            ts = float(raw)
+            if ts <= 0:
+                return None
+            if ts < 10_000_000_000:
+                ts *= 1000.0
+            return int(ts)
+        if isinstance(raw, str):
+            normalized = normalize_iso(raw)
+            if normalized:
+                parsed = _iso_to_timestamp(normalized)
+                if parsed is not None:
+                    return int(parsed * 1000.0)
+        return None
+
+    for key in ("timestamp", "createdAt", "created_at", "time", "ts"):
+        parsed = _from_raw(message.get(key))
+        if parsed is not None:
+            return parsed
+
+    metadata = message.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("timestamp", "createdAt", "created_at", "time", "ts"):
+            parsed = _from_raw(metadata.get(key))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _openclaw_history_message_text_raw(message: dict[str, Any]) -> str:
+    text = str(message.get("text") or "").strip()
+    if text:
+        return text
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    chunks: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            candidate = block.strip()
+            if candidate:
+                chunks.append(candidate)
+            continue
+        if not isinstance(block, dict):
+            continue
+        candidate = str(block.get("text") or block.get("content") or "").strip()
+        if candidate:
+            chunks.append(candidate)
+            continue
+        kind = str(block.get("type") or "").strip().lower()
+        if kind in {"tool_use", "tool_result", "function_call", "function_result"}:
+            name = str(block.get("name") or block.get("toolName") or "").strip()
+            status = str(block.get("status") or "").strip()
+            summary = " ".join(piece for piece in [kind, name, status] if piece).strip()
+            if summary:
+                chunks.append(summary)
+    return "\n\n".join(chunks).strip()
+
+
+def _openclaw_history_message_untrusted_metadata(message: dict[str, Any]) -> dict[str, Any] | None:
+    metadata, _ = _extract_openclaw_untrusted_metadata_wrapper(_openclaw_history_message_text_raw(message))
+    return metadata if isinstance(metadata, dict) else None
+
+
+def _openclaw_history_message_text(message: dict[str, Any]) -> str:
+    _, body = _extract_openclaw_untrusted_metadata_wrapper(_openclaw_history_message_text_raw(message))
+    return str(body or "").strip()
+
+
+def _openclaw_history_channel(message: dict[str, Any], session_key: str) -> str:
+    def _candidate(value: Any) -> str:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return ""
+        return _clip(raw, 80)
+
+    for row in [message, message.get("source"), message.get("metadata"), message.get("meta")]:
+        if not isinstance(row, dict):
+            continue
+        channel = _candidate(row.get("channel"))
+        if channel:
+            return channel
+    return _openclaw_history_channel_from_session_key(session_key)
+
+
+def _openclaw_history_scope_metadata(message: dict[str, Any], session_key: str) -> dict[str, Any]:
+    source: dict[str, Any] = {}
+    metadata_rows = [row for row in [message.get("source"), message.get("metadata"), message.get("meta")] if isinstance(row, dict)]
+    for row in metadata_rows:
+        candidate_space = _normalize_space_id(row.get("boardScopeSpaceId") or row.get("spaceId"))
+        if candidate_space and "boardScopeSpaceId" not in source:
+            source["boardScopeSpaceId"] = candidate_space
+        candidate_topic = str(row.get("boardScopeTopicId") or row.get("topicId") or "").strip()
+        if candidate_topic and "boardScopeTopicId" not in source:
+            source["boardScopeTopicId"] = _clip(candidate_topic, 240)
+        candidate_task = str(row.get("boardScopeTaskId") or row.get("taskId") or "").strip()
+        if candidate_task and "boardScopeTaskId" not in source:
+            source["boardScopeTaskId"] = _clip(candidate_task, 240)
+        if "boardScopeLock" not in source and row.get("boardScopeLock") is not None:
+            lock_raw = row.get("boardScopeLock")
+            if isinstance(lock_raw, bool):
+                source["boardScopeLock"] = lock_raw
+            elif isinstance(lock_raw, str):
+                source["boardScopeLock"] = lock_raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    topic_id, task_id = _parse_board_session_key(session_key)
+    if topic_id and "boardScopeTopicId" not in source:
+        source["boardScopeTopicId"] = topic_id
+    if task_id and "boardScopeTaskId" not in source:
+        source["boardScopeTaskId"] = task_id
+    if task_id:
+        source.setdefault("boardScopeKind", "task")
+        source.setdefault("boardScopeLock", True)
+    elif topic_id:
+        source.setdefault("boardScopeKind", "topic")
+    return source
+
+
+def _openclaw_history_message_identifier(message: dict[str, Any]) -> str | None:
+    def _normalize(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return _clip(text, 240)
+
+    for key in ("messageId", "id", "uuid", "eventId"):
+        candidate = _normalize(message.get(key))
+        if candidate:
+            return candidate
+    metadata = message.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("messageId", "id", "uuid", "eventId"):
+            candidate = _normalize(metadata.get(key))
+            if candidate:
+                return candidate
+    wrapper_metadata = _openclaw_history_message_untrusted_metadata(message)
+    if isinstance(wrapper_metadata, dict):
+        for key in ("messageId", "message_id", "id", "uuid", "eventId", "event_id"):
+            candidate = _normalize(wrapper_metadata.get(key))
+            if candidate:
+                return candidate
+    return None
+
+
+def _openclaw_history_request_identifier(message: dict[str, Any]) -> str | None:
+    def _normalize(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return _clip(text, 240)
+
+    for key in ("requestId", "runId", "idempotencyKey"):
+        candidate = _normalize(message.get(key))
+        if candidate:
+            return candidate
+    metadata = message.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("requestId", "runId", "idempotencyKey"):
+            candidate = _normalize(metadata.get(key))
+            if candidate:
+                return candidate
+    wrapper_metadata = _openclaw_history_message_untrusted_metadata(message)
+    if isinstance(wrapper_metadata, dict):
+        for key in ("requestId", "request_id", "runId", "run_id", "idempotencyKey", "messageId", "message_id"):
+            candidate = _normalize(wrapper_metadata.get(key))
+            if candidate:
+                return candidate
+    return None
+
+
+def _openclaw_history_conversation_idempotency_key(*, channel: str, agent_id: str, message_id: str | None) -> str | None:
+    msg = str(message_id or "").strip()
+    if not msg:
+        return None
+    return f"src:conversation:{str(channel or '').strip().lower()}:{str(agent_id or '').strip().lower()}:{msg}"
+
+
+def _openclaw_history_canonical_session_key(session_key: str) -> str:
+    base = (str(session_key or "").split("|", 1)[0] or "").strip()
+    if not base:
+        return ""
+    board_match = re.search(r"clawboard:(?:task:[a-zA-Z0-9-]+:[a-zA-Z0-9-]+|topic:[a-zA-Z0-9-]+)", base)
+    if board_match:
+        return str(board_match.group(0) or "").strip().lower()
+    channel_idx = base.lower().find("channel:")
+    if channel_idx >= 0:
+        return base[channel_idx:].strip().lower()
+    return base.lower()
+
+
+def _openclaw_history_idempotency_key(
+    *,
+    session_key: str,
+    role: str,
+    timestamp_ms: int,
+    message_text: str,
+    message_id: str | None = None,
+    request_id: str | None = None,
+) -> str:
+    # Keep this stable across retries/history backfills. Avoid serializing full message payloads
+    # because providers can mutate metadata fields between reads while content is unchanged.
+    body = str(message_text or "").strip()
+    payload = {
+        "sessionKey": _openclaw_history_canonical_session_key(session_key) or str(session_key or "").strip(),
+        "role": str(role or "").strip().lower(),
+        "timestampMs": int(timestamp_ms),
+        "messageId": str(message_id or "").strip(),
+        "requestId": str(request_id or "").strip(),
+        "bodyDigest": hashlib.sha1(body.encode("utf-8")).hexdigest(),
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha1(serialized.encode("utf-8")).hexdigest()
+    return f"openclaw-history:{digest}"
+
+
+def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], since_ms: int) -> tuple[int, int]:
+    if not messages:
+        return (0, 0)
+    ingested = 0
+    max_safe_ms = 0
+    ordered_rows: list[tuple[int, dict[str, Any]]] = []
+    for row in messages:
+        if not isinstance(row, dict):
+            continue
+        timestamp_ms = _openclaw_history_message_timestamp_ms(row)
+        if timestamp_ms is None:
+            continue
+        ordered_rows.append((int(timestamp_ms), row))
+    if not ordered_rows:
+        return (0, 0)
+    ordered_rows.sort(key=lambda item: item[0])
+
+    with get_session() as session:
+        for timestamp_ms, row in ordered_rows:
+            if timestamp_ms < since_ms:
+                continue
+
+            text_body = _openclaw_history_message_text(row)
+            normalized_text = _sanitize_log_text(text_body)
+            if not normalized_text:
+                continue
+
+            role = str(row.get("role") or "").strip().lower()
+            if role == "assistant":
+                entry_type = "conversation"
+                agent_id = "assistant"
+                agent_label = "Assistant"
+            elif role == "user":
+                entry_type = "conversation"
+                agent_id = "user"
+                agent_label = "User"
+            elif role == "system":
+                entry_type = "system"
+                agent_id = "system"
+                agent_label = "OpenClaw"
+            else:
+                entry_type = "action"
+                agent_id = role or "openclaw"
+                agent_label = role.title() if role else "OpenClaw"
+
+            created_at = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc).isoformat(timespec="milliseconds").replace(
+                "+00:00", "Z"
+            )
+            channel = _openclaw_history_channel(row, session_key)
+            source = {"sessionKey": session_key, "channel": channel}
+            source.update(_openclaw_history_scope_metadata(row, session_key))
+            message_id = _openclaw_history_message_identifier(row)
+            request_id = _openclaw_history_request_identifier(row)
+            if message_id:
+                source["messageId"] = message_id
+            if request_id:
+                source["requestId"] = request_id
+
+            idempotency_key = None
+            if entry_type == "conversation":
+                idempotency_key = _openclaw_history_conversation_idempotency_key(
+                    channel=channel,
+                    agent_id=agent_id,
+                    message_id=message_id or request_id,
+                )
+            if not idempotency_key:
+                idempotency_key = _openclaw_history_idempotency_key(
+                    session_key=session_key,
+                    role=role or agent_id,
+                    timestamp_ms=timestamp_ms,
+                    message_text=normalized_text,
+                    message_id=message_id,
+                    request_id=request_id,
+                )
+
+            if idempotency_key:
+                existing = session.exec(select(LogEntry.id).where(LogEntry.idempotencyKey == idempotency_key).limit(1)).first()
+                if existing:
+                    max_safe_ms = max(max_safe_ms, timestamp_ms)
+                    continue
+            if entry_type == "conversation" and (message_id or request_id):
+                exact_identifiers, like_identifiers = _openclaw_identifier_match_terms([message_id or "", request_id or ""])
+                if exact_identifiers or like_identifiers:
+                    query = select(LogEntry.id).where(LogEntry.type == "conversation")
+                    if DATABASE_URL.startswith("sqlite"):
+                        query_text_parts: list[str] = []
+                        query_params: dict[str, Any] = {}
+                        channel_text = str(channel or "").strip().lower()
+                        for idx, identifier in enumerate(exact_identifiers):
+                            key = f"eq_{idx}"
+                            scope = "(1=1)"
+                            if channel_text:
+                                query_params["channel"] = channel_text
+                                scope = "(" + " OR ".join(
+                                    [
+                                        "json_extract(source, '$.channel') = :channel",
+                                        "json_extract(source, '$.channel') IS NULL",
+                                        "lower(json_extract(source, '$.channel')) = 'openclaw'",
+                                        "lower(json_extract(source, '$.channel')) = 'clawboard'",
+                                        "lower(json_extract(source, '$.channel')) = 'webchat'",
+                                    ]
+                                ) + ")"
+                            query_text_parts.append(
+                                f"((json_extract(source, '$.messageId') = :{key} OR "
+                                f"json_extract(source, '$.requestId') = :{key}) AND {scope})"
+                            )
+                            query_params[key] = identifier
+                        for idx, identifier_like in enumerate(like_identifiers):
+                            key = f"like_{idx}"
+                            scope = "(1=1)"
+                            if channel_text:
+                                query_params["channel"] = channel_text
+                                scope = "(" + " OR ".join(
+                                    [
+                                        "json_extract(source, '$.channel') = :channel",
+                                        "json_extract(source, '$.channel') IS NULL",
+                                        "lower(json_extract(source, '$.channel')) = 'openclaw'",
+                                        "lower(json_extract(source, '$.channel')) = 'clawboard'",
+                                        "lower(json_extract(source, '$.channel')) = 'webchat'",
+                                    ]
+                                ) + ")"
+                            query_text_parts.append(
+                                f"((json_extract(source, '$.messageId') LIKE :{key} OR "
+                                f"json_extract(source, '$.requestId') LIKE :{key}) AND {scope})"
+                            )
+                            query_params[key] = identifier_like
+                        if query_text_parts:
+                            query = query.where(text("(" + " OR ".join(query_text_parts) + ")")).params(**query_params)
+                    else:
+                        exprs = []
+                        channel_text = str(channel or "").strip().lower()
+                        for identifier in exact_identifiers:
+                            msg_cond = LogEntry.source["messageId"].as_string() == identifier
+                            req_cond = LogEntry.source["requestId"].as_string() == identifier
+                            if channel_text:
+                                channel_filter = or_(
+                                    func.lower(LogEntry.source["channel"].as_string()) == channel_text,
+                                    LogEntry.source["channel"].is_(None),
+                                    func.lower(LogEntry.source["channel"].as_string()) == "openclaw",
+                                    func.lower(LogEntry.source["channel"].as_string()) == "clawboard",
+                                    func.lower(LogEntry.source["channel"].as_string()) == "webchat",
+                                )
+                                msg_cond = and_(msg_cond, channel_filter)
+                                req_cond = and_(req_cond, channel_filter)
+                            exprs.append(or_(msg_cond, req_cond))
+                        for identifier_like in like_identifiers:
+                            msg_cond = LogEntry.source["messageId"].as_string().like(identifier_like)
+                            req_cond = LogEntry.source["requestId"].as_string().like(identifier_like)
+                            if channel_text:
+                                channel_filter = or_(
+                                    func.lower(LogEntry.source["channel"].as_string()) == channel_text,
+                                    LogEntry.source["channel"].is_(None),
+                                    func.lower(LogEntry.source["channel"].as_string()) == "openclaw",
+                                    func.lower(LogEntry.source["channel"].as_string()) == "clawboard",
+                                    func.lower(LogEntry.source["channel"].as_string()) == "webchat",
+                                )
+                                msg_cond = and_(msg_cond, channel_filter)
+                                req_cond = and_(req_cond, channel_filter)
+                            exprs.append(or_(msg_cond, req_cond))
+                        if exprs:
+                            query = query.where(or_(*exprs))
+                    if session.exec(query.limit(1)).first():
+                        max_safe_ms = max(max_safe_ms, timestamp_ms)
+                        continue
+
+            payload = LogAppend(
+                type=entry_type,
+                content=normalized_text,
+                summary=_clip(normalized_text, 160),
+                raw=None,
+                createdAt=created_at,
+                agentId=agent_id,
+                agentLabel=agent_label,
+                source=source,
+                classificationStatus="classified" if entry_type in {"action", "system"} else "pending",
+            )
+            try:
+                append_log_entry(session, payload, idempotency_key=idempotency_key)
+                ingested += 1
+            except Exception:
+                # Cursor safety: on uncertain write failures, stop and retry this window
+                # on the next cycle rather than advancing past potentially missed rows.
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+                break
+            max_safe_ms = max(max_safe_ms, timestamp_ms)
+    return (ingested, max_safe_ms)
+
+
+def _openclaw_history_session_key_likely_gateway(session_key: str) -> bool:
+    base = (str(session_key or "").split("|", 1)[0] or "").strip().lower()
+    if not base:
+        return False
+    if base.startswith("agent:") or base.startswith("clawboard:") or ":clawboard:" in base:
+        return True
+    if base in {"main", "subagent", "cron", "hook", "node", "global"}:
+        return True
+    if base.startswith("channel:"):
+        token = (base.split(":", 1)[1] if ":" in base else "").split(":", 1)[0].strip()
+        return token in {"openclaw", "clawboard"}
+    return False
+
+
+def _openclaw_gateway_history_cursor_seed_sessions(limit: int) -> list[str]:
+
+    if limit <= 0:
+        return []
+    try:
+        with get_session() as session:
+            rows = (
+                session.exec(
+                    select(OpenClawGatewayHistoryCursor)
+                    .order_by(OpenClawGatewayHistoryCursor.updatedAt.desc())
+                    .limit(max(1, int(limit)))
+                ).all()
+            )
+    except Exception:
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        session_key = str(getattr(row, "sessionKey", "") or "").strip()
+        if not session_key or session_key in seen or not _openclaw_history_session_key_likely_gateway(session_key):
+            continue
+        seen.add(session_key)
+        result.append(session_key)
+    return result
+
+
+def _openclaw_gateway_history_recent_log_seed_sessions(*, limit: int, lookback_seconds: int) -> list[str]:
+    if limit <= 0:
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(300, int(lookback_seconds or 300)))).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    fetch_limit = max(limit, min(4000, limit * 10))
+    try:
+        with get_session() as session:
+            rows = (
+                session.exec(
+                    select(LogEntry)
+                    .where(LogEntry.type == "conversation")
+                    .where(LogEntry.createdAt >= cutoff)
+                    .order_by(LogEntry.createdAt.desc())
+                    .limit(fetch_limit)
+                ).all()
+            )
+    except Exception:
+        return []
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        source = row.source if isinstance(row.source, dict) else None
+        if not source:
+            continue
+        session_key = str(source.get("sessionKey") or "").strip()
+        if not session_key or session_key in seen:
+            continue
+        channel = str(source.get("channel") or "").strip().lower()
+        looks_like_gateway_session = _openclaw_history_session_key_likely_gateway(session_key)
+        if channel not in {"openclaw", "clawboard"} and not looks_like_gateway_session:
+            continue
+        seen.add(session_key)
+        result.append(session_key)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _openclaw_gateway_history_unresolved_seed_sessions(*, limit: int, lookback_seconds: int) -> list[str]:
+    """Prioritize sessions that still have unresolved OpenClaw requestIds."""
+    if limit <= 0:
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(300, int(lookback_seconds or 300)))).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    fetch_limit = max(limit, min(5000, limit * 30))
+    try:
+        with get_session() as session:
+            rows = (
+                session.exec(
+                    select(LogEntry)
+                    .where(LogEntry.type == "conversation")
+                    .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "user")
+                    .where(LogEntry.createdAt >= cutoff)
+                    .order_by(LogEntry.createdAt.desc())
+                    .limit(fetch_limit)
+                ).all()
+            )
+
+            by_request: dict[str, tuple[str, str]] = {}
+            for row in rows:
+                source = row.source if isinstance(row.source, dict) else None
+                if not source:
+                    continue
+                session_key = str(source.get("sessionKey") or "").strip()
+                request_id = str(source.get("requestId") or source.get("messageId") or "").strip()
+                sent_at = normalize_iso(str(row.createdAt or ""))
+                if not session_key or not request_id or not sent_at:
+                    continue
+                if not _openclaw_history_session_key_likely_gateway(session_key):
+                    continue
+                channel = str(source.get("channel") or "").strip().lower()
+                if channel and channel not in {"openclaw", "clawboard"}:
+                    continue
+                existing = by_request.get(request_id)
+                if existing is None or sent_at > existing[1]:
+                    by_request[request_id] = (session_key, sent_at)
+
+            candidates = sorted(by_request.items(), key=lambda item: item[1][1], reverse=True)
+            result: list[str] = []
+            seen: set[str] = set()
+            for request_id, (session_key, sent_at) in candidates:
+                if session_key in seen:
+                    continue
+                if _openclaw_watchdog_has_terminal_system_log(session, request_id):
+                    continue
+                if _openclaw_watchdog_has_assistant_by_request(session, request_id, sent_at):
+                    continue
+                seen.add(session_key)
+                result.append(session_key)
+                if len(result) >= limit:
+                    break
+            return result
+    except Exception:
+        return []
+
+
+def _sync_openclaw_gateway_history_single_session(session_key: str) -> dict[str, int]:
+    """One-shot history sync for a single session key."""
+    key = str(session_key or "").strip()
+    if not key:
+        return {"ingested": 0, "cursorUpdated": 0}
+
+    last_seen_ms = 0
+    with get_session() as session:
+        row = session.get(OpenClawGatewayHistoryCursor, key)
+        if row is not None:
+            last_seen_ms = int(row.lastTimestampMs or 0)
+
+    history_payload = _run_gateway_history_rpc_sync(
+        "chat.history",
+        {"sessionKey": key, "limit": _openclaw_gateway_history_sync_history_limit()},
+        scopes=["operator.read"],
+    )
+    messages = history_payload.get("messages") if isinstance(history_payload, dict) else None
+    if not isinstance(messages, list):
+        return {"ingested": 0, "cursorUpdated": 0}
+
+    since_ms = max(0, last_seen_ms - (_openclaw_gateway_history_sync_overlap_seconds() * 1000))
+    ingested, max_seen_ms = _ingest_openclaw_history_messages(
+        session_key=key,
+        messages=messages,
+        since_ms=since_ms,
+    )
+    if max_seen_ms <= last_seen_ms:
+        return {"ingested": int(ingested), "cursorUpdated": 0}
+
+    stamp = now_iso()
+    with get_session() as session:
+        row = session.get(OpenClawGatewayHistoryCursor, key)
+        if row is None:
+            row = OpenClawGatewayHistoryCursor(
+                sessionKey=key,
+                lastTimestampMs=int(max_seen_ms),
+                updatedAt=stamp,
+            )
+        else:
+            row.lastTimestampMs = max(int(row.lastTimestampMs or 0), int(max_seen_ms))
+            row.updatedAt = stamp
+        session.add(row)
+        session.commit()
+    return {"ingested": int(ingested), "cursorUpdated": 1}
+
+
+def _sync_openclaw_gateway_history_once() -> dict[str, Any]:
+    if not _openclaw_gateway_history_sync_enabled():
+        return {"ingested": 0, "sessionsScanned": 0, "cursorUpdates": 0, "failedSessions": 0, "errorSummary": ""}
+
+    candidates_by_key: dict[str, int] = {}
+    sessions_list_error: str | None = None
+    sessions_list_timeout_recovered = 0
+    sessions_limit = _openclaw_gateway_history_sync_session_limit()
+    active_minutes = _openclaw_gateway_history_sync_active_minutes()
+
+    def _merge_session_candidates(rows: Any) -> None:
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            session_key = str(row.get("key") or "").strip()
+            if not session_key:
+                continue
+            updated_raw = row.get("updatedAt")
+            try:
+                updated_at_ms = int(updated_raw) if updated_raw is not None else 0
+            except Exception:
+                updated_at_ms = 0
+            prev = int(candidates_by_key.get(session_key, 0) or 0)
+            candidates_by_key[session_key] = max(prev, max(0, updated_at_ms))
+
+    if _openclaw_gateway_history_sync_sessions_list_enabled():
+        try:
+            sessions_payload = _run_gateway_history_rpc_sync(
+                "sessions.list",
+                {
+                    "limit": sessions_limit,
+                    "activeMinutes": active_minutes,
+                    "includeUnknown": True,
+                    "includeGlobal": True,
+                    "includeDerivedTitles": False,
+                    "includeLastMessage": False,
+                },
+                scopes=["operator.read"],
+            )
+            _merge_session_candidates(sessions_payload.get("sessions") if isinstance(sessions_payload, dict) else None)
+        except Exception as exc:
+            primary_error = _gateway_error_text(exc)
+            reduced_limit = max(20, sessions_limit // 3)
+            reduced_active_minutes = max(60, active_minutes // 2)
+            can_retry = _is_gateway_timeout_error(primary_error) and (
+                reduced_limit < sessions_limit or reduced_active_minutes < active_minutes
+            )
+            if can_retry:
+                try:
+                    retry_payload = _run_gateway_history_rpc_sync(
+                        "sessions.list",
+                        {
+                            "limit": reduced_limit,
+                            "activeMinutes": reduced_active_minutes,
+                            "includeUnknown": True,
+                            "includeGlobal": True,
+                            "includeDerivedTitles": False,
+                            "includeLastMessage": False,
+                        },
+                        scopes=["operator.read"],
+                    )
+                    _merge_session_candidates(retry_payload.get("sessions") if isinstance(retry_payload, dict) else None)
+                    sessions_list_timeout_recovered = 1
+                except Exception as retry_exc:
+                    sessions_list_error = _gateway_error_text(retry_exc)
+            else:
+                sessions_list_error = primary_error
+
+    cursor_seed_keys = _openclaw_gateway_history_cursor_seed_sessions(_openclaw_gateway_history_sync_cursor_seed_limit())
+    log_seed_keys = _openclaw_gateway_history_recent_log_seed_sessions(
+        limit=_openclaw_gateway_history_sync_log_seed_limit(),
+        lookback_seconds=_openclaw_gateway_history_sync_log_seed_lookback_seconds(),
+    )
+    unresolved_seed_keys = _openclaw_gateway_history_unresolved_seed_sessions(
+        limit=_openclaw_gateway_history_sync_unresolved_seed_limit(),
+        lookback_seconds=_openclaw_gateway_history_sync_unresolved_lookback_seconds(),
+    )
+
+    for session_key in cursor_seed_keys:
+        # Cursor seeds provide restart-safe continuity even when sessions.list is unhealthy.
+        candidates_by_key.setdefault(session_key, 0)
+    for session_key in log_seed_keys:
+        # Recent-log seeds recover continuity before the first successful cursor sync.
+        candidates_by_key.setdefault(session_key, 0)
+    for session_key in unresolved_seed_keys:
+        # Unresolved request seeds keep active runs visible even when list calls degrade.
+        candidates_by_key.setdefault(session_key, 0)
+
+    if not candidates_by_key:
+        if sessions_list_error:
+            raise RuntimeError(f"sessions.list failed: {sessions_list_error}")
+        return {"ingested": 0, "sessionsScanned": 0, "cursorUpdates": 0, "failedSessions": 0, "errorSummary": ""}
+
+    candidates: list[tuple[str, int]] = list(candidates_by_key.items())
+    candidates.sort(key=lambda item: int(item[1] or 0), reverse=True)
+
+    seed_priority_order: list[str] = []
+    seed_seen: set[str] = set()
+    for seed_group in [unresolved_seed_keys, cursor_seed_keys, log_seed_keys]:
+        for session_key in seed_group:
+            key = str(session_key or "").strip()
+            if not key or key in seed_seen or key not in candidates_by_key:
+                continue
+            seed_seen.add(key)
+            seed_priority_order.append(key)
+    seed_priority_entries = [(key, int(candidates_by_key.get(key, 0) or 0)) for key in seed_priority_order]
+
+    max_candidates = _openclaw_gateway_history_sync_session_limit()
+    if len(seed_priority_entries) >= max_candidates:
+        candidates = seed_priority_entries[:max_candidates]
+    else:
+        seed_priority_keys = {key for key, _ in seed_priority_entries}
+        remainder = [item for item in candidates if item[0] not in seed_priority_keys]
+        candidates = seed_priority_entries + remainder[: max(0, max_candidates - len(seed_priority_entries))]
+
+    keys = [session_key for session_key, _ in candidates]
+    cursors: dict[str, int] = {}
+    with get_session() as session:
+        cursor_rows = session.exec(
+            select(OpenClawGatewayHistoryCursor).where(OpenClawGatewayHistoryCursor.sessionKey.in_(keys))
+        ).all()
+        for row in cursor_rows:
+            cursors[str(row.sessionKey)] = int(row.lastTimestampMs or 0)
+
+    history_limit = _openclaw_gateway_history_sync_history_limit()
+    overlap_ms = _openclaw_gateway_history_sync_overlap_seconds() * 1000
+    cycle_budget_seconds = _openclaw_gateway_history_sync_cycle_budget_seconds()
+    cycle_started = time.monotonic()
+    cursor_updates: dict[str, int] = {}
+    ingested_total = 0
+    failed_sessions = 0
+    deferred_sessions = 0
+    timeout_recovered_sessions = 0
+    failure_samples: list[str] = []
+
+    for idx, (session_key, updated_at_ms) in enumerate(candidates):
+        if (time.monotonic() - cycle_started) >= cycle_budget_seconds:
+            deferred_sessions = max(0, len(candidates) - idx)
+            break
+        last_seen_ms = int(cursors.get(session_key, 0))
+        if last_seen_ms > 0 and updated_at_ms > 0 and updated_at_ms <= last_seen_ms:
+            continue
+
+        try:
+            history_payload = _run_gateway_history_rpc_sync(
+                "chat.history",
+                {"sessionKey": session_key, "limit": history_limit},
+                scopes=["operator.read"],
+            )
+            messages = history_payload.get("messages") if isinstance(history_payload, dict) else None
+        except Exception as exc:
+            messages = None
+            primary_error = _gateway_error_text(exc)
+            timeout_retry_limit = max(20, history_limit // 3)
+            timeout_retry_enabled = timeout_retry_limit < history_limit and _is_gateway_timeout_error(primary_error)
+            if timeout_retry_enabled:
+                try:
+                    timeout_retry_payload = _run_gateway_history_rpc_sync(
+                        "chat.history",
+                        {"sessionKey": session_key, "limit": timeout_retry_limit},
+                        scopes=["operator.read"],
+                    )
+                    messages = timeout_retry_payload.get("messages") if isinstance(timeout_retry_payload, dict) else None
+                    timeout_recovered_sessions += 1
+                except Exception as retry_exc:
+                    primary_error = _gateway_error_text(retry_exc)
+            if not isinstance(messages, list):
+                failed_sessions += 1
+                if len(failure_samples) < 4:
+                    failure_samples.append(
+                        f"chat.history sessionKey={_clip(session_key, 120)} error={primary_error}"
+                    )
+                continue
+
+        if not isinstance(messages, list):
+            continue
+
+        since_ms = max(0, last_seen_ms - overlap_ms)
+        ingested, max_seen_ms = _ingest_openclaw_history_messages(
+            session_key=session_key,
+            messages=messages,
+            since_ms=since_ms,
+        )
+        ingested_total += ingested
+        if max_seen_ms > last_seen_ms:
+            cursor_updates[session_key] = max_seen_ms
+
+    if cursor_updates:
+        stamp = now_iso()
+        with get_session() as session:
+            for session_key, max_seen_ms in cursor_updates.items():
+                row = session.get(OpenClawGatewayHistoryCursor, session_key)
+                if row is None:
+                    row = OpenClawGatewayHistoryCursor(
+                        sessionKey=session_key,
+                        lastTimestampMs=int(max_seen_ms),
+                        updatedAt=stamp,
+                    )
+                else:
+                    row.lastTimestampMs = max(int(row.lastTimestampMs or 0), int(max_seen_ms))
+                    row.updatedAt = stamp
+                session.add(row)
+            session.commit()
+
+    issue_parts: list[str] = []
+    if sessions_list_error:
+        issue_parts.append(f"sessions.list fallback active: {sessions_list_error}")
+    if failed_sessions > 0:
+        sample = " | ".join(failure_samples)
+        if failed_sessions > len(failure_samples):
+            extra = failed_sessions - len(failure_samples)
+            sample = f"{sample} | +{extra} more session failures" if sample else f"+{extra} session failures"
+        issue_parts.append(f"chat.history partial failures={failed_sessions}: {sample}".strip())
+
+    return {
+        "ingested": int(ingested_total),
+        "sessionsScanned": int(len(candidates)),
+        "cursorUpdates": int(len(cursor_updates)),
+        "failedSessions": int(failed_sessions),
+        "deferredSessions": int(deferred_sessions),
+        "timeoutRecoveredSessions": int(timeout_recovered_sessions),
+        "sessionsListTimeoutRecovered": int(sessions_list_timeout_recovered),
+        "errorSummary": " ; ".join(part for part in issue_parts if part),
+    }
+
+
+def _openclaw_gateway_history_sync_worker() -> None:
+    poll_seconds = _openclaw_gateway_history_sync_poll_seconds()
+    max_backoff = float(_openclaw_gateway_history_sync_max_backoff_seconds())
+    error_streak = 0
+    degraded_streak = 0
+    sleep_seconds = float(poll_seconds)
+    while True:
+        try:
+            stats = _sync_openclaw_gateway_history_once()
+            failed_sessions = int((stats or {}).get("failedSessions") or 0)
+            error_summary = _clip(str((stats or {}).get("errorSummary") or "").strip(), 1600)
+            degraded = failed_sessions > 0 or bool(error_summary)
+            _update_openclaw_gateway_history_sync_state(
+                status="degraded" if degraded else "ok",
+                ingested=int((stats or {}).get("ingested") or 0),
+                sessions_scanned=int((stats or {}).get("sessionsScanned") or 0),
+                cursor_updates=int((stats or {}).get("cursorUpdates") or 0),
+                deferred_sessions=int((stats or {}).get("deferredSessions") or 0),
+                error=error_summary if degraded else None,
+            )
+            if degraded:
+                _log_openclaw_gateway_history_sync_failure(
+                    error_summary or f"partial sync failures={failed_sessions}",
+                    degraded=True,
+                )
+                degraded_streak = min(8, degraded_streak + 1)
+                error_streak = 0
+                sleep_seconds = min(max_backoff, float(poll_seconds) * (1.0 + 0.5 * float(degraded_streak)))
+            else:
+                degraded_streak = 0
+                error_streak = 0
+                sleep_seconds = float(poll_seconds)
+        except Exception as exc:
+            error_text = _gateway_error_text(exc)
+            try:
+                _update_openclaw_gateway_history_sync_state(
+                    status="error",
+                    ingested=0,
+                    sessions_scanned=0,
+                    cursor_updates=0,
+                    deferred_sessions=0,
+                    error=error_text,
+                )
+            except Exception:
+                pass
+            _log_openclaw_gateway_history_sync_failure(error_text, degraded=False)
+            error_streak = min(8, error_streak + 1)
+            degraded_streak = 0
+            sleep_seconds = min(max_backoff, float(poll_seconds) * float(2 ** error_streak))
+        time.sleep(max(5.0, float(sleep_seconds)))
 
 
 @app.post(
@@ -2693,7 +5700,7 @@ def _schedule_openclaw_assistant_log_check(*, session_key: str, request_id: str,
     response_model=OpenClawChatQueuedResponse,
     tags=["openclaw"],
 )
-def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTasks):
+def openclaw_chat(payload: OpenClawChatRequest, _background_tasks: BackgroundTasks):
     """Send a user message to OpenClaw via the Gateway and tie it to a stable sessionKey."""
     base_url = os.getenv("OPENCLAW_BASE_URL", "http://127.0.0.1:18789").strip().rstrip("/")
     gateway_token = (os.getenv("OPENCLAW_GATEWAY_TOKEN") or "").strip()
@@ -2721,7 +5728,6 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
     created_at = now_iso()
     try:
         attachments_meta: list[dict[str, Any]] | None = None
-        attachments_task: list[dict[str, Any]] | None = None
         with get_session() as session:
             if attachment_ids:
                 # Preserve client ordering while validating IDs.
@@ -2741,7 +5747,6 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
                     raise HTTPException(status_code=400, detail=f"Attachment(s) not found: {', '.join(missing)}")
 
                 attachments_meta = []
-                attachments_task = []
                 for att_id in attachment_ids:
                     row = by_id[att_id]
                     mime_type = _normalize_mime_type(row.mimeType)
@@ -2753,15 +5758,6 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
                             "fileName": row.fileName,
                             "mimeType": mime_type,
                             "sizeBytes": row.sizeBytes,
-                        }
-                    )
-                    attachments_task.append(
-                        {
-                            "id": row.id,
-                            "fileName": row.fileName,
-                            "mimeType": mime_type,
-                            "sizeBytes": row.sizeBytes,
-                            "storagePath": row.storagePath,
                         }
                     )
 
@@ -2807,6 +5803,15 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
                     session.commit()
                 except Exception:
                     session.rollback()
+
+            _enqueue_openclaw_chat_dispatch(
+                request_id=request_id,
+                session_key=session_key,
+                agent_id=agent_id,
+                sent_at=created_at,
+                message=message,
+                attachment_ids=attachment_ids,
+            )
     except HTTPException:
         raise
     except Exception as exc:
@@ -2814,17 +5819,6 @@ def openclaw_chat(payload: OpenClawChatRequest, background_tasks: BackgroundTask
         # Otherwise Clawboard can show assistant replies/tool traces without the user prompt that triggered them.
         raise HTTPException(status_code=503, detail="Failed to persist user message. Please retry.") from exc
 
-    background_tasks.add_task(
-        _run_openclaw_chat,
-        request_id,
-        base_url=base_url,
-        token=gateway_token,
-        session_key=session_key,
-        agent_id=agent_id,
-        sent_at=created_at,
-        message=message,
-        attachments=attachments_task,
-    )
     return {"queued": True, "requestId": request_id}
 
 
@@ -2873,6 +5867,225 @@ async def openclaw_skills(agentId: str = Query(default="main", description="Open
         "agentId": agent_id,
         "workspaceDir": str(payload.get("workspaceDir") or "").strip() or None,
         "skills": skills,
+    }
+
+
+@app.get(
+    "/api/openclaw/chat-dispatch/status",
+    dependencies=[Depends(require_token)],
+    tags=["openclaw"],
+)
+def openclaw_chat_dispatch_status():
+    with get_session() as session:
+        rows = session.exec(select(OpenClawChatDispatchQueue)).all()
+
+    counts = {
+        "pending": 0,
+        "retry": 0,
+        "processing": 0,
+        "sent": 0,
+        "failed": 0,
+    }
+    oldest_open: str | None = None
+    newest_completed: str | None = None
+    max_attempts = 0
+    for row in rows:
+        status = str(getattr(row, "status", "") or "").strip().lower()
+        if status in counts:
+            counts[status] += 1
+        attempts = int(getattr(row, "attempts", 0) or 0)
+        max_attempts = max(max_attempts, attempts)
+        created_at = normalize_iso(str(getattr(row, "createdAt", "") or ""))
+        completed_at = normalize_iso(str(getattr(row, "completedAt", "") or ""))
+        if status in {"pending", "retry", "processing"} and created_at:
+            if oldest_open is None or created_at < oldest_open:
+                oldest_open = created_at
+        if completed_at:
+            if newest_completed is None or completed_at > newest_completed:
+                newest_completed = completed_at
+
+    return {
+        "enabled": _openclaw_chat_dispatch_enabled(),
+        "workers": _openclaw_chat_dispatch_workers(),
+        "hotWindowSeconds": _openclaw_chat_dispatch_hot_window_seconds(),
+        "pollSeconds": _openclaw_chat_dispatch_poll_seconds(),
+        "staleProcessingSeconds": _openclaw_chat_dispatch_stale_processing_seconds(),
+        "maxRetryDelaySeconds": _openclaw_chat_dispatch_max_retry_delay_seconds(),
+        "maxAttempts": _openclaw_chat_dispatch_max_attempts(),
+        "recoveryLookbackSeconds": _openclaw_chat_dispatch_recovery_lookback_seconds(),
+        "recoveryIntervalSeconds": _openclaw_chat_dispatch_recovery_interval_seconds(),
+        "autoQuarantineEnabled": _openclaw_chat_dispatch_auto_quarantine_enabled(),
+        "autoQuarantineSeconds": _openclaw_chat_dispatch_auto_quarantine_seconds(),
+        "autoQuarantineLimit": _openclaw_chat_dispatch_auto_quarantine_limit(),
+        "autoQuarantineSyntheticOnly": _openclaw_chat_dispatch_auto_quarantine_synthetic_only(),
+        "counts": counts,
+        "oldestOpenCreatedAt": oldest_open,
+        "newestCompletedAt": newest_completed,
+        "maxObservedAttempts": max_attempts,
+    }
+
+
+_OPENCLAW_CHAT_DISPATCH_SYNTHETIC_MARKERS = (
+    "topic-smoke",
+    "topic-live-",
+    "topic-debug",
+    "topic-canary",
+    "durable-smoke",
+    "restart-canary",
+    "hot-canary",
+    "priority-check",
+    "synthetic",
+    "e2e",
+    "probe",
+)
+
+
+def _openclaw_chat_dispatch_row_looks_synthetic(row: OpenClawChatDispatchQueue) -> bool:
+    haystack_parts = [
+        str(getattr(row, "sessionKey", "") or "").lower(),
+        str(getattr(row, "message", "") or "").lower(),
+        str(getattr(row, "requestId", "") or "").lower(),
+    ]
+    for part in haystack_parts:
+        if not part:
+            continue
+        for marker in _OPENCLAW_CHAT_DISPATCH_SYNTHETIC_MARKERS:
+            if marker in part:
+                return True
+    return False
+
+
+@app.post(
+    "/api/openclaw/chat-dispatch/quarantine",
+    response_model=OpenClawChatDispatchQuarantineResponse,
+    dependencies=[Depends(require_token)],
+    tags=["openclaw"],
+)
+def openclaw_chat_dispatch_quarantine(
+    payload: OpenClawChatDispatchQuarantineRequest = Body(...),
+):
+    cutoff_iso = _iso_after_seconds(datetime.now(timezone.utc), -float(payload.olderThanSeconds))
+    status_filter = [str(status or "").strip().lower() for status in payload.statuses]
+    session_filter = str(payload.sessionKeyContains or "").strip().lower()
+    request_filter = str(payload.requestIdContains or "").strip().lower()
+    message_filter = str(payload.messageContains or "").strip().lower()
+    reason = _clip(str(payload.reason or "admin_quarantine").strip(), 1600) or "admin_quarantine"
+
+    matched_rows: list[OpenClawChatDispatchQueue] = []
+    sample: list[dict[str, Any]] = []
+    quarantined = 0
+    stamp = now_iso()
+    with get_session() as session:
+        candidates = (
+            session.exec(
+                select(OpenClawChatDispatchQueue)
+                .where(OpenClawChatDispatchQueue.status.in_(status_filter))
+                .where(OpenClawChatDispatchQueue.createdAt <= cutoff_iso)
+                .order_by(OpenClawChatDispatchQueue.createdAt.asc(), OpenClawChatDispatchQueue.id.asc())
+                .limit(int(payload.limit))
+            ).all()
+        )
+
+        for row in candidates:
+            request_id = str(getattr(row, "requestId", "") or "")
+            session_key = str(getattr(row, "sessionKey", "") or "")
+            message = str(getattr(row, "message", "") or "")
+            if session_filter and session_filter not in session_key.lower():
+                continue
+            if request_filter and request_filter not in request_id.lower():
+                continue
+            if message_filter and message_filter not in message.lower():
+                continue
+            if payload.syntheticOnly and not _openclaw_chat_dispatch_row_looks_synthetic(row):
+                continue
+            matched_rows.append(row)
+            if len(sample) < 50:
+                sample.append(
+                    {
+                        "id": int(getattr(row, "id", 0) or 0),
+                        "requestId": request_id,
+                        "sessionKey": session_key,
+                        "status": str(getattr(row, "status", "") or ""),
+                        "attempts": int(getattr(row, "attempts", 0) or 0),
+                        "createdAt": str(getattr(row, "createdAt", "") or ""),
+                        "updatedAt": str(getattr(row, "updatedAt", "") or ""),
+                        "lastError": _clip(str(getattr(row, "lastError", "") or ""), 160),
+                    }
+                )
+
+        if not payload.dryRun and matched_rows:
+            for row in matched_rows:
+                row.status = "failed"
+                row.completedAt = stamp
+                row.claimedAt = None
+                row.nextAttemptAt = stamp
+                row.lastError = f"quarantined:{reason}"
+                row.updatedAt = stamp
+                session.add(row)
+                quarantined += 1
+            session.commit()
+
+    return {
+        "dryRun": bool(payload.dryRun),
+        "matched": int(len(matched_rows)),
+        "quarantined": int(quarantined),
+        "cutoffCreatedAt": cutoff_iso,
+        "statuses": status_filter,
+        "syntheticOnly": bool(payload.syntheticOnly),
+        "limit": int(payload.limit),
+        "reason": reason,
+        "filters": {
+            "sessionKeyContains": payload.sessionKeyContains,
+            "requestIdContains": payload.requestIdContains,
+            "messageContains": payload.messageContains,
+        },
+        "sample": sample,
+    }
+
+
+@app.get(
+    "/api/openclaw/history-sync/status",
+    dependencies=[Depends(require_token)],
+    tags=["openclaw"],
+)
+def openclaw_history_sync_status():
+    with get_session() as session:
+        row = session.get(OpenClawGatewayHistorySyncState, _OPENCLAW_HISTORY_SYNC_STATE_ID)
+    return {
+        "enabled": _openclaw_gateway_history_sync_enabled(),
+        "pollSeconds": _openclaw_gateway_history_sync_poll_seconds(),
+        "activeMinutes": _openclaw_gateway_history_sync_active_minutes(),
+        "sessionLimit": _openclaw_gateway_history_sync_session_limit(),
+        "sessionsListEnabled": _openclaw_gateway_history_sync_sessions_list_enabled(),
+        "cycleBudgetSeconds": _openclaw_gateway_history_sync_cycle_budget_seconds(),
+        "cursorSeedLimit": _openclaw_gateway_history_sync_cursor_seed_limit(),
+        "logSeedLimit": _openclaw_gateway_history_sync_log_seed_limit(),
+        "logSeedLookbackSeconds": _openclaw_gateway_history_sync_log_seed_lookback_seconds(),
+        "unresolvedSeedLimit": _openclaw_gateway_history_sync_unresolved_seed_limit(),
+        "unresolvedLookbackSeconds": _openclaw_gateway_history_sync_unresolved_lookback_seconds(),
+        "rpcTimeoutSeconds": _openclaw_gateway_history_sync_rpc_timeout_seconds(),
+        "maxBackoffSeconds": _openclaw_gateway_history_sync_max_backoff_seconds(),
+        "historyLimit": _openclaw_gateway_history_sync_history_limit(),
+        "overlapSeconds": _openclaw_gateway_history_sync_overlap_seconds(),
+        "auth": {
+            "tokenConfigured": bool(_openclaw_gateway_history_sync_token()),
+            "explicitDeviceAuthMode": _openclaw_gateway_history_sync_use_device_auth(),
+            "retryWithoutDeviceAuth": _openclaw_gateway_history_sync_retry_without_device_auth(),
+            "retryWithWriteScope": _openclaw_gateway_history_sync_retry_with_write_scope(),
+        },
+        "state": {
+            "status": str(getattr(row, "status", "idle") or "idle"),
+            "lastRunAt": getattr(row, "lastRunAt", None),
+            "lastSuccessAt": getattr(row, "lastSuccessAt", None),
+            "lastErrorAt": getattr(row, "lastErrorAt", None),
+            "lastError": getattr(row, "lastError", None),
+            "consecutiveFailures": int(getattr(row, "consecutiveFailures", 0) or 0),
+            "lastIngestedCount": int(getattr(row, "lastIngestedCount", 0) or 0),
+            "lastSessionCount": int(getattr(row, "lastSessionCount", 0) or 0),
+            "lastCursorUpdateCount": int(getattr(row, "lastCursorUpdateCount", 0) or 0),
+            "lastDeferredCount": int(getattr(row, "lastDeferredCount", 0) or 0),
+            "updatedAt": getattr(row, "updatedAt", None),
+        },
     }
 
 
@@ -3000,13 +6213,21 @@ def admin_start_fresh_replay(
         default=StartFreshReplayRequest(),
         examples={
             "default": {
-                "summary": "Start fresh replay",
-                "value": {"integrationLevel": "full"},
+                "summary": "Default non-destructive replay",
+                "value": {"integrationLevel": "full", "replayMode": "reclassify"},
+            },
+            "fresh": {
+                "summary": "Destructive fresh replay",
+                "value": {"integrationLevel": "full", "replayMode": "fresh"},
             }
         },
     )
 ):
-    """Admin-only: clear topics/tasks and mark all logs pending so the classifier replays derived state."""
+    """Admin-only: replay classifier state from existing logs.
+
+    Default mode (`reclassify`) keeps existing topic/task links and only re-queues unassigned/failed
+    conversation logs for classification. `fresh` clears derived topics/tasks first.
+    """
     timestamp = now_iso()
     with get_session() as session:
         instance = session.get(InstanceConfig, 1)
@@ -3022,30 +6243,63 @@ def admin_start_fresh_replay(
             instance.updatedAt = timestamp
         session.add(instance)
 
-        # Reset derived associations and classifier state without deleting history.
-        session.exec(
-            text(
-                """
-                UPDATE logentry
-                SET topicId = NULL,
-                    taskId = NULL,
-                    classificationStatus = 'pending',
-                    classificationAttempts = 0,
-                    classificationError = NULL,
-                    updatedAt = :updated_at
-                ;
-                """
-            ).bindparams(updated_at=timestamp)
-        )
+        if payload.replayMode == "fresh":
+            # Reset all log associations/classifier metadata before deleting derived rows.
+            session.exec(
+                text(
+                    """
+                    UPDATE logentry
+                    SET "topicId" = NULL,
+                        "taskId" = NULL,
+                        "classificationStatus" = 'pending',
+                        "classificationAttempts" = 0,
+                        "classificationError" = NULL,
+                        "updatedAt" = :updated_at
+                    ;
+                    """
+                ).bindparams(updated_at=timestamp)
+            )
 
-        # Derived objects: wipe so classifier can rebuild cleanly.
-        session.exec(text("DELETE FROM ingestqueue;"))
-        session.exec(text("DELETE FROM task;"))
-        session.exec(text("DELETE FROM topic;"))
+            # Derived objects: wipe so classifier can rebuild cleanly.
+            session.exec(text("DELETE FROM ingestqueue;"))
+            session.exec(text("DELETE FROM task;"))
+            session.exec(text("DELETE FROM topic;"))
+        else:
+            session_key_expr = (
+                "COALESCE(json_extract(source, '$.sessionKey'), '') <> ''"
+                if DATABASE_URL.startswith("sqlite")
+                else "COALESCE(source->>'sessionKey', '') <> ''"
+            )
+            # Non-destructive replay: preserve existing links and only re-queue logs that still
+            # need allocation (missing topic/task) or previously failed classification.
+            session.exec(
+                text(
+                    f"""
+                    UPDATE logentry
+                    SET "classificationStatus" = 'pending',
+                        "classificationAttempts" = 0,
+                        "classificationError" = NULL,
+                        "updatedAt" = :updated_at
+                    WHERE type = 'conversation'
+                      AND {session_key_expr}
+                      AND (
+                        "topicId" IS NULL
+                        OR "taskId" IS NULL
+                        OR "classificationStatus" = 'failed'
+                      )
+                    ;
+                    """
+                ).bindparams(updated_at=timestamp)
+            )
 
         session.commit()
 
-    return {"ok": True, "resetAt": timestamp, "integrationLevel": payload.integrationLevel}
+    return {
+        "ok": True,
+        "resetAt": timestamp,
+        "integrationLevel": payload.integrationLevel,
+        "replayMode": payload.replayMode,
+    }
 
 
 @app.get("/api/spaces", response_model=List[SpaceOut], tags=["spaces"])
@@ -4969,7 +8223,12 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
                 else:
                     if "topicId" in fields:
                         if entry.topicId and task.topicId != entry.topicId:
-                            raise HTTPException(status_code=400, detail="Task does not belong to selected topic")
+                            if classifier_patch:
+                                # Classifier retries can carry stale scoped IDs; align to the task
+                                # so patching stays idempotent instead of hard-failing.
+                                entry.topicId = task.topicId
+                            else:
+                                raise HTTPException(status_code=400, detail="Task does not belong to selected topic")
                         if not entry.topicId:
                             entry.topicId = task.topicId
                     else:
@@ -7096,6 +10355,50 @@ def _build_metrics_payload(session: Any) -> dict[str, Any]:
     except Exception:
         pass
 
+    history_sync = {
+        "enabled": _openclaw_gateway_history_sync_enabled(),
+        "sessionsListEnabled": _openclaw_gateway_history_sync_sessions_list_enabled(),
+        "status": "idle",
+        "lastRunAt": None,
+        "lastSuccessAt": None,
+        "lastErrorAt": None,
+        "lastError": None,
+        "consecutiveFailures": 0,
+        "lastIngestedCount": 0,
+        "lastSessionCount": 0,
+        "lastCursorUpdateCount": 0,
+        "lastDeferredCount": 0,
+        "cycleBudgetSeconds": _openclaw_gateway_history_sync_cycle_budget_seconds(),
+        "cursorSeedLimit": _openclaw_gateway_history_sync_cursor_seed_limit(),
+        "logSeedLimit": _openclaw_gateway_history_sync_log_seed_limit(),
+        "logSeedLookbackSeconds": _openclaw_gateway_history_sync_log_seed_lookback_seconds(),
+        "unresolvedSeedLimit": _openclaw_gateway_history_sync_unresolved_seed_limit(),
+        "unresolvedLookbackSeconds": _openclaw_gateway_history_sync_unresolved_lookback_seconds(),
+        "rpcTimeoutSeconds": _openclaw_gateway_history_sync_rpc_timeout_seconds(),
+        "maxBackoffSeconds": _openclaw_gateway_history_sync_max_backoff_seconds(),
+        "auth": {
+            "tokenConfigured": bool(_openclaw_gateway_history_sync_token()),
+            "explicitDeviceAuthMode": _openclaw_gateway_history_sync_use_device_auth(),
+            "retryWithoutDeviceAuth": _openclaw_gateway_history_sync_retry_without_device_auth(),
+            "retryWithWriteScope": _openclaw_gateway_history_sync_retry_with_write_scope(),
+        },
+    }
+    try:
+        sync_row = session.get(OpenClawGatewayHistorySyncState, _OPENCLAW_HISTORY_SYNC_STATE_ID)
+        if sync_row is not None:
+            history_sync["status"] = str(sync_row.status or "idle")
+            history_sync["lastRunAt"] = sync_row.lastRunAt
+            history_sync["lastSuccessAt"] = sync_row.lastSuccessAt
+            history_sync["lastErrorAt"] = sync_row.lastErrorAt
+            history_sync["lastError"] = sync_row.lastError
+            history_sync["consecutiveFailures"] = int(sync_row.consecutiveFailures or 0)
+            history_sync["lastIngestedCount"] = int(sync_row.lastIngestedCount or 0)
+            history_sync["lastSessionCount"] = int(sync_row.lastSessionCount or 0)
+            history_sync["lastCursorUpdateCount"] = int(sync_row.lastCursorUpdateCount or 0)
+            history_sync["lastDeferredCount"] = int(getattr(sync_row, "lastDeferredCount", 0) or 0)
+    except Exception:
+        pass
+
     return {
         "logs": {
             "total": total,
@@ -7109,6 +10412,9 @@ def _build_metrics_payload(session: Any) -> dict[str, Any]:
             "topics": {"total": topics_total, "created24h": topics_created_24h},
             "tasks": {"total": tasks_total, "created24h": tasks_created_24h},
             "gate": gate,
+        },
+        "openclaw": {
+            "historySync": history_sync,
         },
     }
 

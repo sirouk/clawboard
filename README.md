@@ -143,6 +143,8 @@ Important envs:
 - `CLAWBOARD_PUBLIC_API_BASE`
 - `CLAWBOARD_PUBLIC_WEB_URL` (optional)
 - `OPENCLAW_BASE_URL`
+- `OPENCLAW_WS_URL` (optional explicit websocket endpoint; use `wss://` only with valid TLS certs)
+- `OPENCLAW_GATEWAY_HOST_HEADER` (optional host override for websocket connects)
 - `OPENCLAW_GATEWAY_TOKEN` (if your gateway requires auth)
 - `CLASSIFIER_INTERVAL_SECONDS`
 

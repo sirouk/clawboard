@@ -18,7 +18,19 @@ const DEFAULT_CONTEXT_LOG_LIMIT = 6;
 const CLAWBOARD_CONTEXT_BEGIN = "[CLAWBOARD_CONTEXT_BEGIN]";
 const CLAWBOARD_CONTEXT_END = "[CLAWBOARD_CONTEXT_END]";
 const IGNORE_SESSION_PREFIXES = getIgnoreSessionPrefixesFromEnv(process.env);
+const OPENCLAW_REQUEST_ID_PREFIX = "occhat-";
+const OPENCLAW_DAY_SECONDS = 24 * 60 * 60;
 const REPLY_DIRECTIVE_TAG_RE = /(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*/gi;
+
+function envInt(name, fallback, min, max) {
+  const raw = (process.env[name] ?? "").trim();
+  const parsed = Number.parseInt(raw, 10);
+  const value = Number.isFinite(parsed) ? parsed : fallback;
+  return Math.max(min, Math.min(max, value));
+}
+
+const OPENCLAW_REQUEST_ID_TTL_MS = envInt("OPENCLAW_REQUEST_ID_TTL_SECONDS", 7 * OPENCLAW_DAY_SECONDS, 5 * 60, 90 * OPENCLAW_DAY_SECONDS) * 1000;
+const OPENCLAW_REQUEST_ID_MAX_ENTRIES = envInt("OPENCLAW_REQUEST_ID_MAX_ENTRIES", 5000, 200, 50000);
 
 function normalizeBaseUrl(url) {
   return url.replace(/\/$/, "");
@@ -27,6 +39,8 @@ function normalizeBaseUrl(url) {
 function sanitizeMessageContent(content) {
   let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
   text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\][\s\S]*?\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
+  text = text.replace(/^\s*Conversation info \(untrusted metadata\)\s*:\s*```(?:json)?\s*[\s\S]*?```\s*/i, "");
+  text = text.replace(/^\s*Conversation info \(untrusted metadata\)\s*:\s*\{[\s\S]*?\}\s*/i, "");
   text = text.replace(
     /Clawboard continuity hook is active for this turn\.[\s\S]*?Prioritize curated user notes when present\.\s*/gi,
     ""
@@ -440,6 +454,34 @@ export default function register(api) {
     return text || void 0;
   }
 
+  function normalizeRequestId(value) {
+    return normalizeId(typeof value === "string" ? value : void 0);
+  }
+
+  function inferRequestIdFromMessageId(value) {
+    const candidate = normalizeId(typeof value === "string" ? value : void 0);
+    if (!candidate)
+      return void 0;
+    return candidate.toLowerCase().startsWith(OPENCLAW_REQUEST_ID_PREFIX) ? candidate : void 0;
+  }
+
+  function requestSessionKeys(sessionKey) {
+    const normalized = normalizeId(sessionKey);
+    if (!normalized)
+      return [];
+    const keys = /* @__PURE__ */ new Set();
+    keys.add(normalized);
+    const base = normalized.split("|", 1)[0]?.trim() || normalized;
+    if (base)
+      keys.add(base);
+    const boardRoute = parseBoardSessionKey(normalized);
+    if (boardRoute) {
+      const canonical = boardRoute.kind === "task" ? `clawboard:task:${boardRoute.topicId}:${boardRoute.taskId}` : `clawboard:topic:${boardRoute.topicId}`;
+      keys.add(canonical);
+    }
+    return Array.from(keys);
+  }
+
   function shortId(value, length = 8) {
     const clean = String(value).replace(/[^a-zA-Z0-9]+/g, "");
     return clean.slice(0, length) || String(value).slice(0, length);
@@ -562,6 +604,9 @@ export default function register(api) {
     const messageId = normalizeId(params.messageId);
     if (messageId)
       source.messageId = messageId;
+    const requestId = normalizeRequestId(params.requestId);
+    if (requestId)
+      source.requestId = requestId;
 
     const boardScope = params.boardScope;
     if (boardScope?.topicId) {
@@ -1224,6 +1269,70 @@ export default function register(api) {
   let lastMessageAt = 0;
   const inboundBySession = /* @__PURE__ */ new Map();
   const agentEndCursorBySession = /* @__PURE__ */ new Map();
+  const openclawRequestBySession = /* @__PURE__ */ new Map();
+
+  const pruneOpenclawRequestMap = (ts, forceTrim = false) => {
+    for (const [key, value] of openclawRequestBySession.entries()) {
+      if (ts - value.ts > OPENCLAW_REQUEST_ID_TTL_MS) {
+        openclawRequestBySession.delete(key);
+      }
+    }
+    if (!forceTrim && openclawRequestBySession.size <= OPENCLAW_REQUEST_ID_MAX_ENTRIES)
+      return;
+    if (openclawRequestBySession.size <= OPENCLAW_REQUEST_ID_MAX_ENTRIES)
+      return;
+    const ordered = Array.from(openclawRequestBySession.entries()).sort((a, b) => a[1].ts - b[1].ts);
+    const overflow = openclawRequestBySession.size - OPENCLAW_REQUEST_ID_MAX_ENTRIES;
+    for (let i = 0; i < overflow; i += 1) {
+      const row = ordered[i];
+      if (!row)
+        break;
+      openclawRequestBySession.delete(row[0]);
+    }
+  };
+
+  const rememberOpenclawRequestId = (sessionKey, requestId) => {
+    const normalizedRequestId = normalizeRequestId(requestId);
+    if (!normalizedRequestId)
+      return;
+    const ts = nowMs();
+    for (const key of requestSessionKeys(sessionKey)) {
+      openclawRequestBySession.set(key, { requestId: normalizedRequestId, ts });
+    }
+    pruneOpenclawRequestMap(ts, openclawRequestBySession.size > OPENCLAW_REQUEST_ID_MAX_ENTRIES);
+  };
+
+  const recentOpenclawRequestId = (sessionKey) => {
+    const ts = nowMs();
+    if (openclawRequestBySession.size > OPENCLAW_REQUEST_ID_MAX_ENTRIES) {
+      pruneOpenclawRequestMap(ts, true);
+    }
+    for (const key of requestSessionKeys(sessionKey)) {
+      const row = openclawRequestBySession.get(key);
+      if (!row)
+        continue;
+      if (ts - row.ts > OPENCLAW_REQUEST_ID_TTL_MS) {
+        openclawRequestBySession.delete(key);
+        continue;
+      }
+      return row.requestId;
+    }
+    return void 0;
+  };
+
+  const resolveOpenclawRequestId = (params) => {
+    const explicit = normalizeRequestId(params.explicitRequestId);
+    if (explicit) {
+      rememberOpenclawRequestId(params.sessionKey, explicit);
+      return explicit;
+    }
+    const inferred = inferRequestIdFromMessageId(params.messageId);
+    if (inferred) {
+      rememberOpenclawRequestId(params.sessionKey, inferred);
+      return inferred;
+    }
+    return recentOpenclawRequestId(params.sessionKey);
+  };
 
   const resolveSessionKey = (meta, ctx2) => {
     return computeEffectiveSessionKey(meta, ctx2);
@@ -1251,7 +1360,17 @@ export default function register(api) {
       return;
     const meta = normalizeEventMeta(event.metadata ?? void 0, event.sessionKey);
     const effectiveSessionKey = resolveSessionKey(meta, ctx);
+    const messageId = typeof meta?.messageId === "string" && meta.messageId.trim().length > 0 ? meta.messageId : typeof event.messageId === "string" ? event.messageId ?? "" : void 0;
+    const requestId = resolveOpenclawRequestId({
+      sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+      explicitRequestId: meta?.requestId,
+      messageId
+    });
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
+      return;
+    const channelId = typeof ctx.channelId === "string" ? ctx.channelId.trim().toLowerCase() : "";
+    const inferredRequestId = inferRequestIdFromMessageId(messageId);
+    if (channelId === "webchat" && (requestId?.toLowerCase().startsWith(OPENCLAW_REQUEST_ID_PREFIX) || Boolean(inferredRequestId)))
       return;
     const directBoardScope = boardScopeFromSessionKey(effectiveSessionKey ?? ctx?.sessionKey);
     if (directBoardScope) {
@@ -1295,7 +1414,6 @@ export default function register(api) {
     const taskId = routing.taskId;
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? summarize(metaSummary) : summarize(cleanRaw);
-    const messageId = typeof meta?.messageId === "string" ? meta.messageId : void 0;
     const incomingKey = messageId ? `received:${ctx.channelId ?? "nochannel"}:${effectiveSessionKey ?? ""}:${messageId}` : null;
     if (incomingKey && recentIncoming.has(incomingKey))
       return;
@@ -1315,6 +1433,7 @@ export default function register(api) {
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
         messageId,
+        requestId,
         boardScope: routing.boardScope,
         flow: deriveConversationFlow({
           role: "user",
@@ -1336,6 +1455,46 @@ export default function register(api) {
     }
     setTimeout(() => recentOutgoing.delete(key), 30e3).unref?.();
   };
+  const recentOutgoingBySession = /* @__PURE__ */ new Map();
+  const RECENT_OUTGOING_SESSION_WINDOW_MS = 5 * 60_000;
+  const dedupeSessionKey = (sessionKey) => {
+    const raw = String(sessionKey ?? "").trim();
+    if (!raw)
+      return "";
+    return raw.split("|", 1)[0] ?? raw;
+  };
+  const rememberOutgoingSession = (sessionKey) => {
+    const key = dedupeSessionKey(sessionKey);
+    if (!key)
+      return;
+    const now = Date.now();
+    recentOutgoingBySession.set(key, now);
+    for (const [known, ts] of recentOutgoingBySession) {
+      if (now - ts > RECENT_OUTGOING_SESSION_WINDOW_MS)
+        recentOutgoingBySession.delete(known);
+    }
+  };
+  const hasRecentOutgoingSession = (sessionKey) => {
+    const key = dedupeSessionKey(sessionKey);
+    if (!key)
+      return false;
+    const ts = recentOutgoingBySession.get(key);
+    if (!ts)
+      return false;
+    const now = Date.now();
+    if (now - ts > RECENT_OUTGOING_SESSION_WINDOW_MS) {
+      recentOutgoingBySession.delete(key);
+      return false;
+    }
+    return true;
+  };
+  const outgoingMessageIdDedupeKey = (channelId, sessionKey, messageId) => {
+    const mid = String(messageId ?? "").trim();
+    if (!mid)
+      return "";
+    return `sending:${channelId ?? "nochannel"}:${sessionKey ?? ""}:${mid}`;
+  };
+  const outgoingFingerprintDedupeKey = (channelId, sessionKey, content) => `sending:${channelId ?? "nochannel"}:${sessionKey ?? ""}:fp:${dedupeFingerprint(content)}`;
   const recentIncoming = /* @__PURE__ */ new Set();
   const rememberIncoming = (key) => {
     recentIncoming.add(key);
@@ -1357,6 +1516,11 @@ export default function register(api) {
       return;
     const meta = normalizeEventMeta(event.metadata ?? void 0, event.sessionKey);
     const effectiveSessionKey = resolveSessionKey(meta, ctx);
+    const requestId = resolveOpenclawRequestId({
+      sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+      explicitRequestId: meta?.requestId,
+      messageId: meta?.messageId
+    });
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
       return;
     const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
@@ -1367,11 +1531,15 @@ export default function register(api) {
     const metaSummary = meta?.summary;
     const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? summarize(metaSummary) : summarize(cleanRaw);
     const messageId = typeof meta?.messageId === "string" ? meta.messageId : void 0;
-    const dedupeKey = messageId ? `sending:${ctx.channelId ?? "nochannel"}:${effectiveSessionKey ?? ""}:${messageId}` : null;
-    if (dedupeKey && recentOutgoing.has(dedupeKey))
+    const dedupeKeys = [
+      outgoingMessageIdDedupeKey(ctx.channelId, effectiveSessionKey, messageId),
+      outgoingFingerprintDedupeKey(ctx.channelId, effectiveSessionKey, cleanRaw)
+    ].filter(Boolean);
+    if (dedupeKeys.some((key) => recentOutgoing.has(key)))
       return;
-    if (dedupeKey)
-      rememberOutgoing(dedupeKey);
+    for (const key of dedupeKeys)
+      rememberOutgoing(key);
+    rememberOutgoingSession(effectiveSessionKey ?? ctx.sessionKey);
     sendAsync({
       topicId,
       taskId,
@@ -1386,6 +1554,7 @@ export default function register(api) {
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
         messageId,
+        requestId,
         boardScope: routing.boardScope,
         flow: deriveConversationFlow({
           role: "assistant",
@@ -1404,7 +1573,7 @@ export default function register(api) {
     const effectiveSessionKey = sessionKey ?? (ctx.channelId ? `channel:${ctx.channelId}` : void 0);
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
       return;
-    const dedupeKey = `sending:${ctx.channelId ?? "nochannel"}:${effectiveSessionKey ?? ""}:${dedupeFingerprint(raw)}`;
+    const dedupeKey = outgoingFingerprintDedupeKey(ctx.channelId, effectiveSessionKey, raw);
     if (recentOutgoing.has(dedupeKey))
       return;
   });
@@ -1412,7 +1581,12 @@ export default function register(api) {
   api.on("before_tool_call", async (event, ctx) => {
     const createdAt = new Date().toISOString();
     const redacted = redact(event.params);
-    const effectiveSessionKey = resolveSessionKey(void 0, ctx);
+    const toolMeta = normalizeEventMeta(event.metadata ?? void 0, event.sessionKey);
+    const effectiveSessionKey = resolveSessionKey(toolMeta, ctx);
+    const requestId = resolveOpenclawRequestId({
+      sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+      explicitRequestId: event.requestId ?? event.runId ?? toolMeta?.requestId
+    });
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
       return;
     const routing = await resolveRoutingScope(effectiveSessionKey, ctx);
@@ -1431,6 +1605,7 @@ export default function register(api) {
       source: buildSourceMeta({
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
+        requestId,
         boardScope: routing.boardScope
       })
     });
@@ -1444,7 +1619,12 @@ export default function register(api) {
       result: redact(event.result),
       durationMs: event.durationMs
     };
-    const effectiveSessionKey = resolveSessionKey(void 0, ctx);
+    const toolMeta = normalizeEventMeta(event.metadata ?? void 0, event.sessionKey);
+    const effectiveSessionKey = resolveSessionKey(toolMeta, ctx);
+    const requestId = resolveOpenclawRequestId({
+      sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+      explicitRequestId: event.requestId ?? event.runId ?? toolMeta?.requestId
+    });
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
       return;
     const routing = await resolveRoutingScope(effectiveSessionKey, ctx);
@@ -1463,6 +1643,7 @@ export default function register(api) {
       source: buildSourceMeta({
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
+        requestId,
         boardScope: routing.boardScope
       })
     });
@@ -1471,6 +1652,8 @@ export default function register(api) {
   api.on("agent_end", async (event, ctx) => {
     const createdAtBaseMs = Date.now();
     const createdAt = new Date(createdAtBaseMs).toISOString();
+    const eventMeta = normalizeEventMeta(event.metadata ?? void 0, event.sessionKey);
+    const eventRequestIdRaw = event.requestId ?? event.runId ?? eventMeta?.requestId;
     const payload = {
       success: event.success,
       error: event.error,
@@ -1518,6 +1701,11 @@ export default function register(api) {
       const agentTag = ctx.agentId ?? "unknown";
       inferredSessionKey = `agent:${agentTag}:adhoc:${Date.now()}`;
     }
+    const requestId = resolveOpenclawRequestId({
+      sessionKey: inferredSessionKey ?? ctx.sessionKey,
+      explicitRequestId: eventRequestIdRaw,
+      messageId: eventMeta?.messageId
+    });
     if (shouldIgnoreSessionKey(inferredSessionKey, IGNORE_SESSION_PREFIXES))
       return;
     const inferredChannelId = (anchorFresh ? anchor?.channelId : void 0) ?? (inferredSessionKey.startsWith("channel:") && channelFresh ? lastChannelId : void 0);
@@ -1550,6 +1738,7 @@ export default function register(api) {
           source: buildSourceMeta({
             channel: inferredChannelId,
             sessionKey: inferredSessionKey,
+            requestId,
             boardScope: routing.boardScope
           })
         });
@@ -1560,6 +1749,7 @@ export default function register(api) {
     } else {
       const isChannelSession = inferredSessionKey.startsWith("channel:");
       const isBoardSession = Boolean(parseBoardSessionKey(inferredSessionKey));
+      const skipBoardAssistantFallback = isBoardSession && hasRecentOutgoingSession(inferredSessionKey);
       let startIdx = 0;
       if (!isChannelSession) {
         const prev = agentEndCursorBySession.get(inferredSessionKey);
@@ -1610,10 +1800,17 @@ export default function register(api) {
             continue;
         }
         if (role === "assistant") {
-          const dedupeKey = `sending:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${messageId}`;
-          if (recentOutgoing.has(dedupeKey))
+          if (skipBoardAssistantFallback)
             continue;
-          rememberOutgoing(dedupeKey);
+          const dedupeKeys = [
+            outgoingMessageIdDedupeKey(inferredChannelId, inferredSessionKey, messageId),
+            outgoingFingerprintDedupeKey(inferredChannelId, inferredSessionKey, cleanedContent)
+          ].filter(Boolean);
+          if (dedupeKeys.some((key) => recentOutgoing.has(key)))
+            continue;
+          for (const key of dedupeKeys)
+            rememberOutgoing(key);
+          rememberOutgoingSession(inferredSessionKey);
           const messageCreatedAt = new Date(createdAtBaseMs + agentEndSeq).toISOString();
           agentEndSeq += 1;
           sendAsync({
@@ -1630,6 +1827,7 @@ export default function register(api) {
               channel: sourceChannel,
               sessionKey: inferredSessionKey,
               messageId,
+              requestId,
               boardScope: routing.boardScope,
               flow: deriveConversationFlow({
                 role: "assistant",
@@ -1660,6 +1858,7 @@ export default function register(api) {
               channel: sourceChannel,
               sessionKey: inferredSessionKey,
               messageId,
+              requestId,
               boardScope: routing.boardScope,
               flow: deriveConversationFlow({
                 role: "user",
@@ -1689,6 +1888,7 @@ export default function register(api) {
         source: buildSourceMeta({
           channel: inferredChannelId,
           sessionKey: inferredSessionKey,
+          requestId,
           boardScope: routing.boardScope
         })
       });

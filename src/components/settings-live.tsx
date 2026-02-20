@@ -282,7 +282,7 @@ export function SettingsLive() {
 
   const startFullBackfillReplay = async () => {
     if (readOnly) {
-      setError("Token required to start full backfill replay.");
+      setError("Token required to start backfill replay.");
       return;
     }
     setBackfillRunning(true);
@@ -299,6 +299,7 @@ export function SettingsLive() {
           },
           body: JSON.stringify({
             integrationLevel: "full",
+            replayMode: "reclassify",
           }),
         },
         localToken.trim()
@@ -309,7 +310,7 @@ export function SettingsLive() {
         const message =
           typeof detail === "string" && detail.trim()
             ? detail.trim()
-            : "Failed to start full backfill replay.";
+            : "Failed to start backfill replay.";
         throw new Error(message);
       }
       setIntegrationLevel("full");
@@ -318,13 +319,15 @@ export function SettingsLive() {
       if (resetAt) {
         const stamp = Number.isNaN(Date.parse(resetAt)) ? resetAt : new Date(resetAt).toLocaleString();
         setMessage(
-          `Full backfill replay started (${stamp}). Logs are now pending while classifier rebuilds topics and tasks.`
+          `Backfill replay started (${stamp}). Existing topic/task links were preserved; unassigned or failed conversation logs are now pending for re-allocation.`
         );
       } else {
-        setMessage("Full backfill replay started. Logs are now pending while classifier rebuilds topics and tasks.");
+        setMessage(
+          "Backfill replay started. Existing topic/task links were preserved; unassigned or failed conversation logs are now pending for re-allocation."
+        );
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start full backfill replay.");
+      setError(err instanceof Error ? err.message : "Failed to start backfill replay.");
     } finally {
       setBackfillRunning(false);
     }
@@ -618,7 +621,7 @@ export function SettingsLive() {
           <div>
             <h2 className="text-lg font-semibold">Backfill Replay</h2>
             <p className="mt-1 text-sm text-[rgb(var(--claw-muted))]">
-              Rebuild Clawboard routing from existing logs by clearing derived topics/tasks and reclassifying history.
+              Reclassify existing conversation logs and re-allocate them across current topics/tasks.
             </p>
           </div>
           <Badge tone={localIntegration === "full" ? "accent2" : "muted"}>{localIntegration === "full" ? "Full mode" : "Not full mode"}</Badge>
@@ -629,8 +632,8 @@ export function SettingsLive() {
             <span className="text-[rgb(var(--claw-text))]">write</span> (live logging),{" "}
             <span className="text-[rgb(var(--claw-text))]">full</span> (write + replay/backfill workflows).
           </p>
-          <p className="text-[rgb(var(--claw-warning))]">
-            This action is destructive to derived state: existing topics/tasks are deleted, then classifier rebuilds them from logs.
+          <p className="text-[rgb(var(--claw-muted))]">
+            Default replay is non-destructive: existing topic/task links stay in place; only unassigned or failed conversation logs are re-queued.
           </p>
         </div>
         <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -638,13 +641,12 @@ export function SettingsLive() {
             <>
               <Button
                 variant="secondary"
-                className="border-[rgba(239,68,68,0.45)] text-[rgb(var(--claw-danger))]"
                 disabled={backfillRunning || readOnly}
                 onClick={() => {
                   void startFullBackfillReplay();
                 }}
               >
-                {backfillRunning ? "Starting..." : "Confirm full backfill replay"}
+                {backfillRunning ? "Starting..." : "Confirm backfill replay"}
               </Button>
               <Button variant="ghost" disabled={backfillRunning} onClick={() => setBackfillArmed(false)}>
                 Cancel
@@ -658,7 +660,7 @@ export function SettingsLive() {
                 setBackfillArmed(true);
               }}
             >
-              Start full backfill replay
+              Start backfill replay
             </Button>
           )}
           {readOnly ? (

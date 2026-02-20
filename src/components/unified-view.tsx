@@ -191,6 +191,59 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function parseEnvSeconds(raw: string | undefined, fallbackSeconds: number, minSeconds: number, maxSeconds: number) {
+  const parsed = Number(String(raw ?? "").trim());
+  if (!Number.isFinite(parsed)) return fallbackSeconds;
+  const value = Math.floor(parsed);
+  return Math.max(minSeconds, Math.min(maxSeconds, value));
+}
+
+// Backward-compatible fallbacks for installs that have not added these NEXT_PUBLIC settings yet.
+// Prefer setting explicit values in `.env`/deploy config for predictable long-running behavior.
+const OPENCLAW_RESPONDING_OPTIMISTIC_REQUEST_TTL_MS =
+  parseEnvSeconds(process.env.NEXT_PUBLIC_OPENCLAW_OPTIMISTIC_REQUEST_TTL_SECONDS, 12 * 60 * 60, 60, 30 * 24 * 60 * 60) *
+  1000;
+const OPENCLAW_RESPONDING_OPTIMISTIC_NO_REQUEST_TTL_MS =
+  parseEnvSeconds(
+    process.env.NEXT_PUBLIC_OPENCLAW_OPTIMISTIC_NO_REQUEST_TTL_SECONDS,
+    10 * 60,
+    30,
+    7 * 24 * 60 * 60
+  ) * 1000;
+const OPENCLAW_PROMOTION_SIGNAL_WINDOW_MS =
+  parseEnvSeconds(
+    process.env.NEXT_PUBLIC_OPENCLAW_PROMOTION_SIGNAL_WINDOW_SECONDS,
+    30 * 60,
+    60,
+    30 * 24 * 60 * 60
+  ) * 1000;
+const OPENCLAW_TYPING_ALIAS_INACTIVE_RETENTION_MS =
+  parseEnvSeconds(
+    process.env.NEXT_PUBLIC_OPENCLAW_TYPING_ALIAS_INACTIVE_RETENTION_SECONDS,
+    30 * 60,
+    60,
+    30 * 24 * 60 * 60
+  ) * 1000;
+
+function isTruthyFlag(value: unknown) {
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
+function isFalseFlag(value: unknown) {
+  return value === false || value === "false" || value === 0 || value === "0";
+}
+
+function isTerminalSystemRequestEvent(entry: LogEntry) {
+  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+  if (agentId !== "system") return false;
+  const type = String(entry.type ?? "").trim().toLowerCase();
+  if (type !== "system") return false;
+  const source = (entry.source && typeof entry.source === "object" ? entry.source : {}) as Record<string, unknown>;
+  if (isTruthyFlag(source.watchdogMissingAssistant)) return false;
+  if (isFalseFlag(source.requestTerminal)) return false;
+  return true;
+}
+
 function compareLogCreatedAtAsc(a: LogEntry, b: LogEntry) {
   if (a.createdAt === b.createdAt) return a.id.localeCompare(b.id);
   return a.createdAt < b.createdAt ? -1 : 1;
@@ -1497,38 +1550,116 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     [computeChatStart, setChatHistoryStarts]
   );
 
+  const derivedAwaitingAssistant = useMemo<Record<string, { sentAt: string; requestId?: string }>>(() => {
+    type PendingRequest = { requestId: string; sentAt: string; sentAtMs: number };
+    const pendingBySession = new Map<string, PendingRequest[]>();
+    const assistantByRequestId = new Set<string>();
+    const terminalByRequestId = new Set<string>();
+    const anonymousAssistantBySession = new Map<string, number[]>();
+
+    const parseMs = (stamp: string) => {
+      const value = Date.parse(stamp);
+      return Number.isFinite(value) ? value : 0;
+    };
+
+    for (const entry of logs) {
+      const sessionKey = normalizeBoardSessionKey(entry.source?.sessionKey);
+      if (!sessionKey) continue;
+
+      const agentId = String(entry.agentId ?? "")
+        .trim()
+        .toLowerCase();
+      const requestId = String(entry.source?.requestId ?? "").trim();
+
+      if (agentId === "user" && entry.type === "conversation" && requestId) {
+        const requests = pendingBySession.get(sessionKey) ?? [];
+        requests.push({
+          requestId,
+          sentAt: entry.createdAt,
+          sentAtMs: parseMs(entry.createdAt),
+        });
+        pendingBySession.set(sessionKey, requests);
+        continue;
+      }
+
+      if (agentId === "assistant" && entry.type === "conversation") {
+        if (requestId) {
+          assistantByRequestId.add(requestId);
+        } else {
+          const anonymous = anonymousAssistantBySession.get(sessionKey) ?? [];
+          const assistantAtMs = parseMs(entry.createdAt);
+          if (assistantAtMs > 0) anonymous.push(assistantAtMs);
+          anonymousAssistantBySession.set(sessionKey, anonymous);
+        }
+        continue;
+      }
+
+      if (requestId && isTerminalSystemRequestEvent(entry)) terminalByRequestId.add(requestId);
+    }
+
+    const derived: Record<string, { sentAt: string; requestId?: string }> = {};
+    for (const [sessionKey, requests] of pendingBySession.entries()) {
+      const ordered = [...requests].sort((a, b) => a.sentAtMs - b.sentAtMs);
+      const anonymous = [...(anonymousAssistantBySession.get(sessionKey) ?? [])].sort((a, b) => a - b);
+      let anonymousIdx = 0;
+      const unresolved: PendingRequest[] = [];
+
+      for (const req of ordered) {
+        if (assistantByRequestId.has(req.requestId) || terminalByRequestId.has(req.requestId)) {
+          continue;
+        }
+
+        while (anonymousIdx < anonymous.length && anonymous[anonymousIdx] < req.sentAtMs) {
+          anonymousIdx += 1;
+        }
+        if (anonymousIdx < anonymous.length) {
+          anonymousIdx += 1;
+          continue;
+        }
+
+        unresolved.push(req);
+      }
+
+      if (unresolved.length === 0) continue;
+      const latest = unresolved[unresolved.length - 1];
+      derived[sessionKey] = { sentAt: latest.sentAt, requestId: latest.requestId };
+    }
+
+    return derived;
+  }, [logs]);
+
+  const effectiveAwaitingAssistant = useMemo<Record<string, { sentAt: string; requestId?: string }>>(() => {
+    const merged: Record<string, { sentAt: string; requestId?: string }> = { ...derivedAwaitingAssistant };
+    for (const [sessionKey, info] of Object.entries(awaitingAssistant)) {
+      if (Object.prototype.hasOwnProperty.call(merged, sessionKey)) continue;
+      merged[sessionKey] = info;
+    }
+    return merged;
+  }, [awaitingAssistant, derivedAwaitingAssistant]);
+
   const isSessionResponding = useCallback(
     (sessionKey: string) => {
       const key = normalizeBoardSessionKey(sessionKey);
       if (!key) return false;
       const typing = openclawTyping[key];
-      if (typing?.typing) {
-        // Fallback: if the typing indicator is older than 3 minutes, assume it's orphaned.
-        const age = Date.now() - Date.parse(typing.updatedAt);
-        if (Number.isFinite(age) && age < 3 * 60 * 1000) {
-          return true;
-        }
-      }
-      if (Object.prototype.hasOwnProperty.call(awaitingAssistant, key)) return true;
+      if (typing?.typing) return true;
+      if (Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, key)) return true;
 
       const alias = typingAliasRef.current.get(key);
       if (!alias) return false;
-      if (Date.now() - alias.createdAt > 30 * 60 * 1000) {
-        typingAliasRef.current.delete(key);
-        return false;
-      }
-
       const sourceKey = alias.sourceSessionKey;
       const sourceTyping = openclawTyping[sourceKey];
-      if (sourceTyping?.typing) {
-        const age = Date.now() - Date.parse(sourceTyping.updatedAt);
-        if (Number.isFinite(age) && age < 3 * 60 * 1000) {
-          return true;
-        }
+      const sourceResponding =
+        Boolean(sourceTyping?.typing) || Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, sourceKey);
+      if (sourceResponding) return true;
+
+      // Cleanup only after inactivity. Do not age out while the source session is still responding.
+      if (Date.now() - alias.createdAt > OPENCLAW_TYPING_ALIAS_INACTIVE_RETENTION_MS) {
+        typingAliasRef.current.delete(key);
       }
-      return Object.prototype.hasOwnProperty.call(awaitingAssistant, sourceKey);
+      return false;
     },
-    [awaitingAssistant, openclawTyping]
+    [effectiveAwaitingAssistant, openclawTyping]
   );
 
   const prevExpandedTaskIdsRef = useRef<Set<string>>(new Set());
@@ -2102,7 +2233,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const map = recentBoardSendAtRef.current;
     map.set(key, now);
     for (const [k, ts] of map) {
-      if (now - ts > 10 * 60 * 1000) map.delete(k);
+      if (now - ts > OPENCLAW_PROMOTION_SIGNAL_WINDOW_MS) map.delete(k);
     }
   }, []);
 
@@ -2216,6 +2347,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (sessions.length === 0) return;
     const now = Date.now();
     const latestAssistantBySession = new Map<string, string>();
+    const assistantRequestIds = new Set<string>();
     const terminalRequestIds = new Set<string>();
 
     for (const entry of logs) {
@@ -2226,11 +2358,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         const ts = entry.createdAt;
         const prev = latestAssistantBySession.get(sessionKey) ?? "";
         if (!prev || ts > prev) latestAssistantBySession.set(sessionKey, ts);
+        const requestId = String(entry.source?.requestId ?? "").trim();
+        if (requestId) assistantRequestIds.add(requestId);
       }
       const reqId = String(entry.source?.requestId ?? "").trim();
       if (reqId) {
-        const agentId = String(entry.agentId ?? "").trim().toLowerCase();
-        if (agentId === "system") terminalRequestIds.add(reqId);
+        if (isTerminalSystemRequestEvent(entry)) terminalRequestIds.add(reqId);
       }
     }
 
@@ -2240,14 +2373,26 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       for (const [sessionKey, info] of Object.entries(prev)) {
         const sentAtMs = Date.parse(info.sentAt);
 
-        // 1. Time-based expiry (fallback)
-        // 1. Time-based expiry (fallback). 5m is plenty for a 2m gateway timeout.
-        if (Number.isFinite(sentAtMs) && now - sentAtMs > 5 * 60 * 1000) {
+        // Once logs carry unresolved state for this session, local optimistic state can drop out.
+        if (Object.prototype.hasOwnProperty.call(derivedAwaitingAssistant, sessionKey)) {
           changed = true;
           continue;
         }
 
-        // 2. Explicit terminal system events (error/timeout)
+        // 1. Time-based expiry (fallback) for optimistic-only state.
+        const optimisticTtlMs = info.requestId
+          ? OPENCLAW_RESPONDING_OPTIMISTIC_REQUEST_TTL_MS
+          : OPENCLAW_RESPONDING_OPTIMISTIC_NO_REQUEST_TTL_MS;
+        if (Number.isFinite(sentAtMs) && now - sentAtMs > optimisticTtlMs) {
+          changed = true;
+          continue;
+        }
+
+        // 2. Request-specific terminal events
+        if (info.requestId && assistantRequestIds.has(info.requestId)) {
+          changed = true;
+          continue;
+        }
         if (info.requestId && terminalRequestIds.has(info.requestId)) {
           changed = true;
           continue;
@@ -2264,9 +2409,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           }
         }
 
-        // 4. New assistant activity in this session
+        // 4. Session-level fallback only for pre-queue optimistic sends (no requestId yet).
         const assistantAt = latestAssistantBySession.get(sessionKey);
-        if (assistantAt && assistantAt > info.sentAt) {
+        if (!info.requestId && assistantAt && assistantAt > info.sentAt) {
           changed = true;
           continue;
         }
@@ -2274,7 +2419,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       }
       return changed ? next : prev;
     });
-  }, [awaitingAssistant, logs, openclawTyping]);
+  }, [awaitingAssistant, derivedAwaitingAssistant, logs, openclawTyping]);
 
   useEffect(() => {
     const prev = prevPendingAttachmentsRef.current;
@@ -4209,7 +4354,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
     if (!promotion) return;
     const sentAt = recentBoardSendAtRef.current.get(promotion.sessionKey) ?? 0;
-    if (!sentAt || Date.now() - sentAt > 30 * 60 * 1000) return;
+    if (!sentAt || Date.now() - sentAt > OPENCLAW_PROMOTION_SIGNAL_WINDOW_MS) return;
     recentBoardSendAtRef.current.delete(promotion.sessionKey);
 
     setExpandedTopics((prevSet) => {

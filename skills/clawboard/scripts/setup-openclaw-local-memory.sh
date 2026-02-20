@@ -274,15 +274,13 @@ configure_memory_search() {
   set_cfg agents.defaults.memorySearch.cache.maxEntries 50000 json false
   set_cfg agents.defaults.memorySearch.store.vector.enabled true json false
 
-  # Hybrid retrieval tuning: BM25 + vector + diversity + recency.
+  # Hybrid retrieval tuning: BM25 + vector weighting and candidate expansion.
+  # Note: older tuning keys under `hybrid.mmr.*` and `hybrid.temporalDecay.*`
+  # are no longer recognized by current OpenClaw config schema.
   set_cfg agents.defaults.memorySearch.query.hybrid.enabled true json false
   set_cfg agents.defaults.memorySearch.query.hybrid.vectorWeight 0.7 json false
   set_cfg agents.defaults.memorySearch.query.hybrid.textWeight 0.3 json false
   set_cfg agents.defaults.memorySearch.query.hybrid.candidateMultiplier 4 json false
-  set_cfg agents.defaults.memorySearch.query.hybrid.mmr.enabled true json false
-  set_cfg agents.defaults.memorySearch.query.hybrid.mmr.lambda 0.7 json false
-  set_cfg agents.defaults.memorySearch.query.hybrid.temporalDecay.enabled true json false
-  set_cfg agents.defaults.memorySearch.query.hybrid.temporalDecay.halfLifeDays 30 json false
 }
 
 configure_qmd_memory_boost() {
@@ -298,7 +296,6 @@ configure_qmd_memory_boost() {
   set_cfg memory.qmd.sessions.enabled true json false
   set_cfg memory.qmd.update.interval "5m" string false
   set_cfg memory.qmd.update.debounceMs 15000 json false
-  set_cfg memory.qmd.update.waitForBootSync false json false
   set_cfg memory.qmd.limits.maxResults 6 json false
   set_cfg memory.qmd.limits.timeoutMs 4000 json false
   set_cfg memory.citations auto string false

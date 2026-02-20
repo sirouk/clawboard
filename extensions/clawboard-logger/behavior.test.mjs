@@ -167,6 +167,162 @@ test("message_sending logs assistant row; message_sent does not duplicate it (IN
   }
 });
 
+test("board session assistant output is not duplicated between message_sending and agent_end", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const sending = api.__handlers.get("message_sending");
+    const agentEnd = api.__handlers.get("agent_end");
+    assert.equal(typeof sending, "function");
+    assert.equal(typeof agentEnd, "function");
+
+    const sessionKey = "clawboard:task:topic-dup-1:task-dup-1";
+    await sending(
+      {
+        content: "Done — I made an actual edit.",
+        metadata: {
+          sessionKey,
+          messageId: "assistant-dup-msg-1",
+          requestId: "occhat-dup-1",
+        },
+      },
+      {
+        channelId: "openclaw",
+        conversationId: sessionKey,
+        sessionKey,
+        agentId: "main",
+      }
+    );
+
+    await agentEnd(
+      {
+        success: true,
+        messages: [
+          {
+            role: "assistant",
+            content:
+              "Done — I made an actual edit.\n\nI changed:\n- `/tmp/file.md`",
+          },
+        ],
+      },
+      {
+        channelId: "openclaw",
+        conversationId: sessionKey,
+        sessionKey,
+        agentId: "main",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 1);
+    const assistantConversationRows = meaningfulCalls(calls)
+      .map((call) => parseBody(call))
+      .filter(
+        (payload) =>
+          payload.type === "conversation" &&
+          payload.agentId === "assistant" &&
+          payload?.source?.sessionKey === sessionKey
+      );
+    assert.equal(assistantConversationRows.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("message_sending includes requestId in source metadata when present", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const sending = api.__handlers.get("message_sending");
+    assert.equal(typeof sending, "function");
+
+    await sending(
+      {
+        content: "Assistant reply with request id",
+        metadata: {
+          sessionKey: "clawboard:topic:topic-req-1",
+          messageId: "assistant-msg-req-1",
+          requestId: "occhat-request-meta-1",
+        },
+      },
+      {
+        channelId: "openclaw",
+        conversationId: "clawboard:topic:topic-req-1",
+        agentId: "main",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 1);
+    const payload = parseBody(meaningfulCalls(calls)[0]);
+    assert.equal(payload.type, "conversation");
+    assert.equal(payload.agentId, "assistant");
+    assert.equal(payload.source.requestId, "occhat-request-meta-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("agent_end fallback reuses recent board-session requestId", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const received = api.__handlers.get("message_received");
+    const agentEnd = api.__handlers.get("agent_end");
+    assert.equal(typeof received, "function");
+    assert.equal(typeof agentEnd, "function");
+
+    await received(
+      {
+        content: "already persisted by backend",
+        metadata: {
+          sessionKey: "clawboard:topic:topic-req-fallback",
+          messageId: "occhat-request-fallback-1",
+        },
+      },
+      {
+        channelId: "openclaw",
+        sessionKey: "clawboard:topic:topic-req-fallback",
+        conversationId: "clawboard:topic:topic-req-fallback",
+        agentId: "main",
+      }
+    );
+
+    await agentEnd(
+      {
+        success: true,
+        messages: [{ role: "assistant", content: "Fallback assistant payload with request id" }],
+      },
+      {
+        sessionKey: "clawboard:topic:topic-req-fallback",
+        channelId: "openclaw",
+        agentId: "main",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 1);
+    const payload = parseBody(meaningfulCalls(calls)[0]);
+    assert.equal(payload.type, "conversation");
+    assert.equal(payload.agentId, "assistant");
+    assert.equal(payload.source.requestId, "occhat-request-fallback-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("before_agent_start adds no-reply-directive hint for board sessions", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -307,6 +463,58 @@ test("before_tool_call emits action log with tool call summary (ING-003)", async
   }
 });
 
+test("before_tool_call inherits requestId across wrapped subagent session keys", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const received = api.__handlers.get("message_received");
+    const toolCall = api.__handlers.get("before_tool_call");
+    assert.equal(typeof received, "function");
+    assert.equal(typeof toolCall, "function");
+
+    await received(
+      {
+        content: "start request chain",
+        metadata: {
+          sessionKey: "clawboard:topic:topic-tool-request-001",
+          messageId: "occhat-tool-request-001",
+          requestId: "occhat-tool-request-001",
+        },
+      },
+      {
+        channelId: "webchat",
+        sessionKey: "clawboard:topic:topic-tool-request-001",
+        conversationId: "clawboard:topic:topic-tool-request-001",
+      }
+    );
+
+    await toolCall(
+      {
+        toolName: "memory.search",
+        params: { q: "progress" },
+      },
+      {
+        sessionKey: "bridge:subagent:worker-1:clawboard:topic:topic-tool-request-001",
+        channelId: "webchat",
+        agentId: "assistant",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 1);
+    const payload = parseBody(meaningfulCalls(calls)[0]);
+    assert.equal(payload.type, "action");
+    assert.equal(payload.content, "Tool call: memory.search");
+    assert.equal(payload.source.requestId, "occhat-tool-request-001");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("after_tool_call emits action log for result and error (ING-004)", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -426,6 +634,75 @@ test("board-session user message echo is skipped to avoid double logging (ING-00
   }
 });
 
+test("webchat occhat user echo is skipped to avoid duplicate board prompt rows", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("message_received");
+    assert.equal(typeof handler, "function");
+
+    await handler(
+      {
+        content: "echoed board prompt",
+        metadata: {
+          sessionKey: "channel:webchat|thread:test-dup",
+          messageId: "webchat-msg-dup",
+          requestId: "occhat-test-dup-1",
+        },
+      },
+      {
+        channelId: "webchat",
+        sessionKey: "channel:webchat|thread:test-dup",
+        conversationId: "channel:webchat|thread:test-dup",
+      }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(meaningfulCalls(calls).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("webchat occhat user echo is skipped when only messageId has occhat prefix", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("message_received");
+    assert.equal(typeof handler, "function");
+
+    await handler(
+      {
+        content: "echoed board prompt missing explicit requestId",
+        metadata: {
+          sessionKey: "channel:webchat|thread:test-dup-occhat",
+          messageId: "occhat-test-dup-2",
+        },
+      },
+      {
+        channelId: "webchat",
+        sessionKey: "channel:webchat|thread:test-dup-occhat",
+        conversationId: "channel:webchat|thread:test-dup-occhat",
+      }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(meaningfulCalls(calls).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("ignored internal session prefixes do not write logs (ING-007)", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -529,6 +806,50 @@ test("injected context blocks are stripped before persistence (ING-009)", async 
     const payload = parseBody(meaningfulCalls(calls)[0]);
     assert.equal(payload.content, "actual user message");
     assert.ok(!String(payload.raw || "").includes("sensitive retrieval block"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("untrusted metadata wrappers are stripped before persistence", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("message_received");
+    assert.equal(typeof handler, "function");
+
+    const content = [
+      "Conversation info (untrusted metadata):",
+      "```json",
+      '{"message_id":"occhat-test-wrapper","sender":"gateway-client"}',
+      "```",
+      "",
+      "actual user content",
+    ].join("\n");
+
+    await handler(
+      {
+        content,
+        metadata: {
+          sessionKey: "channel:test-wrapper-strip",
+          messageId: "wrapper-1",
+        },
+      },
+      {
+        channelId: "discord",
+        conversationId: "channel:test-wrapper-strip",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 1);
+    const payload = parseBody(meaningfulCalls(calls)[0]);
+    assert.equal(payload.content, "actual user content");
+    assert.ok(!String(payload.content || "").includes("Conversation info (untrusted metadata)"));
   } finally {
     globalThis.fetch = originalFetch;
   }

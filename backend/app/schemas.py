@@ -30,12 +30,13 @@ class AttachmentOut(ModelBase):
 
 
 class StartFreshReplayRequest(BaseModel):
-    """Admin-only: clear derived state and mark all logs as pending for classifier replay."""
+    """Admin-only replay controls for classifier backfill."""
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "integrationLevel": "full",
+                "replayMode": "reclassify",
             }
         }
     )
@@ -43,6 +44,15 @@ class StartFreshReplayRequest(BaseModel):
         default="full",
         description="Set instance integrationLevel after reset.",
         examples=["full"],
+    )
+    replayMode: Literal["reclassify", "fresh"] = Field(
+        default="reclassify",
+        description=(
+            "Replay strategy: 'reclassify' keeps existing topic/task links and only re-queues unassigned/failed "
+            "conversation logs for classification; "
+            "'fresh' clears derived topics/tasks first."
+        ),
+        examples=["reclassify"],
     )
 
 
@@ -559,6 +569,109 @@ class OpenClawChatRequest(BaseModel):
 class OpenClawChatQueuedResponse(BaseModel):
     queued: bool = Field(description="Whether the request was accepted for processing.", examples=[True])
     requestId: str = Field(description="Server request identifier.", examples=["occhat-123e4567-e89b-12d3-a456-426614174000"])
+
+
+class OpenClawChatDispatchQuarantineRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "dryRun": True,
+                "olderThanSeconds": 21600,
+                "limit": 1000,
+                "statuses": ["pending", "retry", "processing"],
+                "syntheticOnly": True,
+                "sessionKeyContains": "topic-smoke",
+                "reason": "synthetic_backlog_quarantine",
+            }
+        }
+    )
+    dryRun: bool = Field(
+        default=True,
+        description="When true, return the matched rows without changing DB state.",
+        examples=[True],
+    )
+    olderThanSeconds: int = Field(
+        default=21600,
+        ge=60,
+        le=60 * 60 * 24 * 30,
+        description="Only include rows created at least this many seconds ago.",
+        examples=[21600],
+    )
+    limit: int = Field(
+        default=1000,
+        ge=1,
+        le=20000,
+        description="Maximum number of queue rows to inspect in one request.",
+        examples=[1000],
+    )
+    statuses: List[str] = Field(
+        default_factory=lambda: ["pending", "retry", "processing"],
+        description="Dispatch statuses eligible for quarantine.",
+        examples=[["pending", "retry", "processing"]],
+    )
+    syntheticOnly: bool = Field(
+        default=True,
+        description="Restrict matches to synthetic/test-like session/message markers.",
+        examples=[True],
+    )
+    sessionKeyContains: Optional[str] = Field(
+        default=None,
+        max_length=240,
+        description="Optional case-insensitive substring filter on sessionKey.",
+        examples=["topic-smoke"],
+    )
+    requestIdContains: Optional[str] = Field(
+        default=None,
+        max_length=240,
+        description="Optional case-insensitive substring filter on requestId.",
+        examples=["occhat-"],
+    )
+    messageContains: Optional[str] = Field(
+        default=None,
+        max_length=240,
+        description="Optional case-insensitive substring filter on message text.",
+        examples=["canary"],
+    )
+    reason: Optional[str] = Field(
+        default="admin_quarantine",
+        max_length=160,
+        description="Reason string stored in lastError for quarantined rows.",
+        examples=["synthetic_backlog_quarantine"],
+    )
+
+    @model_validator(mode="after")
+    def _normalize(self):
+        allowed = {"pending", "retry", "processing"}
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for raw in self.statuses or []:
+            status = str(raw or "").strip().lower()
+            if status not in allowed or status in seen:
+                continue
+            seen.add(status)
+            normalized.append(status)
+        if not normalized:
+            raise ValueError("statuses must include at least one of: pending, retry, processing")
+        self.statuses = normalized
+        self.sessionKeyContains = (self.sessionKeyContains or "").strip() or None
+        self.requestIdContains = (self.requestIdContains or "").strip() or None
+        self.messageContains = (self.messageContains or "").strip() or None
+        reason = (self.reason or "").strip()
+        self.reason = reason or "admin_quarantine"
+        return self
+
+
+class OpenClawChatDispatchQuarantineResponse(BaseModel):
+    dryRun: bool = Field(description="Whether DB writes were skipped.")
+    matched: int = Field(description="Number of rows matching the filters.")
+    quarantined: int = Field(description="Number of rows updated to failed/quarantined.")
+    cutoffCreatedAt: str = Field(description="Computed cutoff timestamp (UTC ISO).")
+    statuses: List[str] = Field(description="Statuses included in this run.")
+    syntheticOnly: bool = Field(description="Whether synthetic-only matching was enforced.")
+    limit: int = Field(description="Max rows inspected.")
+    reason: str = Field(description="Reason written to row lastError when quarantined.")
+    filters: Dict[str, Optional[str]] = Field(description="Applied optional substring filters.")
+    sample: List[Dict[str, Any]] = Field(description="Sample of matched rows.")
 
 
 class ReindexRequest(BaseModel):

@@ -590,6 +590,84 @@ copy_curated_workspace() {
   done
 }
 
+clawboard_api_reachable() {
+  local api_base="$1"
+  [[ -n "${api_base:-}" ]] || return 1
+  python3 - "$api_base" <<'PY'
+import sys
+import urllib.error
+import urllib.request
+
+base = (sys.argv[1] or "").strip().rstrip("/")
+if not base:
+    sys.exit(1)
+
+targets = ("/api/config", "/api/health", "/health")
+for target in targets:
+    url = base + target
+    req = urllib.request.Request(url, method="GET")
+    try:
+      with urllib.request.urlopen(req, timeout=3) as resp:
+          code = getattr(resp, "status", 200)
+          if 200 <= int(code) < 500:
+              print(base, end="")
+              sys.exit(0)
+    except urllib.error.HTTPError as exc:
+      if 200 <= int(getattr(exc, "code", 500)) < 500:
+          print(base, end="")
+          sys.exit(0)
+    except Exception:
+      pass
+
+sys.exit(1)
+PY
+}
+
+preserve_existing_clawboard_snapshot() {
+  if [[ -d "$BACKUP_DIR/clawboard" ]]; then
+    mkdir -p "$STAGE_DIR/clawboard"
+    rsync -a --delete "$BACKUP_DIR/clawboard/" "$STAGE_DIR/clawboard/" >/dev/null
+    say "WARN: Preserved prior clawboard snapshot from backup repo for this run."
+  fi
+}
+
+first_reachable_clawboard_api() {
+  local -a candidates=()
+  local candidate seen existing
+
+  add_candidate() {
+    candidate="${1:-}"
+    [[ -n "$candidate" ]] || return 0
+    candidate="${candidate%/}"
+    [[ -n "$candidate" ]] || return 0
+    seen=0
+    if [[ "${#candidates[@]}" -gt 0 ]]; then
+      for existing in "${candidates[@]}"; do
+        if [[ "$existing" == "$candidate" ]]; then
+          seen=1
+          break
+        fi
+      done
+    fi
+    if [[ "$seen" -eq 0 ]]; then
+      candidates+=("$candidate")
+    fi
+  }
+
+  add_candidate "${CLAWBOARD_API_URL:-}"
+  add_candidate "${CLAWBOARD_API_URL_FROM_CONFIG:-}"
+  add_candidate "http://127.0.0.1:8010"
+  add_candidate "http://localhost:8010"
+
+  for candidate in "${candidates[@]}"; do
+    if clawboard_api_reachable "$candidate" >/dev/null 2>&1; then
+      printf "%s" "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 apply_arg_overrides() {
   [[ -n "$ARG_WORKSPACE_PATH" ]] && WORKSPACE_PATH="$ARG_WORKSPACE_PATH"
   [[ -n "$ARG_WORKSPACE_PATHS_JSON" ]] && WORKSPACE_PATHS_JSON="$ARG_WORKSPACE_PATHS_JSON"
@@ -1006,6 +1084,7 @@ else
 fi
 
 # Env file values override JSON for secrets/runtime configuration.
+CLAWBOARD_API_URL_FROM_CONFIG="${CLAWBOARD_API_URL:-}"
 load_env_file "$CRED_ENV"
 CLAWBOARD_TOKEN="${CLAWBOARD_BACKUP_TOKEN:-${CLAWBOARD_TOKEN:-}}"
 CLAWBOARD_API_URL="${CLAWBOARD_BACKUP_API_URL:-${CLAWBOARD_API_URL:-}}"
@@ -1322,67 +1401,104 @@ if as_bool "${INCLUDE_OPENCLAW_SKILLS:-}"; then
   fi
 fi
 
-# --- C) Full Clawboard state backup (optional) ---
+# --- C) Full Clawboard state backup (optional, best-effort) ---
+CLAWBOARD_STATE_EXPORT_OK=0
 if as_bool "${INCLUDE_CLAWBOARD_STATE:-}"; then
-  [[ -f "$EXPORT_CLAWBOARD_HELPER" ]] || die "Missing exporter helper: $EXPORT_CLAWBOARD_HELPER"
+  SKIP_CLAWBOARD_EXPORT=0
 
-  if [[ -n "${CLAWBOARD_DIR:-}" ]]; then
-    # Expand "~" in a POSIX-safe way.
-    case "$CLAWBOARD_DIR" in
-      "~/"*) CLAWBOARD_DIR="$HOME/${CLAWBOARD_DIR#~/}" ;;
-    esac
+  if [[ ! -f "$EXPORT_CLAWBOARD_HELPER" ]]; then
+    say "WARN: Missing exporter helper: $EXPORT_CLAWBOARD_HELPER. Skipping Clawboard state export for this run."
+    preserve_existing_clawboard_snapshot
+    SKIP_CLAWBOARD_EXPORT=1
   fi
 
-  if [[ -n "${CLAWBOARD_DIR:-}" && ! -d "$CLAWBOARD_DIR" ]]; then
-    fallback_clawboard_dir=""
-    for candidate in \
-      "$WORKSPACE_PATH/projects/clawboard" \
-      "$WORKSPACE_PATH/project/clawboard"
-    do
-      if [[ -f "$candidate/deploy.sh" && -f "$candidate/docker-compose.yaml" ]]; then
-        fallback_clawboard_dir="$candidate"
-        break
-      fi
-    done
+  if [[ "$SKIP_CLAWBOARD_EXPORT" -eq 0 ]]; then
+    if [[ -n "${CLAWBOARD_DIR:-}" ]]; then
+      # Expand "~" in a POSIX-safe way.
+      case "$CLAWBOARD_DIR" in
+        "~/"*) CLAWBOARD_DIR="$HOME/${CLAWBOARD_DIR#~/}" ;;
+      esac
+    fi
 
-    if [[ -z "$fallback_clawboard_dir" ]]; then
-      for ws_path in "${WORKSPACE_PATH_LIST[@]}"; do
-        for candidate in \
-          "$ws_path/projects/clawboard" \
-          "$ws_path/project/clawboard"
-        do
-          if [[ -f "$candidate/deploy.sh" && -f "$candidate/docker-compose.yaml" ]]; then
-            fallback_clawboard_dir="$candidate"
-            break
-          fi
-        done
-        [[ -n "$fallback_clawboard_dir" ]] && break
+    if [[ -n "${CLAWBOARD_DIR:-}" && ! -d "$CLAWBOARD_DIR" ]]; then
+      fallback_clawboard_dir=""
+      for candidate in \
+        "$WORKSPACE_PATH/projects/clawboard" \
+        "$WORKSPACE_PATH/project/clawboard"
+      do
+        if [[ -f "$candidate/deploy.sh" && -f "$candidate/docker-compose.yaml" ]]; then
+          fallback_clawboard_dir="$candidate"
+          break
+        fi
       done
+
+      if [[ -z "$fallback_clawboard_dir" ]]; then
+        for ws_path in "${WORKSPACE_PATH_LIST[@]}"; do
+          for candidate in \
+            "$ws_path/projects/clawboard" \
+            "$ws_path/project/clawboard"
+          do
+            if [[ -f "$candidate/deploy.sh" && -f "$candidate/docker-compose.yaml" ]]; then
+              fallback_clawboard_dir="$candidate"
+              break
+            fi
+          done
+          [[ -n "$fallback_clawboard_dir" ]] && break
+        done
+      fi
+
+      if [[ -n "$fallback_clawboard_dir" ]]; then
+        say "WARN: clawboardDir does not exist: $CLAWBOARD_DIR (using $fallback_clawboard_dir)"
+        CLAWBOARD_DIR="$fallback_clawboard_dir"
+      else
+        say "WARN: clawboardDir does not exist: $CLAWBOARD_DIR. Will continue without path-based fallbacks."
+        CLAWBOARD_DIR=""
+      fi
     fi
 
-    if [[ -n "$fallback_clawboard_dir" ]]; then
-      say "WARN: clawboardDir does not exist: $CLAWBOARD_DIR (using $fallback_clawboard_dir)"
-      CLAWBOARD_DIR="$fallback_clawboard_dir"
+    if [[ -z "${CLAWBOARD_TOKEN:-}" && -n "${CLAWBOARD_DIR:-}" && -f "$CLAWBOARD_DIR/.env" ]]; then
+      CLAWBOARD_TOKEN="$(read_env_value "$CLAWBOARD_DIR/.env" "CLAWBOARD_TOKEN" || true)"
+    fi
+    if [[ -z "${CLAWBOARD_TOKEN:-}" ]]; then
+      say "WARN: Clawboard token missing. Skipping Clawboard state export for this run."
+      preserve_existing_clawboard_snapshot
+      SKIP_CLAWBOARD_EXPORT=1
+    fi
+  fi
+
+  if [[ "$SKIP_CLAWBOARD_EXPORT" -eq 0 ]]; then
+    reachable_clawboard_api="$(first_reachable_clawboard_api || true)"
+    if [[ -z "$reachable_clawboard_api" ]]; then
+      say "WARN: Clawboard API unreachable at configured endpoints. Skipping Clawboard state export for this run."
+      preserve_existing_clawboard_snapshot
+      SKIP_CLAWBOARD_EXPORT=1
     else
-      die "clawboardDir does not exist: $CLAWBOARD_DIR"
+      if [[ "$reachable_clawboard_api" != "${CLAWBOARD_API_URL:-}" ]]; then
+        say "WARN: Clawboard API fallback selected: $reachable_clawboard_api"
+      fi
+      CLAWBOARD_API_URL="$reachable_clawboard_api"
     fi
   fi
 
-  if [[ -z "${CLAWBOARD_TOKEN:-}" && -n "${CLAWBOARD_DIR:-}" && -f "$CLAWBOARD_DIR/.env" ]]; then
-    CLAWBOARD_TOKEN="$(read_env_value "$CLAWBOARD_DIR/.env" "CLAWBOARD_TOKEN" || true)"
+  if [[ "$SKIP_CLAWBOARD_EXPORT" -eq 0 ]]; then
+    CLAWBOARD_EXPORT_DIR="$STAGE_DIR/clawboard/export"
+    mkdir -p "$CLAWBOARD_EXPORT_DIR"
+    if python3 "$EXPORT_CLAWBOARD_HELPER" \
+      --api-base "$CLAWBOARD_API_URL" \
+      --token "$CLAWBOARD_TOKEN" \
+      --out-dir "$CLAWBOARD_EXPORT_DIR" \
+      --include-raw \
+      >/dev/null; then
+      CLAWBOARD_STATE_EXPORT_OK=1
+    else
+      say "WARN: Clawboard state export failed against $CLAWBOARD_API_URL. Preserving prior state snapshot."
+      rm -rf "$STAGE_DIR/clawboard"
+      preserve_existing_clawboard_snapshot
+      SKIP_CLAWBOARD_EXPORT=1
+    fi
   fi
-  [[ -n "${CLAWBOARD_TOKEN:-}" ]] || die "Clawboard token missing. Set CLAWBOARD_TOKEN in $CLAWBOARD_DIR/.env or CLAWBOARD_BACKUP_TOKEN in $CRED_ENV."
 
-  CLAWBOARD_EXPORT_DIR="$STAGE_DIR/clawboard/export"
-  mkdir -p "$CLAWBOARD_EXPORT_DIR"
-  python3 "$EXPORT_CLAWBOARD_HELPER" \
-    --api-base "$CLAWBOARD_API_URL" \
-    --token "$CLAWBOARD_TOKEN" \
-    --out-dir "$CLAWBOARD_EXPORT_DIR" \
-    --include-raw \
-    >/dev/null
-
-  if as_bool "${INCLUDE_CLAWBOARD_ATTACHMENTS:-}"; then
+  if [[ "$CLAWBOARD_STATE_EXPORT_OK" -eq 1 ]] && as_bool "${INCLUDE_CLAWBOARD_ATTACHMENTS:-}"; then
     attachments_path=""
     if [[ -n "${CLAWBOARD_ATTACHMENTS_DIR:-}" ]]; then
       attachments_path="$CLAWBOARD_ATTACHMENTS_DIR"
@@ -1410,7 +1526,7 @@ if as_bool "${INCLUDE_CLAWBOARD_STATE:-}"; then
     fi
   fi
 
-  if as_bool "${INCLUDE_CLAWBOARD_ENV:-}" && [[ -n "${CLAWBOARD_DIR:-}" ]] && [[ -f "$CLAWBOARD_DIR/.env" ]]; then
+  if [[ "$CLAWBOARD_STATE_EXPORT_OK" -eq 1 ]] && as_bool "${INCLUDE_CLAWBOARD_ENV:-}" && [[ -n "${CLAWBOARD_DIR:-}" ]] && [[ -f "$CLAWBOARD_DIR/.env" ]]; then
     mkdir -p "$STAGE_DIR/clawboard"
     rsync -a "$CLAWBOARD_DIR/.env" "$STAGE_DIR/clawboard/" >/dev/null
   fi
@@ -1428,7 +1544,8 @@ rm -rf "$STAGE_DIR"
 
 cd "$BACKUP_DIR"
 
-if as_bool "${INCLUDE_CLAWBOARD_STATE:-}" \
+if [[ "${CLAWBOARD_STATE_EXPORT_OK:-0}" -eq 1 ]] \
+  && as_bool "${INCLUDE_CLAWBOARD_STATE:-}" \
   && as_bool "${INCLUDE_CLAWBOARD_ATTACHMENTS:-}" \
   && as_bool "${SWEEP_ORPHAN_ATTACHMENTS:-}"; then
   ORPHAN_REPORT_PATH="$BACKUP_DIR/clawboard/export/orphan_attachments_report.json"

@@ -85,12 +85,30 @@ def _ensure_runtime_indexes() -> None:
         else "CREATE INDEX IF NOT EXISTS ix_logentry_source_session_key "
         "ON logentry ((source ->> 'sessionKey'));"
     )
+    source_request_id_index = (
+        "CREATE INDEX IF NOT EXISTS ix_logentry_source_request_id "
+        "ON logentry(json_extract(source, '$.requestId'));"
+        if DATABASE_URL.startswith("sqlite")
+        else "CREATE INDEX IF NOT EXISTS ix_logentry_source_request_id "
+        "ON logentry ((source ->> 'requestId'));"
+    )
+    source_message_id_index = (
+        "CREATE INDEX IF NOT EXISTS ix_logentry_source_message_id "
+        "ON logentry(json_extract(source, '$.messageId'));"
+        if DATABASE_URL.startswith("sqlite")
+        else "CREATE INDEX IF NOT EXISTS ix_logentry_source_message_id "
+        "ON logentry ((source ->> 'messageId'));"
+    )
     statements = [
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_logentry_idempotency_key "
         'ON logentry("idempotencyKey") WHERE "idempotencyKey" IS NOT NULL;',
         source_session_key_index,
+        source_request_id_index,
+        source_message_id_index,
         "CREATE INDEX IF NOT EXISTS ix_logentry_status_type_created_at "
         'ON logentry("classificationStatus", "type", "createdAt");',
+        "CREATE INDEX IF NOT EXISTS ix_logentry_type_agent_created_at "
+        'ON logentry("type", "agentId", "createdAt");',
         "CREATE INDEX IF NOT EXISTS ix_logentry_topic_created_at "
         'ON logentry("topicId", "createdAt");',
         "CREATE INDEX IF NOT EXISTS ix_logentry_task_created_at "
@@ -105,6 +123,18 @@ def _ensure_runtime_indexes() -> None:
         'ON logentry("createdAt");',
         "CREATE INDEX IF NOT EXISTS ix_sessionroutingmemory_updated_at "
         'ON sessionroutingmemory("updatedAt");',
+        "CREATE INDEX IF NOT EXISTS ix_openclawgatewayhistorycursor_updated_at "
+        'ON openclawgatewayhistorycursor("updatedAt");',
+        "CREATE INDEX IF NOT EXISTS ix_openclawgatewayhistorysyncstate_updated_at "
+        'ON openclawgatewayhistorysyncstate("updatedAt");',
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_openclawchatdispatchqueue_request_id "
+        'ON openclawchatdispatchqueue("requestId");',
+        "CREATE INDEX IF NOT EXISTS ix_openclawchatdispatchqueue_status_next_attempt "
+        'ON openclawchatdispatchqueue("status", "nextAttemptAt", "createdAt");',
+        "CREATE INDEX IF NOT EXISTS ix_openclawchatdispatchqueue_session_created "
+        'ON openclawchatdispatchqueue("sessionKey", "createdAt");',
+        "CREATE INDEX IF NOT EXISTS ix_openclawchatdispatchqueue_updated "
+        'ON openclawchatdispatchqueue("updatedAt");',
         "CREATE INDEX IF NOT EXISTS ix_topic_space_updated_at "
         'ON topic("spaceId", "updatedAt");',
         "CREATE INDEX IF NOT EXISTS ix_topic_created_at "
@@ -221,6 +251,16 @@ def init_db() -> None:
                 )
             except Exception:
                 # Table may not exist if the model isn't loaded yet; create_all will handle later.
+                pass
+
+            try:
+                sync_cols = conn.exec_driver_sql("PRAGMA table_info(openclawgatewayhistorysyncstate);").fetchall()
+                sync_existing = {row[1] for row in sync_cols}
+                if "lastDeferredCount" not in sync_existing:
+                    conn.exec_driver_sql(
+                        "ALTER TABLE openclawgatewayhistorysyncstate ADD COLUMN lastDeferredCount INTEGER NOT NULL DEFAULT 0;"
+                    )
+            except Exception:
                 pass
 
             topic_cols = conn.exec_driver_sql("PRAGMA table_info(topic);").fetchall()
@@ -430,6 +470,33 @@ def init_db() -> None:
                     )
 
             conn.commit()
+
+    if not DATABASE_URL.startswith("sqlite"):
+        # Postgres hardening: ms-epoch cursors exceed INT32 range, so ensure BIGINT storage.
+        with engine.connect() as conn:
+            try:
+                row = conn.exec_driver_sql(
+                    """
+                    SELECT data_type
+                    FROM information_schema.columns
+                    WHERE table_name = 'openclawgatewayhistorycursor'
+                      AND column_name = 'lastTimestampMs'
+                    """
+                ).fetchone()
+                data_type = str(row[0] or "").strip().lower() if row else ""
+                if data_type in {"integer", "int", "int4"}:
+                    conn.exec_driver_sql(
+                        'ALTER TABLE openclawgatewayhistorycursor ALTER COLUMN "lastTimestampMs" TYPE BIGINT;'
+                    )
+                conn.exec_driver_sql(
+                    """
+                    ALTER TABLE openclawgatewayhistorysyncstate
+                    ADD COLUMN IF NOT EXISTS "lastDeferredCount" BIGINT NOT NULL DEFAULT 0;
+                    """
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
 
     # Non-model indexes are required on both SQLite and Postgres.
     _ensure_runtime_indexes()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, List, Dict, Any
 from sqlmodel import SQLModel, Field
-from sqlalchemy import Column, JSON
+from sqlalchemy import Column, JSON, BigInteger
 
 
 class InstanceConfig(SQLModel, table=True):
@@ -284,6 +284,96 @@ class IngestQueue(SQLModel, table=True):
     attempts: int = Field(default=0)
     lastError: Optional[str] = Field(default=None)
     createdAt: str = Field(description="ISO timestamp when enqueued.")
+
+
+class OpenClawChatDispatchQueue(SQLModel, table=True):
+    """Durable outbound dispatch queue for Clawboard -> OpenClaw gateway sends."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    requestId: str = Field(description="Stable request identifier (occhat-...).")
+    sessionKey: str = Field(description="Gateway session key.")
+    agentId: str = Field(default="main", description="Target OpenClaw agent id.")
+    sentAt: str = Field(description="Original user-log timestamp for the request.")
+    message: str = Field(description="User message payload to send.")
+    attachmentIds: List[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON),
+        description="Attachment ids to resolve at dispatch time.",
+    )
+    status: str = Field(default="pending", description="pending|retry|processing|sent|failed")
+    attempts: int = Field(default=0, description="Dispatch attempt count.")
+    nextAttemptAt: str = Field(description="Earliest next dispatch attempt timestamp (ISO).")
+    claimedAt: Optional[str] = Field(default=None, description="Claim timestamp while processing.")
+    completedAt: Optional[str] = Field(default=None, description="Completion timestamp for sent/failed.")
+    lastError: Optional[str] = Field(default=None, description="Latest dispatch error text.")
+    createdAt: str = Field(description="Enqueue timestamp.")
+    updatedAt: str = Field(description="Last queue row update timestamp.")
+
+
+class OpenClawGatewayHistoryCursor(SQLModel, table=True):
+    """Per-session cursor for gateway history sync fallback.
+
+    This lets Clawboard resume ingestion after restarts without reprocessing
+    entire transcripts.
+    """
+
+    sessionKey: str = Field(primary_key=True, description="Gateway/OpenClaw session key.")
+    lastTimestampMs: int = Field(
+        default=0,
+        sa_column=Column(BigInteger, nullable=False, default=0),
+        description="Largest message timestamp (milliseconds epoch) ingested for this session.",
+    )
+    updatedAt: str = Field(description="ISO timestamp when this cursor was updated.")
+
+
+class OpenClawGatewayHistorySyncState(SQLModel, table=True):
+    """Singleton health snapshot for background gateway history sync.
+
+    Stores the latest run outcome so operators can detect silent sync failures.
+    """
+
+    id: int = Field(default=1, primary_key=True)
+    status: str = Field(
+        default="idle",
+        description="Worker status (idle | ok | degraded | error).",
+    )
+    lastRunAt: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp when the worker last completed a cycle.",
+    )
+    lastSuccessAt: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp of the last successful sync cycle.",
+    )
+    lastErrorAt: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp of the most recent failed sync cycle.",
+    )
+    lastError: Optional[str] = Field(
+        default=None,
+        description="Most recent sync error summary.",
+    )
+    consecutiveFailures: int = Field(
+        default=0,
+        description="Number of consecutive sync failures.",
+    )
+    lastIngestedCount: int = Field(
+        default=0,
+        description="Number of logs ingested in the most recent successful cycle.",
+    )
+    lastSessionCount: int = Field(
+        default=0,
+        description="Number of sessions scanned in the most recent successful cycle.",
+    )
+    lastCursorUpdateCount: int = Field(
+        default=0,
+        description="Number of cursor rows advanced in the most recent successful cycle.",
+    )
+    lastDeferredCount: int = Field(
+        default=0,
+        description="Number of sessions deferred due cycle budget in the most recent cycle.",
+    )
+    updatedAt: str = Field(description="ISO timestamp of last state update.")
 
 
 class Attachment(SQLModel, table=True):

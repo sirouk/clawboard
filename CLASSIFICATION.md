@@ -490,7 +490,7 @@ This catalog enumerates the complete engineered scenario surface at the methodol
 | CHAT-001 | board chat send | user message persisted before gateway dispatch | `backend/app/main.py` `/api/openclaw/chat` |
 | CHAT-002 | attachment upload + send | validated and bound to log; gateway payload includes bytes | `backend/app/main.py` `/api/attachments`, `_run_openclaw_chat` |
 | CHAT-003 | gateway send in-flight | `openclaw.typing=true` published | `backend/app/main.py` `_run_openclaw_chat` |
-| CHAT-004 | gateway returns or fails | `openclaw.typing=false` always published | `backend/app/main.py` `_run_openclaw_chat` finally block |
+| CHAT-004 | gateway returns or fails | failure emits `openclaw.typing=false`; success clears typing on terminal ingest (assistant/system terminal) | `backend/app/main.py` `_run_openclaw_chat`, `append_log_entry` |
 | CHAT-005 | assistant plugin logs arrive | watchdog no-op | `backend/app/main.py` `_OpenClawAssistantLogWatchdog._check` |
 | CHAT-006 | assistant plugin logs missing | system warning appended to same session | `backend/app/main.py` watchdog error branch |
 | CHAT-007 | persist user message fails | fail closed; no gateway send | `backend/app/main.py` `/api/openclaw/chat` exception branch |
@@ -659,8 +659,8 @@ Automated behavior full-coverage gate status: `MET` (`77/77` covered).
 |---|---|---|---|
 | CHAT-001 | board chat persists user log before/with gateway dispatch | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_001_persists_user_log_before_background_dispatch` | Covered |
 | CHAT-002 | attachment upload/validation + binding into chat payload | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_002_attachment_payload_is_bound_into_gateway_call`; `backend/tests/test_attachments.py::test_upload_and_download_roundtrip` | Covered |
-| CHAT-003 | gateway in-flight publishes `openclaw.typing=true` | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_003_and_004_run_openclaw_chat_typing_lifecycle` | Covered |
-| CHAT-004 | gateway return/fail always publishes `openclaw.typing=false` | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_003_and_004_run_openclaw_chat_typing_lifecycle`; `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_004_gateway_failure_still_emits_typing_false` | Covered |
+| CHAT-003 | gateway in-flight publishes `openclaw.typing=true` | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_003_run_openclaw_chat_emits_typing_start_without_forced_stop_on_success` | Covered |
+| CHAT-004 | failures publish `openclaw.typing=false`; successful sends clear on terminal ingest | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_004_gateway_failure_still_emits_typing_false`; `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_ing_020_assistant_append_publishes_typing_false` | Covered |
 | CHAT-005 | assistant logs arriving in grace window => watchdog no-op | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_005_watchdog_noop_when_assistant_log_arrives` | Covered |
 | CHAT-006 | missing assistant logs => watchdog warning log appended | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_006_watchdog_logs_when_assistant_is_missing` | Covered |
 | CHAT-007 | user-log persist failure fail-closes (no dispatch) | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_007_openclaw_chat_fail_closes_when_persist_fails` | Covered |

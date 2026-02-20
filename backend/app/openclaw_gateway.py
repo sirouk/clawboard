@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -77,8 +78,11 @@ def _base64_url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def _load_device_auth() -> OpenClawDeviceAuth | None:
-    if os.getenv("OPENCLAW_GATEWAY_USE_DEVICE_AUTH", "1").strip().lower() in {"0", "false", "no", "off"}:
+def _load_device_auth(*, enabled_override: bool | None = None) -> OpenClawDeviceAuth | None:
+    enabled = enabled_override
+    if enabled is None:
+        enabled = os.getenv("OPENCLAW_GATEWAY_USE_DEVICE_AUTH", "1").strip().lower() not in {"0", "false", "no", "off"}
+    if not enabled:
         return None
 
     identity_dir = (os.getenv("OPENCLAW_GATEWAY_IDENTITY_DIR") or os.path.expanduser("~")).strip()
@@ -208,9 +212,16 @@ def _build_device_auth_payload(
     }
 
 
-def load_openclaw_gateway_config() -> OpenClawGatewayConfig:
+def load_openclaw_gateway_config(
+    *,
+    token_override: str | None = None,
+    use_device_auth_override: bool | None = None,
+) -> OpenClawGatewayConfig:
     http_base = os.getenv("OPENCLAW_BASE_URL", "http://127.0.0.1:18789").strip()
-    token = (os.getenv("OPENCLAW_GATEWAY_TOKEN") or "").strip()
+    if token_override is not None:
+        token = str(token_override).strip()
+    else:
+        token = (os.getenv("OPENCLAW_GATEWAY_TOKEN") or "").strip()
     if not token:
         raise RuntimeError("OPENCLAW_GATEWAY_TOKEN is required")
 
@@ -228,7 +239,7 @@ def load_openclaw_gateway_config() -> OpenClawGatewayConfig:
         client_platform=(os.getenv("OPENCLAW_GATEWAY_CLIENT_PLATFORM") or "server").strip() or "server",
         default_scopes=scopes,
         host_header=(os.getenv("OPENCLAW_GATEWAY_HOST_HEADER") or "127.0.0.1").strip() or "127.0.0.1",
-        identity=_load_device_auth(),
+        identity=_load_device_auth(enabled_override=use_device_auth_override),
     )
 
 
@@ -237,102 +248,121 @@ async def gateway_rpc(
     params: Optional[Dict[str, Any]] = None,
     *,
     scopes: Optional[list[str]] = None,
+    token_override: str | None = None,
+    use_device_auth_override: bool | None = None,
+    timeout_seconds: float | None = None,
 ) -> Any:
-    cfg = load_openclaw_gateway_config()
-
-    effective_scopes = _dedupe_scopes(list(scopes) if scopes is not None else list(cfg.default_scopes))
-    if not effective_scopes:
-        effective_scopes = ["operator.read", "operator.write"]
-
-    headers = {"Host": cfg.host_header}
-
-    async with websockets.connect(cfg.ws_url, max_size=8_000_000, extra_headers=headers) as ws:
-        first_raw = await ws.recv()
-        try:
-            first = json.loads(first_raw)
-        except Exception as exc:
-            raise RuntimeError(f"invalid gateway message: {first_raw!r}") from exc
-        if first.get("type") != "event" or first.get("event") != "connect.challenge":
-            raise RuntimeError(f"expected connect.challenge, got: {first}")
-
-        challenge_nonce = _resolve_connect_nonce(first)
-
-        device = None
-        if cfg.identity is not None:
-            try:
-                device = _build_device_auth_payload(
-                    identity=cfg.identity,
-                    client_id=cfg.client_id,
-                    client_mode=cfg.client_mode,
-                    role="operator",
-                    scopes=effective_scopes,
-                    signed_at_ms=int(time.time() * 1000),
-                    token=cfg.token,
-                    nonce=challenge_nonce or None,
-                )
-            except Exception:
-                device = None
-
-        connect_id = str(uuid.uuid4())
-        connect_params = {
-            "type": "req",
-            "id": connect_id,
-            "method": "connect",
-            "params": {
-                "minProtocol": 3,
-                "maxProtocol": 3,
-                "client": {
-                    "id": cfg.client_id,
-                    "version": cfg.client_version,
-                    "platform": cfg.client_platform,
-                    "mode": cfg.client_mode,
-                },
-                "role": "operator",
-                "scopes": effective_scopes,
-                "caps": [],
-                "commands": [],
-                "permissions": {},
-                "auth": {"token": cfg.token},
-                "locale": "en-US",
-                "userAgent": "clawboard/0.1.0",
-            },
-        }
-        if device is not None:
-            connect_params["params"]["device"] = device
-        await ws.send(json.dumps(connect_params))
-
-        connect_response_raw = None
-        while True:
-            connect_response_raw = await ws.recv()
-            connect_response = json.loads(connect_response_raw)
-            if connect_response.get("type") != "res" or connect_response.get("id") != connect_id:
-                continue
-            if not connect_response.get("ok"):
-                raise RuntimeError(f"gateway connect failed: {connect_response.get('error')}")
-            break
-
-        req_id = str(uuid.uuid4())
-        await ws.send(
-            json.dumps(
-                {
-                    "type": "req",
-                    "id": req_id,
-                    "method": method,
-                    "params": params or {},
-                }
-            )
+    async def _call_once() -> Any:
+        cfg = load_openclaw_gateway_config(
+            token_override=token_override,
+            use_device_auth_override=use_device_auth_override,
         )
 
-        while True:
-            raw = await ws.recv()
-            response = json.loads(raw)
-            if response.get("type") != "res" or response.get("id") != req_id:
-                continue
-            if not response.get("ok"):
-                error = response.get("error")
-                if isinstance(error, dict):
-                    message = error.get("message") or "Gateway request failed"
-                else:
-                    message = str(error or "Gateway request failed")
-                raise RuntimeError(message)
-            return response.get("payload")
+        effective_scopes = _dedupe_scopes(list(scopes) if scopes is not None else list(cfg.default_scopes))
+        if not effective_scopes:
+            effective_scopes = ["operator.read", "operator.write"]
+
+        headers = {"Host": cfg.host_header}
+        open_timeout = None
+        if timeout_seconds is not None and float(timeout_seconds) > 0:
+            open_timeout = float(timeout_seconds)
+
+        async with websockets.connect(
+            cfg.ws_url,
+            max_size=8_000_000,
+            extra_headers=headers,
+            open_timeout=open_timeout,
+        ) as ws:
+            first_raw = await ws.recv()
+            try:
+                first = json.loads(first_raw)
+            except Exception as exc:
+                raise RuntimeError(f"invalid gateway message: {first_raw!r}") from exc
+            if first.get("type") != "event" or first.get("event") != "connect.challenge":
+                raise RuntimeError(f"expected connect.challenge, got: {first}")
+
+            challenge_nonce = _resolve_connect_nonce(first)
+
+            device = None
+            if cfg.identity is not None:
+                try:
+                    device = _build_device_auth_payload(
+                        identity=cfg.identity,
+                        client_id=cfg.client_id,
+                        client_mode=cfg.client_mode,
+                        role="operator",
+                        scopes=effective_scopes,
+                        signed_at_ms=int(time.time() * 1000),
+                        token=cfg.token,
+                        nonce=challenge_nonce or None,
+                    )
+                except Exception:
+                    device = None
+
+            connect_id = str(uuid.uuid4())
+            connect_params = {
+                "type": "req",
+                "id": connect_id,
+                "method": "connect",
+                "params": {
+                    "minProtocol": 3,
+                    "maxProtocol": 3,
+                    "client": {
+                        "id": cfg.client_id,
+                        "version": cfg.client_version,
+                        "platform": cfg.client_platform,
+                        "mode": cfg.client_mode,
+                    },
+                    "role": "operator",
+                    "scopes": effective_scopes,
+                    "caps": [],
+                    "commands": [],
+                    "permissions": {},
+                    "auth": {"token": cfg.token},
+                    "locale": "en-US",
+                    "userAgent": "clawboard/0.1.0",
+                },
+            }
+            if device is not None:
+                connect_params["params"]["device"] = device
+            await ws.send(json.dumps(connect_params))
+
+            connect_response_raw = None
+            while True:
+                connect_response_raw = await ws.recv()
+                connect_response = json.loads(connect_response_raw)
+                if connect_response.get("type") != "res" or connect_response.get("id") != connect_id:
+                    continue
+                if not connect_response.get("ok"):
+                    raise RuntimeError(f"gateway connect failed: {connect_response.get('error')}")
+                break
+
+            req_id = str(uuid.uuid4())
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "req",
+                        "id": req_id,
+                        "method": method,
+                        "params": params or {},
+                    }
+                )
+            )
+
+            while True:
+                raw = await ws.recv()
+                response = json.loads(raw)
+                if response.get("type") != "res" or response.get("id") != req_id:
+                    continue
+                if not response.get("ok"):
+                    error = response.get("error")
+                    if isinstance(error, dict):
+                        message = error.get("message") or "Gateway request failed"
+                    else:
+                        message = str(error or "Gateway request failed")
+                    raise RuntimeError(message)
+                return response.get("payload")
+
+    if timeout_seconds is not None and float(timeout_seconds) > 0:
+        return await asyncio.wait_for(_call_once(), timeout=float(timeout_seconds))
+    return await _call_once()

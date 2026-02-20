@@ -204,8 +204,12 @@ sequenceDiagram
     API->>EV: log.appended/log.patched/openclaw.typing false
     EV-->>UI: live updates
 
-    API->>WD: schedule requestId/sessionKey check
-    alt no assistant logs after grace window
+    API->>WD: schedule requestId/sessionKey watchdog
+    loop poll interval while run is active
+        WD->>API: check for assistant output and non-user activity
+    end
+    Note over API,WD: On API restart, watchdog recovers unresolved requestIds from persisted user logs.
+    alt no assistant output after inactivity window
         WD->>API: append system warning log
         API->>DB: persist warning
         API->>EV: publish log.appended(system warning)

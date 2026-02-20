@@ -62,6 +62,9 @@ INTERVAL = int(os.environ.get("CLASSIFIER_INTERVAL_SECONDS", "10"))
 MAX_ATTEMPTS = int(os.environ.get("CLASSIFIER_MAX_ATTEMPTS", "3"))
 MAX_SESSIONS_PER_CYCLE = int(os.environ.get("CLASSIFIER_MAX_SESSIONS_PER_CYCLE", "8"))
 MAX_SESSION_SECONDS = float(os.environ.get("CLASSIFIER_MAX_SESSION_SECONDS", "75"))
+FAST_POLL_RECENT_WINDOW_SECONDS = float(
+    os.environ.get("CLASSIFIER_FAST_POLL_RECENT_WINDOW_SECONDS", "120")
+)
 CYCLE_BUDGET_SECONDS = float(
     os.environ.get(
         "CLASSIFIER_CYCLE_BUDGET_SECONDS",
@@ -142,6 +145,12 @@ SESSION_ROUTING_ENABLED = (os.environ.get("CLASSIFIER_SESSION_ROUTING_ENABLED", 
     "off",
 }
 SESSION_ROUTING_PROMPT_ITEMS = int(os.environ.get("CLASSIFIER_SESSION_ROUTING_PROMPT_ITEMS", "4"))
+CLASSIFIER_MISSING_ENTITY_TTL_SECONDS = float(
+    os.environ.get("CLASSIFIER_MISSING_ENTITY_TTL_SECONDS", "1800")
+)
+CLASSIFIER_MISSING_ENTITY_CACHE_MAX = int(
+    os.environ.get("CLASSIFIER_MISSING_ENTITY_CACHE_MAX", "5000")
+)
 
 _SPACE_SCOPE_ALLOWED_IDS: ContextVar[tuple[str, ...] | None] = ContextVar(
     "classifier_space_scope_allowed_ids",
@@ -170,6 +179,59 @@ CLASSIFIER_DIGEST_MAX_PER_CYCLE = int(os.environ.get("CLASSIFIER_DIGEST_MAX_PER_
 CLASSIFIER_DIGEST_TOPIC_LOOKBACK_LOGS = int(os.environ.get("CLASSIFIER_DIGEST_TOPIC_LOOKBACK_LOGS", "120"))
 CLASSIFIER_DIGEST_TASK_LOOKBACK_LOGS = int(os.environ.get("CLASSIFIER_DIGEST_TASK_LOOKBACK_LOGS", "90"))
 CLASSIFIER_DIGEST_MAX_CHARS = int(os.environ.get("CLASSIFIER_DIGEST_MAX_CHARS", "1800"))
+
+_MISSING_TASK_SCOPE_CACHE: dict[str, float] = {}
+_MISSING_TOPIC_SCOPE_CACHE: dict[str, float] = {}
+_MISSING_SESSION_SCOPE_CACHE: dict[str, float] = {}
+
+
+def _negative_cache_key(key: str) -> str:
+    token = str(key or "").strip()
+    if not token:
+        return ""
+    return token.lower()
+
+
+def _session_scope_cache_key(session_key: str) -> str:
+    key = str(session_key or "").strip()
+    if not key:
+        return ""
+    return (key.split("|", 1)[0] or "").strip().lower()
+
+
+def _negative_cache_has(cache: dict[str, float], key: str) -> bool:
+    token = _negative_cache_key(key)
+    if not token:
+        return False
+    expiry = float(cache.get(token) or 0.0)
+    if expiry <= 0:
+        return False
+    now_ts = time.time()
+    if expiry <= now_ts:
+        cache.pop(token, None)
+        return False
+    return True
+
+
+def _negative_cache_mark(cache: dict[str, float], key: str, *, ttl_seconds: float | None = None) -> None:
+    token = _negative_cache_key(key)
+    if not token:
+        return
+    ttl = float(CLASSIFIER_MISSING_ENTITY_TTL_SECONDS if ttl_seconds is None else ttl_seconds)
+    ttl = max(30.0, min(24 * 60 * 60.0, ttl))
+    now_ts = time.time()
+    cache[token] = now_ts + ttl
+
+    if len(cache) <= CLASSIFIER_MISSING_ENTITY_CACHE_MAX:
+        return
+    stale_keys = [k for k, exp in cache.items() if float(exp or 0.0) <= now_ts]
+    for stale in stale_keys:
+        cache.pop(stale, None)
+    overflow = len(cache) - CLASSIFIER_MISSING_ENTITY_CACHE_MAX
+    if overflow <= 0:
+        return
+    for k, _exp in sorted(cache.items(), key=lambda item: float(item[1] or 0.0))[:overflow]:
+        cache.pop(k, None)
 
 _embedder = None
 _embed_failed = False
@@ -1825,12 +1887,29 @@ def _resolve_allowed_space_ids_for_session(session_key: str) -> tuple[str, ...] 
     sk = str(session_key or "").strip()
     if not sk:
         return None
+    session_scope_key = _session_scope_cache_key(sk)
+    if _negative_cache_has(_MISSING_SESSION_SCOPE_CACHE, session_scope_key):
+        return None
 
     topic_id, task_id = _parse_board_session_key(sk)
     if not topic_id and not task_id:
         return None
 
     source_space_id: str | None = None
+    observed_space_ids: list[str] = []
+    observed_space_seen: set[str] = set()
+    task_missing = False
+    topic_missing = False
+
+    def _record_space(value: object) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        if text in observed_space_seen:
+            return
+        observed_space_seen.add(text)
+        observed_space_ids.append(text)
+
     try:
         log_res = requests.get(
             f"{CLAWBOARD_API_BASE}/api/log",
@@ -1853,15 +1932,18 @@ def _resolve_allowed_space_ids_for_session(session_key: str) -> tuple[str, ...] 
                     source = entry.get("source")
                     if isinstance(source, dict):
                         scoped = str(source.get("boardScopeSpaceId") or "").strip()
+                        _record_space(scoped)
                         if scoped:
                             source_space_id = scoped
                             break
+                    _record_space(entry.get("spaceId"))
                 if not source_space_id:
                     for entry in rows:
                         if not isinstance(entry, dict):
                             continue
                         agent_id = str(entry.get("agentId") or "").strip().lower()
                         candidate = str(entry.get("spaceId") or "").strip()
+                        _record_space(candidate)
                         if agent_id == "user" and candidate:
                             source_space_id = candidate
                             break
@@ -1870,33 +1952,56 @@ def _resolve_allowed_space_ids_for_session(session_key: str) -> tuple[str, ...] 
                         if not isinstance(entry, dict):
                             continue
                         candidate = str(entry.get("spaceId") or "").strip()
+                        _record_space(candidate)
                         if candidate:
                             source_space_id = candidate
                             break
 
-        if task_id:
-            task_res = requests.get(
-                f"{CLAWBOARD_API_BASE}/api/tasks/{task_id}",
-                headers=headers_clawboard(),
-                timeout=8,
-            )
-            if task_res.ok:
-                payload = task_res.json()
-                if not source_space_id:
-                    source_space_id = str(payload.get("spaceId") or "").strip() or None
+        if not source_space_id and task_id:
+            if _negative_cache_has(_MISSING_TASK_SCOPE_CACHE, task_id):
+                task_missing = True
+            else:
+                task_res = requests.get(
+                    f"{CLAWBOARD_API_BASE}/api/tasks/{task_id}",
+                    headers=headers_clawboard(),
+                    timeout=8,
+                )
+                if task_res.ok:
+                    payload = task_res.json()
+                    if not source_space_id:
+                        source_space_id = str(payload.get("spaceId") or "").strip() or None
+                    _record_space(payload.get("spaceId"))
+                elif int(getattr(task_res, "status_code", 0) or 0) == 404:
+                    task_missing = True
+                    _negative_cache_mark(_MISSING_TASK_SCOPE_CACHE, task_id)
         if not source_space_id and topic_id:
-            topic_res = requests.get(
-                f"{CLAWBOARD_API_BASE}/api/topics/{topic_id}",
-                headers=headers_clawboard(),
-                timeout=8,
-            )
-            if topic_res.ok:
-                payload = topic_res.json()
-                source_space_id = _topic_source_space_id(payload)
+            if _negative_cache_has(_MISSING_TOPIC_SCOPE_CACHE, topic_id):
+                topic_missing = True
+            else:
+                topic_res = requests.get(
+                    f"{CLAWBOARD_API_BASE}/api/topics/{topic_id}",
+                    headers=headers_clawboard(),
+                    timeout=8,
+                )
+                if topic_res.ok:
+                    payload = topic_res.json()
+                    source_space_id = _topic_source_space_id(payload)
+                    _record_space(source_space_id)
+                elif int(getattr(topic_res, "status_code", 0) or 0) == 404:
+                    topic_missing = True
+                    _negative_cache_mark(_MISSING_TOPIC_SCOPE_CACHE, topic_id)
     except Exception:
         source_space_id = None
 
     if not source_space_id:
+        if task_missing or topic_missing:
+            # Missing task/topic ids in stale synthetic session keys can otherwise cause
+            # high-frequency 404 loops; keep classification unscoped and suppress repeat scope lookups briefly.
+            _negative_cache_mark(
+                _MISSING_SESSION_SCOPE_CACHE,
+                session_scope_key,
+                ttl_seconds=min(CLASSIFIER_MISSING_ENTITY_TTL_SECONDS, 3600.0),
+            )
         return None
 
     try:
@@ -1910,11 +2015,28 @@ def _resolve_allowed_space_ids_for_session(session_key: str) -> tuple[str, ...] 
         payload = allowed_res.json()
         ids = payload.get("allowedSpaceIds")
         if not isinstance(ids, list):
+            if observed_space_ids:
+                unique: list[str] = []
+                seen: set[str] = set()
+                for candidate in [source_space_id, *observed_space_ids]:
+                    text = str(candidate or "").strip()
+                    if not text or text in seen:
+                        continue
+                    seen.add(text)
+                    unique.append(text)
+                if unique:
+                    return tuple(unique)
             return (source_space_id,)
         unique: list[str] = []
         seen: set[str] = set()
         # Preserve source space as the first slot so creation helpers can target it.
-        for candidate in [source_space_id, *[str(value or "").strip() for value in ids]]:
+        # Include any observed spaces from the same session key to avoid stale mixed-space
+        # sessions getting "stuck pending" outside the computed scope.
+        for candidate in [
+            source_space_id,
+            *[str(value or "").strip() for value in ids],
+            *observed_space_ids,
+        ]:
             text = str(candidate or "").strip()
             if not text:
                 continue
@@ -1926,6 +2048,17 @@ def _resolve_allowed_space_ids_for_session(session_key: str) -> tuple[str, ...] 
             return (source_space_id,)
         return tuple(unique)
     except Exception:
+        if observed_space_ids:
+            unique: list[str] = []
+            seen: set[str] = set()
+            for candidate in [source_space_id, *observed_space_ids]:
+                text = str(candidate or "").strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                unique.append(text)
+            if unique:
+                return tuple(unique)
         return (source_space_id,)
 
 
@@ -4915,7 +5048,16 @@ def main():
             )
             session_keys = session_keys[:MAX_SESSIONS_PER_CYCLE]
             if session_keys:
-                next_sleep = min(INTERVAL, 1.0)
+                # Keep rapid polling for freshly-active sessions only; otherwise stale
+                # pending rows can force a perpetual 1s loop and saturate API traffic.
+                freshest_pending_ts = max(
+                    float(session_stats.get(sk, {}).get("newestPendingAtTs") or 0.0)
+                    for sk in session_keys
+                )
+                if freshest_pending_ts > 0:
+                    age_seconds = max(0.0, time.time() - freshest_pending_ts)
+                    if age_seconds <= max(1.0, FAST_POLL_RECENT_WINDOW_SECONDS):
+                        next_sleep = min(INTERVAL, 1.0)
             for sk in session_keys:
                 if (time.time() - cycle_start) > CYCLE_BUDGET_SECONDS:
                     if LOG_TIMING:

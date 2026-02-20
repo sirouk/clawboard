@@ -185,3 +185,88 @@ class AppendLogEntryTests(unittest.TestCase):
         self.assertEqual(payload.get("classificationStatus"), "failed")
         self.assertEqual(payload.get("classificationError"), "filtered_cron_event")
         self.assertEqual(payload.get("classificationAttempts"), 1)
+
+    def test_patch_log_classifier_aligns_stale_topic_to_task(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.add(
+                Topic(
+                    id="topic-b",
+                    name="Topic B",
+                    color="#4DA39E",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+            session.add(
+                Task(
+                    id="task-a",
+                    topicId="topic-a",
+                    title="Task A",
+                    color="#4EA1FF",
+                    status="todo",
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        create_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "content": "hello",
+                "summary": "hello",
+                "raw": "hello",
+                "createdAt": ts,
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {"channel": "tests", "sessionKey": "channel:tests", "messageId": "m2"},
+                "classificationStatus": "pending",
+            },
+        )
+        self.assertEqual(create_res.status_code, 200, create_res.text)
+        log_id = (create_res.json() or {}).get("id")
+        self.assertTrue(log_id)
+
+        patch_res = self.client.patch(
+            f"/api/log/{log_id}",
+            headers=self.auth_headers,
+            json={
+                # Simulates stale scoped topic ID from retries; task is canonical.
+                "topicId": "topic-b",
+                "taskId": "task-a",
+                "classificationStatus": "classified",
+                "classificationAttempts": 1,
+            },
+        )
+        self.assertEqual(patch_res.status_code, 200, patch_res.text)
+        patched = patch_res.json() or {}
+        self.assertEqual(patched.get("taskId"), "task-a")
+        self.assertEqual(patched.get("topicId"), "topic-a")

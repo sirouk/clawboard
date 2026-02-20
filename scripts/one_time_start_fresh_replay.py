@@ -72,7 +72,7 @@ def _read_env_kv(path: Path) -> dict[str, str]:
 
 def _admin_reset(api_base: str, token: str, integration_level: str) -> None:
     url = f"{api_base}/api/admin/start-fresh-replay"
-    body = json.dumps({"integrationLevel": integration_level}).encode("utf-8")
+    body = json.dumps({"integrationLevel": integration_level, "replayMode": "fresh"}).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if token:
         headers["X-Clawboard-Token"] = token
