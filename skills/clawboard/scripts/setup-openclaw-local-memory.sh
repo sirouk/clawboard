@@ -48,6 +48,9 @@ set_cfg() {
   log_warn "Could not set optional key (likely unsupported on this OpenClaw version): $key"
 }
 
+# run_cfg_set is an alias for set_cfg — same signature: (key, value, mode, required)
+run_cfg_set() { set_cfg "$@"; }
+
 as_bool() {
   local raw
   raw="$(printf "%s" "${1:-}" | tr '[:upper:]' '[:lower:]')"
@@ -390,6 +393,131 @@ print_status() {
   fi
 }
 
+configure_main_agent_tools() {
+  # Set the main agent's tool policy to explicitly allow delegation + memory tools.
+  # Uses an explicit allow list — do NOT set profile:minimal here.
+  # profile:minimal only grants session_status and intersects (not unions) with allow,
+  # which silently blocks sessions_spawn and breaks all delegation.
+  local -a base_path_args
+  # Find the main agent index in the JSON config
+  local main_idx
+  main_idx="$(python3 - "$OPENCLAW_CONFIG_PATH" "$MAIN_AGENT_ID" <<'PY'
+import json, sys
+path, main_id = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    cfg = json.load(f)
+for i, a in enumerate(cfg.get("agents", {}).get("list", [])):
+    if str(a.get("id","")).strip().lower() == main_id.strip().lower():
+        print(i)
+        break
+PY
+)" || true
+  if [[ -z "$main_idx" ]]; then
+    log_warn "Could not find main agent ($MAIN_AGENT_ID) index — skipping tool policy configuration."
+    return 0
+  fi
+
+  local base="agents.list.${main_idx}"
+  log_info "Configuring main agent tool policy (index $main_idx)..."
+
+  # Explicit allow: delegation + memory + Clawboard ledger tools.
+  # cron allows durable one-shot follow-up jobs per delegation.
+  # clawboard_* tools allow reading/writing the external task ledger for restart-resilient state recovery.
+  run_cfg_set "${base}.tools.allow" \
+    '["sessions_spawn","sessions_list","sessions_history","sessions_send","session_status","memory_search","memory_get","cron","clawboard_search","clawboard_update_task","clawboard_context","clawboard_get_task"]' \
+    json false
+
+  # Deny filesystem, runtime, web, UI, gateway, nodes, messaging.
+  # Note: group:automation (cron+gateway) is split — gateway denied, cron allowed above.
+  run_cfg_set "${base}.tools.deny" \
+    '["group:fs","group:runtime","group:web","group:ui","gateway","group:nodes","group:messaging","image"]' \
+    json false
+
+  run_cfg_set "${base}.tools.elevated.enabled" false json false
+
+  # Heartbeat: 5m interval, sessions_list-first prompt so missed announces are caught.
+  run_cfg_set "${base}.heartbeat.every" "5m" string false
+  run_cfg_set "${base}.heartbeat.target" "last" string false
+  run_cfg_set "${base}.heartbeat.prompt" \
+    "Heartbeat: (1) read the Clawboard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call sessions_list; (3) call clawboard_search(\"delegating\") as a backup sweep. For any Clawboard task with status 'doing' and no matching active session: the work was lost — re-spawn it. For any completed sub-agent session not yet surfaced: call sessions_history and relay the result to Chris. If nothing needs attention, reply HEARTBEAT_OK." \
+    string false
+  run_cfg_set "${base}.heartbeat.ackMaxChars" 300 json false
+
+  log_success "Main agent tool policy configured."
+}
+
+ensure_watchdog_cron() {
+  # Upsert a persistent sub-agent watchdog cron job in ~/.openclaw/cron/jobs.json.
+  # This job fires every 5 minutes in the main session. It checks both sessions_list
+  # AND clawboard_search("delegating") so it can recover lost delegations even after
+  # a gateway restart — pure infrastructure, survives inference failures.
+  # Idempotent: removes any existing watchdog and writes the current version.
+  local cron_dir="${OPENCLAW_HOME}/cron"
+  local cron_file="${cron_dir}/jobs.json"
+
+  mkdir -p "$cron_dir"
+
+  if [ ! -f "$cron_file" ]; then
+    echo '{"version":1,"jobs":[]}' > "$cron_file"
+  fi
+
+  log_info "Upserting sub-agent watchdog cron job in $cron_file..."
+  python3 - "$cron_file" "$MAIN_AGENT_ID" <<'PY'
+import json, sys, uuid, time
+
+cron_file, agent_id = sys.argv[1], sys.argv[2]
+with open(cron_file) as f:
+    data = json.load(f)
+
+if isinstance(data, list):
+    jobs = data
+    data = {"version": 1, "jobs": jobs}
+else:
+    jobs = data.setdefault("jobs", [])
+
+# Remove any existing watchdog (upsert — ensures payload stays current on re-runs)
+jobs[:] = [j for j in jobs if "watchdog" not in j.get("name", "").lower()]
+
+now_ms = int(time.time() * 1000)
+watchdog_text = (
+    "WATCHDOG RECOVERY:\n"
+    "1. Call sessions_list to check for sub-agent sessions from the last 15 minutes.\n"
+    "2. Call clawboard_search(\"delegating\") to find all tasks tagged \"delegating\" in Clawboard.\n"
+    "3. For each Clawboard task with status \"doing\": extract childSessionKey from tag starting with \"session:\", "
+    "extract agentId from tag starting with \"agent:\". Call sessions_history(childSessionKey). "
+    "COMPLETE: clawboard_update_task(taskId, { status: \"done\", tags: [] }), deliver result to Chris. "
+    "STILL RUNNING: send brief status if >10 minutes. "
+    "LOST (no session, no output): sessions_spawn(agentId, originalTask), "
+    "clawboard_update_task(taskId, { tags: [\"delegating\",\"agent:<agentId>\",\"session:<newKey>\"] }), "
+    "cron.add new follow-up in 10 minutes.\n"
+    "4. For sessions in step 1 not covered by step 3: COMPLETED not delivered: relay result. "
+    "INCOMPLETE: re-spawn and cron.add follow-up.\n"
+    "If nothing needs attention, reply HEARTBEAT_OK."
+)
+jobs.append({
+    "id": str(uuid.uuid4()),
+    "name": "sub-agent-watchdog",
+    "enabled": True,
+    "createdAtMs": now_ms,
+    "updatedAtMs": now_ms,
+    "agentId": agent_id,
+    "schedule": {"kind": "every", "everyMs": 300000, "anchorMs": now_ms},
+    "sessionTarget": "main",
+    "wakeMode": "now",
+    "payload": {
+        "kind": "systemEvent",
+        "text": watchdog_text
+    }
+})
+
+with open(cron_file, "w") as f:
+    json.dump(data, f, indent=2)
+
+print(f"Watchdog cron job upserted in {cron_file}")
+PY
+  log_success "Sub-agent watchdog cron job upserted (every 5m, main session, Clawboard-aware)."
+}
+
 main() {
   log_info "Resolving agents/workspaces from $OPENCLAW_CONFIG_PATH..."
   discover_agents_and_workspaces
@@ -399,6 +527,8 @@ main() {
   model_path="$(resolve_model_path)"
   configure_memory_search "$model_path"
   configure_qmd_memory_boost
+  configure_main_agent_tools
+  ensure_watchdog_cron
   refresh_indexes
   print_status
 
@@ -409,6 +539,10 @@ main() {
   echo "Workspaces: ${WORKSPACES[*]}"
   echo "Model path: $model_path"
   echo "Session memory source enabled: $MEMORY_ENABLE_SESSIONS"
+  echo ""
+  echo "Delegation tools: sessions_spawn, sessions_list, sessions_history, sessions_send, cron"
+  echo "Clawboard ledger tools: clawboard_search, clawboard_update_task, clawboard_context, clawboard_get_task"
+  echo "Follow-up guarantee: 3 independent recovery paths (cron + watchdog + session-start clawboard_search)"
 }
 
 main "$@"

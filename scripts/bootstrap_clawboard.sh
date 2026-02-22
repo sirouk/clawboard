@@ -1076,10 +1076,77 @@ resolve_local_memory_setup_script() {
   printf "%s" "$LOCAL_MEMORY_SETUP_SCRIPT"
 }
 
+# Deploy main agent templates (AGENTS.md, SOUL.md, HEARTBEAT.md) from the Clawboard repo.
+# Source of truth: INSTALL_DIR/agent-templates/main/ (repo). No policy text is hardcoded in this script.
+# Copies into the main agent workspace. Idempotent (overwrites). Call after skill/plugin install, before gateway restart.
+maybe_deploy_agent_templates() {
+  local templates_dir="$INSTALL_DIR/agent-templates/main"
+  local workspace_root=""
+  workspace_root="$(detect_openclaw_workspace_root 2>/dev/null || true)"
+  workspace_root="${workspace_root//$'\r'/}"
+  if [ -z "$workspace_root" ]; then
+    OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-}"
+    if [ -n "${OPENCLAW_WORKSPACE_DIR:-}" ]; then
+      workspace_root="${OPENCLAW_WORKSPACE_DIR}"
+    else
+      workspace_root="$(resolve_default_openclaw_workspace_root)"
+    fi
+  fi
+  workspace_root="${workspace_root/#\~/$HOME}"
+  if [ ! -d "$templates_dir" ]; then
+    log_warn "Agent templates directory not found: $templates_dir (skipping deploy)."
+    return 0
+  fi
+  if [ ! -d "$workspace_root" ]; then
+    log_warn "Workspace root not found: $workspace_root (skipping agent template deploy)."
+    return 0
+  fi
+  local deployed=0
+  for f in AGENTS.md SOUL.md HEARTBEAT.md; do
+    if [ -f "$templates_dir/$f" ]; then
+      cp "$templates_dir/$f" "$workspace_root/$f"
+      log_info "Deployed $f to $workspace_root"
+      deployed=$((deployed + 1))
+    fi
+  done
+  if [ "$deployed" -gt 0 ]; then
+    log_success "Deployed $deployed agent template(s) to main workspace."
+  fi
+}
+
+# Provision specialist agent workspaces (workspace-coding, workspace-docs, workspace-web, workspace-social).
+# Runs scripts/setup_specialist_agents.sh when present. Idempotent.
+setup_specialist_agents() {
+  if [ ! -f "$INSTALL_DIR/scripts/setup_specialist_agents.sh" ]; then
+    log_warn "setup_specialist_agents.sh not found; skipping specialist workspace provisioning."
+    return 0
+  fi
+  OPENCLAW_HOME="$OPENCLAW_HOME" INSTALL_DIR="$INSTALL_DIR" bash "$INSTALL_DIR/scripts/setup_specialist_agents.sh"
+}
+
+# Run setup-openclaw-local-memory.sh unconditionally (no user prompt). Tool policy + watchdog
+# are always applied. Call before the Obsidian prompt. Handles missing openclaw/script gracefully.
+maybe_run_local_memory_setup() {
+  local script_path=""
+  if ! script_path="$(resolve_local_memory_setup_script 2>/dev/null)"; then
+    log_warn "setup-openclaw-local-memory.sh not found; skipping local memory setup (tool allow list, heartbeat, watchdog)."
+    return 0
+  fi
+  if ! command -v openclaw >/dev/null 2>&1; then
+    log_warn "openclaw not installed; skipping local memory setup. Run later: bash $script_path"
+    return 0
+  fi
+  log_info "Running local memory setup (tool allow list, heartbeat, watchdog)..."
+  if bash "$script_path"; then
+    log_success "Local memory setup completed."
+  else
+    log_warn "setup-openclaw-local-memory.sh did not complete successfully. Re-run: bash $script_path"
+  fi
+}
+
 maybe_offer_obsidian_memory_setup() {
   local mode="${1:-ask}"
   local obsidian_script=""
-  local local_memory_script=""
   local answer=""
   local should_run=false
   local rc=0
@@ -1128,11 +1195,6 @@ maybe_offer_obsidian_memory_setup() {
     log_warn "Missing setup_obsidian_brain.sh. Cannot run Obsidian/memory setup."
     return 0
   fi
-  if ! local_memory_script="$(resolve_local_memory_setup_script)"; then
-    OBSIDIAN_MEMORY_SETUP_STATUS="missing-script"
-    log_warn "Missing setup-openclaw-local-memory.sh. Cannot run local memory tuning setup."
-    return 0
-  fi
 
   log_info "Launching Obsidian thinking vault + qmd setup..."
   if ! bash "$obsidian_script" "${obsidian_args[@]}"; then
@@ -1140,18 +1202,12 @@ maybe_offer_obsidian_memory_setup() {
     log_warn "setup_obsidian_brain.sh did not complete successfully."
   fi
 
-  log_info "Launching local memory tuning setup..."
-  if ! bash "$local_memory_script"; then
-    rc=1
-    log_warn "setup-openclaw-local-memory.sh did not complete successfully."
-  fi
-
   if [ "$rc" -eq 0 ]; then
     OBSIDIAN_MEMORY_SETUP_STATUS="configured"
-    log_success "Obsidian + memory tuning setup completed."
+    log_success "Obsidian setup completed."
   else
     OBSIDIAN_MEMORY_SETUP_STATUS="failed"
-    log_warn "Obsidian + memory tuning setup had errors. Re-run scripts when ready."
+    log_warn "Obsidian setup had errors. Re-run script when ready."
   fi
 }
 
@@ -1903,6 +1959,12 @@ PY
       OPENCLAW_GATEWAY_RESTART_NEEDED=true
       log_success "Logger plugin installed and enabled."
     fi
+
+    maybe_deploy_agent_templates
+
+    setup_specialist_agents
+
+    maybe_run_local_memory_setup
 
     if [ "$OPENCLAW_GATEWAY_RESTART_NEEDED" = true ]; then
       log_info "Restarting OpenClaw gateway to apply configuration..."
