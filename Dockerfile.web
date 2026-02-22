@@ -17,6 +17,7 @@ RUN npm ci
 
 COPY . .
 
+RUN ./node_modules/.bin/prisma generate
 RUN npm run build
 
 EXPOSE 3000

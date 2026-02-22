@@ -396,6 +396,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 base_key="channel:watchdog-ok",
                 request_id="request-watchdog-ok",
                 sent_at=sent_at,
+                agent_id="main",
             )
         error_logger.assert_not_called()
 
@@ -406,6 +407,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 base_key="channel:watchdog-missing",
                 request_id="request-watchdog-missing",
                 sent_at=now_iso(),
+                agent_id="main",
             )
         error_logger.assert_called_once()
         kwargs = error_logger.call_args.kwargs

@@ -2228,6 +2228,124 @@ def _log_openclaw_chat_error(*, session_key: str, request_id: str, detail: str, 
         pass
 
 
+def _try_openclaw_recovery_prompt(*, base_key: str, request_id: str, agent_id: str) -> None:
+    """Send one recovery chat.send to the agent when a response was not received.
+
+    This fires after the watchdog grace period expires with no assistant log.
+    A system note is written to the board so the user can see recovery is in progress,
+    then a new chat.send is dispatched to nudge the agent into producing a status reply.
+    The recovery itself is guarded by an idempotency key so it fires at most once per
+    original request_id regardless of how many times the watchdog fires.
+    """
+    if os.getenv("OPENCLAW_CHAT_AUTO_RECOVERY", "1").strip() in ("0", "false", "no"):
+        return
+
+    base_url = os.getenv("OPENCLAW_BASE_URL", "http://127.0.0.1:18789").strip().rstrip("/")
+    gateway_token = (os.getenv("OPENCLAW_GATEWAY_TOKEN") or "").strip()
+    if not base_url or not gateway_token:
+        return
+
+    recovery_idem = f"openclaw-chat:recovery:attempt:{request_id}"
+    topic_id, task_id = _parse_board_session_key(base_key)
+
+    # Guard: only attempt recovery once per original request.
+    try:
+        with get_session() as session:
+            if session.exec(
+                select(LogEntry.id).where(LogEntry.idempotencyKey == recovery_idem)
+            ).first():
+                return  # already attempted
+    except Exception:
+        return
+
+    # Look up the user's original message so we can include it in the recovery prompt.
+    original_message = ""
+    try:
+        with get_session() as session:
+            entry = session.exec(
+                select(LogEntry).where(
+                    LogEntry.idempotencyKey == f"openclaw-chat:user:{request_id}"
+                )
+            ).first()
+            if entry:
+                original_message = _clip(entry.content or "", 300)
+    except Exception:
+        pass
+
+    # Log a visible system note so the user knows auto-recovery is in progress.
+    try:
+        note = (
+            "[Auto-recovery] No response was received from the agent — "
+            "this can happen after a gateway restart or network hiccup. "
+            "Re-prompting the agent now…"
+        )
+        with get_session() as session:
+            append_log_entry(
+                session,
+                LogAppend(
+                    topicId=topic_id,
+                    taskId=task_id,
+                    type="system",
+                    content=note,
+                    summary="Auto-recovery: re-prompting agent",
+                    agentId="system",
+                    agentLabel="Clawboard",
+                    source={"sessionKey": base_key, "channel": "clawboard", "requestId": request_id},
+                    classificationStatus="classified",
+                ),
+                idempotency_key=recovery_idem,
+            )
+    except Exception:
+        return  # if we can't log the recovery attempt, bail out
+
+    # Build the recovery message that the agent will receive.
+    recovery_parts = [
+        "[Auto-recovery] Your previous response was not received "
+        "(possible gateway restart or interruption).",
+    ]
+    if original_message:
+        recovery_parts.append(f"The user's original message was: {original_message}")
+    recovery_parts += [
+        "",
+        "Please:",
+        "1. Call sessions_list to check the status of any active or recently completed sub-agent runs.",
+        "2. Reply with a plain-text status update — even a brief one is fine.",
+        "3. If sub-agents are still running, say so and give an ETA.",
+        "4. If work finished while you were interrupted, summarise the result.",
+    ]
+    recovery_message = "\n".join(recovery_parts)
+    recovery_request_id = f"occhat-recovery-{request_id}"
+
+    try:
+        asyncio.run(
+            gateway_rpc(
+                "chat.send",
+                {
+                    "sessionKey": base_key,
+                    "message": recovery_message,
+                    "agentId": agent_id,
+                    "idempotencyKey": recovery_request_id,
+                    "timeoutMs": int(
+                        float(os.getenv("OPENCLAW_CHAT_TIMEOUT_SECONDS", "120")) * 1000
+                    ),
+                },
+                scopes=["operator.write"],
+            )
+        )
+    except Exception:
+        pass  # gateway may be transiently unavailable; the watchdog note is already written
+
+    # Schedule a second watchdog pass for the recovery response.
+    # This will log an error if the recovery itself yields no reply, but will NOT
+    # attempt another recovery (the idempotency key prevents it).
+    _schedule_openclaw_assistant_log_check(
+        session_key=base_key,
+        request_id=recovery_request_id,
+        agent_id=agent_id,
+        sent_at=now_iso(),
+    )
+
+
 BOARD_TOPIC_SESSION_PREFIX = "clawboard:topic:"
 BOARD_TASK_SESSION_PREFIX = "clawboard:task:"
 
@@ -2501,6 +2619,7 @@ def _run_openclaw_chat(
                     "sessionKey": session_key,
                     "message": message,
                     "attachments": ws_attachments if ws_attachments else [],
+                    "agentId": agent_id,
                     "timeoutMs": int(float(os.getenv("OPENCLAW_CHAT_TIMEOUT_SECONDS", "120")) * 1000),
                     "idempotencyKey": request_id,
                 },
@@ -2509,7 +2628,12 @@ def _run_openclaw_chat(
         )
         # We don't need the response body; OpenClaw logs the conversation via plugins.
         _ = payload
-        _schedule_openclaw_assistant_log_check(session_key=session_key, request_id=request_id, sent_at=sent_at)
+        _schedule_openclaw_assistant_log_check(
+            session_key=session_key,
+            request_id=request_id,
+            agent_id=agent_id,
+            sent_at=sent_at,
+        )
     except Exception as exc:
         raw = str(exc)
         if not raw:
@@ -2554,7 +2678,7 @@ class _OpenClawAssistantLogWatchdog:
 
     def __init__(self) -> None:
         self._cv = threading.Condition()
-        self._heap: list[tuple[float, str, str, str]] = []
+        self._heap: list[tuple[float, str, str, str, str]] = []
         self._thread = threading.Thread(target=self._run, name="clawboard-openclaw-watchdog", daemon=True)
         self._started = False
 
@@ -2565,13 +2689,30 @@ class _OpenClawAssistantLogWatchdog:
             self._started = True
             self._thread.start()
 
-    def schedule(self, *, session_key: str, request_id: str, sent_at: str, delay_seconds: float) -> None:
+    def schedule(
+        self,
+        *,
+        session_key: str,
+        request_id: str,
+        sent_at: str,
+        delay_seconds: float,
+        agent_id: str,
+    ) -> None:
         base_key = (str(session_key or "").split("|", 1)[0] or "").strip()
         if not base_key:
             return
         due = time.time() + max(0.0, float(delay_seconds))
         with self._cv:
-            heapq.heappush(self._heap, (due, base_key, str(request_id or "").strip(), str(sent_at or "").strip()))
+            heapq.heappush(
+                self._heap,
+                (
+                    due,
+                    base_key,
+                    str(request_id or "").strip(),
+                    str(sent_at or "").strip(),
+                    (str(agent_id or "main").strip() or "main"),
+                ),
+            )
             self._cv.notify()
 
     def _run(self) -> None:
@@ -2579,19 +2720,19 @@ class _OpenClawAssistantLogWatchdog:
             with self._cv:
                 while not self._heap:
                     self._cv.wait()
-                due, base_key, request_id, sent_at = self._heap[0]
+                due, base_key, request_id, sent_at, agent_id = self._heap[0]
                 now = time.time()
                 if due > now:
                     self._cv.wait(timeout=due - now)
                     continue
                 heapq.heappop(self._heap)
             try:
-                self._check(base_key=base_key, request_id=request_id, sent_at=sent_at)
+                self._check(base_key=base_key, request_id=request_id, sent_at=sent_at, agent_id=agent_id)
             except Exception:
                 # Never crash the watchdog thread.
                 pass
 
-    def _check(self, *, base_key: str, request_id: str, sent_at: str) -> None:
+    def _check(self, *, base_key: str, request_id: str, sent_at: str, agent_id: str) -> None:
         if not base_key or not request_id or not sent_at:
             return
 
@@ -2667,12 +2808,25 @@ class _OpenClawAssistantLogWatchdog:
             ),
         )
 
+        # Attempt automatic recovery: send the agent a nudge so it produces a status reply.
+        # This is a best-effort operation — errors are swallowed to protect the watchdog thread.
+        try:
+            _try_openclaw_recovery_prompt(base_key=base_key, request_id=request_id, agent_id=agent_id)
+        except Exception:
+            pass
+
 
 _OPENCLAW_ASSISTANT_LOG_WATCHDOG: _OpenClawAssistantLogWatchdog | None = None
 _OPENCLAW_ASSISTANT_LOG_WATCHDOG_LOCK = threading.Lock()
 
 
-def _schedule_openclaw_assistant_log_check(*, session_key: str, request_id: str, sent_at: str) -> None:
+def _schedule_openclaw_assistant_log_check(
+    *,
+    session_key: str,
+    request_id: str,
+    agent_id: str,
+    sent_at: str,
+) -> None:
     grace = _openclaw_chat_assistant_log_grace_seconds()
     if grace <= 0:
         return
@@ -2684,7 +2838,13 @@ def _schedule_openclaw_assistant_log_check(*, session_key: str, request_id: str,
             _OPENCLAW_ASSISTANT_LOG_WATCHDOG.start()
         watchdog = _OPENCLAW_ASSISTANT_LOG_WATCHDOG
 
-    watchdog.schedule(session_key=session_key, request_id=request_id, sent_at=sent_at, delay_seconds=grace)
+    watchdog.schedule(
+        session_key=session_key,
+        request_id=request_id,
+        agent_id=agent_id,
+        sent_at=sent_at,
+        delay_seconds=grace,
+    )
 
 
 @app.post(

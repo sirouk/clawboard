@@ -85,6 +85,9 @@ if [ ! -d node_modules/.bin ] || [ -z "$LOCK_HASH" ] || [ "$LOCK_HASH" != "$INST
   fi
 fi
 
+log "Generating Prisma client..."
+./node_modules/.bin/prisma generate
+
 log "Starting Next.js dev server..."
 npm run dev -- -H 0.0.0.0 -p 3000 &
 NEXT_PID=$!
