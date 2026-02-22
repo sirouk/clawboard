@@ -539,16 +539,27 @@ case "$(lc "${CREATE_REPO:-}")" in
     say "  - Keep it private"
     say "  - You can leave it empty (no README needed)"
     say ""
-    prompt REPO_URL "Paste the repo HTTPS URL (like https://github.com/OWNER/REPO.git): "
+    prompt REPO_URL "Paste the repo HTTPS URL (like https://github.com/OWNER/REPO or .../REPO.git): "
     if [[ -z "$REPO_URL" && "$NON_INTERACTIVE" = true ]]; then
       die "Non-interactive mode requires CLAWBOARD_BACKUP_REPO_URL (or --repo-url)."
     fi
-    [[ "$REPO_URL" == https://github.com/*/*.git ]] || die "Repo URL must look like: https://github.com/OWNER/REPO.git"
+    # Accept with or without .git suffix
+    [[ "$REPO_URL" =~ ^https://github.com/[^/]+/[^/]+\.git$ ]] || [[ "$REPO_URL" =~ ^https://github.com/[^/]+/[^/]+$ ]] || die "Repo URL must look like: https://github.com/OWNER/REPO or https://github.com/OWNER/REPO.git"
+    REPO_URL="${REPO_URL%.git}"
+    REPO_URL="${REPO_URL}.git"
     if [[ -z "$REPO_SSH_URL" ]]; then
       REPO_SSH_URL="${REPO_URL/https:\/\/github.com\//git@github.com:}"
     fi
     ;;
 esac
+
+# Normalize GitHub HTTPS URL to end with .git (for preset or env URL that omitted it)
+if [[ "$REPO_URL" =~ ^https://github.com/[^/]+/[^/]+$ ]]; then
+  REPO_URL="${REPO_URL}.git"
+fi
+if [[ -z "$REPO_SSH_URL" && "$REPO_URL" =~ ^https://github.com/ ]]; then
+  REPO_SSH_URL="${REPO_URL/https:\/\/github.com\//git@github.com:}"
+fi
 
 say ""
 say "Step 2: Auth method"
@@ -797,11 +808,17 @@ case "$(lc "${INSTALL_CRON:-}")" in
     JOB_SESSION="isolated"
     JOB_MESSAGE="Run the continuity + Clawboard state backup now (automated 15-minute backup). Execute: $HOME/.openclaw/skills/clawboard/scripts/backup_openclaw_curated_memories.sh . IMPORTANT: Only notify me if (a) there were changes pushed, or (b) the backup failed. If there were no changes and the script exited 0 without output, respond with NO_REPLY."
 
-    # Idempotent cron install: update existing job by name (or backup script match); otherwise add.
-    existing_id=""
-    if openclaw cron list --json >/dev/null 2>&1; then
-      existing_id="$(
-        openclaw cron list --json | python3 -c '
+    # Retry cron install when gateway is flaky (e.g. gateway closed 1006). Re-attempt after doctor --fix.
+    CRON_MAX_ATTEMPTS=3
+    CRON_RETRY_DELAY=5
+    cron_ok=0
+    attempt=1
+    while [[ "$attempt" -le "$CRON_MAX_ATTEMPTS" ]]; do
+      existing_id=""
+      cron_stderr=""
+      if openclaw cron list --json 2>"${TMPDIR:-/tmp}/cron_list_stderr.$$" >/dev/null; then
+        existing_id="$(
+          openclaw cron list --json 2>/dev/null | python3 -c '
 import json
 import sys
 
@@ -824,33 +841,48 @@ cands = [
 ]
 
 print((cands[0].get("id") or cands[0].get("jobId") or "") if cands else "", end="")
-' || true
-      )"
-    fi
+' 2>/dev/null || true
+        )"
+      else
+        cron_stderr="$(cat "${TMPDIR:-/tmp}/cron_list_stderr.$$" 2>/dev/null || true)"
+      fi
 
-    cron_ok=0
-    if [[ -n "$existing_id" ]]; then
-      say "Found existing cron job ($existing_id). Updating it..."
-      if openclaw cron edit "$existing_id" \
-        --name "$JOB_NAME" \
-        --every "$JOB_EVERY" \
-        --session "$JOB_SESSION" \
-        --no-deliver \
-        --message "$JOB_MESSAGE" \
-        --enable; then
-        cron_ok=1
+      if [[ -n "$existing_id" ]]; then
+        say "Found existing cron job ($existing_id). Updating it... (attempt $attempt/$CRON_MAX_ATTEMPTS)"
+        if openclaw cron edit "$existing_id" \
+          --name "$JOB_NAME" \
+          --every "$JOB_EVERY" \
+          --session "$JOB_SESSION" \
+          --no-deliver \
+          --message "$JOB_MESSAGE" \
+          --enable 2>"${TMPDIR:-/tmp}/cron_edit_stderr.$$"; then
+          cron_ok=1
+          break
+        fi
+        cron_stderr="$(cat "${TMPDIR:-/tmp}/cron_edit_stderr.$$" 2>/dev/null || true)"
+      else
+        say "No existing cron job found. Creating it... (attempt $attempt/$CRON_MAX_ATTEMPTS)"
+        if openclaw cron add \
+          --name "$JOB_NAME" \
+          --every "$JOB_EVERY" \
+          --session "$JOB_SESSION" \
+          --no-deliver \
+          --message "$JOB_MESSAGE" 2>"${TMPDIR:-/tmp}/cron_add_stderr.$$"; then
+          cron_ok=1
+          break
+        fi
+        cron_stderr="$(cat "${TMPDIR:-/tmp}/cron_add_stderr.$$" 2>/dev/null || true)"
       fi
-    else
-      say "No existing cron job found. Creating it..."
-      if openclaw cron add \
-        --name "$JOB_NAME" \
-        --every "$JOB_EVERY" \
-        --session "$JOB_SESSION" \
-        --no-deliver \
-        --message "$JOB_MESSAGE"; then
-        cron_ok=1
+
+      if [[ "$attempt" -lt "$CRON_MAX_ATTEMPTS" ]]; then
+        if echo "$cron_stderr" | grep -qE 'gateway closed|1006|connection refused|timeout'; then
+          say "Gateway may be unstable. Running openclaw doctor --fix and retrying in ${CRON_RETRY_DELAY}s..."
+          openclaw doctor --fix 2>/dev/null || true
+        fi
+        sleep "$CRON_RETRY_DELAY"
       fi
-    fi
+      attempt=$((attempt + 1))
+    done
 
     if [[ "$cron_ok" -ne 1 ]]; then
       say "If cron setup failed, create it manually with these settings:"
@@ -859,6 +891,7 @@ print((cands[0].get("id") or cands[0].get("jobId") or "") if cands else "", end=
       say "  session: $JOB_SESSION"
       say "  delivery: none"
       say "  message: $JOB_MESSAGE"
+      say "You can also run: openclaw doctor --fix then re-run this script to retry cron install."
     else
       say "Cron job installed/updated successfully."
     fi

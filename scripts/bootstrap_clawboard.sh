@@ -633,6 +633,29 @@ ensure_env_file() {
   touch "$env_file"
 }
 
+# Idempotent: ensure clawboard-logger is in plugins.allow (append only, never replace the list).
+ensure_clawboard_logger_in_allow() {
+  [ -f "$OPENCLAW_CONFIG_PATH" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$OPENCLAW_CONFIG_PATH" <<'PY' 2>/dev/null || true
+import json, sys
+path = sys.argv[1]
+try:
+  with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+except Exception:
+  sys.exit(0)
+plug = data.get("plugins") or {}
+allow = list(plug.get("allow") or []) if isinstance(plug.get("allow"), list) else []
+if "clawboard-logger" not in allow:
+  allow.append("clawboard-logger")
+  plug["allow"] = allow
+  data["plugins"] = plug
+  with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+PY
+}
+
 should_run_env_wizard() {
   case "${ENV_WIZARD_OVERRIDE:-}" in
     1|true|TRUE|yes|YES) return 0 ;;
@@ -931,7 +954,7 @@ configure_access_urls() {
 
 wait_for_api_health() {
   local health_url="${API_URL%/}/api/health"
-  local max_attempts=45
+  local max_attempts=60
   local attempt=1
   if ! command -v curl >/dev/null 2>&1; then
     log_warn "curl not found. Skipping API readiness check."
@@ -1150,11 +1173,8 @@ maybe_offer_obsidian_memory_setup() {
   local answer=""
   local should_run=false
   local rc=0
-  local -a obsidian_args
-  obsidian_args=()
-  if [ "$USE_COLOR" = false ]; then
-    obsidian_args+=(--no-color)
-  fi
+  local obsidian_extra=""
+  [ "$USE_COLOR" = false ] && obsidian_extra="--no-color"
 
   case "$mode" in
     never)
@@ -1197,7 +1217,7 @@ maybe_offer_obsidian_memory_setup() {
   fi
 
   log_info "Launching Obsidian thinking vault + qmd setup..."
-  if ! bash "$obsidian_script" "${obsidian_args[@]}"; then
+  if ! bash "$obsidian_script" $obsidian_extra; then
     rc=1
     log_warn "setup_obsidian_brain.sh did not complete successfully."
   fi
@@ -1778,20 +1798,18 @@ if [ "$SKIP_DOCKER" = false ]; then
     log_error "Docker Compose not found. Install docker compose v2 or docker-compose."
   fi
 
-  log_info "Starting Clawboard via docker compose..."
+  # Match deploy.sh option 3 then 1: full tear-down + rebuild (fresh), then start.
+  log_info "Tearing down existing Clawboard stack (like deploy.sh fresh)..."
+  (cd "$INSTALL_DIR" && $COMPOSE --profile dev down --remove-orphans 2>/dev/null || true)
+  (cd "$INSTALL_DIR" && $COMPOSE down --remove-orphans 2>/dev/null || true)
+  log_info "Building and starting Clawboard via docker compose..."
   WEB_HOT_RELOAD="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" || true)"
   case "$WEB_HOT_RELOAD" in
     1|true|TRUE|yes|YES)
-      # Avoid port conflicts: stop the production web service if it is running.
-      (cd "$INSTALL_DIR" && $COMPOSE stop web >/dev/null 2>&1 || true)
-      (cd "$INSTALL_DIR" && $COMPOSE rm -f web >/dev/null 2>&1 || true)
-      (cd "$INSTALL_DIR" && $COMPOSE --profile dev up -d --build api classifier qdrant web-dev)
+      (cd "$INSTALL_DIR" && $COMPOSE --profile dev up -d --build --force-recreate api classifier qdrant web-dev)
       ;;
     *)
-      # Avoid port conflicts: stop the dev web service if it is running.
-      (cd "$INSTALL_DIR" && $COMPOSE stop web-dev >/dev/null 2>&1 || true)
-      (cd "$INSTALL_DIR" && $COMPOSE rm -f web-dev >/dev/null 2>&1 || true)
-      (cd "$INSTALL_DIR" && $COMPOSE up -d --build)
+      (cd "$INSTALL_DIR" && $COMPOSE up -d --build --force-recreate)
       ;;
   esac
   log_success "Clawboard services running."
@@ -1945,6 +1963,43 @@ PY
 
     if [ "$SKIP_PLUGIN" = false ]; then
       log_info "Installing Clawboard logger plugin..."
+      PLUGIN_EXT_DIR="$OPENCLAW_HOME/extensions/clawboard-logger"
+      if [ -e "$PLUGIN_EXT_DIR" ]; then
+        rm -rf "$PLUGIN_EXT_DIR"
+        log_info "Removed existing plugin at $PLUGIN_EXT_DIR for idempotent re-install."
+      fi
+      # If plugin dir is missing, config may still reference it (e.g. from a previous run). Strip so openclaw commands succeed.
+      if [ ! -e "$PLUGIN_EXT_DIR" ] && [ -f "$OPENCLAW_CONFIG_PATH" ] && command -v python3 >/dev/null 2>&1; then
+        log_info "Removing stale clawboard-logger references from OpenClaw config so install can run..."
+        python3 - "$OPENCLAW_CONFIG_PATH" <<'PY' 2>/dev/null || true
+import json, sys
+path = sys.argv[1]
+try:
+  with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+except Exception:
+  sys.exit(0)
+plug = data.get("plugins") or {}
+# Remove from load.paths
+paths = (plug.get("load") or {}).get("paths") or []
+if isinstance(paths, list):
+  paths[:] = [p for p in paths if "clawboard-logger" not in (p or "")]
+  if plug.get("load") is not None:
+    plug["load"]["paths"] = paths
+# Remove from allow
+allow = plug.get("allow") or []
+if isinstance(allow, list):
+  allow[:] = [a for a in allow if a != "clawboard-logger"]
+  plug["allow"] = allow
+# Remove entries and installs
+for key in ("entries", "installs"):
+  if isinstance(plug.get(key), dict) and "clawboard-logger" in plug[key]:
+    del plug[key]["clawboard-logger"]
+data["plugins"] = plug
+with open(path, "w", encoding="utf-8") as f:
+  json.dump(data, f, indent=2)
+PY
+      fi
       openclaw plugins install -l "$INSTALL_DIR/extensions/clawboard-logger"
       openclaw plugins enable clawboard-logger
 
@@ -1958,6 +2013,7 @@ PY
       openclaw config set plugins.entries.clawboard-logger.enabled --json true >/dev/null 2>&1 || true
       OPENCLAW_GATEWAY_RESTART_NEEDED=true
       log_success "Logger plugin installed and enabled."
+      ensure_clawboard_logger_in_allow
     fi
 
     maybe_deploy_agent_templates
@@ -1979,6 +2035,7 @@ PY
 
     maybe_offer_obsidian_memory_setup "$OBSIDIAN_MEMORY_SETUP_MODE"
     if [ "$OBSIDIAN_MEMORY_SETUP_STATUS" = "configured" ]; then
+      ensure_clawboard_logger_in_allow
       log_info "Restarting OpenClaw gateway after Obsidian/memory setup..."
       if openclaw gateway restart >/dev/null 2>&1; then
         log_success "OpenClaw gateway restarted."
@@ -1990,6 +2047,8 @@ PY
     fi
 
     maybe_offer_memory_backup_setup "$MEMORY_BACKUP_SETUP_MODE"
+
+    ensure_clawboard_logger_in_allow
   fi
 fi
 

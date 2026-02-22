@@ -793,7 +793,7 @@ install_clawhub_and_skill() {
   mkdir -p "$OPENCLAW_HOME/skills"
   local max_attempts attempt delay_s max_delay_s rc install_output
   max_attempts="${OBSIDIAN_DIRECT_INSTALL_MAX_ATTEMPTS:-12}"
-  delay_s="${OBSIDIAN_DIRECT_INSTALL_RETRY_DELAY_SEC:-10}"
+  delay_s="${OBSIDIAN_DIRECT_INSTALL_RETRY_DELAY_SEC:-15}"
   max_delay_s="${OBSIDIAN_DIRECT_INSTALL_RETRY_MAX_DELAY_SEC:-120}"
   attempt=1
   while [ "$attempt" -le "$max_attempts" ]; do
