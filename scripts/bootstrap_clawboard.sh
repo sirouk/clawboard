@@ -246,9 +246,6 @@ OPENCLAW_HEAP_SETUP_MODE="${CLAWBOARD_OPENCLAW_HEAP_SETUP:-ask}"
 OPENCLAW_HEAP_SETUP_STATUS="not-run"
 OPENCLAW_HEAP_TARGET=""
 OPENCLAW_HEAP_MB="${CLAWBOARD_OPENCLAW_MAX_OLD_SPACE_MB:-6144}"
-DIRECTIVES_SETUP_MODE="${CLAWBOARD_DIRECTIVES_SETUP:-ask}"
-DIRECTIVES_SETUP_STATUS="not-run"
-DIRECTIVES_SETUP_SCRIPT=""
 
 SKIP_DOCKER=false
 SKIP_OPENCLAW=false
@@ -327,8 +324,6 @@ while [ $# -gt 0 ]; do
     --skip-obsidian-memory-setup) OBSIDIAN_MEMORY_SETUP_MODE="never"; shift ;;
     --setup-openclaw-heap) OPENCLAW_HEAP_SETUP_MODE="always"; shift ;;
     --skip-openclaw-heap-setup) OPENCLAW_HEAP_SETUP_MODE="never"; shift ;;
-    --setup-directives) DIRECTIVES_SETUP_MODE="always"; shift ;;
-    --skip-directives-setup) DIRECTIVES_SETUP_MODE="never"; shift ;;
     --openclaw-max-old-space-mb)
       [ $# -ge 2 ] || log_error "--openclaw-max-old-space-mb requires a value"
       OPENCLAW_HEAP_MB="$2"; shift 2
@@ -368,8 +363,6 @@ Environment overrides:
                               Offer/run OpenClaw launcher heap tuning at bootstrap end (default: ask)
   CLAWBOARD_OPENCLAW_MAX_OLD_SPACE_MB=<int>
                               Heap size for launcher patch (default: 6144)
-  CLAWBOARD_DIRECTIVES_SETUP=<ask|always|never>
-                              Offer/run directives helper at bootstrap end (default: ask)
   CLAWBOARD_ENV_WIZARD=<0|1>  Force disable/enable interactive .env connection wizard
   --api-url <url>      Clawboard API base (default: http://localhost:8010)
   --web-url <url>      Clawboard web URL (default: http://localhost:3010)
@@ -411,10 +404,6 @@ Environment overrides:
                       Apply OpenClaw launcher heap tuning at the end of bootstrap (interactive)
   --skip-openclaw-heap-setup
                       Skip the OpenClaw launcher heap tuning prompt
-  --setup-directives
-                      Run directives helper at the end of bootstrap (interactive)
-  --skip-directives-setup
-                      Skip the directives helper prompt
   --openclaw-max-old-space-mb <int>
                       Heap limit for launcher patch (default: 6144)
   --skill-copy         Install skill by copying files into \$OPENCLAW_HOME/skills
@@ -484,14 +473,6 @@ case "$(printf "%s" "$OPENCLAW_HEAP_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" i
   *)
     log_warn "Invalid OpenClaw heap setup mode: $OPENCLAW_HEAP_SETUP_MODE (expected ask|always|never). Using ask."
     OPENCLAW_HEAP_SETUP_MODE="ask"
-    ;;
-esac
-
-case "$(printf "%s" "$DIRECTIVES_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" in
-  ask|always|never) DIRECTIVES_SETUP_MODE="$(printf "%s" "$DIRECTIVES_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" ;;
-  *)
-    log_warn "Invalid directives setup mode: $DIRECTIVES_SETUP_MODE (expected ask|always|never). Using ask."
-    DIRECTIVES_SETUP_MODE="ask"
     ;;
 esac
 
@@ -1403,8 +1384,6 @@ maybe_offer_memory_backup_setup() {
   local setup_script=""
   local answer=""
   local should_run=false
-  local -a setup_args
-  setup_args=()
 
   case "$mode" in
     never)
@@ -1447,106 +1426,13 @@ maybe_offer_memory_backup_setup() {
     return 0
   fi
 
-  if [ ! -t 0 ]; then
-    setup_args+=(--non-interactive)
-  fi
-
   log_info "Launching memory + Clawboard backup setup..."
-  if bash "$setup_script" "${setup_args[@]}"; then
+  if bash "$setup_script"; then
     MEMORY_BACKUP_SETUP_STATUS="configured"
     log_success "Memory + Clawboard backup setup completed."
   else
     MEMORY_BACKUP_SETUP_STATUS="failed"
     log_warn "Memory + Clawboard backup setup did not complete. You can rerun: bash $setup_script"
-  fi
-}
-
-resolve_directives_setup_script() {
-  local workspace_root="${OPENCLAW_WORKSPACE_DIR:-}"
-  workspace_root="${workspace_root/#\~/$HOME}"
-
-  if [ -n "${DIRECTIVES_SETUP_SCRIPT:-}" ] && [ -f "$DIRECTIVES_SETUP_SCRIPT" ]; then
-    printf "%s" "$DIRECTIVES_SETUP_SCRIPT"
-    return 0
-  fi
-
-  if [ -f "$INSTALL_DIR/scripts/apply_directives_to_agents.sh" ]; then
-    DIRECTIVES_SETUP_SCRIPT="$INSTALL_DIR/scripts/apply_directives_to_agents.sh"
-  elif [ -n "$workspace_root" ] && [ -f "$workspace_root/projects/clawboard/scripts/apply_directives_to_agents.sh" ]; then
-    DIRECTIVES_SETUP_SCRIPT="$workspace_root/projects/clawboard/scripts/apply_directives_to_agents.sh"
-  elif [ -n "$workspace_root" ] && [ -f "$workspace_root/project/clawboard/scripts/apply_directives_to_agents.sh" ]; then
-    DIRECTIVES_SETUP_SCRIPT="$workspace_root/project/clawboard/scripts/apply_directives_to_agents.sh"
-  elif [ -f "$OPENCLAW_HOME/workspace/projects/clawboard/scripts/apply_directives_to_agents.sh" ]; then
-    DIRECTIVES_SETUP_SCRIPT="$OPENCLAW_HOME/workspace/projects/clawboard/scripts/apply_directives_to_agents.sh"
-  else
-    return 1
-  fi
-
-  printf "%s" "$DIRECTIVES_SETUP_SCRIPT"
-}
-
-maybe_offer_directives_setup() {
-  local mode="${1:-ask}"
-  local setup_script=""
-  local answer=""
-  local should_run=false
-  local -a setup_args
-  setup_args=()
-
-  case "$mode" in
-    never)
-      DIRECTIVES_SETUP_STATUS="skipped-mode-never"
-      return 0
-      ;;
-    always) should_run=true ;;
-    ask)
-      if [ ! -t 0 ]; then
-        DIRECTIVES_SETUP_STATUS="skipped-no-tty"
-        return 0
-      fi
-      printf "\nApply Clawboard directives into discovered agent AGENTS.md files now? [y/N]: "
-      read -r answer
-      case "$(printf "%s" "$answer" | tr '[:upper:]' '[:lower:]')" in
-        y|yes) should_run=true ;;
-        *) should_run=false ;;
-      esac
-      ;;
-    *)
-      DIRECTIVES_SETUP_STATUS="skipped-invalid-mode"
-      return 0
-      ;;
-  esac
-
-  if [ "$should_run" = false ]; then
-    DIRECTIVES_SETUP_STATUS="skipped-by-user"
-    if setup_script="$(resolve_directives_setup_script)"; then
-      log_warn "Directives helper skipped. Recommended when ready: bash $setup_script"
-    else
-      log_warn "Directives helper skipped. Run apply_directives_to_agents.sh later when available."
-    fi
-    return 0
-  fi
-
-  if ! setup_script="$(resolve_directives_setup_script)"; then
-    DIRECTIVES_SETUP_STATUS="missing-script"
-    log_warn "Directives helper script not found. Run manually when available."
-    return 0
-  fi
-
-  if [ "$USE_COLOR" = false ]; then
-    setup_args+=(--no-color)
-  fi
-  if [ ! -t 0 ]; then
-    setup_args+=(--yes)
-  fi
-
-  log_info "Launching directives helper..."
-  if bash "$setup_script" "${setup_args[@]}"; then
-    DIRECTIVES_SETUP_STATUS="configured"
-    log_success "Directives helper completed."
-  else
-    DIRECTIVES_SETUP_STATUS="failed"
-    log_warn "Directives helper did not complete. You can rerun: bash $setup_script"
   fi
 }
 
@@ -2046,7 +1932,6 @@ PY
 fi
 
 maybe_offer_openclaw_heap_setup "$OPENCLAW_HEAP_SETUP_MODE"
-maybe_offer_directives_setup "$DIRECTIVES_SETUP_MODE"
 
 echo ""
 log_success "Bootstrap complete."
@@ -2146,26 +2031,6 @@ case "$OPENCLAW_HEAP_SETUP_STATUS" in
     echo "OpenClaw heap:  setup attempted but did not complete"
     ;;
 esac
-DIRECTIVES_SETUP_HINT="$INSTALL_DIR/scripts/apply_directives_to_agents.sh"
-if directives_setup_path="$(resolve_directives_setup_script 2>/dev/null)"; then
-  DIRECTIVES_SETUP_HINT="$directives_setup_path"
-fi
-case "$DIRECTIVES_SETUP_STATUS" in
-  configured)
-    echo "Directives:     helper run complete (AGENTS.md directives reviewed/applied)"
-    ;;
-  failed)
-    echo "Directives:     helper run attempted but did not complete"
-    echo "               Rerun: bash $DIRECTIVES_SETUP_HINT"
-    ;;
-  missing-script)
-    echo "Directives:     setup helper not found in this install"
-    ;;
-  skipped-mode-never|skipped-by-user|skipped-no-tty|skipped-invalid-mode|not-run)
-    echo "Directives:     not configured in this run"
-    echo "               Recommended: bash $DIRECTIVES_SETUP_HINT"
-    ;;
-esac
 echo "Security note: CLAWBOARD_TOKEN is required for all writes and non-localhost reads."
 echo "               Localhost reads can run tokenless. Keep network ACLs strict (no Funnel/public exposure)."
 echo ""
@@ -2177,8 +2042,6 @@ echo "Set up Obsidian thinking vaults + memory tuning:"
 echo "  bash $OBSIDIAN_SETUP_HINT"
 echo "  bash $LOCAL_MEMORY_SETUP_HINT"
 echo "Tune OpenClaw launcher heap (idempotent patch helper via bootstrap):"
-echo "  bash scripts/bootstrap_clawboard.sh --setup-openclaw-heap --skip-docker --skip-skill --skip-plugin --skip-memory-backup-setup --skip-obsidian-memory-setup --skip-directives-setup"
-echo "Apply directives into discovered agent AGENTS.md files:"
-echo "  bash $DIRECTIVES_SETUP_HINT"
+echo "  bash scripts/bootstrap_clawboard.sh --setup-openclaw-heap --skip-docker --skip-skill --skip-plugin --skip-memory-backup-setup --skip-obsidian-memory-setup"
 echo "If you want Chutes before Clawboard skill wiring:"
 echo "  tmp=\$(mktemp -t add-chutes.sh.XXXXXX) && curl -fsSL $CHUTES_FAST_PATH_URL -o \"\$tmp\" && bash \"\$tmp\" && rm -f \"\$tmp\""

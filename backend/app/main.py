@@ -4455,6 +4455,13 @@ class _OpenClawAssistantLogWatchdog:
             )
         return max(5.0, poll_seconds)
 
+        # Attempt automatic recovery: send the agent a nudge so it produces a status reply.
+        # This is a best-effort operation — errors are swallowed to protect the watchdog thread.
+        try:
+            _try_openclaw_recovery_prompt(base_key=base_key, request_id=request_id, agent_id=agent_id)
+        except Exception:
+            pass
+
 
 _OPENCLAW_ASSISTANT_LOG_WATCHDOG: _OpenClawAssistantLogWatchdog | None = None
 _OPENCLAW_ASSISTANT_LOG_WATCHDOG_LOCK = threading.Lock()
