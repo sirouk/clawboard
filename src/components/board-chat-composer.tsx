@@ -192,6 +192,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   const { value: draft, setValue: setDraft } = usePersistentDraft(`draft:chat:${sessionKey}`, { fallback: "" });
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [sending, setSending] = useState(false);
+  const sendingGuardRef = useRef(false);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -363,9 +364,11 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   );
 
   const sendMessage = async () => {
+    if (sendingGuardRef.current) return;
     const message = draft.trim();
     if (!message) return;
     if (readOnly) return;
+    sendingGuardRef.current = true;
 
     const localId = randomId();
     const createdAt = new Date().toISOString();
@@ -460,6 +463,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
       onSendUpdate?.({ phase: "failed", localId, sessionKey, message, createdAt, error: msg, attachments: pendingAttachments, debugHint });
       setAttachError(msg);
     } finally {
+      sendingGuardRef.current = false;
       setSending(false);
     }
   };

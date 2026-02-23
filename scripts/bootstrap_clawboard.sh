@@ -1147,6 +1147,61 @@ setup_specialist_agents() {
   OPENCLAW_HOME="$OPENCLAW_HOME" INSTALL_DIR="$INSTALL_DIR" bash "$INSTALL_DIR/scripts/setup_specialist_agents.sh"
 }
 
+# Optionally ask the user to add specialist agents (coding, docs, web, social) to openclaw.json
+# so the main agent can delegate. Uses `openclaw agents add` when the user agrees. Idempotent.
+maybe_offer_agentic_team_setup() {
+  local answer=""
+  local existing_ids=""
+  local raw=""
+  local id=""
+  local added=0
+  local specialist_ids="coding docs web social"
+
+  if [ ! -t 0 ]; then
+    log_info "No TTY; skipping agentic team prompt. Add specialists later with: openclaw agents add <id> --workspace \$OPENCLAW_HOME/workspace-<id> --non-interactive"
+    return 0
+  fi
+  if ! command -v openclaw >/dev/null 2>&1; then
+    log_warn "openclaw not in PATH; skipping agentic team setup. Install OpenClaw and run: openclaw agents add <id> --workspace \$OPENCLAW_HOME/workspace-<id> --non-interactive"
+    return 0
+  fi
+
+  printf "\nSet up the agentic team (main + coding, docs, web, social) so the main agent can delegate to specialists? [Y/n]: "
+  read -r answer
+  case "$(printf "%s" "$answer" | tr '[:upper:]' '[:lower:]')" in
+    n|no) log_info "Skipped. You can add specialists later: openclaw agents add <id> --workspace %s/workspace-<id> --non-interactive" "$OPENCLAW_HOME"; return 0 ;;
+    *) ;;
+  esac
+
+  if raw="$(OPENCLAW_HOME="$OPENCLAW_HOME" openclaw config get agents.list 2>/dev/null)"; then
+    if command -v jq >/dev/null 2>&1; then
+      existing_ids=$(printf '%s' "$raw" | jq -r '.[].id' 2>/dev/null | tr '\n' ' ')
+    elif command -v python3 >/dev/null 2>&1; then
+      existing_ids=$(printf '%s' "$raw" | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(x.get('id','') for x in d))" 2>/dev/null)
+    fi
+  fi
+  existing_ids=" ${existing_ids} "
+
+  for id in $specialist_ids; do
+    case "$existing_ids" in *" $id "*) continue ;; *) ;; esac
+    if [ ! -d "$OPENCLAW_HOME/workspace-$id" ]; then
+      log_warn "Workspace $OPENCLAW_HOME/workspace-$id missing; run setup_specialist_agents first. Skipping agent $id."
+      continue
+    fi
+    log_info "Adding agent: $id"
+    if OPENCLAW_HOME="$OPENCLAW_HOME" openclaw agents add "$id" --workspace "$OPENCLAW_HOME/workspace-$id" --non-interactive 2>/dev/null; then
+      added=$((added + 1))
+    else
+      log_warn "Failed to add agent $id (may already exist). Continue."
+    fi
+  done
+
+  if [ "$added" -gt 0 ]; then
+    OPENCLAW_GATEWAY_RESTART_NEEDED=true
+    log_success "Added $added specialist agent(s) to config. Gateway will restart to apply."
+  fi
+}
+
 # Run setup-openclaw-local-memory.sh unconditionally (no user prompt). Tool policy + watchdog
 # are always applied. Call before the Obsidian prompt. Handles missing openclaw/script gracefully.
 maybe_run_local_memory_setup() {
@@ -1705,6 +1760,37 @@ CONTEXT_MAX_CHARS_VALUE="$(clamp_int "$CONTEXT_MAX_CHARS_VALUE" 400 12000 || ech
 log_info "Writing CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS=$CONTEXT_MAX_CHARS_VALUE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS" "$CONTEXT_MAX_CHARS_VALUE"
 
+# Long-running subagent board-scope persistence (hours). Plugin uses this when resolving scope from DB; 48h keeps day-long agents aligned.
+BOARD_SCOPE_SUBAGENT_TTL_HOURS_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS" >/dev/null 2>&1; then
+  BOARD_SCOPE_SUBAGENT_TTL_HOURS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS" || true)"
+else
+  BOARD_SCOPE_SUBAGENT_TTL_HOURS_VALUE="48"
+fi
+BOARD_SCOPE_SUBAGENT_TTL_HOURS_VALUE="$(clamp_int "$BOARD_SCOPE_SUBAGENT_TTL_HOURS_VALUE" 1 168 || echo "48")"
+log_info "Writing CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS=$BOARD_SCOPE_SUBAGENT_TTL_HOURS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS" "$BOARD_SCOPE_SUBAGENT_TTL_HOURS_VALUE"
+
+# Plugin request-id cache (for unlabeled follow-up events / cross-agent handoffs). Keep long enough for multi-day runs.
+OPENCLAW_REQUEST_ID_TTL_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ID_TTL_SECONDS" >/dev/null 2>&1; then
+  OPENCLAW_REQUEST_ID_TTL_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ID_TTL_SECONDS" || true)"
+else
+  OPENCLAW_REQUEST_ID_TTL_VALUE="604800"
+fi
+OPENCLAW_REQUEST_ID_TTL_VALUE="$(clamp_int "$OPENCLAW_REQUEST_ID_TTL_VALUE" 300 7776000 || echo "604800")"
+log_info "Writing OPENCLAW_REQUEST_ID_TTL_SECONDS=$OPENCLAW_REQUEST_ID_TTL_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ID_TTL_SECONDS" "$OPENCLAW_REQUEST_ID_TTL_VALUE"
+OPENCLAW_REQUEST_ID_MAX_ENTRIES_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ID_MAX_ENTRIES" >/dev/null 2>&1; then
+  OPENCLAW_REQUEST_ID_MAX_ENTRIES_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ID_MAX_ENTRIES" || true)"
+else
+  OPENCLAW_REQUEST_ID_MAX_ENTRIES_VALUE="5000"
+fi
+OPENCLAW_REQUEST_ID_MAX_ENTRIES_VALUE="$(clamp_int "$OPENCLAW_REQUEST_ID_MAX_ENTRIES_VALUE" 200 50000 || echo "5000")"
+log_info "Writing OPENCLAW_REQUEST_ID_MAX_ENTRIES=$OPENCLAW_REQUEST_ID_MAX_ENTRIES_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ID_MAX_ENTRIES" "$OPENCLAW_REQUEST_ID_MAX_ENTRIES_VALUE"
+
 SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE=""
 if [ -n "$SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE" ]; then
   SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE="$SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE"
@@ -2019,6 +2105,8 @@ PY
     maybe_deploy_agent_templates
 
     setup_specialist_agents
+
+    maybe_offer_agentic_team_setup
 
     maybe_run_local_memory_setup
 

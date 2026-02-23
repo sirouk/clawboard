@@ -5002,7 +5002,13 @@ def _openclaw_history_conversation_idempotency_key(*, channel: str, agent_id: st
     msg = str(message_id or "").strip()
     if not msg:
         return None
-    return f"src:conversation:{str(channel or '').strip().lower()}:{str(agent_id or '').strip().lower()}:{msg}"
+    # Normalize board-equivalent channel names so that messages logged immediately by the backend
+    # (channel="openclaw") and messages later ingested via history (channel="clawboard" or "webchat")
+    # share the same idempotency key and are not double-logged.
+    normalized_channel = str(channel or "").strip().lower()
+    if normalized_channel in {"openclaw", "clawboard", "webchat"}:
+        normalized_channel = "openclaw"
+    return f"src:conversation:{normalized_channel}:{str(agent_id or '').strip().lower()}:{msg}"
 
 
 def _openclaw_history_canonical_session_key(session_key: str) -> str:
@@ -5016,6 +5022,36 @@ def _openclaw_history_canonical_session_key(session_key: str) -> str:
     if channel_idx >= 0:
         return base[channel_idx:].strip().lower()
     return base.lower()
+
+
+def _openclaw_history_is_subagent_session_key(session_key: str) -> bool:
+    base = (str(session_key or "").split("|", 1)[0] or "").strip().lower()
+    if not base:
+        return False
+    return base.startswith("agent:") and ":subagent:" in base
+
+
+def _openclaw_history_subagent_parts(session_key: str) -> tuple[str, str] | None:
+    base = (str(session_key or "").split("|", 1)[0] or "").strip()
+    if not base:
+        return None
+    lowered = base.lower()
+    if not lowered.startswith("agent:") or ":subagent:" not in lowered:
+        return None
+    parts = [part.strip() for part in base.split(":")]
+    if len(parts) < 4:
+        return None
+    owner = parts[1] if len(parts) >= 2 else ""
+    try:
+        sub_idx = [p.lower() for p in parts].index("subagent")
+    except ValueError:
+        return None
+    if sub_idx + 1 >= len(parts):
+        return None
+    subagent_id = parts[sub_idx + 1]
+    if not owner or not subagent_id:
+        return None
+    return (owner, subagent_id)
 
 
 def _openclaw_history_idempotency_key(
@@ -5060,6 +5096,8 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
         return (0, 0)
     ordered_rows.sort(key=lambda item: item[0])
 
+    subagent_parts = _openclaw_history_subagent_parts(session_key)
+    is_subagent_session = subagent_parts is not None
     with get_session() as session:
         for timestamp_ms, row in ordered_rows:
             if timestamp_ms < since_ms:
@@ -5076,9 +5114,31 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 agent_id = "assistant"
                 agent_label = "Assistant"
             elif role == "user":
-                entry_type = "conversation"
-                agent_id = "user"
-                agent_label = "User"
+                # Board sessions (non-subagent): user messages are owned exclusively by
+                # /api/openclaw/chat which persists them immediately. Skipping here is the
+                # definitive dedup; we cannot rely on the gateway echoing the occhat- requestId
+                # back in history, making any key-based check fragile.
+                if not is_subagent_session:
+                    parsed_board = _parse_board_session_key(session_key)
+                    if parsed_board[0] is not None:
+                        continue
+                if is_subagent_session and subagent_parts:
+                    # Subagent sessions: role=user is the parent agent's delegation prompt.
+                    entry_type = "conversation"
+                    owner_id, _ = subagent_parts
+                    agent_id = owner_id
+                    agent_label = "OpenClaw" if owner_id.lower() == "main" else f"Agent {owner_id}"
+                elif normalized_text.startswith("[System Message]"):
+                    # OpenClaw injects system notifications (subagent failures, etc.) as role=user
+                    # into the board session transcript. Re-attribute them as system events so they
+                    # don't render as human messages in the Clawboard UI.
+                    entry_type = "system"
+                    agent_id = "system"
+                    agent_label = "OpenClaw"
+                else:
+                    entry_type = "conversation"
+                    agent_id = "user"
+                    agent_label = "User"
             elif role == "system":
                 entry_type = "system"
                 agent_id = "system"
@@ -5094,6 +5154,21 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
             channel = _openclaw_history_channel(row, session_key)
             source = {"sessionKey": session_key, "channel": channel}
             source.update(_openclaw_history_scope_metadata(row, session_key))
+            if is_subagent_session and subagent_parts:
+                owner_id, subagent_id = subagent_parts
+                owner_label = "OpenClaw" if owner_id.lower() == "main" else f"Agent {owner_id}"
+                subagent_speaker_id = f"subagent:{subagent_id}"
+                subagent_label = f"Subagent {subagent_id[:8] or subagent_id}"
+                if role == "user":
+                    source["speakerId"] = owner_id
+                    source["speakerLabel"] = owner_label
+                    source["audienceId"] = subagent_speaker_id
+                    source["audienceLabel"] = subagent_label
+                elif role == "assistant":
+                    source["speakerId"] = subagent_speaker_id
+                    source["speakerLabel"] = subagent_label
+                    source["audienceId"] = owner_id
+                    source["audienceLabel"] = owner_label
             message_id = _openclaw_history_message_identifier(row)
             request_id = _openclaw_history_request_identifier(row)
             if message_id:

@@ -3235,7 +3235,7 @@ def call_creation_gate(
             "Output MUST be a single JSON object that matches outputTemplate EXACTLY: "
             "same keys, no extra keys. Replace placeholder values with real values. "
             "Rules: (1) Topic creation is allowed when no candidate is a close fit and the conversation has a stable human theme/entity. "
-            "(2) Task creation is stricter: allow only when execution intent is explicit or user confirmed an assistant action plan. "
+            "(2) Task creation is stricter: allow only when there is a clear, concrete task (execution intent explicit or user confirmed an assistant action plan). "
             "(3) If an existing candidate is a close fit, set create=false and provide its id. "
             "(4) Never create from system/tool/memory artifacts or slash commands like /new. "
             "(5) If uncertain for task, set createTask=false."
@@ -3839,9 +3839,8 @@ def classify_session(session_key: str):
             forced_topic_id = latest_topic_scope
 
     if forced_topic_id and forced_task_id:
-        # Clawboard UI explicitly selects Topic/Task scope via `clawboard:topic:*` / `clawboard:task:*`.
-        # Do not let the classifier re-route those logs into other topics/tasks (it can make the
-        # user's message "disappear" from the chat pane they sent it from).
+        # Task Chat: clawboard:task:<topicId>:<taskId> — messages MUST stay in this task only.
+        # Never reallocate; no LLM, no candidate retrieval. Patch all scope_logs with this topic+task.
         for e in scope_logs:
             if (e.get("classificationStatus") or "pending") != "pending":
                 continue
@@ -4201,10 +4200,10 @@ def classify_session(session_key: str):
     task_contexts: dict[str, list[dict]] = {}
 
     if forced_topic_id:
+        # Topic Chat: clawboard:topic:<topicId> — messages stay in this topic; task inference/creation
+        # only within this topic. Candidate retrieval is restricted to this topic (and its tasks).
         forced_topic_name = None
         try:
-            # Best-effort: include the board-selected topic as the only candidate so the
-            # LLM can focus on whether a task should be inferred/created within it.
             all_topics = list_topics()
             match = next((t for t in all_topics if t.get("id") == forced_topic_id), None)
             if match and match.get("name"):
@@ -4796,11 +4795,12 @@ def classify_session(session_key: str):
         target_topic_id = topic_id
         target_task_id = task_id
         if locked_kind == "task":
+            # Per-entry task lock (e.g. from source.boardScope*): never reallocate to another topic/task.
             target_topic_id = locked_topic_id or target_topic_id
             target_task_id = locked_task_id
         elif locked_kind == "topic":
+            # Per-entry topic lock: stay in this topic; task inference/creation only within it.
             target_topic_id = locked_topic_id or target_topic_id
-            # Topic lock keeps routing inside the selected topic, but task inference is still allowed.
         has_locked_scope = locked_kind in {"topic", "task"}
         filtered_topic_id = target_topic_id if has_locked_scope else None
         filtered_task_id = target_task_id if has_locked_scope else None

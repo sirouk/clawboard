@@ -9,6 +9,10 @@ import { getIgnoreSessionPrefixesFromEnv, shouldIgnoreSessionKey } from "./ignor
 export { computeEffectiveSessionKey, isBoardSessionKey, parseBoardSessionKey };
 
 const DEFAULT_QUEUE = path.join(os.homedir(), ".openclaw", "clawboard-queue.sqlite");
+const BOARD_SCOPE_TTL_MS = 15 * 60_000;
+/** Longer TTL when resolving subagent scope from DB. Env: CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS (default 48, max 168). */
+const BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS =
+  envInt("CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS", 48, 1, 168) * 60 * 60 * 1000;
 const SUMMARY_MAX = 72;
 const RAW_MAX = 5000;
 const DEFAULT_CONTEXT_MAX_CHARS = 2200;
@@ -315,6 +319,45 @@ export default function register(api) {
         SET attempts = ?2, next_attempt_at_ms = ?3, last_error = ?4
         WHERE id = ?1;
       `);
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS board_scope_cache (
+          agent_id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL,
+          task_id TEXT,
+          kind TEXT NOT NULL,
+          session_key TEXT,
+          updated_at_ms INTEGER NOT NULL
+        );
+      `);
+      this.scopeInsertStmt = this.db.prepare(`
+        INSERT OR REPLACE INTO board_scope_cache (agent_id, topic_id, task_id, kind, session_key, updated_at_ms)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6);
+      `);
+      this.scopeSelectStmt = this.db.prepare(`
+        SELECT topic_id as topicId, task_id as taskId, kind, session_key as sessionKey, updated_at_ms as updatedAt
+        FROM board_scope_cache
+        WHERE updated_at_ms >= ?1
+        ORDER BY updated_at_ms DESC
+        LIMIT 1;
+      `);
+    }
+    saveBoardScope(agentId, scope) {
+      const taskId = scope.kind === "task" && scope.taskId ? scope.taskId : null;
+      this.scopeInsertStmt.run(agentId, scope.topicId, taskId, scope.kind, scope.sessionKey ?? null, scope.updatedAt);
+    }
+    getMostRecentFreshBoardScope(cutoffMs) {
+      const rows = this.scopeSelectStmt.all(cutoffMs);
+      const row = rows?.[0];
+      if (!row) return void 0;
+      const scope = {
+        topicId: row.topicId,
+        kind: row.kind === "task" ? "task" : "topic",
+        sessionKey: row.sessionKey ?? "",
+        inherited: true,
+        updatedAt: row.updatedAt,
+      };
+      if (row.taskId) scope.taskId = row.taskId;
+      return scope;
     }
     enqueue(idempotencyKey, payload, error) {
       const ts = nowMs();
@@ -531,7 +574,18 @@ export default function register(api) {
   }
 
   function isFreshBoardScope(scope, now = nowMs()) {
-    return Boolean(scope && now - scope.updatedAt <= 15 * 60_000);
+    return Boolean(scope && now - scope.updatedAt <= BOARD_SCOPE_TTL_MS);
+  }
+
+  function getMostRecentFreshBoardScopeFromAgents(now = nowMs()) {
+    let best;
+    for (const scope of boardScopeByAgent.values()) {
+      if (!isFreshBoardScope(scope, now))
+        continue;
+      if (!best || scope.updatedAt > best.updatedAt)
+        best = scope;
+    }
+    return best;
   }
 
   function rememberBoardScope(scope, opts) {
@@ -549,6 +603,16 @@ export default function register(api) {
       if (!agentId)
         continue;
       boardScopeByAgent.set(agentId, stamped);
+    }
+    if (agentIds.length > 0) {
+      getQueueDb()
+        .then((db) => {
+          for (const rawAgentId of agentIds) {
+            const agentId = normalizeId(rawAgentId);
+            if (agentId) db.saveBoardScope(agentId, stamped);
+          }
+        })
+        .catch(() => {});
     }
   }
 
@@ -663,8 +727,23 @@ export default function register(api) {
       const exact = sessionCandidates
         .map((candidate) => candidate ? boardScopeBySession.get(candidate) : void 0)
         .find((scope) => isFreshBoardScope(scope, now));
-      const inherited = exact ?? boardScopeByAgent.get(subagent.ownerAgentId);
-      if (isFreshBoardScope(inherited, now)) {
+      let inherited =
+        exact ??
+        boardScopeByAgent.get(subagent.ownerAgentId) ??
+        getMostRecentFreshBoardScopeFromAgents(now);
+      let inheritedFromDb = false;
+      if (!inherited) {
+        try {
+          const db = await getQueueDb();
+          const cutoffPersistence = now - BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS;
+          inherited = db.getMostRecentFreshBoardScope(cutoffPersistence);
+          if (inherited) inheritedFromDb = true;
+        } catch {
+        }
+      }
+      const ttlMs = inheritedFromDb ? BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS : BOARD_SCOPE_TTL_MS;
+      const accepted = inherited && now - inherited.updatedAt <= ttlMs;
+      if (accepted) {
         const nextScope = {
           ...inherited,
           inherited: true,
@@ -1398,6 +1477,7 @@ export default function register(api) {
       }
       return;
     }
+    const inboundSubagent = parseSubagentSession(effectiveSessionKey ?? ctx.sessionKey);
     lastChannelId = ctx.channelId;
     lastEffectiveSessionKey = effectiveSessionKey;
     lastMessageAt = Date.now();
@@ -1419,6 +1499,13 @@ export default function register(api) {
       return;
     if (incomingKey)
       rememberIncoming(incomingKey);
+    const inboundFingerprintKey = inboundSubagent ? null : incomingFingerprintDedupeKey(ctx.channelId, effectiveSessionKey, cleanRaw);
+    if (inboundFingerprintKey && recentIncoming.has(inboundFingerprintKey))
+      return;
+    if (inboundFingerprintKey)
+      rememberIncoming(inboundFingerprintKey, 60e3);
+    const inboundAgentId = (inboundSubagent == null ? void 0 : inboundSubagent.ownerAgentId) ?? "user";
+    const inboundAgentLabel = inboundSubagent ? resolveAgentLabel(inboundSubagent.ownerAgentId, `agent:${inboundSubagent.ownerAgentId}`) : "User";
     sendAsync({
       topicId,
       taskId,
@@ -1427,8 +1514,8 @@ export default function register(api) {
       summary,
       raw: truncateRaw(cleanRaw),
       createdAt,
-      agentId: "user",
-      agentLabel: "User",
+      agentId: inboundAgentId,
+      agentLabel: inboundAgentLabel,
       source: buildSourceMeta({
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
@@ -1495,15 +1582,16 @@ export default function register(api) {
     return `sending:${channelId ?? "nochannel"}:${sessionKey ?? ""}:${mid}`;
   };
   const outgoingFingerprintDedupeKey = (channelId, sessionKey, content) => `sending:${channelId ?? "nochannel"}:${sessionKey ?? ""}:fp:${dedupeFingerprint(content)}`;
+  const incomingFingerprintDedupeKey = (channelId, sessionKey, content) => `incoming-fp:${channelId ?? "nochannel"}:${sessionKey ?? ""}:${dedupeFingerprint(content)}`;
   const recentIncoming = /* @__PURE__ */ new Set();
-  const rememberIncoming = (key) => {
+  const rememberIncoming = (key, ttlMs = 30e3) => {
     recentIncoming.add(key);
     if (recentIncoming.size > 200) {
       const first = recentIncoming.values().next().value;
       if (first)
         recentIncoming.delete(first);
     }
-    setTimeout(() => recentIncoming.delete(key), 30e3).unref?.();
+    setTimeout(() => recentIncoming.delete(key), ttlMs).unref?.();
   };
 
   api.on("message_sending", async (event, ctx) => {
@@ -1749,6 +1837,7 @@ export default function register(api) {
     } else {
       const isChannelSession = inferredSessionKey.startsWith("channel:");
       const isBoardSession = Boolean(parseBoardSessionKey(inferredSessionKey));
+      const isSubagentSession = Boolean(parseSubagentSession(inferredSessionKey));
       const skipBoardAssistantFallback = isBoardSession && hasRecentOutgoingSession(inferredSessionKey);
       let startIdx = 0;
       if (!isChannelSession) {
@@ -1770,6 +1859,9 @@ export default function register(api) {
         if (isBoardSession && role === "user")
           continue;
         if (isChannelSession && role === "user")
+          continue;
+        const ch = (sourceChannel ?? ctx.channelId ?? "").toString().trim().toLowerCase();
+        if (role === "user" && ch === "heartbeat")
           continue;
         const content = extractText(msg.content);
         if (!content || !content.trim())
@@ -1842,6 +1934,9 @@ export default function register(api) {
           if (recentIncoming.has(dedupeKey))
             continue;
           rememberIncoming(dedupeKey);
+          const subagentSession = parseSubagentSession(inferredSessionKey);
+          const inboundAgentId = (subagentSession == null ? void 0 : subagentSession.ownerAgentId) ?? "user";
+          const inboundAgentLabel = subagentSession ? resolveAgentLabel(subagentSession.ownerAgentId, `agent:${subagentSession.ownerAgentId}`) : "User";
           const messageCreatedAt = new Date(createdAtBaseMs + agentEndSeq).toISOString();
           agentEndSeq += 1;
           sendAsync({
@@ -1852,8 +1947,8 @@ export default function register(api) {
             summary,
             raw: truncateRaw(cleanedContent),
             createdAt: messageCreatedAt,
-            agentId: "user",
-            agentLabel: "User",
+            agentId: inboundAgentId,
+            agentLabel: inboundAgentLabel,
             source: buildSourceMeta({
               channel: sourceChannel,
               sessionKey: inferredSessionKey,

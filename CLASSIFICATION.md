@@ -54,8 +54,8 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 - Semantic conversation rows must not remain `classificationStatus=pending` indefinitely.
 - Classified semantic conversations must have a topic assignment.
 - Task assignment is optional and must belong to the selected topic.
-- `clawboard:task:<topicId>:<taskId>` sessions are hard-locked and cannot reroute.
-- `clawboard:topic:<topicId>` sessions pin topic; task inference may still occur inside that topic.
+- **Task Chat** (`clawboard:task:<topicId>:<taskId>`): messages **never** get allocated to another topic or task; classifier patches with fixed scope and does not reroute.
+- **Topic Chat** (`clawboard:topic:<topicId>`): messages stay in **this topic only**; task inference/creation only within this topic and only when there is a clear, concrete task.
 - Slash commands and classifier/context artifacts are non-semantic and must not create topics/tasks.
 - Cron delivery/control logs must never route into user topics/tasks.
 - Idempotent ingest must tolerate retries and queue replays without duplicate logical sends.
@@ -135,14 +135,15 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 - Semantic context includes only `conversation` and `note`.
 - Excludes slash commands, cron events, classifier payload noise, and context-injection artifacts.
 
-### 6.4 Board Session Forcing
+### 6.4 Board Session Forcing (Surefire Rules)
 
-- `clawboard:task:*`:
-  - direct scope patch to fixed topic+task
-  - no reroute or retarget.
-- `clawboard:topic:*`:
-  - topic is pinned
-  - task inference/creation remains allowed inside pinned topic.
+- **Task Chat** (`clawboard:task:<topicId>:<taskId>`):
+  - Messages **never** get allocated elsewhere. Classifier patches all scope logs with this topic+task and returns; no LLM, no candidate retrieval, no reroute.
+  - Per-entry lock from `source.boardScope*` also forces topic+task when present.
+- **Topic Chat** (`clawboard:topic:<topicId>`):
+  - Messages stay in **this topic only**. Topic is pinned; classifier candidate retrieval is restricted to this topic (and its tasks).
+  - Task inference or creation is allowed **only within this topic**, and only when there is a **clear, concrete task** (gated by `_task_creation_allowed` and `call_creation_gate`).
+  - Never allocate to another topic.
 - Subagent sessions can inherit latest classified scope to avoid routing drift.
 
 ### 6.5 Candidate Retrieval and Scoring

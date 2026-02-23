@@ -149,6 +149,9 @@ const CLAWBOARD_CONTEXT_BEGIN = "[CLAWBOARD_CONTEXT_BEGIN]";
 const CLAWBOARD_CONTEXT_END = "[CLAWBOARD_CONTEXT_END]";
 const IGNORE_SESSION_PREFIXES = getIgnoreSessionPrefixesFromEnv(process.env);
 const BOARD_SCOPE_TTL_MS = 15 * 60_000;
+/** Longer TTL when resolving subagent scope from DB so long-running subagents stay aligned. Configurable via CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS (default 48). */
+const BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS =
+  envInt("CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS", 48, 1, 168) * 60 * 60 * 1000;
 const OPENCLAW_REQUEST_ID_PREFIX = "occhat-";
 const OPENCLAW_DAY_SECONDS = 24 * 60 * 60;
 const REPLY_DIRECTIVE_TAG_RE =
@@ -438,6 +441,8 @@ export default function register(api: OpenClawPluginApi) {
     selectStmt: ReturnType<DatabaseSync["prepare"]>;
     deleteStmt: ReturnType<DatabaseSync["prepare"]>;
     failStmt: ReturnType<DatabaseSync["prepare"]>;
+    scopeInsertStmt: ReturnType<DatabaseSync["prepare"]>;
+    scopeSelectStmt: ReturnType<DatabaseSync["prepare"]>;
 
     constructor(filePath: string) {
       this.db = new DatabaseSync(filePath);
@@ -476,6 +481,28 @@ export default function register(api: OpenClawPluginApi) {
         SET attempts = ?2, next_attempt_at_ms = ?3, last_error = ?4
         WHERE id = ?1;
       `);
+
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS board_scope_cache (
+          agent_id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL,
+          task_id TEXT,
+          kind TEXT NOT NULL,
+          session_key TEXT,
+          updated_at_ms INTEGER NOT NULL
+        );
+      `);
+      this.scopeInsertStmt = this.db.prepare(`
+        INSERT OR REPLACE INTO board_scope_cache (agent_id, topic_id, task_id, kind, session_key, updated_at_ms)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6);
+      `);
+      this.scopeSelectStmt = this.db.prepare(`
+        SELECT topic_id as topicId, task_id as taskId, kind, session_key as sessionKey, updated_at_ms as updatedAt
+        FROM board_scope_cache
+        WHERE updated_at_ms >= ?1
+        ORDER BY updated_at_ms DESC
+        LIMIT 1;
+      `);
     }
 
     enqueue(idempotencyKey: string, payload: Record<string, unknown>, error: string) {
@@ -494,6 +521,39 @@ export default function register(api: OpenClawPluginApi) {
 
     markFailed(id: number, attempts: number, nextAttemptAtMs: number, error: string) {
       this.failStmt.run(id, attempts, nextAttemptAtMs, error.slice(0, 1200));
+    }
+
+    saveBoardScope(agentId: string, scope: BoardScope) {
+      const taskId = scope.kind === "task" && scope.taskId ? scope.taskId : null;
+      this.scopeInsertStmt.run(
+        agentId,
+        scope.topicId,
+        taskId,
+        scope.kind,
+        scope.sessionKey ?? null,
+        scope.updatedAt,
+      );
+    }
+
+    getMostRecentFreshBoardScope(cutoffMs: number): BoardScope | undefined {
+      const rows = this.scopeSelectStmt.all(cutoffMs) as Array<{
+        topicId: string;
+        taskId: string | null;
+        kind: string;
+        sessionKey: string | null;
+        updatedAt: number;
+      }>;
+      const row = rows?.[0];
+      if (!row) return undefined;
+      const scope: BoardScope = {
+        topicId: row.topicId,
+        kind: row.kind === "task" ? "task" : "topic",
+        sessionKey: row.sessionKey ?? "",
+        inherited: true,
+        updatedAt: row.updatedAt,
+      };
+      if (row.taskId) scope.taskId = row.taskId;
+      return scope;
     }
   }
 
@@ -703,6 +763,16 @@ export default function register(api: OpenClawPluginApi) {
     return Boolean(scope && now - scope.updatedAt <= BOARD_SCOPE_TTL_MS);
   }
 
+  /** Most recent fresh board scope across all agents; used for subagent fallback when owner has none. */
+  function getMostRecentFreshBoardScopeFromAgents(now = nowMs()): BoardScope | undefined {
+    let best: BoardScope | undefined;
+    for (const scope of boardScopeByAgent.values()) {
+      if (!isFreshBoardScope(scope, now)) continue;
+      if (!best || scope.updatedAt > best.updatedAt) best = scope;
+    }
+    return best;
+  }
+
   function rememberBoardScope(
     scope: BoardScope,
     opts?: {
@@ -722,6 +792,16 @@ export default function register(api: OpenClawPluginApi) {
       const agentId = normalizeId(rawAgentId);
       if (!agentId) continue;
       boardScopeByAgent.set(agentId, stamped);
+    }
+    if (agentIds.length > 0) {
+      getQueueDb()
+        .then((db) => {
+          for (const rawAgentId of agentIds) {
+            const agentId = normalizeId(rawAgentId);
+            if (agentId) db.saveBoardScope(agentId, stamped);
+          }
+        })
+        .catch(() => {});
     }
   }
 
@@ -839,14 +919,35 @@ export default function register(api: OpenClawPluginApi) {
     }
 
     // Subagent sessions inherit from the owning agent's most-recent board scope.
+    // The spawner (e.g. main) holds the board session; scope is stored under the spawner's agent id,
+    // not the subagent's owner (e.g. coding). Fall back to the most recent scope from any agent
+    // (in-memory, then DB) so subagent logs stay in the same Task/Topic Chat that spawned them.
+    // Use a longer TTL when reading from DB so long-running subagents (e.g. a day) don't get
+    // orphaned or misaligned.
     const subagent = parseSubagentSession(normalizedSessionKey ?? ctxSessionKey);
     if (subagent) {
       const now = nowMs();
       const exact = sessionCandidates
         .map((candidate) => (candidate ? boardScopeBySession.get(candidate) : undefined))
         .find((scope) => isFreshBoardScope(scope, now));
-      const inherited = exact ?? boardScopeByAgent.get(subagent.ownerAgentId);
-      if (isFreshBoardScope(inherited, now)) {
+      let inherited: BoardScope | undefined =
+        exact ??
+        boardScopeByAgent.get(subagent.ownerAgentId) ??
+        getMostRecentFreshBoardScopeFromAgents(now);
+      let inheritedFromDb = false;
+      if (!inherited) {
+        try {
+          const db = await getQueueDb();
+          const cutoffPersistence = now - BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS;
+          inherited = db.getMostRecentFreshBoardScope(cutoffPersistence);
+          if (inherited) inheritedFromDb = true;
+        } catch {
+          // DB unavailable or not yet initialized; leave inherited undefined
+        }
+      }
+      const ttlMs = inheritedFromDb ? BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS : BOARD_SCOPE_TTL_MS;
+      const accepted = inherited && now - inherited.updatedAt <= ttlMs;
+      if (accepted) {
         const nextScope: BoardScope = {
           ...(inherited as BoardScope),
           inherited: true,
@@ -1628,6 +1729,7 @@ export default function register(api: OpenClawPluginApi) {
       // (`/api/openclaw/chat`). Avoid double-logging if OpenClaw emits message_received for them.
       return;
     }
+    const inboundSubagent = parseSubagentSession(effectiveSessionKey ?? ctx.sessionKey);
 	    lastChannelId = ctx.channelId;
 	    lastEffectiveSessionKey = effectiveSessionKey;
 	    lastMessageAt = Date.now();
@@ -1651,7 +1753,16 @@ export default function register(api: OpenClawPluginApi) {
       : null;
     if (incomingKey && recentIncoming.has(incomingKey)) return;
     if (incomingKey) rememberIncoming(incomingKey);
+    const inboundFingerprintKey = inboundSubagent
+      ? null
+      : incomingFingerprintDedupeKey(ctx.channelId, effectiveSessionKey, cleanRaw);
+    if (inboundFingerprintKey && recentIncoming.has(inboundFingerprintKey)) return;
+    if (inboundFingerprintKey) rememberIncoming(inboundFingerprintKey, 60_000);
 
+    const inboundAgentId = inboundSubagent?.ownerAgentId ?? "user";
+    const inboundAgentLabel = inboundSubagent
+      ? resolveAgentLabel(inboundSubagent.ownerAgentId, `agent:${inboundSubagent.ownerAgentId}`)
+      : "User";
     sendAsync({
       topicId,
       taskId,
@@ -1660,8 +1771,8 @@ export default function register(api: OpenClawPluginApi) {
       summary,
 	      raw: truncateRaw(cleanRaw),
 	      createdAt,
-	      agentId: "user",
-	      agentLabel: "User",
+	      agentId: inboundAgentId,
+	      agentLabel: inboundAgentLabel,
       source: buildSourceMeta({
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
@@ -1733,14 +1844,19 @@ export default function register(api: OpenClawPluginApi) {
     sessionKey: string | undefined | null,
     content: string
   ) => `sending:${channelId ?? "nochannel"}:${sessionKey ?? ""}:fp:${dedupeFingerprint(content)}`;
+  const incomingFingerprintDedupeKey = (
+    channelId: string | undefined,
+    sessionKey: string | undefined | null,
+    content: string
+  ) => `incoming-fp:${channelId ?? "nochannel"}:${sessionKey ?? ""}:${dedupeFingerprint(content)}`;
   const recentIncoming = new Set<string>();
-  const rememberIncoming = (key: string) => {
+  const rememberIncoming = (key: string, ttlMs = 30_000) => {
     recentIncoming.add(key);
     if (recentIncoming.size > 200) {
       const first = recentIncoming.values().next().value;
       if (first) recentIncoming.delete(first);
     }
-    (setTimeout(() => recentIncoming.delete(key), 30_000) as unknown as { unref?: () => void })?.unref?.();
+    (setTimeout(() => recentIncoming.delete(key), ttlMs) as unknown as { unref?: () => void })?.unref?.();
   };
 
   api.on("message_sending", async (event: PluginHookMessageSentEvent, ctx: PluginHookMessageContext) => {
@@ -2024,6 +2140,7 @@ export default function register(api: OpenClawPluginApi) {
 	    } else {
 	      const isChannelSession = inferredSessionKey.startsWith("channel:");
 	      const isBoardSession = Boolean(parseBoardSessionKey(inferredSessionKey));
+	      const isSubagentSession = Boolean(parseSubagentSession(inferredSessionKey));
 	      const skipBoardAssistantFallback = isBoardSession && hasRecentOutgoingSession(inferredSessionKey);
 	      let startIdx = 0;
 	      if (!isChannelSession) {
@@ -2057,7 +2174,10 @@ export default function register(api: OpenClawPluginApi) {
 	          // role messages here creates duplicate user entries in Clawboard.
           continue;
         }
-
+	        // Heartbeat (and similar system) runs inject the prompt as role=user. Do not log those as "User"
+	        // so logs do not show "User -> OpenClaw · channel: heartbeat" or pollute task threads.
+	        const ch = (sourceChannel ?? ctx.channelId ?? "").toString().trim().toLowerCase();
+	        if (role === "user" && ch === "heartbeat") continue;
         const content = extractText(msg.content);
         if (!content || !content.trim()) continue;
         const cleanedContent = sanitizeMessageContent(content);
@@ -2125,6 +2245,11 @@ export default function register(api: OpenClawPluginApi) {
           const dedupeKey = `received:${inferredChannelId ?? "nochannel"}:${inferredSessionKey}:${messageId}`;
           if (recentIncoming.has(dedupeKey)) continue;
           rememberIncoming(dedupeKey);
+          const subagentSession = parseSubagentSession(inferredSessionKey);
+          const inboundAgentId = subagentSession?.ownerAgentId ?? "user";
+          const inboundAgentLabel = subagentSession
+            ? resolveAgentLabel(subagentSession.ownerAgentId, `agent:${subagentSession.ownerAgentId}`)
+            : "User";
           const messageCreatedAt = new Date(createdAtBaseMs + agentEndSeq).toISOString();
           agentEndSeq += 1;
           sendAsync({
@@ -2135,8 +2260,8 @@ export default function register(api: OpenClawPluginApi) {
             summary,
             raw: truncateRaw(cleanedContent),
             createdAt: messageCreatedAt,
-            agentId: "user",
-            agentLabel: "User",
+            agentId: inboundAgentId,
+            agentLabel: inboundAgentLabel,
             source: buildSourceMeta({
               channel: sourceChannel,
               sessionKey: inferredSessionKey,
