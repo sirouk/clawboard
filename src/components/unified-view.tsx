@@ -6667,7 +6667,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	            </div>
 	          );
 
-          if (isUnassigned) return card;
           return (
             <SwipeRevealRow
               key={topicId}
