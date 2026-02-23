@@ -143,7 +143,8 @@ Commands:
   restart [services...]                Restart running services
   down                                 Stop services (keep data)
   nuke [--yes]                         Stop services + remove volumes
-  reset-data [--yes]                   Stop services and wipe local data/*
+  reset-data [--yes]                   Stop services and wipe local Clawboard data/* (OpenClaw untouched)
+  reset-openclaw-sessions [--yes]      Wipe OpenClaw agent session history; keeps memories + credentials
   start-fresh-replay [--yes]           One-time: clear topics/tasks, reset classifier, wipe vectors, restart
   status                               Show container status
   logs [service]                       Tail logs
@@ -321,6 +322,117 @@ restart() {
   compose restart
 }
 
+# ===========================================================================
+# OpenClaw config helpers — resolve paths dynamically from openclaw.json so
+# these functions work correctly even if the install is non-default.
+# ===========================================================================
+
+# Resolve the OpenClaw home directory.  Respects OPENCLAW_HOME and the legacy
+# OPENCLAW_STATE_DIR override used by --profile / --dev flags.
+_oc_home() {
+  printf "%s" "${OPENCLAW_HOME:-${OPENCLAW_STATE_DIR:-$HOME/.openclaw}}"
+}
+
+# Locate openclaw.json: explicit env var > <oc-home>/openclaw.json.
+# Prints the path (empty string if not found).
+_oc_config_path() {
+  if [ -n "${OPENCLAW_CONFIG_PATH:-}" ] && [ -f "$OPENCLAW_CONFIG_PATH" ]; then
+    printf "%s" "$OPENCLAW_CONFIG_PATH"
+    return
+  fi
+  local cfg
+  cfg="$(_oc_home)/openclaw.json"
+  [ -f "$cfg" ] && printf "%s" "$cfg"
+}
+
+# Emit tab-separated lines: "<agent-id>\t<sessions-dir>"
+# Source: agents.list[] in openclaw.json.  Falls back to filesystem walk.
+_oc_agent_sessions() {
+  local oc_home cfg_path
+  oc_home="$(_oc_home)"
+  cfg_path="$(_oc_config_path)"
+
+  if [ -n "$cfg_path" ] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$cfg_path" "$oc_home" <<'PY'
+import sys, json, os
+cfg_path, oc_home = sys.argv[1], sys.argv[2]
+try:
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+except Exception:
+    sys.exit(1)
+agents = cfg.get("agents", {}).get("list", [])
+if not isinstance(agents, list):
+    sys.exit(1)
+for a in agents:
+    if not isinstance(a, dict):
+        continue
+    aid = str(a.get("id", "")).strip()
+    if not aid:
+        continue
+    sessions_dir = os.path.join(oc_home, "agents", aid, "sessions")
+    print(f"{aid}\t{sessions_dir}")
+PY
+    return $?
+  fi
+
+  # Fallback: walk the filesystem
+  local agents_dir="$oc_home/agents"
+  [ -d "$agents_dir" ] || return 0
+  for agent_dir in "$agents_dir"/*/; do
+    [ -d "$agent_dir" ] || continue
+    local aid
+    aid="$(basename "$agent_dir")"
+    printf "%s\t%s\n" "$aid" "$agent_dir/sessions"
+  done
+}
+
+# Print a human-readable summary of paths that will NOT be touched.
+# Reads workspace/memory dirs and QMD vault paths from openclaw.json.
+_oc_preserved_paths_summary() {
+  local cfg_path
+  cfg_path="$(_oc_config_path)"
+  [ -n "$cfg_path" ] && command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$cfg_path" <<'PY'
+import sys, json, os
+cfg_path = sys.argv[1]
+try:
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+except Exception:
+    sys.exit(0)
+printed = []
+# Per-agent workspace/memory (daily long-term memories)
+for a in cfg.get("agents", {}).get("list", []):
+    if not isinstance(a, dict):
+        continue
+    ws = str(a.get("workspace", "") or "").strip()
+    aid = str(a.get("id", "") or "").strip()
+    if ws:
+        mem = os.path.join(ws, "memory")
+        printed.append(f"  {mem}  [{aid} long-term memories]")
+# QMD vault paths
+for p in cfg.get("memory", {}).get("qmd", {}).get("paths", []):
+    if isinstance(p, dict) and p.get("path"):
+        label = str(p.get("name", "")).strip() or "qmd"
+        printed.append(f"  {p['path']}  [QMD vault: {label}]")
+# agent/ credential dirs
+for a in cfg.get("agents", {}).get("list", []):
+    if not isinstance(a, dict):
+        continue
+    aid = str(a.get("id", "") or "").strip()
+    if aid:
+        printed.append(f"  <oc_home>/agents/{aid}/agent/  [credentials + model config]")
+        printed.append(f"  <oc_home>/agents/{aid}/qmd/    [QMD vector index]")
+for line in printed:
+    print(line)
+PY
+}
+
+# ===========================================================================
+# reset_data — wipe Clawboard's local data/ (Postgres + Qdrant).
+# OpenClaw data is never touched; the scope is $ROOT_DIR/data only.
+# ===========================================================================
 reset_data() {
   local force=false
   local project_name=""
@@ -328,20 +440,92 @@ reset_data() {
   if [ "${1:-}" = "--yes" ]; then
     force=true
   fi
-  confirm_or_abort "This will delete local Clawboard data under data/ (Postgres + Qdrant) and remove any legacy SQLite DB volume. Continue?" "$force"
+
+  local oc_home
+  oc_home="$(_oc_home)"
+  echo "Clawboard data directory : $DATA_DIR"
+  echo "OpenClaw home (untouched): $oc_home"
+  echo ""
+
+  confirm_or_abort "Delete Clawboard data under data/ (Postgres + Qdrant) and any legacy SQLite volume? OpenClaw data is NOT affected. Continue?" "$force"
   down
 
   # Legacy cleanup: older deployments used a named SQLite volume for /db/clawboard.db.
-  # Remove it if present so reset-data is fully clean across old/new layouts.
   project_name="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT_DIR")}"
   for api_db_volume in "${project_name}_clawboard_api_db" "clawboard_api_db"; do
     docker volume rm -f "$api_db_volume" >/dev/null 2>&1 || true
   done
 
-  # Wipe all local bind-mounted state (Postgres, vectors, queues, locks, attachments, etc.).
+  # Scope is intentionally $DATA_DIR = $ROOT_DIR/data — never $oc_home.
   rm -rf "$DATA_DIR"
   mkdir -p "$DATA_DIR/qdrant" "$DATA_DIR/postgres"
-  echo "Local data reset complete."
+  echo "Clawboard data reset complete. OpenClaw data was not touched."
+}
+
+# ===========================================================================
+# reset_openclaw_sessions — wipe agent session history; preserve everything
+# else (memories, credentials, QMD indexes).  Agent list and paths are read
+# dynamically from openclaw.json so this works for any install layout.
+# ===========================================================================
+reset_openclaw_sessions() {
+  local force=false
+  if [ "${1:-}" = "--yes" ]; then
+    force=true
+  fi
+
+  local oc_home cfg_path
+  oc_home="$(_oc_home)"
+  cfg_path="$(_oc_config_path)"
+
+  echo "OpenClaw home : $oc_home"
+  if [ -n "$cfg_path" ]; then
+    echo "Config file   : $cfg_path"
+  else
+    echo "Config file   : not found — falling back to filesystem discovery"
+  fi
+  echo ""
+  echo "The following paths will be PRESERVED:"
+  if ! _oc_preserved_paths_summary 2>/dev/null; then
+    echo "  (config unreadable — agent/ and qmd/ dirs will not be touched)"
+  fi
+  echo ""
+
+  confirm_or_abort "Delete all OpenClaw session conversation history for every agent? Continue?" "$force"
+
+  local total_agents=0 total_files=0
+
+  while IFS=$'\t' read -r aid sessions_dir; do
+    [ -n "$aid" ] && [ -n "$sessions_dir" ] || continue
+
+    if [ ! -d "$sessions_dir" ]; then
+      echo "  [$aid] no sessions directory — skipping"
+      continue
+    fi
+
+    local count=0
+    count=$(find "$sessions_dir" -maxdepth 1 \( -name "*.jsonl" -o -name "*.jsonl.deleted.*" \) 2>/dev/null | wc -l | tr -d ' ')
+
+    # Active and soft-deleted session files
+    find "$sessions_dir" -maxdepth 1 -name "*.jsonl"            -delete 2>/dev/null || true
+    find "$sessions_dir" -maxdepth 1 -name "*.jsonl.deleted.*"  -delete 2>/dev/null || true
+    # Stale atomic-write temp files and doctor backup snapshots
+    find "$sessions_dir" -maxdepth 1 -name "sessions.json.*.tmp"          -delete 2>/dev/null || true
+    find "$sessions_dir" -maxdepth 1 -name "sessions.json.backup*"        -delete 2>/dev/null || true
+    find "$sessions_dir" -maxdepth 1 -name "sessions.json.bak.*"          -delete 2>/dev/null || true
+    find "$sessions_dir" -maxdepth 1 -name "sessions.json.pre-prune-backup" -delete 2>/dev/null || true
+    # Reset the index to an empty store (preserved so openclaw doesn't recreate it with stale keys)
+    [ -f "$sessions_dir/sessions.json" ] && echo '{}' > "$sessions_dir/sessions.json"
+
+    echo "  [$aid] cleared $count session file(s)  ($sessions_dir)"
+    total_agents=$((total_agents + 1))
+    total_files=$((total_files + count))
+  done < <(_oc_agent_sessions)
+
+  echo ""
+  echo "Done: $total_agents agent(s), $total_files session file(s) removed."
+  echo "Memories, credentials, and QMD indexes were not touched."
+  echo ""
+  echo "Tip: run 'openclaw gateway restart' to pick up the cleared state."
 }
 
 start_fresh_replay() {
@@ -496,33 +680,35 @@ bootstrap_openclaw() {
 
 run_interactive() {
   echo "Clawboard deploy menu"
-  echo "1) Up (start only, no build)"
-  echo "2) Rebuild (force recreate)"
-  echo "3) Fresh (tear down + rebuild all)"
-  echo "4) Down (stop)"
-  echo "5) Status"
-  echo "6) Logs"
-  echo "7) Run tests"
-  echo "8) Reset data"
-  echo "9) Load demo data"
+  echo "1)  Up (start only, no build)"
+  echo "2)  Rebuild (force recreate)"
+  echo "3)  Fresh (tear down + rebuild all)"
+  echo "4)  Down (stop)"
+  echo "5)  Status"
+  echo "6)  Logs"
+  echo "7)  Run tests"
+  echo "8)  Reset Clawboard data (wipes DB + vectors; OpenClaw untouched)"
+  echo "9)  Load demo data"
   echo "10) Clear demo data"
   echo "11) Ensure skill installed"
-  echo "12) Quit"
+  echo "12) Reset OpenClaw sessions (clears agent session history, keeps memories)"
+  echo "13) Quit"
   read -r -p "Select an option: " choice
 
   case "$choice" in
-    1) up ;;
-    2) rebuild ;;
-    3) fresh ;;
-    4) down ;;
-    5) status ;;
-    6) logs ;;
-    7) run_tests ;;
-    8) reset_data ;;
-    9) demo_load ;;
+    1)  up ;;
+    2)  rebuild ;;
+    3)  fresh ;;
+    4)  down ;;
+    5)  status ;;
+    6)  logs ;;
+    7)  run_tests ;;
+    8)  reset_data ;;
+    9)  demo_load ;;
     10) demo_clear ;;
     11) ensure_skill ;;
-    12) exit 0 ;;
+    12) reset_openclaw_sessions ;;
+    13) exit 0 ;;
     *) echo "Invalid choice"; exit 1 ;;
   esac
 }
@@ -536,6 +722,7 @@ case "$cmd" in
   down) down ;;
   nuke) shift; nuke "$@" ;;
   reset-data) shift; reset_data "$@" ;;
+  reset-openclaw-sessions|reset_openclaw_sessions) shift; reset_openclaw_sessions "$@" ;;
   start-fresh-replay|start_fresh_replay) shift; start_fresh_replay "$@" ;;
   status) status ;;
   logs) shift; logs "$@" ;;

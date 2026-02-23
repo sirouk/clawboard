@@ -920,6 +920,43 @@ function shuffleArray<T>(array: T[]): T[] {
   return next;
 }
 
+// Euclidean distance in RGB space (range 0–441).
+function colorDist(a: string, b: string): number {
+  const ra = hexToRgb(a);
+  const rb = hexToRgb(b);
+  return Math.sqrt((ra.r - rb.r) ** 2 + (ra.g - rb.g) ** 2 + (ra.b - rb.b) ** 2);
+}
+
+// Pick the color from `pool` that maximises its minimum distance to every
+// color in `forbidden`. The chosen color is moved to the back of the pool
+// (LRU-style) so it is least preferred on the next call.
+// Returns { color, pool } — treat pool as immutable; use the returned copy.
+function pickDistinctColor(
+  pool: string[],
+  forbidden: string[],
+): { color: string; pool: string[] } {
+  if (!pool.length) return { color: "#808080", pool: [] };
+  if (!forbidden.length) {
+    const color = pool[0];
+    return { color, pool: [...pool.slice(1), color] };
+  }
+  let best = pool[0];
+  let bestDist = -1;
+  let bestIdx = 0;
+  for (let i = 0; i < pool.length; i++) {
+    const minDist = Math.min(...forbidden.map((f) => colorDist(pool[i], f)));
+    if (minDist > bestDist) {
+      bestDist = minDist;
+      best = pool[i];
+      bestIdx = i;
+    }
+  }
+  const nextPool = [...pool];
+  nextPool.splice(bestIdx, 1);
+  nextPool.push(best);
+  return { color: best, pool: nextPool };
+}
+
 export function ColorShuffleTrigger({ 
   topics, 
   tasks, 
@@ -940,34 +977,56 @@ export function ColorShuffleTrigger({
     setShuffling(true);
     
     try {
-      const shuffledTopics = shuffleArray(TOPIC_FALLBACK_COLORS);
+      // Deduplicate palettes so no two slots in the pool are identical.
+      let topicPool = shuffleArray([...new Set(TOPIC_FALLBACK_COLORS)]);
       const nextTopics = [...topics];
-      const updatedTopics: Topic[] = [];
+      // Slide a window of the last 2 topic colors as forbidden so no adjacent
+      // topics share a similar hue.
+      const recentTopicColors: string[] = [];
 
       for (let i = 0; i < nextTopics.length; i++) {
         const topic = nextTopics[i];
-        const newColor = shuffledTopics[i % shuffledTopics.length];
-        const updated = { ...topic, color: newColor };
-        nextTopics[i] = updated;
-        updatedTopics.push(updated);
+        const forbidden = recentTopicColors.slice(-2);
+        const result = pickDistinctColor(topicPool, forbidden);
+        topicPool = result.pool;
+        const newColor = result.color;
+        recentTopicColors.push(newColor);
+        nextTopics[i] = { ...topic, color: newColor };
 
-        // Update DB
-        await apiFetch("/api/topics", {
-          method: "POST",
+        // Use PATCH so the backend does not bump updatedAt for a color-only change.
+        await apiFetch(`/api/topics/${encodeURIComponent(topic.id)}`, {
+          method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: topic.id, name: topic.name, color: newColor }),
+          body: JSON.stringify({ color: newColor }),
         }, token);
       }
       onTopicsUpdate(nextTopics);
 
+      // Tasks get colors from the dedicated task palette — not derived from the
+      // parent topic — so sibling tasks don't all look like tints of the same hue.
+      // Forbidden set per task: previous task globally + last task in same topic
+      // + the parent topic color (keeps tasks visually distinct from their header).
+      let taskPool = shuffleArray([...new Set(TASK_FALLBACK_COLORS)]);
       const nextTasks = [...tasks];
+      let prevTaskColor: string | null = null;
+      const topicLastTaskColor = new Map<string, string>();
+
       for (let i = 0; i < nextTasks.length; i++) {
         const task = nextTasks[i];
-        const parentTopic = nextTopics.find(t => t.id === task.topicId);
-        const topicColor = parentTopic?.color || TOPIC_FALLBACK_COLORS[0];
-        const newColor = deriveTaskColor(topicColor, `task:${task.id}:${Date.now()}`);
-        const updated = { ...task, color: newColor };
-        nextTasks[i] = updated;
+        const parentTopic = nextTopics.find((t) => t.id === task.topicId);
+        const forbidden = [
+          prevTaskColor,
+          task.topicId ? topicLastTaskColor.get(task.topicId) ?? null : null,
+          parentTopic?.color ?? null,
+        ].filter((c): c is string => c !== null);
+
+        const result = pickDistinctColor(taskPool, forbidden);
+        taskPool = result.pool;
+        const newColor = result.color;
+
+        prevTaskColor = newColor;
+        if (task.topicId) topicLastTaskColor.set(task.topicId, newColor);
+        nextTasks[i] = { ...task, color: newColor };
 
         await apiFetch(`/api/tasks/${encodeURIComponent(task.id)}`, {
           method: "PATCH",
@@ -1032,10 +1091,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const topicView: TopicView = isTopicView(storedTopicView) ? storedTopicView : "active";
   const showSnoozedTasks = useLocalStorageItem(SHOW_SNOOZED_TASKS_KEY) === "true";
   const activeSpaceIdStored = (useLocalStorageItem(ACTIVE_SPACE_KEY) ?? "").trim();
-  const [mdUp, setMdUp] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return window.matchMedia("(min-width: 768px)").matches;
-  });
+  // Must start false to match SSR output. useEffect syncs the real value post-hydration,
+  // preventing the server/client HTML mismatch that causes a hydration error.
+  const [mdUp, setMdUp] = useState(false);
   const {
     state: expansionState,
     setExpandedTopics,

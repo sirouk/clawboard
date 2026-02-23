@@ -69,6 +69,9 @@ export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; r
         if (typeof next === "string") {
           lastEventTs.current = next;
         }
+      } catch {
+        // Reconcile is best-effort. Network errors or transient API failures are silently
+        // dropped here — the watchdog/poll timer will retry on the next tick.
       } finally {
         reconciling = false;
       }

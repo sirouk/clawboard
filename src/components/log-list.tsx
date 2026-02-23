@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { LogEntry, Task, Topic } from "@/lib/types";
 import { Badge, Button, Input, SearchInput, Select, TextArea } from "@/components/ui";
@@ -208,6 +208,12 @@ function areLogsEquivalent(a: LogEntry[], b: LogEntry[]) {
   return true;
 }
 
+function summarizeText(value: string) {
+  const clean = value.trim().replace(/\s+/g, " ");
+  if (clean.length <= 140) return clean;
+  return `${clean.slice(0, 139)}…`;
+}
+
 export function LogList({
   logs: initialLogs,
   topics,
@@ -336,137 +342,153 @@ export function LogList({
   }, [agentFilter, groupByDay, initialVisibleCount, laneFilter, loadMoreEnabled, search, topicFilter, typeFilter]);
 
   const readOnly = tokenRequired && !token;
-  const topicKey = (topicId: string | null | undefined) => (topicId ? topicId : "__null__");
+  const topicKey = useCallback((topicId: string | null | undefined) => (topicId ? topicId : "__null__"), []);
 
-  const tasksFromOverride = tasksOverride ?? [];
-  const getTasksForTopic = (topicId: string | null) => {
-    // Prefer caller-provided tasks (already in memory); fall back to on-demand fetch cache.
-    if (tasksFromOverride.length > 0) {
-      return tasksFromOverride.filter((task) => (topicId ? task.topicId === topicId : task.topicId == null));
-    }
-    return tasksCache[topicKey(topicId)] ?? [];
-  };
+  // Stable reference: avoid a new array literal on every render when tasksOverride is undefined.
+  const tasksFromOverride = useMemo(() => tasksOverride ?? [], [tasksOverride]);
 
-  const ensureTasksForTopic = async (topicId: string | null) => {
-    if (tasksFromOverride.length > 0) return;
-    const key = topicKey(topicId);
-    if (tasksCache[key]) return;
-    if (tasksLoading[key]) return;
-    setTasksLoading((prev) => ({ ...prev, [key]: true }));
-    try {
-      const url = topicId ? `/api/tasks?topicId=${encodeURIComponent(topicId)}` : "/api/tasks";
-      const res = await apiFetch(url, { cache: "no-store" });
-      if (!res.ok) return;
-      const raw = await res.json().catch(() => null);
-      const payload = Array.isArray(raw)
-        ? (raw as Task[])
-        : raw && typeof raw === "object" && Array.isArray((raw as { tasks?: unknown }).tasks)
-          ? ((raw as { tasks: Task[] }).tasks ?? [])
-          : null;
-      if (!payload || !Array.isArray(payload)) return;
-      const next = topicId ? payload : payload.filter((task) => task.topicId == null);
-      setTasksCache((prev) => ({ ...prev, [key]: next }));
-    } finally {
-      setTasksLoading((prev) => ({ ...prev, [key]: false }));
-    }
-  };
+  const getTasksForTopic = useCallback(
+    (topicId: string | null) => {
+      if (tasksFromOverride.length > 0) {
+        return tasksFromOverride.filter((task) => (topicId ? task.topicId === topicId : task.topicId == null));
+      }
+      return tasksCache[topicKey(topicId)] ?? [];
+    },
+    [tasksFromOverride, tasksCache, topicKey]
+  );
 
-  const isTasksLoadingForTopic = (topicId: string | null) => Boolean(tasksLoading[topicKey(topicId)]);
+  const ensureTasksForTopic = useCallback(
+    async (topicId: string | null) => {
+      if (tasksFromOverride.length > 0) return;
+      const key = topicKey(topicId);
+      if (tasksCache[key]) return;
+      if (tasksLoading[key]) return;
+      setTasksLoading((prev) => ({ ...prev, [key]: true }));
+      try {
+        const url = topicId ? `/api/tasks?topicId=${encodeURIComponent(topicId)}` : "/api/tasks";
+        const res = await apiFetch(url, { cache: "no-store" });
+        if (!res.ok) return;
+        const raw = await res.json().catch(() => null);
+        const payload = Array.isArray(raw)
+          ? (raw as Task[])
+          : raw && typeof raw === "object" && Array.isArray((raw as { tasks?: unknown }).tasks)
+            ? ((raw as { tasks: Task[] }).tasks ?? [])
+            : null;
+        if (!payload || !Array.isArray(payload)) return;
+        const next = topicId ? payload : payload.filter((task) => task.topicId == null);
+        setTasksCache((prev) => ({ ...prev, [key]: next }));
+      } finally {
+        setTasksLoading((prev) => ({ ...prev, [key]: false }));
+      }
+    },
+    [tasksFromOverride, tasksCache, tasksLoading, topicKey, token]
+  );
 
-  const patchLogEntry = async (
-    entry: LogEntry,
-    patch: LogPatchPayload
-  ) => {
-    if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
-    const res = await apiFetch(
-      `/api/log/${encodeURIComponent(entry.id)}`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      },
-      token
-    );
-    if (!res.ok) {
-      const detail = await res.json().catch(() => null);
-      const msg = typeof detail?.detail === "string" ? detail.detail : "Failed to edit message.";
-      return { ok: false, error: msg };
-    }
-    const updated = (await res.json().catch(() => null)) as LogEntry | null;
-    if (!updated) return { ok: false, error: "Failed to edit message." };
-    setStoreLogs((prev) => prev.map((item) => (item.id === entry.id ? updated : item)));
-    setLogs((prev) => {
-      const next = prev.map((item) => (item.id === entry.id ? updated : item));
-      const scoped = scopeTopicId !== undefined || scopeTaskId !== undefined;
-      if (!scoped) return next;
-      return next.filter((row) => {
-        if (scopeTopicId !== undefined) {
-          if (scopeTopicId == null) {
-            if (row.topicId != null) return false;
-          } else if (row.topicId !== scopeTopicId) {
-            return false;
+  const isTasksLoadingForTopic = useCallback(
+    (topicId: string | null) => Boolean(tasksLoading[topicKey(topicId)]),
+    [tasksLoading, topicKey]
+  );
+
+  const patchLogEntry = useCallback(
+    async (entry: LogEntry, patch: LogPatchPayload) => {
+      if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
+      const res = await apiFetch(
+        `/api/log/${encodeURIComponent(entry.id)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        },
+        token
+      );
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        const msg = typeof detail?.detail === "string" ? detail.detail : "Failed to edit message.";
+        return { ok: false, error: msg };
+      }
+      const updated = (await res.json().catch(() => null)) as LogEntry | null;
+      if (!updated) return { ok: false, error: "Failed to edit message." };
+      setStoreLogs((prev) => prev.map((item) => (item.id === entry.id ? updated : item)));
+      setLogs((prev) => {
+        const next = prev.map((item) => (item.id === entry.id ? updated : item));
+        const scoped = scopeTopicId !== undefined || scopeTaskId !== undefined;
+        if (!scoped) return next;
+        return next.filter((row) => {
+          if (scopeTopicId !== undefined) {
+            if (scopeTopicId == null) {
+              if (row.topicId != null) return false;
+            } else if (row.topicId !== scopeTopicId) {
+              return false;
+            }
           }
-        }
-        if (scopeTaskId !== undefined) {
-          if (scopeTaskId == null) {
-            if (row.taskId != null) return false;
-          } else if ((row.taskId ?? null) !== scopeTaskId) {
-            return false;
+          if (scopeTaskId !== undefined) {
+            if (scopeTaskId == null) {
+              if (row.taskId != null) return false;
+            } else if ((row.taskId ?? null) !== scopeTaskId) {
+              return false;
+            }
           }
-        }
-        return true;
+          return true;
+        });
       });
-    });
-    return { ok: true, entry: updated };
-  };
+      return { ok: true, entry: updated };
+    },
+    [readOnly, token, setStoreLogs, scopeTopicId, scopeTaskId]
+  );
 
-  const replayClassifierBundle = async (anchorLogId: string) => {
-    const id = String(anchorLogId ?? "").trim();
-    if (!id) return { ok: false, error: "Missing anchor log id." };
-    if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
-    const res = await apiFetch(
-      "/api/classifier/replay",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ anchorLogId: id, mode: "bundle" }),
-      },
-      token
-    );
-    if (!res.ok) {
-      const detail = await res.json().catch(() => null);
-      const msg = typeof detail?.detail === "string" ? detail.detail : "Failed to replay classifier.";
-      return { ok: false, error: msg };
-    }
-    const payload = (await res.json().catch(() => null)) as { logCount?: unknown } | null;
-    const logCount = typeof payload?.logCount === "number" ? payload.logCount : undefined;
-    return { ok: true, logCount };
-  };
+  const replayClassifierBundle = useCallback(
+    async (anchorLogId: string) => {
+      const id = String(anchorLogId ?? "").trim();
+      if (!id) return { ok: false, error: "Missing anchor log id." };
+      if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
+      const res = await apiFetch(
+        "/api/classifier/replay",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ anchorLogId: id, mode: "bundle" }),
+        },
+        token
+      );
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        const msg = typeof detail?.detail === "string" ? detail.detail : "Failed to replay classifier.";
+        return { ok: false, error: msg };
+      }
+      const payload = (await res.json().catch(() => null)) as { logCount?: unknown } | null;
+      const logCount = typeof payload?.logCount === "number" ? payload.logCount : undefined;
+      return { ok: true, logCount };
+    },
+    [readOnly, token]
+  );
 
-  const purgeForward = async (anchorLogId: string) => {
-    const id = String(anchorLogId ?? "").trim();
-    if (!id) return { ok: false, error: "Missing anchor log id." };
-    if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
-    const res = await apiFetch(`/api/log/${encodeURIComponent(id)}/purge_forward`, { method: "POST" }, token);
-    if (!res.ok) {
-      const detail = await res.json().catch(() => null);
-      const msg = typeof detail?.detail === "string" ? detail.detail : "Failed to purge forward.";
-      return { ok: false, error: msg };
-    }
-    const payload = (await res.json().catch(() => null)) as { deletedCount?: unknown; deletedIds?: unknown } | null;
-    const deletedCount = typeof payload?.deletedCount === "number" ? payload.deletedCount : undefined;
-    const deletedIds = Array.isArray(payload?.deletedIds)
-      ? payload.deletedIds.map((item) => String(item ?? "").trim()).filter(Boolean)
-      : [];
+  const purgeForward = useCallback(
+    async (anchorLogId: string) => {
+      const id = String(anchorLogId ?? "").trim();
+      if (!id) return { ok: false, error: "Missing anchor log id." };
+      if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
+      const res = await apiFetch(`/api/log/${encodeURIComponent(id)}/purge_forward`, { method: "POST" }, token);
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        const msg = typeof detail?.detail === "string" ? detail.detail : "Failed to purge forward.";
+        return { ok: false, error: msg };
+      }
+      const payload = (await res.json().catch(() => null)) as { deletedCount?: unknown; deletedIds?: unknown } | null;
+      const deletedCount = typeof payload?.deletedCount === "number" ? payload.deletedCount : undefined;
+      const deletedIds = Array.isArray(payload?.deletedIds)
+        ? payload.deletedIds.map((item) => String(item ?? "").trim()).filter(Boolean)
+        : [];
 
-    if (deletedIds.length > 0) {
-      const deletedSet = new Set(deletedIds);
-      setStoreLogs((prev) => prev.filter((row) => !deletedSet.has(row.id)));
-      setLogs((prev) => prev.filter((row) => !deletedSet.has(row.id)));
-    }
+      if (deletedIds.length > 0) {
+        const deletedSet = new Set(deletedIds);
+        setStoreLogs((prev) => prev.filter((row) => !deletedSet.has(row.id)));
+        setLogs((prev) => prev.filter((row) => !deletedSet.has(row.id)));
+      }
 
-    return { ok: true, deletedCount };
-  };
+      return { ok: true, deletedCount };
+    },
+    [readOnly, token, setStoreLogs]
+  );
 
   const normalizedSearch = search.trim().toLowerCase();
   const semanticRefreshKey = useMemo(() => {
@@ -600,68 +622,66 @@ export function LogList({
       .map(([label]) => label);
   }, [agentLabelCounts]);
 
-  const summarize = (value: string) => {
-    const clean = value.trim().replace(/\s+/g, " ");
-    if (clean.length <= 140) return clean;
-    return `${clean.slice(0, 139)}…`;
-  };
+  const addNote = useCallback(
+    async (entry: LogEntry, note: string) => {
+      if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
+      const payload = {
+        topicId: entry.topicId,
+        taskId: entry.taskId ?? null,
+        relatedLogId: entry.id,
+        type: "note",
+        content: note,
+        summary: summarizeText(note),
+        agentId: "user",
+        agentLabel: "User",
+      };
 
-  const addNote = async (entry: LogEntry, note: string) => {
-    if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
-    const payload = {
-      topicId: entry.topicId,
-      taskId: entry.taskId ?? null,
-      relatedLogId: entry.id,
-      type: "note",
-      content: note,
-      summary: summarize(note),
-      agentId: "user",
-      agentLabel: "User",
-    };
+      const res = await apiFetch(
+        "/api/log",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        token
+      );
 
-    const res = await apiFetch(
-      "/api/log",
-      {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-      },
-      token
-    );
+      if (!res.ok) {
+        return { ok: false, error: "Failed to add note." };
+      }
+      const data = await res.json().catch(() => null);
+      if (data?.logs && Array.isArray(data.logs)) {
+        setStoreLogs(data.logs);
+        setLogs(data.logs);
+      } else {
+        const optimistic = { ...(payload as LogEntry), id: `tmp-${Date.now()}`, createdAt: new Date().toISOString() };
+        setStoreLogs((prev) => [optimistic, ...prev]);
+        setLogs((prev) => [optimistic, ...prev]);
+      }
+      return { ok: true };
+    },
+    [readOnly, token, setStoreLogs]
+  );
 
-    if (!res.ok) {
-      return { ok: false, error: "Failed to add note." };
-    }
-    const data = await res.json().catch(() => null);
-    if (data?.logs && Array.isArray(data.logs)) {
-      setStoreLogs(data.logs);
-      setLogs(data.logs);
-    } else {
-      const optimistic = { ...(payload as LogEntry), id: `tmp-${Date.now()}`, createdAt: new Date().toISOString() };
-      setStoreLogs((prev) => [optimistic, ...prev]);
-      setLogs((prev) => [optimistic, ...prev]);
-    }
-    return { ok: true };
-  };
+  const deleteLogEntry = useCallback(
+    async (entry: LogEntry) => {
+      if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
 
-  const deleteLogEntry = async (entry: LogEntry) => {
-    if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
+      const res = await apiFetch(`/api/log/${encodeURIComponent(entry.id)}`, { method: "DELETE" }, token);
 
-    const res = await apiFetch(`/api/log/${encodeURIComponent(entry.id)}`, { method: "DELETE" }, token);
+      if (!res.ok) {
+        return { ok: false, error: "Failed to delete message." };
+      }
 
-    if (!res.ok) {
-      return { ok: false, error: "Failed to delete message." };
-    }
-
-    const data = (await res.json().catch(() => null)) as { deletedIds?: string[] } | null;
-    const deletedIds = Array.isArray(data?.deletedIds) ? data?.deletedIds.filter(Boolean) : [entry.id];
-    const removed = new Set(deletedIds.length > 0 ? deletedIds : [entry.id]);
-    setStoreLogs((prev) => prev.filter((item) => !removed.has(item.id)));
-    setLogs((prev) => prev.filter((item) => !removed.has(item.id)));
-    return { ok: true };
-  };
+      const data = (await res.json().catch(() => null)) as { deletedIds?: string[] } | null;
+      const deletedIds = Array.isArray(data?.deletedIds) ? data?.deletedIds.filter(Boolean) : [entry.id];
+      const removed = new Set(deletedIds.length > 0 ? deletedIds : [entry.id]);
+      setStoreLogs((prev) => prev.filter((item) => !removed.has(item.id)));
+      setLogs((prev) => prev.filter((item) => !removed.has(item.id)));
+      return { ok: true };
+    },
+    [readOnly, token, setStoreLogs]
+  );
 
   return (
     <div className="space-y-4">
@@ -851,28 +871,7 @@ export function LogList({
   );
 }
 
-function LogRow({
-  entry,
-  topicLabel,
-  topics,
-  scopeTopicId,
-  scopeTaskId,
-  showRawAll,
-  allowNotes,
-  allowDelete,
-  messageDensity,
-  onAddNote,
-  onDelete,
-  onPatch,
-  onReplayClassifier,
-  onPurgeForward,
-  getTasksForTopic,
-  ensureTasksForTopic,
-  isTasksLoadingForTopic,
-  readOnly,
-  enableNavigation,
-  variant,
-}: {
+type LogRowProps = {
   entry: LogEntry;
   topicLabel: string;
   topics: Topic[];
@@ -896,7 +895,30 @@ function LogRow({
   readOnly: boolean;
   enableNavigation: boolean;
   variant: LogListVariant;
-}) {
+};
+
+const LogRow = memo(function LogRow({
+  entry,
+  topicLabel,
+  topics,
+  scopeTopicId,
+  scopeTaskId,
+  showRawAll,
+  allowNotes,
+  allowDelete,
+  messageDensity,
+  onAddNote,
+  onDelete,
+  onPatch,
+  onReplayClassifier,
+  onPurgeForward,
+  getTasksForTopic,
+  ensureTasksForTopic,
+  isTasksLoadingForTopic,
+  readOnly,
+  enableNavigation,
+  variant,
+}: LogRowProps) {
   const router = useRouter();
   const [compactMessageVisible, setCompactMessageVisible] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -1033,6 +1055,10 @@ function LogRow({
     };
   }, [entry.id, toolEvent, toolRawLoaded]);
 
+  // Available in all variants (chat bubble + cards edit panel).
+  const showPurgeForward =
+    allowDelete && Boolean(scopeTopicId) && typeof onPurgeForward === "function";
+
   if (variant === "chat") {
     const chatBubbleText = (() => {
       if (!isConversation) return summary || "(empty)";
@@ -1041,9 +1067,6 @@ function LogRow({
     const bubbleTitle = sourceMeta ? `${formatDateTime(entry.createdAt)}\n${sourceMeta}` : formatDateTime(entry.createdAt);
     const showReplay =
       isUser && isConversation && scopeTaskId === null && Boolean(scopeTopicId) && typeof onReplayClassifier === "function";
-
-    const showPurgeForward =
-      allowDelete && scopeTaskId === null && Boolean(scopeTopicId) && typeof onPurgeForward === "function";
 
     return (
       <div
@@ -1430,7 +1453,11 @@ function LogRow({
                                   setPurgeArmed(true);
                                   setPurgeStatus(null);
                                 }}
-                                title="Delete this message and everything after it in this Topic Chat session"
+                                title={
+                                  scopeTaskId
+                                    ? "Delete this message and everything after it in this Task Chat"
+                                    : "Delete this message and everything after it in this Topic Chat"
+                                }
                               >
                                 Purge from here
                               </Button>
@@ -1531,7 +1558,7 @@ function LogRow({
 	              )}
 	            </div>
 
-            <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+            <div className="mt-2 flex flex-wrap items-center justify-start gap-2">
               <CopyPill value={copyValue || messageSource || chatBubbleText} />
               {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen ? (
                 <>
@@ -1588,7 +1615,7 @@ function LogRow({
                     className="min-h-[90px]"
                   />
                   {noteStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{noteStatus}</p>}
-                  <div className="flex flex-wrap items-center justify-center gap-2">
+                  <div className="flex flex-wrap items-center justify-start gap-2">
                     <Button
                       size="sm"
                       onClick={async () => {
@@ -1688,7 +1715,7 @@ function LogRow({
 
                   {editStatus && <p className="text-xs text-[rgb(var(--claw-muted))]">{editStatus}</p>}
 
-                  <div className="flex flex-wrap items-center justify-center gap-2">
+                  <div className="flex flex-wrap items-center justify-start gap-2">
                     <Button
                       size="sm"
                       disabled={readOnly || editSaving}
@@ -1730,7 +1757,7 @@ function LogRow({
                   <div className="pt-2">
                     <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Danger zone</div>
                     {deleteStatus && <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{deleteStatus}</p>}
-                    <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+                    <div className="mt-2 flex flex-wrap items-center justify-start gap-2">
                       {!deleteArmed ? (
                         <Button
                           variant="secondary"
@@ -1778,6 +1805,64 @@ function LogRow({
                       )}
                     </div>
                   </div>
+
+                  {showPurgeForward && (
+                    <>
+                      {purgeStatus && <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">{purgeStatus}</p>}
+                      <div className="mt-2 flex flex-wrap items-center justify-start gap-2">
+                        {!purgeArmed ? (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            className="border-[rgba(255,90,45,0.35)] text-[rgba(255,90,45,0.92)]"
+                            disabled={readOnly}
+                            onClick={() => {
+                              setPurgeArmed(true);
+                              setPurgeStatus(null);
+                            }}
+                            title={
+                              scopeTaskId
+                                ? "Delete this message and everything after it in this Task Chat"
+                                : "Delete this message and everything after it in this Topic Chat"
+                            }
+                          >
+                            Purge from here
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            className="border-[rgba(255,90,45,0.35)] text-[rgba(255,90,45,0.92)]"
+                            disabled={readOnly}
+                            onClick={async () => {
+                              setPurgeStatus(null);
+                              const result = await onPurgeForward(entry.id);
+                              if (!result.ok) {
+                                setPurgeStatus(result.error ?? "Failed to purge forward.");
+                                return;
+                              }
+                              setEditOpen(false);
+                              setPurgeArmed(false);
+                            }}
+                          >
+                            Confirm purge
+                          </Button>
+                        )}
+                        {purgeArmed && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => {
+                              setPurgeArmed(false);
+                              setPurgeStatus(null);
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        )}
+                      </div>
+                    </>
+                  )}
 
                   {sourceMeta && (
                     <div className="pt-2 text-xs text-[rgb(var(--claw-muted))]">
@@ -2164,6 +2249,64 @@ function LogRow({
               </div>
             </div>
 
+            {showPurgeForward && (
+              <>
+                {purgeStatus && <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">{purgeStatus}</p>}
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {!purgeArmed ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="border-[rgba(255,90,45,0.35)] text-[rgba(255,90,45,0.92)]"
+                      disabled={readOnly}
+                      onClick={() => {
+                        setPurgeArmed(true);
+                        setPurgeStatus(null);
+                      }}
+                      title={
+                        scopeTaskId
+                          ? "Delete this message and everything after it in this Task Chat"
+                          : "Delete this message and everything after it in this Topic Chat"
+                      }
+                    >
+                      Purge from here
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="border-[rgba(255,90,45,0.35)] text-[rgba(255,90,45,0.92)]"
+                      disabled={readOnly}
+                      onClick={async () => {
+                        setPurgeStatus(null);
+                        const result = await onPurgeForward(entry.id);
+                        if (!result.ok) {
+                          setPurgeStatus(result.error ?? "Failed to purge forward.");
+                          return;
+                        }
+                        setEditOpen(false);
+                        setPurgeArmed(false);
+                      }}
+                    >
+                      Confirm purge
+                    </Button>
+                  )}
+                  {purgeArmed && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        setPurgeArmed(false);
+                        setPurgeStatus(null);
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  )}
+                </div>
+              </>
+            )}
+
             {sourceMeta && (
               <div className="pt-2 text-xs text-[rgb(var(--claw-muted))]">
                 <span className="font-mono">{sourceMeta}</span>
@@ -2175,4 +2318,28 @@ function LogRow({
       )}
     </div>
   );
-}
+}, (prev: LogRowProps, next: LogRowProps) => {
+  // Skip re-render when the entry object reference is unchanged (the common SSE case where a
+  // new message is appended but existing entries keep their reference from upsertById).
+  if (prev.entry !== next.entry) return false;
+  if (prev.topicLabel !== next.topicLabel) return false;
+  if (prev.topics !== next.topics) return false;
+  if (prev.scopeTopicId !== next.scopeTopicId) return false;
+  if (prev.scopeTaskId !== next.scopeTaskId) return false;
+  if (prev.showRawAll !== next.showRawAll) return false;
+  if (prev.allowNotes !== next.allowNotes) return false;
+  if (prev.allowDelete !== next.allowDelete) return false;
+  if (prev.messageDensity !== next.messageDensity) return false;
+  if (prev.readOnly !== next.readOnly) return false;
+  if (prev.enableNavigation !== next.enableNavigation) return false;
+  if (prev.variant !== next.variant) return false;
+  if (prev.onAddNote !== next.onAddNote) return false;
+  if (prev.onDelete !== next.onDelete) return false;
+  if (prev.onPatch !== next.onPatch) return false;
+  if (prev.onReplayClassifier !== next.onReplayClassifier) return false;
+  if (prev.onPurgeForward !== next.onPurgeForward) return false;
+  if (prev.getTasksForTopic !== next.getTasksForTopic) return false;
+  if (prev.ensureTasksForTopic !== next.ensureTasksForTopic) return false;
+  if (prev.isTasksLoadingForTopic !== next.isTasksLoadingForTopic) return false;
+  return true;
+});

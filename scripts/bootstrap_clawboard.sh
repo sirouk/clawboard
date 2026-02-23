@@ -1215,7 +1215,10 @@ maybe_run_local_memory_setup() {
     return 0
   fi
   log_info "Running local memory setup (tool allow list, heartbeat, watchdog)..."
-  if bash "$script_path"; then
+  # Force a full reindex so that Obsidian vault collections (added to memory.qmd.paths) are
+  # guaranteed to be populated even on existing installations where the incremental index
+  # would otherwise skip new/empty QMD collections.
+  if MEMORY_FORCE_INDEX=true bash "$script_path"; then
     log_success "Local memory setup completed."
   else
     log_warn "setup-openclaw-local-memory.sh did not complete successfully. Re-run: bash $script_path"
@@ -2249,6 +2252,15 @@ case "$OPENCLAW_HEAP_SETUP_STATUS" in
 esac
 echo "Security note: CLAWBOARD_TOKEN is required for all writes and non-localhost reads."
 echo "               Localhost reads can run tokenless. Keep network ACLs strict (no Funnel/public exposure)."
+echo ""
+echo "──────────────────────────────────────────────────────────────────────────"
+echo "Memory status"
+echo "──────────────────────────────────────────────────────────────────────────"
+if command -v openclaw >/dev/null 2>&1; then
+  openclaw memory status --deep || true
+else
+  echo "(openclaw not on PATH — skipping memory status)"
+fi
 echo ""
 echo "If OpenClaw was not installed, run this later:"
 echo "  bash scripts/bootstrap_clawboard.sh --skip-docker --update"

@@ -4813,7 +4813,12 @@ def _openclaw_history_channel_from_session_key(session_key: str) -> str:
         parts = [part.strip().lower() for part in base.split(":")]
         if len(parts) >= 3:
             token = parts[2]
-            if token in {"main", "subagent", "cron", "hook", "node", "global", "unknown"}:
+            # Isolated cron sessions (agent:main:cron:<id>) are automated background
+            # tasks; tag them as "cron-event" so the classifier suppresses them rather
+            # than routing them into user topics.
+            if token == "cron":
+                return "cron-event"
+            if token in {"main", "subagent", "hook", "node", "global", "unknown"}:
                 return "openclaw"
             return token or "openclaw"
     token = base.split(":", 1)[0].strip()
@@ -6783,13 +6788,14 @@ def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
         if "color" in fields:
             if payload.color is None:
                 topic.color = None
-                touched = True
+                # Color-only changes intentionally do not set touched=True so that
+                # updatedAt is not bumped (e.g. Shuffle Board Colors must not reorder topics).
             else:
                 normalized = _normalize_hex_color(payload.color)
                 if not normalized:
                     raise HTTPException(status_code=400, detail="Invalid color (expected #RRGGBB)")
                 topic.color = normalized
-                touched = True
+                # same: color change alone does not advance updatedAt
 
         if "description" in fields:
             desc = payload.description
@@ -7389,13 +7395,14 @@ def patch_task(task_id: str, payload: TaskPatch = Body(...)):
         if "color" in fields:
             if payload.color is None:
                 task.color = None
-                touched = True
+                # Color-only changes intentionally do not set touched=True so that
+                # updatedAt is not bumped (e.g. Shuffle Board Colors must not reorder tasks).
             else:
                 normalized = _normalize_hex_color(payload.color)
                 if not normalized:
                     raise HTTPException(status_code=400, detail="Invalid color (expected #RRGGBB)")
                 task.color = normalized
-                touched = True
+                # same: color change alone does not advance updatedAt
 
         if "topicId" in fields:
             if payload.topicId:
@@ -8590,7 +8597,9 @@ def purge_topic_chat(topic_id: str):
 def purge_log_forward(log_id: str):
     """Permanently delete the given log entry and everything after it in the same board chat session.
 
-    Intended for Topic Chat cleanup when a thread goes in a bad direction.
+    Works for both Topic Chat (taskId IS NULL) and Task Chat (taskId IS NOT NULL) entries.
+    For Topic Chat the scope is: same topicId, taskId IS NULL.
+    For Task Chat the scope is: same topicId + same taskId.
     """
     anchor_id = (log_id or "").strip()
     if not anchor_id:
@@ -8603,28 +8612,40 @@ def purge_log_forward(log_id: str):
 
         topic_id = str(getattr(anchor, "topicId", "") or "").strip()
         task_id = getattr(anchor, "taskId", None)
-        if not topic_id or task_id is not None:
-            raise HTTPException(status_code=400, detail="Purge forward is only supported for Topic Chat messages")
+        if not topic_id:
+            raise HTTPException(status_code=400, detail="Anchor log has no topicId; purge forward requires a board chat entry")
 
-        # Purge within Topic Chat scope only: same topicId + taskId is NULL, from anchor onward.
+        # Scope the query to the anchor's chat thread.
+        if task_id is not None:
+            # Task Chat: same topic + same task.
+            q_filter = (LogEntry.topicId == topic_id, LogEntry.taskId == task_id)
+            scope_label = "Task Chat"
+            scope_err = "Anchor log is not part of Task Chat"
+        else:
+            # Topic Chat: same topic, no task.
+            q_filter = (LogEntry.topicId == topic_id, LogEntry.taskId.is_(None))
+            scope_label = "Topic Chat"
+            scope_err = "Anchor log is not part of Topic Chat"
+
         query = (
             select(LogEntry)
-            .where(LogEntry.topicId == topic_id, LogEntry.taskId.is_(None))
+            .where(*q_filter)
             .order_by(
                 LogEntry.createdAt.asc(),
                 (text("rowid ASC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.asc()),
             )
         )
-        topic_chat_logs = session.exec(query).all()
-        if not topic_chat_logs:
+        _ = scope_label  # kept for future logging
+        chat_logs = session.exec(query).all()
+        if not chat_logs:
             return {"ok": True, "deleted": False, "deletedCount": 0, "deletedIds": []}
 
         # Purge from the anchor's position forward.
-        start_idx = next((idx for idx, row in enumerate(topic_chat_logs) if row.id == anchor_id), -1)
+        start_idx = next((idx for idx, row in enumerate(chat_logs) if row.id == anchor_id), -1)
         if start_idx < 0:
-            raise HTTPException(status_code=400, detail="Anchor log is not part of Topic Chat")
+            raise HTTPException(status_code=400, detail=scope_err)
 
-        roots = topic_chat_logs[start_idx:]
+        roots = chat_logs[start_idx:]
         root_ids = [row.id for row in roots]
 
         notes = session.exec(select(LogEntry).where(LogEntry.relatedLogId.in_(root_ids))).all() if root_ids else []

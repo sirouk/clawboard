@@ -270,7 +270,13 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const reconcile = async (since?: string) => {
     const url = since ? `/api/changes?since=${encodeURIComponent(since)}` : "/api/changes";
-    const res = await apiFetch(url, { cache: "no-store" });
+    let res: Response;
+    try {
+      res = await apiFetch(url, { cache: "no-store" });
+    } catch {
+      // Network unavailable or API temporarily unreachable — will retry on next poll/watchdog tick.
+      return;
+    }
     if (!res.ok) return;
     const payload = await res.json().catch(() => null);
     if (!payload) return;
