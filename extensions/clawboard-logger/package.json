@@ -5,6 +5,9 @@
   "main": "./index.js",
   "files": ["index.js", "openclaw.plugin.json", "package.json"],
   "description": "Always-on logging bridge from OpenClaw to Clawboard.",
+  "scripts": {
+    "build": "tsc -p tsconfig.plugin.json"
+  },
   "openclaw": {
     "extensions": ["./index.js"]
   }

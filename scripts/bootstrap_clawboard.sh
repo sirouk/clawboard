@@ -1228,8 +1228,8 @@ maybe_offer_obsidian_memory_setup() {
   local answer=""
   local should_run=false
   local rc=0
-  local obsidian_extra=""
-  [ "$USE_COLOR" = false ] && obsidian_extra="--no-color"
+  local -a obsidian_args=()
+  [ "$USE_COLOR" = false ] && obsidian_args+=(--no-color)
 
   case "$mode" in
     never)
@@ -1272,7 +1272,7 @@ maybe_offer_obsidian_memory_setup() {
   fi
 
   log_info "Launching Obsidian thinking vault + qmd setup..."
-  if ! bash "$obsidian_script" $obsidian_extra; then
+  if ! bash "$obsidian_script" "${obsidian_args[@]}"; then
     rc=1
     log_warn "setup_obsidian_brain.sh did not complete successfully."
   fi
@@ -2049,6 +2049,13 @@ PY
 
     if [ "$SKIP_PLUGIN" = false ]; then
       log_info "Installing Clawboard logger plugin..."
+      # Compile TypeScript source to index.js before installing so the plugin reflects the
+      # latest source. Non-fatal: if tsc is unavailable the existing index.js is used as-is.
+      if [ -f "$INSTALL_DIR/node_modules/.bin/tsc" ] && [ -f "$INSTALL_DIR/extensions/clawboard-logger/tsconfig.plugin.json" ]; then
+        log_info "Compiling clawboard-logger TypeScript plugin..."
+        (cd "$INSTALL_DIR" && node_modules/.bin/tsc -p extensions/clawboard-logger/tsconfig.plugin.json 2>/dev/null) \
+          || log_warn "Plugin TypeScript compile failed; using existing index.js"
+      fi
       PLUGIN_EXT_DIR="$OPENCLAW_HOME/extensions/clawboard-logger"
       if [ -e "$PLUGIN_EXT_DIR" ]; then
         rm -rf "$PLUGIN_EXT_DIR"

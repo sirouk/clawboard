@@ -12,8 +12,8 @@ import {
   computeEffectiveSessionKey,
   isBoardSessionKey,
   parseBoardSessionKey,
-} from "./session-key";
-import { getIgnoreSessionPrefixesFromEnv, shouldIgnoreSessionKey } from "./ignore-session";
+} from "./session-key.js";
+import { getIgnoreSessionPrefixesFromEnv, shouldIgnoreSessionKey } from "./ignore-session.js";
 
 type HookEvent = {
   [key: string]: unknown;
@@ -496,6 +496,10 @@ export default function register(api: OpenClawPluginApi) {
         INSERT OR REPLACE INTO board_scope_cache (agent_id, topic_id, task_id, kind, session_key, updated_at_ms)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6);
       `);
+      // Intentionally cross-agent: returns the globally most-recent fresh scope to use as a
+      // fallback when the owning agent's in-memory scope cannot be found (e.g. after a restart).
+      // The PRIMARY KEY on agent_id enables per-agent upserts; this query ignores it to get the
+      // latest scope across all agents, which is the correct behaviour for orphaned subagents.
       this.scopeSelectStmt = this.db.prepare(`
         SELECT topic_id as topicId, task_id as taskId, kind, session_key as sessionKey, updated_at_ms as updatedAt
         FROM board_scope_cache
@@ -1673,7 +1677,7 @@ export default function register(api: OpenClawPluginApi) {
     const raw = event.content ?? "";
     const cleanRaw = sanitizeMessageContent(raw);
     if (isClassifierPayloadText(cleanRaw)) return;
-	    if (!cleanRaw) return;
+    if (!cleanRaw) return;
     const meta = normalizeEventMeta(
       event.metadata as Record<string, unknown> | undefined,
       (event as { sessionKey?: unknown }).sessionKey,
@@ -1730,24 +1734,24 @@ export default function register(api: OpenClawPluginApi) {
       return;
     }
     const inboundSubagent = parseSubagentSession(effectiveSessionKey ?? ctx.sessionKey);
-	    lastChannelId = ctx.channelId;
-	    lastEffectiveSessionKey = effectiveSessionKey;
-	    lastMessageAt = Date.now();
-	    const ctxSessionKey = (ctx as unknown as { sessionKey?: string })?.sessionKey ?? (meta?.sessionKey as string | undefined);
-	    if (ctxSessionKey) {
-	      inboundBySession.set(ctxSessionKey, {
-	        ts: lastMessageAt,
-	        channelId: ctx.channelId,
-	        sessionKey: effectiveSessionKey,
-	      });
-	    }
-	    const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
-	    const topicId = routing.topicId;
-	    const taskId = routing.taskId;
+    lastChannelId = ctx.channelId;
+    lastEffectiveSessionKey = effectiveSessionKey;
+    lastMessageAt = Date.now();
+    const ctxSessionKey = (ctx as unknown as { sessionKey?: string })?.sessionKey ?? (meta?.sessionKey as string | undefined);
+    if (ctxSessionKey) {
+      inboundBySession.set(ctxSessionKey, {
+        ts: lastMessageAt,
+        channelId: ctx.channelId,
+        sessionKey: effectiveSessionKey,
+      });
+    }
+    const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
+    const topicId = routing.topicId;
+    const taskId = routing.taskId;
 
-	    const metaSummary = meta?.summary;
-	    const summary =
-	      typeof metaSummary === "string" && metaSummary.trim().length > 0 ? summarize(metaSummary) : summarize(cleanRaw);
+    const metaSummary = meta?.summary;
+    const summary =
+      typeof metaSummary === "string" && metaSummary.trim().length > 0 ? summarize(metaSummary) : summarize(cleanRaw);
     const incomingKey = messageId
       ? `received:${ctx.channelId ?? "nochannel"}:${effectiveSessionKey ?? ""}:${messageId}`
       : null;
@@ -1769,10 +1773,10 @@ export default function register(api: OpenClawPluginApi) {
       type: "conversation",
       content: cleanRaw,
       summary,
-	      raw: truncateRaw(cleanRaw),
-	      createdAt,
-	      agentId: inboundAgentId,
-	      agentLabel: inboundAgentLabel,
+      raw: truncateRaw(cleanRaw),
+      createdAt,
+      agentId: inboundAgentId,
+      agentLabel: inboundAgentLabel,
       source: buildSourceMeta({
         channel: ctx.channelId,
         sessionKey: effectiveSessionKey,
@@ -1782,11 +1786,11 @@ export default function register(api: OpenClawPluginApi) {
         flow: deriveConversationFlow({
           role: "user",
           sessionKey: effectiveSessionKey ?? ctx.sessionKey,
-	          agentId: ctx.agentId,
-	          assistantLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey),
-	        }),
-	      }),
-	    });
+          agentId: ctx.agentId,
+          assistantLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey),
+        }),
+      }),
+    });
 
     // Intentionally allow topicId to be null/undefined. Stage-2 classifier
     // will attach this log to a real topic based on conversation context.
@@ -2137,16 +2141,16 @@ export default function register(api: OpenClawPluginApi) {
 
     if (!inferredSessionKey) {
       // No session key to attribute messages; skip conversation logs.
-	    } else {
-	      const isChannelSession = inferredSessionKey.startsWith("channel:");
-	      const isBoardSession = Boolean(parseBoardSessionKey(inferredSessionKey));
-	      const isSubagentSession = Boolean(parseSubagentSession(inferredSessionKey));
-	      const skipBoardAssistantFallback = isBoardSession && hasRecentOutgoingSession(inferredSessionKey);
-	      let startIdx = 0;
-	      if (!isChannelSession) {
-	        const prev = agentEndCursorBySession.get(inferredSessionKey);
-	        if (typeof prev === "number" && Number.isFinite(prev)) {
-	          startIdx = Math.max(0, Math.floor(prev));
+    } else {
+      const isChannelSession = inferredSessionKey.startsWith("channel:");
+      const isBoardSession = Boolean(parseBoardSessionKey(inferredSessionKey));
+      const isSubagentSession = Boolean(parseSubagentSession(inferredSessionKey));
+      const skipBoardAssistantFallback = isBoardSession && hasRecentOutgoingSession(inferredSessionKey);
+      let startIdx = 0;
+      if (!isChannelSession) {
+        const prev = agentEndCursorBySession.get(inferredSessionKey);
+        if (typeof prev === "number" && Number.isFinite(prev)) {
+          startIdx = Math.max(0, Math.floor(prev));
         } else {
           // On gateway restart we lose the in-memory cursor; only scan the tail to avoid
           // re-walking huge direct-session histories (which can stall the gateway).
@@ -2159,25 +2163,25 @@ export default function register(api: OpenClawPluginApi) {
       // without collapsing them onto the same timestamp.
       let agentEndSeq = 0;
 
-	      for (let idx = startIdx; idx < messages.length; idx += 1) {
-	        const msg = messages[idx];
-	        const role = typeof msg.role === "string" ? msg.role : undefined;
-	        if (role !== "assistant" && role !== "user") continue;
-	        if (isBoardSession && role === "user") {
-	          // Clawboard persists UI-originated user messages immediately via `/api/openclaw/chat`.
-	          // Logging them again from agent_end duplicates them (same content, different ids).
-	          continue;
-	        }
-	        if (isChannelSession && role === "user") {
-	          // Inbound user messages for channel sessions are logged via message_received with the
-	          // upstream messageId. agent_end often includes prior context prompts, so logging user
-	          // role messages here creates duplicate user entries in Clawboard.
+      for (let idx = startIdx; idx < messages.length; idx += 1) {
+        const msg = messages[idx];
+        const role = typeof msg.role === "string" ? msg.role : undefined;
+        if (role !== "assistant" && role !== "user") continue;
+        if (isBoardSession && role === "user") {
+          // Clawboard persists UI-originated user messages immediately via `/api/openclaw/chat`.
+          // Logging them again from agent_end duplicates them (same content, different ids).
           continue;
         }
-	        // Heartbeat (and similar system) runs inject the prompt as role=user. Do not log those as "User"
-	        // so logs do not show "User -> OpenClaw · channel: heartbeat" or pollute task threads.
-	        const ch = (sourceChannel ?? ctx.channelId ?? "").toString().trim().toLowerCase();
-	        if (role === "user" && ch === "heartbeat") continue;
+        if (isChannelSession && role === "user") {
+          // Inbound user messages for channel sessions are logged via message_received with the
+          // upstream messageId. agent_end often includes prior context prompts, so logging user
+          // role messages here creates duplicate user entries in Clawboard.
+          continue;
+        }
+        // Heartbeat (and similar system) runs inject the prompt as role=user. Do not log those as "User"
+        // so logs do not show "User -> OpenClaw · channel: heartbeat" or pollute task threads.
+        const ch = (sourceChannel ?? ctx.channelId ?? "").toString().trim().toLowerCase();
+        if (role === "user" && ch === "heartbeat") continue;
         const content = extractText(msg.content);
         if (!content || !content.trim()) continue;
         const cleanedContent = sanitizeMessageContent(content);

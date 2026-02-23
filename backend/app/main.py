@@ -5024,13 +5024,6 @@ def _openclaw_history_canonical_session_key(session_key: str) -> str:
     return base.lower()
 
 
-def _openclaw_history_is_subagent_session_key(session_key: str) -> bool:
-    base = (str(session_key or "").split("|", 1)[0] or "").strip().lower()
-    if not base:
-        return False
-    return base.startswith("agent:") and ":subagent:" in base
-
-
 def _openclaw_history_subagent_parts(session_key: str) -> tuple[str, str] | None:
     base = (str(session_key or "").split("|", 1)[0] or "").strip()
     if not base:
@@ -5041,7 +5034,7 @@ def _openclaw_history_subagent_parts(session_key: str) -> tuple[str, str] | None
     parts = [part.strip() for part in base.split(":")]
     if len(parts) < 4:
         return None
-    owner = parts[1] if len(parts) >= 2 else ""
+    owner = parts[1]
     try:
         sub_idx = [p.lower() for p in parts].index("subagent")
     except ValueError:
