@@ -816,9 +816,13 @@ case "$(lc "${INSTALL_CRON:-}")" in
     while [[ "$attempt" -le "$CRON_MAX_ATTEMPTS" ]]; do
       existing_id=""
       cron_stderr=""
-      if openclaw cron list --json 2>"${TMPDIR:-/tmp}/cron_list_stderr.$$" >/dev/null; then
-        existing_id="$(
-          openclaw cron list --json 2>/dev/null | python3 -c '
+      # Single call: capture both stdout and stderr to avoid a double-call race where the
+      # second call fails silently and Python sees empty stdin, returning "" and triggering
+      # a spurious cron add (the root cause of duplicate cron entries on flaky gateways).
+      _cron_list_json="$(openclaw cron list --json 2>"${TMPDIR:-/tmp}/cron_list_stderr.$$")"
+      _cron_list_exit=$?
+      if [[ "$_cron_list_exit" -eq 0 && -n "$_cron_list_json" ]]; then
+        existing_id="$(echo "$_cron_list_json" | python3 -c '
 import json
 import sys
 
