@@ -528,7 +528,11 @@ main() {
   configure_memory_search "$model_path"
   configure_qmd_memory_boost
   configure_main_agent_tools
-  ensure_watchdog_cron
+  # ensure_watchdog_cron is intentionally omitted: the main agent's built-in heartbeat
+  # (heartbeat.every: 5m in openclaw.json) already runs the same watchdog sweep once per
+  # tick. Adding a separate cron with payload.kind=systemEvent on a main-session target
+  # causes triple-delivery per tick (systemEvent injects twice + heartbeat once), generating
+  # unnecessary background noise without any additional recovery coverage.
   refresh_indexes
   print_status
 
@@ -542,7 +546,7 @@ main() {
   echo ""
   echo "Delegation tools: sessions_spawn, sessions_list, sessions_history, sessions_send, cron"
   echo "Clawboard ledger tools: clawboard_search, clawboard_update_task, clawboard_context, clawboard_get_task"
-  echo "Follow-up guarantee: 3 independent recovery paths (cron + watchdog + session-start clawboard_search)"
+  echo "Follow-up guarantee: 2 independent recovery paths (heartbeat + session-start clawboard_search)"
 }
 
 main "$@"
