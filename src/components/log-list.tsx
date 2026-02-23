@@ -1062,7 +1062,8 @@ const LogRow = memo(function LogRow({
   if (variant === "chat") {
     const chatBubbleText = (() => {
       if (!isConversation) return summary || "(empty)";
-      return messageText || summary || "(empty)";
+      const raw = messageText || summary || "(empty)";
+      return raw;
     })();
     const bubbleTitle = sourceMeta ? `${formatDateTime(entry.createdAt)}\n${sourceMeta}` : formatDateTime(entry.createdAt);
     const showReplay =
@@ -1117,7 +1118,7 @@ const LogRow = memo(function LogRow({
                   {entry.attachments && entry.attachments.length > 0 ? (
                     <AttachmentStrip attachments={entry.attachments} className="mt-0 mb-3" />
                   ) : null}
-                  <Markdown>{chatBubbleText}</Markdown>
+                  <Markdown highlightCommands={variant === "chat"}>{chatBubbleText}</Markdown>
 	                {shouldTruncate && (
 	                  <div className="mt-2">
 	                    <Button variant="ghost" size="sm" onClick={() => setExpanded(true)} aria-label="Expand message">
@@ -1944,40 +1945,43 @@ const LogRow = memo(function LogRow({
                   <p className="mb-1 text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">
                     {conversationLaneLabel}
                   </p>
-                </div>
-              </div>
-	              <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-	                <div
-	                  data-testid={`message-bubble-${entry.id}`}
-	                  data-agent-side={isUser ? "right" : "left"}
-	                  onClick={(event) => {
-	                    if (!shouldTruncate) return;
-	                    if (showRawAll) return;
-	                    if (expanded) return;
-	                    event.stopPropagation();
-	                    setExpanded(true);
-	                  }}
-	                  className={`max-w-[78%] rounded-[20px] border px-4 py-3 text-sm leading-relaxed ${
-	                    isUser
-	                      ? "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
-	                      : "border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] text-[rgb(var(--claw-text))]"
-	                  }`}
-	                >
-	                  <p className="whitespace-pre-wrap break-words">{messageText || summary || "(empty)"}</p>
-                  {shouldTruncate && (
-                    <div className="mt-2">
-                      <Button variant="ghost" size="sm" onClick={() => setExpanded(true)} aria-label="Expand message">
-                        ...
-                      </Button>
-                    </div>
-                  )}
-                  {!showRawAll && expanded && messageSource.length > MESSAGE_TRUNCATE_LIMIT && (
-                    <div className="mt-2">
-                      <Button variant="ghost" size="sm" onClick={() => setExpanded(false)}>
-                        Collapse
-                      </Button>
-                    </div>
-                  )}
+                  <div
+                    data-testid={`message-bubble-${entry.id}`}
+                    data-agent-side={isUser ? "right" : "left"}
+                    onClick={(event) => {
+                      if (!shouldTruncate) return;
+                      if (showRawAll) return;
+                      if (expanded) return;
+                      event.stopPropagation();
+                      setExpanded(true);
+                    }}
+                    className={`max-w-[78%] rounded-[20px] border px-4 py-3 text-sm leading-relaxed ${
+                      isUser
+                        ? "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
+                        : "border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] text-[rgb(var(--claw-text))]"
+                    }`}
+                  >
+                    <Markdown>
+                      {(() => {
+                        const raw = messageText || summary || "(empty)";
+                        return raw;
+                      })()}
+                    </Markdown>
+                    {shouldTruncate && (
+                      <div className="mt-2">
+                        <Button variant="ghost" size="sm" onClick={() => setExpanded(true)} aria-label="Expand message">
+                          ...
+                        </Button>
+                      </div>
+                    )}
+                    {!showRawAll && expanded && messageSource.length > MESSAGE_TRUNCATE_LIMIT && (
+                      <div className="mt-2">
+                        <Button variant="ghost" size="sm" onClick={() => setExpanded(false)}>
+                          Collapse
+                        </Button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </>

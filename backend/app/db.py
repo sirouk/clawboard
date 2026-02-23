@@ -23,13 +23,46 @@ DATABASE_URL = os.getenv("CLAWBOARD_DB_URL", "postgresql+psycopg://clawboard:cla
 # allowing upstream queues/retries (OpenClaw logger + classifier) to recover without stalling.
 SQLITE_TIMEOUT_SECONDS = float(os.getenv("CLAWBOARD_SQLITE_TIMEOUT_SECONDS", "3"))
 
+# ---------------------------------------------------------------------------
+# Postgres connection-pool tuning
+# ---------------------------------------------------------------------------
+# The API starts ~9 long-lived background threads (history sync, 4 dispatch
+# workers, snooze, session-routing GC, watchdog × 2) plus uvicorn's sync
+# thread pool (8–32 threads depending on CPU count).  SQLAlchemy's default of
+# pool_size=5 / max_overflow=10 = 15 total connections is routinely exhausted
+# under normal load, causing QueuePool timeout errors.
+#
+# Defaults chosen here are intentionally conservative for a single-node setup:
+#   pool_size    = 15   →  permanent connections, covers background threads
+#   max_overflow = 5    →  burst headroom for spiky API traffic (total = 20)
+#   pool_timeout = 10   →  fail fast; avoids cascading waits under saturation
+#   pool_recycle = 1800 →  recycle every 30 min, outlasting typical Postgres
+#                          idle timeouts and AWS/GCP connection resets
+#   pool_pre_ping= True →  send a lightweight ping before handing out a
+#                          recycled connection; avoids "server closed the
+#                          connection unexpectedly" errors stranding pool slots
+#
+# All values are overridable via environment variables.
+_PG_POOL_SIZE = int(os.getenv("CLAWBOARD_DB_POOL_SIZE", "15"))
+_PG_MAX_OVERFLOW = int(os.getenv("CLAWBOARD_DB_MAX_OVERFLOW", "5"))
+_PG_POOL_TIMEOUT = float(os.getenv("CLAWBOARD_DB_POOL_TIMEOUT", "10"))
+_PG_POOL_RECYCLE = int(os.getenv("CLAWBOARD_DB_POOL_RECYCLE", "1800"))
+_PG_POOL_PRE_PING = os.getenv("CLAWBOARD_DB_POOL_PRE_PING", "1").strip() not in ("0", "false", "no")
+
 connect_args = {}
 if DATABASE_URL.startswith("sqlite"):
     connect_args = {"check_same_thread": False, "timeout": SQLITE_TIMEOUT_SECONDS}
 
-engine_kwargs = {"echo": False, "connect_args": connect_args}
+engine_kwargs: dict = {"echo": False, "connect_args": connect_args}
 if DATABASE_URL.startswith("sqlite") and NullPool is not None:
     engine_kwargs["poolclass"] = NullPool
+else:
+    # Apply Postgres pool settings (ignored when NullPool / SQLite is used above).
+    engine_kwargs["pool_size"] = _PG_POOL_SIZE
+    engine_kwargs["max_overflow"] = _PG_MAX_OVERFLOW
+    engine_kwargs["pool_timeout"] = _PG_POOL_TIMEOUT
+    engine_kwargs["pool_recycle"] = _PG_POOL_RECYCLE
+    engine_kwargs["pool_pre_ping"] = _PG_POOL_PRE_PING
 engine = create_engine(DATABASE_URL, **engine_kwargs)
 
 DEFAULT_SPACE_ID = "space-default"

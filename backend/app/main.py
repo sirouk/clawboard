@@ -1113,8 +1113,106 @@ SLASH_COMMANDS = {
     "/board",
     "/graph",
     "/help",
+    "/commands",
     "/reset",
     "/clear",
+    "/skill",
+    "/model",
+    "/models",
+    "/think",
+    "/verbose",
+    "/reasoning",
+    "/elevated",
+    "/exec",
+    "/status",
+    "/whoami",
+    "/id",
+    "/context",
+    "/subagents",
+    "/usage",
+    "/stop",
+    "/voice",
+    "/bash",
+    "/config",
+    "/debug",
+    "/restart",
+    "/scripts",
+    "/edit",
+    "/delete",
+    "/read",
+    "/write",
+    "/browser",
+    "/message",
+    "/thought",
+    "/v",
+    "/e",
+    "/settings",
+    "/r",
+    "/t",
+    "/th",
+    "/think-level",
+    "/thinklevel",
+    "/u",
+    "/m",
+    "/provider",
+    "/providers",
+    "/subagent",
+    "/subs",
+    "/me",
+    "/who-am-i",
+    "/h",
+    "/cmds",
+    "/s",
+    "/ctx",
+    "/tts",
+    "/sh",
+    "/d",
+    "/abort",
+    "/sk",
+    "/top",
+    "/tk",
+    "/l",
+    "/b",
+    "/g",
+    "/thinking",
+    "/reason",
+    "/reasoning",
+    "/commands",
+    "/help",
+    "/whoami",
+    "/status",
+    "/context",
+    "/subagents",
+    "/usage",
+    "/model",
+    "/models",
+    "/think",
+    "/verbose",
+    "/elevated",
+    "/exec",
+    "/read",
+    "/write",
+    "/reset",
+    "/clear",
+    "/new",
+    "/stop",
+    "/skill",
+    "/topic",
+    "/topics",
+    "/task",
+    "/tasks",
+    "/log",
+    "/logs",
+    "/board",
+    "/graph",
+    "/voice",
+    "/bash",
+    "/config",
+    "/debug",
+    "/restart",
+    "/scripts",
+    "/edit",
+    "/delete",
 }
 
 ATTACHMENTS_DIR = os.getenv("CLAWBOARD_ATTACHMENTS_DIR", "./data/attachments").strip() or "./data/attachments"
@@ -1463,6 +1561,8 @@ def _is_command_log(entry: LogEntry) -> bool:
     command = text.split(None, 1)[0].lower()
     if command in SLASH_COMMANDS:
         return True
+    # For better forwardslash command support, match any single-word /token
+    # unless it is clearly just markdown formatting (like / in a path).
     return bool(re.fullmatch(r"/[a-z0-9_-]{2,}", command))
 
 
@@ -2040,6 +2140,7 @@ def _openclaw_chat_dispatch_claim_next_job(now_iso_value: str) -> dict[str, Any]
             prior = aliased(OpenClawChatDispatchQueue)
             hot_cutoff_iso = _iso_after_seconds(datetime.now(timezone.utc), -float(_openclaw_chat_dispatch_hot_window_seconds()))
             cold_backlog_rank = case((OpenClawChatDispatchQueue.sentAt < hot_cutoff_iso, 1), else_=0)
+            voice_rank = case((OpenClawChatDispatchQueue.message.like("/voice%"), 0), (OpenClawChatDispatchQueue.message.like("/skill%"), 0), else_=1)
             retry_rank = case((OpenClawChatDispatchQueue.status == "pending", 0), else_=1)
             has_prior_undelivered = exists(
                 select(1)
@@ -2054,6 +2155,7 @@ def _openclaw_chat_dispatch_claim_next_job(now_iso_value: str) -> dict[str, Any]
                 .where(OpenClawChatDispatchQueue.nextAttemptAt <= now_iso_value)
                 .where(~has_prior_undelivered)
                 .order_by(
+                    voice_rank.asc(),
                     retry_rank.asc(),
                     cold_backlog_rank.asc(),
                     OpenClawChatDispatchQueue.nextAttemptAt.asc(),
@@ -5096,10 +5198,30 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
         return (0, 0)
     ordered_rows.sort(key=lambda item: item[0])
 
+    # Build a parallel list of display timestamps that spread same-second messages
+    # by 1 ms each so that their positional order in the session history is preserved
+    # in createdAt.  Gateways that only provide second-level precision would otherwise
+    # produce identical createdAt values for all messages within the same second, causing
+    # random ordering in the UI (the UUID tiebreaker is not chronological).
+    # The original timestamps are still used for idempotency-key computation so that
+    # already-ingested entries are never re-inserted with a different timestamp.
+    display_ms: list[int] = []
+    prev_display = ordered_rows[0][0]
+    display_ms.append(prev_display)
+    for i in range(1, len(ordered_rows)):
+        orig = ordered_rows[i][0]
+        # If the original timestamp would collide with (or precede) the previous
+        # display timestamp, nudge it forward by 1 ms to preserve insertion order.
+        if orig <= prev_display:
+            prev_display = prev_display + 1
+        else:
+            prev_display = orig
+        display_ms.append(prev_display)
+
     subagent_parts = _openclaw_history_subagent_parts(session_key)
     is_subagent_session = subagent_parts is not None
     with get_session() as session:
-        for timestamp_ms, row in ordered_rows:
+        for (timestamp_ms, row), disp_ts_ms in zip(ordered_rows, display_ms):
             if timestamp_ms < since_ms:
                 continue
 
@@ -5148,7 +5270,9 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 agent_id = role or "openclaw"
                 agent_label = role.title() if role else "OpenClaw"
 
-            created_at = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc).isoformat(timespec="milliseconds").replace(
+            # Use the display timestamp (spread by 1 ms when same-second precision) for
+            # createdAt so adjacent messages sort in session-history order.
+            created_at = datetime.fromtimestamp(disp_ts_ms / 1000.0, tz=timezone.utc).isoformat(timespec="milliseconds").replace(
                 "+00:00", "Z"
             )
             channel = _openclaw_history_channel(row, session_key)
@@ -6003,6 +6127,7 @@ async def openclaw_skills(agentId: str = Query(default="main", description="Open
                     "disabled": bool(row.get("disabled")) if row.get("disabled") is not None else None,
                     "always": bool(row.get("always")) if row.get("always") is not None else None,
                     "source": str(row.get("source") or "").strip() or None,
+                    "commands": [str(c).strip() for c in row.get("commands")] if isinstance(row.get("commands"), list) else None,
                 }
             )
 

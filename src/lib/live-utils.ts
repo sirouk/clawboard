@@ -73,9 +73,13 @@ export function compareLogsDesc(a: LogEntry, b: LogEntry): number {
   const bCreated = parseIsoMs(b.createdAt);
   if (Number.isFinite(aCreated) && Number.isFinite(bCreated) && aCreated !== bCreated) return bCreated - aCreated;
 
-  // Deterministic fallback. Not chronological, but stable.
+  // Stable, deterministic tiebreaker for same-createdAt entries.
+  // Prefer idempotencyKey (present on history-synced entries) over the random
+  // UUID-based id so same-second gateway messages sort consistently.
   if (a.id === b.id) return 0;
-  return a.id < b.id ? 1 : -1;
+  const aKey = a.idempotencyKey ?? a.id;
+  const bKey = b.idempotencyKey ?? b.id;
+  return aKey > bKey ? 1 : aKey < bKey ? -1 : 0;
 }
 
 export function maxTimestamp(items: Array<{ updatedAt?: string; createdAt?: string }>): string | undefined {

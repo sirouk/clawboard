@@ -245,8 +245,13 @@ function isTerminalSystemRequestEvent(entry: LogEntry) {
 }
 
 function compareLogCreatedAtAsc(a: LogEntry, b: LogEntry) {
-  if (a.createdAt === b.createdAt) return a.id.localeCompare(b.id);
-  return a.createdAt < b.createdAt ? -1 : 1;
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
+  // Stable, deterministic tiebreaker for entries that share the same createdAt.
+  // Prefer idempotencyKey (present on history-synced entries) so same-second
+  // messages from the gateway maintain a consistent order across renders.
+  const aKey = a.idempotencyKey ?? a.id;
+  const bKey = b.idempotencyKey ?? b.id;
+  return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
 }
 
 function compareLogCreatedAtDesc(a: LogEntry, b: LogEntry) {
@@ -6259,7 +6264,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                                       {pending.attachments && pending.attachments.length > 0 ? (
                                                         <AttachmentStrip attachments={pending.attachments} className="mt-0 mb-3" />
                                                       ) : null}
-                                                      <Markdown>{pending.message}</Markdown>
+                                                      <Markdown highlightCommands={true}>{
+                                                        pending.message
+                                                      }</Markdown>
                                                     </div>
                                                     <div className="mt-1 flex items-center justify-end gap-2 text-[10px] text-[rgba(148,163,184,0.9)]">
                                                       <button
@@ -6619,7 +6626,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                                   {pending.attachments && pending.attachments.length > 0 ? (
                                                     <AttachmentStrip attachments={pending.attachments} className="mt-0 mb-3" />
                                                   ) : null}
-                                                  <Markdown>{pending.message}</Markdown>
+                                                  <Markdown highlightCommands={true}>{
+                                                    pending.message
+                                                  }</Markdown>
                                                 </div>
                                                 <div className="mt-1 flex items-center justify-end gap-2 text-[10px] text-[rgba(148,163,184,0.9)]">
                                                   <button
