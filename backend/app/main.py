@@ -72,6 +72,8 @@ from .schemas import (
     ContextResponse,
     OpenClawChatRequest,
     OpenClawChatQueuedResponse,
+    OpenClawChatCancelRequest,
+    OpenClawChatCancelResponse,
     OpenClawChatDispatchQuarantineRequest,
     OpenClawChatDispatchQuarantineResponse,
     ReindexRequest,
@@ -5895,6 +5897,67 @@ def openclaw_chat(payload: OpenClawChatRequest, _background_tasks: BackgroundTas
         raise HTTPException(status_code=503, detail="Failed to persist user message. Please retry.") from exc
 
     return {"queued": True, "requestId": request_id}
+
+
+@app.delete(
+    "/api/openclaw/chat",
+    dependencies=[Depends(require_token)],
+    response_model=OpenClawChatCancelResponse,
+    tags=["openclaw"],
+)
+def openclaw_chat_cancel(payload: OpenClawChatCancelRequest):
+    """Cancel an in-flight OpenClaw request.
+
+    Sends chat.abort to the gateway (best-effort) and marks all open dispatch queue
+    rows for the session (optionally narrowed to a specific requestId) as failed so
+    the dispatch workers will not retry them.
+    """
+    session_key = payload.sessionKey.strip()
+    request_id_filter = (payload.requestId or "").strip() or None
+
+    # --- Step 1: cancel pending/retry/processing dispatch queue rows ---
+    cancelled_count = 0
+    now_val = now_iso()
+    try:
+        with get_session() as db:
+            q = select(OpenClawChatDispatchQueue).where(
+                OpenClawChatDispatchQueue.sessionKey == session_key,
+                OpenClawChatDispatchQueue.status.in_(["pending", "retry", "processing"]),
+            )
+            if request_id_filter:
+                q = q.where(OpenClawChatDispatchQueue.requestId == request_id_filter)
+            rows = db.exec(q).all()
+            for row in rows:
+                row.status = "failed"
+                row.lastError = "user_cancelled"
+                row.updatedAt = now_val
+                db.add(row)
+                cancelled_count += 1
+            db.commit()
+    except Exception:
+        pass
+
+    # --- Step 2: send chat.abort to the gateway (best-effort, non-fatal) ---
+    aborted = False
+    try:
+        abort_params: dict[str, Any] = {"sessionKey": session_key}
+        asyncio.run(
+            gateway_rpc(
+                "chat.abort",
+                abort_params,
+                scopes=["operator.write"],
+                timeout_seconds=8.0,
+            )
+        )
+        aborted = True
+    except Exception:
+        pass
+
+    return {
+        "aborted": aborted,
+        "queueCancelled": cancelled_count,
+        "sessionKey": session_key,
+    }
 
 
 @app.get(

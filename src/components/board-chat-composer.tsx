@@ -146,6 +146,22 @@ function PaperclipIcon({ className }: { className?: string }) {
   );
 }
 
+function StopIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      xmlns="http://www.w3.org/2000/svg"
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden
+    >
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+    </svg>
+  );
+}
+
 function SendIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -192,6 +208,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   const { value: draft, setValue: setDraft } = usePersistentDraft(`draft:chat:${sessionKey}`, { fallback: "" });
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [sending, setSending] = useState(false);
+  const [pendingRequestId, setPendingRequestId] = useState<string | null>(null);
   const sendingGuardRef = useRef(false);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
@@ -454,6 +471,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
       const payload = (await res.json().catch(() => null)) as { requestId?: string } | null;
       const requestId = String(payload?.requestId ?? "").trim();
       if (requestId) {
+        setPendingRequestId(requestId);
         onSendUpdate?.({ phase: "queued", localId, requestId, sessionKey, message, createdAt, attachments: pendingAttachments, debugHint });
       }
     } catch (err) {
@@ -465,8 +483,30 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     } finally {
       sendingGuardRef.current = false;
       setSending(false);
+      setPendingRequestId(null);
     }
   };
+
+  const stopSending = useCallback(async () => {
+    if (!sending) return;
+    sendingGuardRef.current = false;
+    setSending(false);
+    const rid = pendingRequestId;
+    setPendingRequestId(null);
+    try {
+      await apiFetch(
+        "/api/openclaw/chat",
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionKey, ...(rid ? { requestId: rid } : {}) }),
+        },
+        token
+      );
+    } catch {
+      // best-effort; UI state is already cleared
+    }
+  }, [sending, pendingRequestId, sessionKey, token]);
 
   const hardDisabled = Boolean(disabled || sending || readOnly);
   const sendDisabled = hardDisabled || draft.trim().length === 0;
@@ -659,23 +699,39 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
               >
                 <PaperclipIcon />
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  void sendMessage();
-                }}
-                disabled={sendDisabled}
-                aria-label="Send message"
-                title="Send message"
-                className={cn(
-                  "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
-                  "border-[rgba(255,90,45,0.6)] bg-[rgba(255,90,45,0.2)] backdrop-blur",
-                  "hover:bg-[rgba(255,90,45,0.3)]",
-                  "disabled:cursor-not-allowed disabled:border-[rgba(255,255,255,0.14)] disabled:bg-[rgba(255,255,255,0.06)] disabled:text-[rgb(var(--claw-muted))]"
-                )}
-              >
-                <SendIcon />
-              </button>
+              {sending ? (
+                <button
+                  type="button"
+                  onClick={() => { void stopSending(); }}
+                  aria-label="Stop"
+                  title="Stop generation"
+                  className={cn(
+                    "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
+                    "border-[rgba(220,38,38,0.7)] bg-[rgba(220,38,38,0.25)] backdrop-blur",
+                    "hover:bg-[rgba(220,38,38,0.4)]"
+                  )}
+                >
+                  <StopIcon />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void sendMessage();
+                  }}
+                  disabled={sendDisabled}
+                  aria-label="Send message"
+                  title="Send message"
+                  className={cn(
+                    "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
+                    "border-[rgba(255,90,45,0.6)] bg-[rgba(255,90,45,0.2)] backdrop-blur",
+                    "hover:bg-[rgba(255,90,45,0.3)]",
+                    "disabled:cursor-not-allowed disabled:border-[rgba(255,255,255,0.14)] disabled:bg-[rgba(255,255,255,0.06)] disabled:text-[rgb(var(--claw-muted))]"
+                  )}
+                >
+                  <SendIcon />
+                </button>
+              )}
             </div>
           ) : null}
         </div>
@@ -716,17 +772,32 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
               >
                 <PaperclipIcon />
               </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="primary"
-                onClick={() => {
-                  void sendMessage();
-                }}
-                disabled={sendDisabled}
-              >
-                Send
-              </Button>
+              {sending ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => { void stopSending(); }}
+                  aria-label="Stop"
+                  title="Stop generation"
+                  className="border-red-500/60 text-red-400 hover:border-red-500 hover:text-red-300"
+                >
+                  <StopIcon className="mr-1" />
+                  Stop
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="primary"
+                  onClick={() => {
+                    void sendMessage();
+                  }}
+                  disabled={sendDisabled}
+                >
+                  Send
+                </Button>
+              )}
             </div>
           </div>
         )}

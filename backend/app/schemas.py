@@ -571,6 +571,33 @@ class OpenClawChatQueuedResponse(BaseModel):
     requestId: str = Field(description="Server request identifier.", examples=["occhat-123e4567-e89b-12d3-a456-426614174000"])
 
 
+class OpenClawChatCancelRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "sessionKey": "clawboard:task:topic-abc:task-def",
+                "requestId": "occhat-abc123",
+            }
+        }
+    )
+    sessionKey: str = Field(
+        description="Session key to abort. All pending/retry/processing dispatch rows for this session are cancelled.",
+        min_length=1,
+        max_length=512,
+    )
+    requestId: Optional[str] = Field(
+        default=None,
+        description="Optional: narrow cancellation to a specific request ID (occhat-...). When omitted, all open queue rows for the session are cancelled.",
+        max_length=128,
+    )
+
+
+class OpenClawChatCancelResponse(BaseModel):
+    aborted: bool = Field(description="Whether chat.abort was sent to the gateway (best-effort).")
+    queueCancelled: int = Field(description="Number of dispatch queue rows cancelled.")
+    sessionKey: str = Field(description="Session key targeted.")
+
+
 class OpenClawChatDispatchQuarantineRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
