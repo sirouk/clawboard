@@ -124,6 +124,12 @@ type BoardChatComposerProps = {
   autoFocus?: boolean;
   onAutoFocusApplied?: () => void;
   onSendUpdate?: (event: BoardChatComposerSendEvent) => void;
+  /** True while the agent is processing a response (tracked by parent via stream/logs). */
+  waiting?: boolean;
+  /** The requestId the parent knows is in-flight; used by Stop when the composer's own pendingRequestId is gone (e.g. after a re-render). */
+  waitingRequestId?: string;
+  /** Called when the user clicks Stop so the parent can clear its awaiting state. */
+  onCancel?: () => void;
   testId?: string;
 };
 
@@ -195,6 +201,9 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     autoFocus,
     onAutoFocusApplied,
     onSendUpdate,
+    waiting = false,
+    waitingRequestId,
+    onCancel,
     testId,
   },
   ref
@@ -488,11 +497,12 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   };
 
   const stopSending = useCallback(async () => {
-    if (!sending) return;
+    if (!sending && !waiting) return;
     sendingGuardRef.current = false;
     setSending(false);
-    const rid = pendingRequestId;
+    const rid = pendingRequestId ?? waitingRequestId ?? undefined;
     setPendingRequestId(null);
+    onCancel?.();
     try {
       await apiFetch(
         "/api/openclaw/chat",
@@ -506,9 +516,10 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     } catch {
       // best-effort; UI state is already cleared
     }
-  }, [sending, pendingRequestId, sessionKey, token]);
+  }, [sending, waiting, pendingRequestId, waitingRequestId, sessionKey, token, onCancel]);
 
-  const hardDisabled = Boolean(disabled || sending || readOnly);
+  const isInFlight = sending || waiting;
+  const hardDisabled = Boolean(disabled || isInFlight || readOnly);
   const sendDisabled = hardDisabled || draft.trim().length === 0;
   const wordCount = useMemo(() => {
     const text = draft.trim();
@@ -699,7 +710,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
               >
                 <PaperclipIcon />
               </button>
-              {sending ? (
+              {isInFlight ? (
                 <button
                   type="button"
                   onClick={() => { void stopSending(); }}
@@ -772,7 +783,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
               >
                 <PaperclipIcon />
               </Button>
-              {sending ? (
+              {isInFlight ? (
                 <Button
                   type="button"
                   size="sm"

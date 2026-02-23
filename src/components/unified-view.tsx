@@ -2762,8 +2762,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (effectiveView !== "snoozed" && effectiveView !== "archived") {
       filtered.push({
         id: "unassigned",
-        name: "Unassigned",
-        description: "Tasks without a topic.",
+        name: "Deleted",
+        description: "Tasks not assigned to any topic.",
         pinned: false,
         lastActivity: new Date().toISOString(),
         createdAt: new Date().toISOString(),
@@ -4820,7 +4820,29 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             : "";
           const topicSpaceExtraCount = topicSpaceName ? Math.max(0, topicSpaceIdList.length - 1) : 0;
 
-	          const swipeActions = isUnassigned ? null : (
+	          const swipeActions = isUnassigned ? (
+	            <button
+	              type="button"
+	              onClick={(event) => {
+	                event.stopPropagation();
+	                if (readOnly) return;
+	                setTopicSwipeOpenId(null);
+	                const count = taskList.length;
+	                if (count === 0) return;
+	                const ok = window.confirm(`Permanently delete all ${count} unassigned task${count === 1 ? "" : "s"}? This cannot be undone.`);
+	                if (!ok) return;
+	                void deleteUnassignedTasks();
+	              }}
+	              disabled={readOnly || taskList.length === 0}
+	              className={cn(
+	                "inline-flex h-full min-w-[80px] items-center justify-center whitespace-nowrap rounded-[var(--radius-sm)] border px-3.5 py-2 text-xs font-semibold leading-none tracking-[0.04em] transition",
+	                "border-[rgba(239,68,68,0.6)] text-[rgb(var(--claw-danger))] hover:bg-[rgba(239,68,68,0.12)]",
+	                readOnly || taskList.length === 0 ? "opacity-40" : ""
+	              )}
+	            >
+	              EMPTY
+	            </button>
+	          ) : (
 	            <>
 	              <button
 	                type="button"
@@ -6270,6 +6292,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                    )
 			                                  }
 			                                  onSendUpdate={handleComposerSendUpdate}
+			                                  waiting={isSessionResponding(taskSessionKey(topicId, task.id))}
+			                                  waitingRequestId={effectiveAwaitingAssistant[taskSessionKey(topicId, task.id)]?.requestId}
+			                                  onCancel={() => {
+			                                    const sk = taskSessionKey(topicId, task.id);
+			                                    setAwaitingAssistant((prev) => {
+			                                      if (!Object.prototype.hasOwnProperty.call(prev, sk)) return prev;
+			                                      const next = { ...prev };
+			                                      delete next[sk];
+			                                      return next;
+			                                    });
+			                                  }}
 			                                  testId={`task-chat-composer-${task.id}`}
 				                                />
 				                                </>
@@ -6608,6 +6641,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                              )
 		                            }
 		                            onSendUpdate={handleComposerSendUpdate}
+		                            waiting={isSessionResponding(topicSessionKey(topicId))}
+		                            waitingRequestId={effectiveAwaitingAssistant[topicSessionKey(topicId)]?.requestId}
+		                            onCancel={() => {
+		                              const sk = topicSessionKey(topicId);
+		                              setAwaitingAssistant((prev) => {
+		                                if (!Object.prototype.hasOwnProperty.call(prev, sk)) return prev;
+		                                const next = { ...prev };
+		                                delete next[sk];
+		                                return next;
+		                              });
+		                            }}
 		                            autoFocus={autoFocusTopicId === topicId}
 		                            onAutoFocusApplied={() =>
 		                              setAutoFocusTopicId((prev) => (prev === topicId ? null : prev))
