@@ -361,13 +361,13 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
         if (!res.ok) return;
         const payload = (await res.json().catch(() => null)) as { skills?: unknown } | null;
         const skills = Array.isArray(payload?.skills) ? payload?.skills : [];
-        const normalized = skills
+        const normalized: SlashCommand[] = skills
           .flatMap((entry) => {
             const skill = entry as { name?: string; description?: string; commands?: string[] };
             const skillName = (skill.name || "").trim();
             if (!skillName) return [];
             
-            const results = [{ name: skillName, description: skill.description || "", kind: "skill" }];
+            const results: SlashCommand[] = [{ name: skillName, description: skill.description || "", kind: "skill" }];
             
             if (Array.isArray(skill.commands)) {
               for (const cmd of skill.commands) {
@@ -381,7 +381,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
             return results;
           });
         // Merge built-ins + skills (skills win on name collisions).
-        const merged = new Map<string, { name: string; description: string; kind: string }>();
+        const merged = new Map<string, SlashCommand>();
         for (const cmd of BUILTIN_SLASH_COMMANDS) merged.set(cmd.name.toLowerCase(), cmd);
         for (const cmd of normalized) merged.set(cmd.name.toLowerCase(), cmd);
         setSlashCommands(Array.from(merged.values()));

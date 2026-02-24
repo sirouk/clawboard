@@ -9,12 +9,20 @@ from datetime import datetime, timezone
 from urllib import error as url_error
 from urllib import request as url_request
 
-SEARCH_INCLUDE_TOOL_CALL_LOGS = str(os.getenv("CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS", "0") or "").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    text = str(raw or "").strip().lower()
+    if not text:
+        return bool(default)
+    return text in {"1", "true", "yes", "on"}
+
+
+# Keep vector cleanup behavior deterministic by default. This should only be enabled
+# explicitly for cleanup jobs, independent from runtime search knobs.
+SEARCH_INCLUDE_TOOL_CALL_LOGS = _env_flag("CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS", False)
 
 SLASH_COMMANDS = {
     "/new",

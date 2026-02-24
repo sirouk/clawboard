@@ -832,6 +832,18 @@ SEARCH_INCLUDE_TOOL_CALL_LOGS = str(os.getenv("CLAWBOARD_SEARCH_INCLUDE_TOOL_CAL
     "yes",
     "on",
 }
+
+
+def _env_int_with_default(name: str, default: int) -> int:
+    raw = str(os.getenv(name, str(default)) or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
 TOPIC_LOG_PROPAGATION_FACTOR = 0.22
 TOPIC_LOG_PROPAGATION_PER_LOG_CAP = 0.18
 TOPIC_LOG_PROPAGATION_TOP_K = 6
@@ -855,9 +867,9 @@ SEARCH_LOG_CONTENT_PREVIEW_SCAN_LIMIT = int(os.getenv("CLAWBOARD_SEARCH_LOG_CONT
 SEARCH_LOG_CONTENT_MATCH_SCAN_LIMIT = int(os.getenv("CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_SCAN_LIMIT", "120") or "120")
 SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS = int(os.getenv("CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS", "1800") or "1800")
 SEARCH_LOG_CONTENT_ID_CHUNK_SIZE = 320
-SEARCH_EFFECTIVE_LIMIT_TOPICS = int(os.getenv("CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TOPICS", "120") or "120")
-SEARCH_EFFECTIVE_LIMIT_TASKS = int(os.getenv("CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TASKS", "240") or "240")
-SEARCH_EFFECTIVE_LIMIT_LOGS = int(os.getenv("CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_LOGS", "320") or "320")
+SEARCH_EFFECTIVE_LIMIT_TOPICS = max(1, min(120, _env_int_with_default("CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TOPICS", 120)))
+SEARCH_EFFECTIVE_LIMIT_TASKS = max(1, min(240, _env_int_with_default("CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TASKS", 240)))
+SEARCH_EFFECTIVE_LIMIT_LOGS = max(10, min(320, _env_int_with_default("CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_LOGS", 320)))
 SEARCH_WINDOW_MULTIPLIER = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MULTIPLIER", "2") or "2")
 SEARCH_WINDOW_MIN_LOGS = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MIN_LOGS", "320") or "320")
 SEARCH_WINDOW_MAX_LOGS = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MAX_LOGS", "2000") or "2000")
@@ -2679,7 +2691,7 @@ def _openclaw_request_attribution_lookback_seconds() -> int:
     """How far back assistant logs may look for unresolved OpenClaw user request attribution."""
     raw = str(os.getenv("OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS") or "").strip()
     if not raw:
-        raise RuntimeError("OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS is required")
+        return 1209600
     try:
         value = int(raw)
     except Exception:
@@ -2691,7 +2703,7 @@ def _openclaw_request_attribution_max_candidates() -> int:
     """Cap candidate rows scanned when attaching requestId to unlabeled assistant rows."""
     raw = str(os.getenv("OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES") or "").strip()
     if not raw:
-        raise RuntimeError("OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES is required")
+        return 24
     try:
         value = int(raw)
     except Exception:
@@ -4477,6 +4489,7 @@ class _OpenClawAssistantLogWatchdog:
         base_key: str,
         request_id: str,
         sent_at: str,
+        agent_id: str | None = None,
         poll_seconds: float = 30.0,
         idle_seconds: float = 900.0,
     ) -> float | None:
@@ -5361,14 +5374,8 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 agent_id = "assistant"
                 agent_label = "Assistant"
             elif role == "user":
-                # Board sessions (non-subagent): user messages are owned exclusively by
-                # /api/openclaw/chat which persists them immediately. Skipping here is the
-                # definitive dedup; we cannot rely on the gateway echoing the occhat- requestId
-                # back in history, making any key-based check fragile.
-                if not is_subagent_session:
-                    parsed_board = _parse_board_session_key(session_key)
-                    if parsed_board[0] is not None:
-                        continue
+                # Board/user rows must still be ingested from history for replay/import flows.
+                # Duplicate suppression is handled by idempotency + request/message identifiers.
                 if is_subagent_session and subagent_parts:
                     # Subagent sessions: role=user is the parent agent's delegation prompt.
                     entry_type = "conversation"
