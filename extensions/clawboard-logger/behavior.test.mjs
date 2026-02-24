@@ -429,6 +429,49 @@ test("before_agent_start skips no-reply-directive hint for non-board sessions", 
   }
 });
 
+test("before_agent_start skips context retrieval for heartbeat control-plane prompts", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const calls = [];
+    globalThis.fetch = async (url, _options = {}) => {
+      calls.push(String(url));
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { block: "should-not-be-used" };
+        },
+        async text() {
+          return '{"block":"should-not-be-used"}';
+        },
+      };
+    };
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("before_agent_start");
+    assert.equal(typeof handler, "function");
+
+    const result = await handler(
+      {
+        prompt: "Heartbeat: run continuity check now",
+        messages: [{ role: "user", content: "Heartbeat: run continuity check now" }],
+      },
+      {
+        sessionKey: "agent:main:main",
+        conversationId: "agent:main:main",
+        channelId: "imessage",
+      }
+    );
+
+    assert.equal(result, undefined);
+    assert.equal(calls.some((url) => url.includes("/api/context")), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("before_tool_call emits action log with tool call summary (ING-003)", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -515,6 +558,240 @@ test("before_tool_call inherits requestId across wrapped subagent session keys",
   }
 });
 
+test("subagent tool logs inherit board scope from parent board session when ctx.agentId is absent", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const queuePath = path.join(
+      os.tmpdir(),
+      `clawboard-logger-scope-inherit-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`
+    );
+    const api = makeApi({ queuePath });
+    register(api);
+
+    const toolCall = api.__handlers.get("before_tool_call");
+    const toolResult = api.__handlers.get("after_tool_call");
+    assert.equal(typeof toolCall, "function");
+    assert.equal(typeof toolResult, "function");
+
+    const parentSessionKey = "agent:main:clawboard:task:topic-scope-inherit-1:task-scope-inherit-1";
+    const childSessionKey = "agent:coding:subagent:scope-inherit-worker-1";
+
+    // Simulate a parent board-scoped tool call where ctx.agentId is unavailable.
+    await toolCall(
+      {
+        toolName: "sessions_spawn",
+        params: { agentId: "coding" },
+      },
+      {
+        sessionKey: parentSessionKey,
+        channelId: "openclaw",
+      }
+    );
+
+    await toolResult(
+      {
+        toolName: "sessions_spawn",
+        result: { status: "accepted", childSessionKey },
+        durationMs: 8,
+      },
+      {
+        sessionKey: parentSessionKey,
+        channelId: "openclaw",
+      }
+    );
+
+    // Simulate the spawned subagent's first tool call.
+    await toolCall(
+      {
+        toolName: "exec",
+        params: { command: "pwd" },
+      },
+      {
+        sessionKey: childSessionKey,
+        channelId: "openclaw",
+        agentId: "coding",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 3);
+    const childPayload = meaningfulCalls(calls)
+      .map((call) => parseBody(call))
+      .find((payload) => payload?.source?.sessionKey === childSessionKey);
+
+    assert.ok(childPayload, "expected child subagent action log");
+    assert.equal(childPayload.topicId, "topic-scope-inherit-1");
+    assert.equal(childPayload.taskId, "task-scope-inherit-1");
+    assert.equal(childPayload.source.boardScopeTopicId, "topic-scope-inherit-1");
+    assert.equal(childPayload.source.boardScopeTaskId, "task-scope-inherit-1");
+    assert.equal(childPayload.source.boardScopeInherited, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("subagent tool logs do not inherit board scope without explicit spawn linkage", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const queuePath = path.join(
+      os.tmpdir(),
+      `clawboard-logger-scope-guard-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`
+    );
+    const api = makeApi({ queuePath });
+    register(api);
+
+    const toolCall = api.__handlers.get("before_tool_call");
+    const toolResult = api.__handlers.get("after_tool_call");
+    assert.equal(typeof toolCall, "function");
+    assert.equal(typeof toolResult, "function");
+
+    const parentSessionKey = "agent:main:clawboard:task:topic-scope-guard-1:task-scope-guard-1";
+    const linkedChildSessionKey = "agent:coding:subagent:scope-guard-linked-1";
+    const unrelatedChildSessionKey = "agent:coding:subagent:scope-guard-unrelated-1";
+
+    await toolCall(
+      {
+        toolName: "sessions_spawn",
+        params: { agentId: "coding" },
+      },
+      {
+        sessionKey: parentSessionKey,
+        channelId: "openclaw",
+      }
+    );
+
+    await toolResult(
+      {
+        toolName: "sessions_spawn",
+        result: { status: "accepted", childSessionKey: linkedChildSessionKey },
+        durationMs: 8,
+      },
+      {
+        sessionKey: parentSessionKey,
+        channelId: "openclaw",
+      }
+    );
+
+    await toolCall(
+      {
+        toolName: "exec",
+        params: { command: "pwd" },
+      },
+      {
+        sessionKey: unrelatedChildSessionKey,
+        channelId: "openclaw",
+        agentId: "coding",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 3);
+    const unrelatedPayload = meaningfulCalls(calls)
+      .map((call) => parseBody(call))
+      .find((payload) => payload?.source?.sessionKey === unrelatedChildSessionKey);
+
+    assert.ok(unrelatedPayload, "expected unrelated subagent action log");
+    assert.equal(unrelatedPayload.topicId, undefined);
+    assert.equal(unrelatedPayload.taskId, undefined);
+    assert.equal(unrelatedPayload.source.boardScopeTopicId, undefined);
+    assert.equal(unrelatedPayload.source.boardScopeTaskId, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("subagent routing ignores stale conversation board scope when child linkage exists", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const queuePath = path.join(
+      os.tmpdir(),
+      `clawboard-logger-scope-stale-conv-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`
+    );
+    const api = makeApi({ queuePath });
+    register(api);
+
+    const toolCall = api.__handlers.get("before_tool_call");
+    const toolResult = api.__handlers.get("after_tool_call");
+    assert.equal(typeof toolCall, "function");
+    assert.equal(typeof toolResult, "function");
+
+    const staleParentSessionKey = "agent:main:clawboard:task:topic-scope-stale-1:task-scope-stale-1";
+    const currentParentSessionKey = "agent:main:clawboard:task:topic-scope-current-1:task-scope-current-1";
+    const childSessionKey = "agent:coding:subagent:scope-current-child-1";
+
+    // Prime stale board scope in memory, simulating older board context that should not leak.
+    await toolCall(
+      {
+        toolName: "exec",
+        params: { command: "echo stale" },
+      },
+      {
+        sessionKey: staleParentSessionKey,
+        channelId: "openclaw",
+      }
+    );
+
+    // Spawn child from the current board-scoped parent, which must define child inheritance.
+    await toolCall(
+      {
+        toolName: "sessions_spawn",
+        params: { agentId: "coding" },
+      },
+      {
+        sessionKey: currentParentSessionKey,
+        channelId: "openclaw",
+      }
+    );
+
+    await toolResult(
+      {
+        toolName: "sessions_spawn",
+        result: { status: "accepted", childSessionKey },
+        durationMs: 8,
+      },
+      {
+        sessionKey: currentParentSessionKey,
+        channelId: "openclaw",
+      }
+    );
+
+    // Child call carries stale conversationId, but should still resolve to linked current parent scope.
+    await toolCall(
+      {
+        toolName: "exec",
+        params: { command: "pwd" },
+      },
+      {
+        sessionKey: childSessionKey,
+        conversationId: staleParentSessionKey,
+        channelId: "openclaw",
+        agentId: "coding",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 4);
+    const childPayload = meaningfulCalls(calls)
+      .map((call) => parseBody(call))
+      .find((payload) => payload?.source?.sessionKey === childSessionKey && payload?.content === "Tool call: exec");
+
+    assert.ok(childPayload, "expected child subagent action log");
+    assert.equal(childPayload.topicId, "topic-scope-current-1");
+    assert.equal(childPayload.taskId, "task-scope-current-1");
+    assert.equal(childPayload.source.boardScopeTopicId, "topic-scope-current-1");
+    assert.equal(childPayload.source.boardScopeTaskId, "task-scope-current-1");
+    assert.equal(childPayload.source.boardScopeInherited, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("after_tool_call emits action log for result and error (ING-004)", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -564,6 +841,73 @@ test("after_tool_call emits action log for result and error (ING-004)", async ()
   }
 });
 
+test("before_tool_call skips unanchored OpenClaw control-plane tool calls", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const queuePath = path.join(
+      os.tmpdir(),
+      `clawboard-logger-unanchored-before-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`
+    );
+    const api = makeApi({ queuePath });
+    register(api);
+
+    const handler = api.__handlers.get("before_tool_call");
+    assert.equal(typeof handler, "function");
+
+    await handler(
+      {
+        toolName: "sessions_list",
+        params: {},
+      },
+      {
+        channelId: "openclaw",
+      }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(meaningfulCalls(calls).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("after_tool_call skips unanchored OpenClaw control-plane tool results", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const queuePath = path.join(
+      os.tmpdir(),
+      `clawboard-logger-unanchored-after-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`
+    );
+    const api = makeApi({ queuePath });
+    register(api);
+
+    const handler = api.__handlers.get("after_tool_call");
+    assert.equal(typeof handler, "function");
+
+    await handler(
+      {
+        toolName: "sessions_list",
+        result: { sessions: [] },
+        durationMs: 11,
+      },
+      {
+        channelId: "openclaw",
+      }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(meaningfulCalls(calls).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("agent_end fallback captures assistant output when send hooks are absent (ING-005)", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -600,6 +944,42 @@ test("agent_end fallback captures assistant output when send hooks are absent (I
   }
 });
 
+test("agent_end suppresses subagent scaffold user payloads", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("agent_end");
+    assert.equal(typeof handler, "function");
+
+    await handler(
+      {
+        success: true,
+        messages: [
+          { role: "user", content: "[Subagent Context] You are running as a subagent (depth 1/1)." },
+          { role: "assistant", content: "Subagent finished with actionable result." },
+        ],
+      },
+      {
+        sessionKey: "agent:coding:subagent:test-agent-end",
+        channelId: "direct",
+        agentId: "coding",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 1);
+    const payloads = meaningfulCalls(calls).map((call) => parseBody(call)).filter((payload) => payload?.type === "conversation");
+    assert.ok(payloads.some((payload) => payload.content === "Subagent finished with actionable result."));
+    assert.equal(payloads.some((payload) => String(payload.content || "").startsWith("[Subagent Context]")), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("board-session user message echo is skipped to avoid double logging (ING-006)", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -624,6 +1004,75 @@ test("board-session user message echo is skipped to avoid double logging (ING-00
         channelId: "openclaw",
         sessionKey: "clawboard:topic:topic-123",
         conversationId: "channel:ignored",
+      }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(meaningfulCalls(calls).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("message_received suppresses heartbeat control-plane prompts for agent:main:main", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("message_received");
+    assert.equal(typeof handler, "function");
+
+    await handler(
+      {
+        content: "Heartbeat: read context and validate in-flight subagents",
+        metadata: {
+          sessionKey: "agent:main:main",
+          messageId: "hb-msg-1",
+        },
+      },
+      {
+        channelId: "imessage",
+        sessionKey: "agent:main:main",
+        conversationId: "agent:main:main",
+      }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(meaningfulCalls(calls).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("message_received suppresses subagent scaffold prompts", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("message_received");
+    assert.equal(typeof handler, "function");
+
+    await handler(
+      {
+        content:
+          "[Subagent Context] You are running as a subagent (depth 1/1). Results auto-announce to your requester.",
+        metadata: {
+          sessionKey: "agent:coding:subagent:test-subagent",
+          messageId: "subagent-msg-1",
+        },
+      },
+      {
+        channelId: "direct",
+        sessionKey: "agent:coding:subagent:test-subagent",
+        conversationId: "agent:coding:subagent:test-subagent",
       }
     );
 

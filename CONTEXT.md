@@ -30,6 +30,18 @@ Net effect: the agent can "remember" what happened across Topics/Tasks/logs/note
 
 ---
 
+### Allocation guardrails for context eligibility (absolute)
+Aligned with `CLASSIFICATION.md` section 4.1 and `ANATOMY.md` section 4.1.
+
+- Only logs in direct user-request lineage are eligible for Topic/Task allocation and downstream continuity recall.
+- `clawboard:task:<topicId>:<taskId>` sessions are hard-locked to that topic+task.
+- `clawboard:topic:<topicId>` sessions are hard-locked to that topic; task promotion is allowed only inside that same topic.
+- Subagent logs inherit board scope only when lineage is explicit:
+  - explicit `source.boardScope*` on the row, or
+  - explicit `sessions_spawn` child-session linkage captured by the logger.
+- Cross-agent/global "latest scope" fallback is forbidden.
+- Background/control-plane activity (cron, backup, maintenance, unanchored tool churn) must not be surfaced as user-request continuity in Topic/Task chats.
+
 ### What the agent sees (the injected context block)
 On `before_agent_start`, if `contextAugment` is enabled (default), the plugin prepends a block like:
 
@@ -172,6 +184,17 @@ Two separate protections exist to keep injected context from poisoning logs, emb
    - burst protection: bounded search gate (`CLAWBOARD_SEARCH_CONCURRENCY_*`) keeps `/api/search` responsive under rapid typing by failing fast with `429 search_busy`
    - efficiency tuning: `CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS`, `CLAWBOARD_SEARCH_SOURCE_TOPK_*`, `CLAWBOARD_RERANK_CHUNKS_PER_DOC`, and `CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE`
 
+4. **Control-plane and tool-trace suppression at ingest/classification**
+   - logger conversation hooks suppress heartbeat/control-plane and subagent scaffold payloads before they hit Clawboard
+   - API ingest terminal-filters any surviving control-plane conversations:
+     - `filtered_control_plane`
+     - `filtered_subagent_scaffold`
+     - plus `filtered_cron_event` for `source.channel=cron-event`
+   - API ingest terminalizes tool trace actions:
+     - anchored traces -> `classified` + `filtered_tool_activity`
+     - unanchored traces -> `failed` + `filtered_unanchored_tool_activity` (detached)
+   - classifier re-applies the same filters for historical/pending rows so old data converges to guardrails
+
 Additional guardrail:
 - The plugin ignores internal classifier sessions by default via `DEFAULT_IGNORE_SESSION_PREFIXES = ["internal:clawboard-classifier:"]`
   - file: `extensions/clawboard-logger/ignore-session.ts`
@@ -221,6 +244,11 @@ The plugin computes an "effective session key" in `computeEffectiveSessionKey(..
 Important: to avoid double-logging Clawboard UI chat, the plugin explicitly skips logging `message_received` when the effective session key parses as a board session (`parseBoardSessionKey(...)`), because Clawboard's own backend persists those messages immediately via its board chat endpoint.
 
 During ingest, Clawboard normalizes source scope metadata (`boardScopeTopicId`, `boardScopeTaskId`, `boardScopeSpaceId`) so later context/search calls can infer the correct source space from session continuity.
+
+For subagents, board scope inheritance is explicit-link only:
+- parent board-scoped runs that call `sessions_spawn` can publish child session keys into the logger cache
+- child sessions inherit only when the exact child session key has linked board scope (memory + persisted sqlite cache)
+- there is no cross-agent/global "latest scope" fallback
 
 ---
 

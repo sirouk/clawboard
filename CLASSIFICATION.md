@@ -63,6 +63,21 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 - Tool call action logs are excluded from semantic search and graph extraction by default.
 - When a source space is resolved, classifier/context/search must stay within effective allowed-space visibility.
 
+### 4.1 Allocation Guardrails (Absolute)
+
+This section is normative for `ANATOMY.md` and `CONTEXT.md`.
+
+- Allocation to Topic/Task is allowed only for logs in a direct user-request lineage.
+- Board sessions are hard constraints:
+  - `clawboard:task:<topicId>:<taskId>` is permanently pinned to that topic+task.
+  - `clawboard:topic:<topicId>` is permanently pinned to that topic; task inference/creation can happen only inside that same topic.
+- Subagent scope inheritance is allowed only when explicitly linked to the parent request chain:
+  - explicit board scope on the log (`source.boardScope*`), or
+  - explicit parent-child session linkage captured from `sessions_spawn` (`childSessionKey`) and cached by exact child session key.
+- Cross-agent or global "latest scope" fallback is forbidden for allocation.
+- Non-request/control-plane activity (cron, backups, maintenance, unanchored tool churn) must never be allocated to user Topic/Task chats.
+- If an event cannot prove request lineage, it must remain detached (`topicId/taskId` empty) and/or terminal-filtered by ingest/classifier filters.
+
 ## 5) Ingestion, Allocation, and Routing Deep Dive
 
 ### 5.1 Session Identity and Scope
@@ -72,7 +87,8 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 - Plugin routing scope can come from:
   - explicit board session key
   - board scope metadata (`source.boardScope*`)
-  - subagent inherited scope cache.
+  - explicit subagent linkage cache keyed by exact child session key (`sessions_spawn` `childSessionKey`, memory + sqlite).
+- Cross-agent/global recency fallback is intentionally disallowed.
 - API canonicalizes scope metadata into `source.boardScope*` fields for downstream consistency.
 - Classifier board-session runs resolve allowed spaces from source scope and apply `allowedSpaceIds` on API reads/writes.
 
@@ -92,6 +108,20 @@ This spec is code-accurate for the current repository and adds mission-grade ope
   - `classificationAttempts=1`
   - `classificationError=filtered_cron_event`
   - `topicId` and `taskId` cleared.
+- Main-session heartbeat/control-plane conversations are terminal at ingest:
+  - `classificationStatus=failed`
+  - `classificationAttempts=1`
+  - `classificationError=filtered_control_plane`
+  - `topicId` and `taskId` cleared.
+- Subagent scaffold envelopes (`[Subagent Context]...`) are terminal at ingest:
+  - `classificationStatus=failed`
+  - `classificationAttempts=1`
+  - `classificationError=filtered_subagent_scaffold`
+  - `topicId` and `taskId` cleared.
+- Tool trace action rows (`Tool call|result|error`) are terminalized at ingest:
+  - anchored rows -> `classificationStatus=classified`, `classificationError=filtered_tool_activity`
+  - unanchored rows -> `classificationStatus=failed`, `classificationError=filtered_unanchored_tool_activity`
+  - both paths set `classificationAttempts=1`.
 
 ### 5.4 Queue Mode
 
@@ -144,7 +174,7 @@ This spec is code-accurate for the current repository and adds mission-grade ope
   - Messages stay in **this topic only**. Topic is pinned; classifier candidate retrieval is restricted to this topic (and its tasks).
   - Task inference or creation is allowed **only within this topic**, and only when there is a **clear, concrete task** (gated by `_task_creation_allowed` and `call_creation_gate`).
   - Never allocate to another topic.
-- Subagent sessions can inherit latest classified scope to avoid routing drift.
+- Subagent sessions can be pinned only by explicit board scope lineage (`source.boardScope*`) or prior classified scope in that same subagent session; never by global/cross-session recency fallback.
 
 ### 6.5 Candidate Retrieval and Scoring
 
@@ -204,6 +234,10 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 | System/import row | `classified` | `filtered_non_semantic` |
 | Memory tool action | `classified` | `filtered_memory_action` |
 | Cron event | `failed` | `filtered_cron_event` |
+| Heartbeat/control-plane conversation | `failed` | `filtered_control_plane` |
+| Subagent scaffold conversation | `failed` | `filtered_subagent_scaffold` |
+| Anchored tool trace action | `classified` | `filtered_tool_activity` |
+| Unanchored tool trace action | `failed` | `filtered_unanchored_tool_activity` |
 | Classifier payload artifact | `failed` | `classifier_payload_noise` |
 | Context injection artifact | `failed` | `context_injection_noise` |
 | Other conversation noise | `failed` | `conversation_noise` |
@@ -428,7 +462,7 @@ This catalog enumerates the complete engineered scenario surface at the methodol
 | CLS-007 | interleaved actions/system rows between turns | same bundle `scope_logs` patched consistently | `classifier/classifier.py` scope range logic |
 | CLS-008 | task-scoped board session | hard pin to topic+task; no reroute | `classifier/classifier.py` forced task scope branch |
 | CLS-009 | topic-scoped board session | topic pinned, task inference allowed inside topic | `classifier/classifier.py` forced topic handling |
-| CLS-010 | subagent session with prior classified scope | inherits latest classified topic/task scope | `classifier/classifier.py` subagent continuity branch |
+| CLS-010 | subagent session with explicit board lineage | inherits pinned scope from explicit board linkage or prior classified rows in the same subagent session; no cross-session fallback | `extensions/clawboard-logger/index.ts` explicit `sessions_spawn` linkage + `classifier/classifier.py` subagent continuity branch |
 | CLS-011 | low-signal follow-up (`yes/ok`) | continuity memory consulted and may force prior topic/task | `classifier/classifier.py` continuity logic |
 | CLS-012 | explicit “new thread/topic” cue | continuity force suppressed | `classifier/classifier.py` explicit new-thread detection |
 | CLS-013 | small-talk bundle | routed to stable `Small Talk` topic | `classifier/classifier.py` `_is_small_talk_bundle` fast path |
@@ -466,6 +500,9 @@ This catalog enumerates the complete engineered scenario surface at the methodol
 | FIL-006 | injected context artifact | `failed`, detached unless locked scope | `context_injection_noise` |
 | FIL-007 | other conversation noise | `failed`, detached unless locked scope | `conversation_noise` |
 | FIL-008 | fallback semantic route | `classified` with degraded provenance marker | `fallback:<reason>` |
+| FIL-009 | heartbeat/control-plane conversation | `failed`, detached | `filtered_control_plane` |
+| FIL-010 | subagent scaffold conversation | `failed`, detached | `filtered_subagent_scaffold` |
+| FIL-011 | tool trace action (anchored/unanchored) | `classified` when anchored, `failed` when unanchored | `filtered_tool_activity` / `filtered_unanchored_tool_activity` |
 
 ### 14.5 Search, Context, and UI Synchronization Scenarios
 
@@ -580,6 +617,10 @@ Automated behavior full-coverage gate status: `MET` (`77/77` covered).
 | ING-014 | board scope metadata-only source is normalized into canonical scope fields | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_ing_014_source_scope_metadata_is_normalized` | Covered |
 | ING-015 | task/topic mismatch is corrected to task authority | `backend/tests/test_append_log_entry.py::test_append_log_aligns_topic_to_task` | Covered |
 | ING-016 | cron-event ingest is terminal filtered + detached | `backend/tests/test_append_log_entry.py::test_append_log_filters_cron_event_logs` | Covered |
+| ING-021 | main-session heartbeat/control-plane conversation is terminal filtered + detached | `backend/tests/test_append_log_entry.py::test_append_log_filters_main_session_heartbeat_control_plane_conversation` | Covered |
+| ING-022 | subagent scaffold conversation is terminal filtered + detached | `backend/tests/test_append_log_entry.py::test_append_log_filters_subagent_scaffold_conversation` | Covered |
+| ING-023 | scoped tool trace action is terminalized as classified filtered tool activity | `backend/tests/test_append_log_entry.py::test_append_log_marks_scoped_tool_trace_action_as_terminal_classified` | Covered |
+| ING-024 | unanchored tool trace action is terminalized as failed + detached | `backend/tests/test_append_log_entry.py::test_append_log_marks_unanchored_tool_trace_action_as_terminal_failed` | Covered |
 | ING-017 | conversation activity revives snoozed topic/task | `backend/tests/test_unsnooze_on_activity.py::test_conversation_revives_snoozed_topic_and_task` | Covered |
 | ING-018 | queue ingest mode writes `IngestQueue` and worker drains statuses | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_ing_018_queue_ingest_and_worker_drain` | Covered |
 | ING-019 | SQLite lock during ingest follows bounded retry/backoff | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_ing_019_append_retries_sqlite_lock_then_commits` | Covered |
@@ -598,7 +639,7 @@ Automated behavior full-coverage gate status: `MET` (`77/77` covered).
 | CLS-007 | interleaved rows are patched in-scope consistently | `scripts/classifier_e2e_check.py` scenarios `multi-bundle`, `board-task-fixed-scope` | Covered |
 | CLS-008 | task-scoped board session is hard-pinned | `classifier/tests/test_board_sessions.py::test_classify_session_task_scope_keeps_task_fixed`; `scripts/classifier_e2e_check.py` `board-task-fixed-scope` | Covered |
 | CLS-009 | topic-scoped board session pins topic while allowing task inference | `classifier/tests/test_board_sessions.py::test_classify_session_topic_scope_can_promote_to_task_without_moving_topic`; `scripts/classifier_e2e_check.py` `board-topic-promote-task` | Covered |
-| CLS-010 | subagent session inherits latest classified scope | `classifier/tests/test_board_sessions.py::test_subagent_session_with_existing_task_scope_stays_pinned` | Covered |
+| CLS-010 | subagent session inherits only explicit board lineage | `classifier/tests/test_board_sessions.py::test_subagent_session_with_existing_task_scope_stays_pinned`; `extensions/clawboard-logger/behavior.test.mjs` `subagent tool logs inherit board scope from parent board session when ctx.agentId is absent`; `extensions/clawboard-logger/behavior.test.mjs` `subagent tool logs do not inherit board scope without explicit spawn linkage` | Covered |
 | CLS-011 | low-signal follow-up can force continuity scope | `classifier/tests/test_session_routing_continuity.py::test_low_signal_followup_forces_continuity_topic_in_llm_mode` | Covered |
 | CLS-012 | explicit "new thread/topic" cue suppresses continuity forcing | `classifier/tests/test_classifier_additional_coverage.py::test_cls_012_explicit_new_thread_suppresses_continuity_forcing` | Covered |
 | CLS-013 | small-talk fast path routes to stable small-talk scope | `classifier/tests/test_classifier_additional_coverage.py::test_cls_013_small_talk_fast_path_uses_stable_small_talk_topic` | Covered |
@@ -636,6 +677,9 @@ Automated behavior full-coverage gate status: `MET` (`77/77` covered).
 | FIL-006 | context injection artifact -> `failed` + `context_injection_noise` | `classifier/tests/test_classifier_failure_paths.py::test_fil_005_and_fil_006_noise_error_code_specific_branches` | Covered |
 | FIL-007 | other conversation noise -> `failed` + `conversation_noise` | `classifier/tests/test_classifier_failure_paths.py::test_fil_007_noise_error_code_defaults_to_conversation_noise` | Covered |
 | FIL-008 | fallback semantic route -> `classified` + `fallback:<reason>` | `classifier/tests/test_classifier_failure_paths.py::test_fil_008_fallback_route_sets_fallback_error_code` | Covered |
+| FIL-009 | heartbeat/control-plane conversation -> `failed` + detached | `classifier/tests/test_control_plane_and_tool_filtering.py::test_classify_session_filters_main_session_heartbeat_control_plane_conversation` | Covered |
+| FIL-010 | subagent scaffold conversation -> `failed` + detached | `classifier/tests/test_control_plane_and_tool_filtering.py::test_classify_session_filters_subagent_scaffold_conversation` | Covered |
+| FIL-011 | tool trace action -> anchored classified, unanchored failed | `classifier/tests/test_control_plane_and_tool_filtering.py::test_classify_session_marks_scoped_tool_action_filtered_in_forced_task_scope`; `classifier/tests/test_control_plane_and_tool_filtering.py::test_classify_session_marks_unanchored_tool_action_as_terminal_failed` | Covered |
 
 ### SRCH and Context Scenarios
 
@@ -729,7 +773,7 @@ Trace-level coverage means each scenario maps to existing implementation files (
 | CLS-007 | interleaved actions/system rows between turns | `classifier/classifier.py` | Traced | OK |
 | CLS-008 | task-scoped board session | `classifier/classifier.py` | Traced | OK |
 | CLS-009 | topic-scoped board session | `classifier/classifier.py` | Traced | OK |
-| CLS-010 | subagent session with prior classified scope | `classifier/classifier.py` | Traced | OK |
+| CLS-010 | subagent session with explicit board lineage | `extensions/clawboard-logger/index.ts`; `classifier/classifier.py` | Traced | OK |
 | CLS-011 | low-signal follow-up (`yes/ok`) | `classifier/classifier.py` | Traced | OK |
 | CLS-012 | explicit “new thread/topic” cue | `classifier/classifier.py` | Traced | OK |
 | CLS-013 | small-talk bundle | `classifier/classifier.py` | Traced | OK |

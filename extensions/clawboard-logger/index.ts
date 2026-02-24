@@ -148,7 +148,6 @@ const DEFAULT_CONTEXT_LOG_LIMIT = 6;
 const CLAWBOARD_CONTEXT_BEGIN = "[CLAWBOARD_CONTEXT_BEGIN]";
 const CLAWBOARD_CONTEXT_END = "[CLAWBOARD_CONTEXT_END]";
 const IGNORE_SESSION_PREFIXES = getIgnoreSessionPrefixesFromEnv(process.env);
-const BOARD_SCOPE_TTL_MS = 15 * 60_000;
 /** Longer TTL when resolving subagent scope from DB so long-running subagents stay aligned. Configurable via CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS (default 48). */
 const BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS =
   envInt("CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS", 48, 1, 168) * 60 * 60 * 1000;
@@ -329,6 +328,58 @@ function isClassifierPayloadText(content: string) {
   return hits >= 2;
 }
 
+function normalizeChannelId(value: string | undefined | null) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function isMainAgentSessionKey(value: string | undefined | null) {
+  const key = String(value ?? "").trim();
+  if (!key) return false;
+  const base = key.split("|", 1)[0] ?? key;
+  return base.trim().toLowerCase() === "agent:main:main";
+}
+
+function isHeartbeatControlPlaneText(
+  content: string,
+  params?: {
+    sessionKey?: string | null;
+    channelId?: string | null;
+  },
+) {
+  const clean = sanitizeMessageContent(content).trim();
+  if (!clean) return false;
+  const channel = normalizeChannelId(params?.channelId);
+  const mainAgentSession = isMainAgentSessionKey(params?.sessionKey);
+
+  if (channel === "heartbeat" || channel === "cron-event") return true;
+  if (/^\[cron:[^\]]+\]/i.test(clean)) return true;
+  if (/^\s*heartbeat\s*:/i.test(clean)) return mainAgentSession || channel === "heartbeat";
+  if (/^\s*heartbeat_ok\s*$/i.test(clean)) return mainAgentSession || channel === "heartbeat";
+  if (mainAgentSession && /heartbeat and watchdog recovery check/i.test(clean)) return true;
+  return false;
+}
+
+function isSubagentScaffoldText(content: string, sessionKey: string | undefined | null) {
+  const clean = sanitizeMessageContent(content).trim();
+  if (!clean) return false;
+  if (!/^\s*\[subagent context\]/i.test(clean)) return false;
+  const key = String(sessionKey ?? "").trim().toLowerCase();
+  return key.includes(":subagent:");
+}
+
+function shouldSuppressNonSemanticConversation(
+  content: string,
+  params?: {
+    sessionKey?: string | null;
+    channelId?: string | null;
+  },
+) {
+  const sessionKey = params?.sessionKey ?? undefined;
+  if (isSubagentScaffoldText(content, sessionKey)) return true;
+  if (isHeartbeatControlPlaneText(content, params)) return true;
+  return false;
+}
+
 function redact(value: unknown, depth = 0): unknown {
   if (depth > 4) return "[redacted-depth]";
   if (value === null || value === undefined) return value;
@@ -442,7 +493,7 @@ export default function register(api: OpenClawPluginApi) {
     deleteStmt: ReturnType<DatabaseSync["prepare"]>;
     failStmt: ReturnType<DatabaseSync["prepare"]>;
     scopeInsertStmt: ReturnType<DatabaseSync["prepare"]>;
-    scopeSelectStmt: ReturnType<DatabaseSync["prepare"]>;
+    scopeSelectByAgentStmt: ReturnType<DatabaseSync["prepare"]>;
 
     constructor(filePath: string) {
       this.db = new DatabaseSync(filePath);
@@ -496,14 +547,10 @@ export default function register(api: OpenClawPluginApi) {
         INSERT OR REPLACE INTO board_scope_cache (agent_id, topic_id, task_id, kind, session_key, updated_at_ms)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6);
       `);
-      // Intentionally cross-agent: returns the globally most-recent fresh scope to use as a
-      // fallback when the owning agent's in-memory scope cannot be found (e.g. after a restart).
-      // The PRIMARY KEY on agent_id enables per-agent upserts; this query ignores it to get the
-      // latest scope across all agents, which is the correct behaviour for orphaned subagents.
-      this.scopeSelectStmt = this.db.prepare(`
+      this.scopeSelectByAgentStmt = this.db.prepare(`
         SELECT topic_id as topicId, task_id as taskId, kind, session_key as sessionKey, updated_at_ms as updatedAt
         FROM board_scope_cache
-        WHERE updated_at_ms >= ?1
+        WHERE agent_id = ?1 AND updated_at_ms >= ?2
         ORDER BY updated_at_ms DESC
         LIMIT 1;
       `);
@@ -539,8 +586,16 @@ export default function register(api: OpenClawPluginApi) {
       );
     }
 
-    getMostRecentFreshBoardScope(cutoffMs: number): BoardScope | undefined {
-      const rows = this.scopeSelectStmt.all(cutoffMs) as Array<{
+    saveBoardScopeForSession(sessionKey: string, scope: BoardScope) {
+      const key = normalizeId(sessionKey);
+      if (!key) return;
+      this.saveBoardScope(`session:${key}`, scope);
+    }
+
+    getFreshBoardScopeForAgent(agentId: string, cutoffMs: number): BoardScope | undefined {
+      const key = normalizeId(agentId);
+      if (!key) return undefined;
+      const rows = this.scopeSelectByAgentStmt.all(key, cutoffMs) as Array<{
         topicId: string;
         taskId: string | null;
         kind: string;
@@ -558,6 +613,12 @@ export default function register(api: OpenClawPluginApi) {
       };
       if (row.taskId) scope.taskId = row.taskId;
       return scope;
+    }
+
+    getFreshBoardScopeForSession(sessionKey: string, cutoffMs: number): BoardScope | undefined {
+      const key = normalizeId(sessionKey);
+      if (!key) return undefined;
+      return this.getFreshBoardScopeForAgent(`session:${key}`, cutoffMs);
     }
   }
 
@@ -739,6 +800,13 @@ export default function register(api: OpenClawPluginApi) {
     return { ownerAgentId, subagentId };
   }
 
+  function parseAgentSessionOwner(sessionKey: string | undefined | null) {
+    const key = normalizeId(sessionKey);
+    if (!key || !key.startsWith("agent:")) return undefined;
+    const parts = key.split(":");
+    return normalizeId(parts[1]);
+  }
+
   function boardScopeFromSessionKey(sessionKey: string | undefined | null): BoardScope | undefined {
     const key = normalizeId(sessionKey);
     if (!key) return undefined;
@@ -761,20 +829,6 @@ export default function register(api: OpenClawPluginApi) {
       inherited: false,
       updatedAt: nowMs(),
     };
-  }
-
-  function isFreshBoardScope(scope: BoardScope | undefined, now = nowMs()) {
-    return Boolean(scope && now - scope.updatedAt <= BOARD_SCOPE_TTL_MS);
-  }
-
-  /** Most recent fresh board scope across all agents; used for subagent fallback when owner has none. */
-  function getMostRecentFreshBoardScopeFromAgents(now = nowMs()): BoardScope | undefined {
-    let best: BoardScope | undefined;
-    for (const scope of boardScopeByAgent.values()) {
-      if (!isFreshBoardScope(scope, now)) continue;
-      if (!best || scope.updatedAt > best.updatedAt) best = scope;
-    }
-    return best;
   }
 
   function rememberBoardScope(
@@ -866,7 +920,7 @@ export default function register(api: OpenClawPluginApi) {
   }) {
     const source: Record<string, unknown> = {};
     if (params.channel !== undefined) source.channel = params.channel;
-    const sessionKey = normalizeId(params.sessionKey);
+    const sessionKey = normalizeId(params.sessionKey) ?? normalizeId(params.boardScope?.sessionKey);
     if (sessionKey) source.sessionKey = sessionKey;
     const messageId = normalizeId(params.messageId);
     if (messageId) source.messageId = messageId;
@@ -895,6 +949,107 @@ export default function register(api: OpenClawPluginApi) {
     return source;
   }
 
+  function hasSpecificSessionAnchor(
+    effectiveSessionKey: string | undefined,
+    ctx2: PluginHookContextBase,
+  ) {
+    const candidates = [
+      normalizeId(effectiveSessionKey),
+      normalizeId(ctx2.sessionKey),
+      normalizeId(ctx2.conversationId),
+    ];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const lowered = candidate.toLowerCase();
+      if (lowered === "channel:openclaw" || lowered === "channel:clawboard") continue;
+      return true;
+    }
+    return false;
+  }
+
+  function hasToolRoutingAnchor(routing: RoutingScope) {
+    if (routing.topicId || routing.taskId) return true;
+    const scope = routing.boardScope;
+    if (!scope) return false;
+    if (scope.topicId) return true;
+    return scope.kind === "task" && Boolean(scope.taskId);
+  }
+
+  function extractSpawnedSubagentSessionKeys(value: unknown) {
+    const out = new Set<string>();
+    const seen = new WeakSet<object>();
+    const CHILD_KEY_FIELDS = ["childSessionKey", "child_session_key"] as const;
+    const CHILD_LIST_FIELDS = ["childSessionKeys", "child_session_keys"] as const;
+
+    const record = (candidate: unknown) => {
+      const key = normalizeId(typeof candidate === "string" ? candidate : undefined);
+      if (!key) return;
+      if (!parseSubagentSession(key)) return;
+      out.add(key);
+    };
+
+    const visit = (node: unknown, depth: number) => {
+      if (depth > 6 || node === null || node === undefined) return;
+      if (typeof node === "string") {
+        record(node);
+        return;
+      }
+      if (Array.isArray(node)) {
+        for (const item of node) visit(item, depth + 1);
+        return;
+      }
+      if (typeof node !== "object") return;
+      const obj = node as Record<string, unknown>;
+      if (seen.has(obj)) return;
+      seen.add(obj);
+
+      for (const field of CHILD_KEY_FIELDS) {
+        record(obj[field]);
+      }
+      for (const field of CHILD_LIST_FIELDS) {
+        const list = obj[field];
+        if (!Array.isArray(list)) continue;
+        for (const item of list) record(item);
+      }
+      for (const next of Object.values(obj)) {
+        visit(next, depth + 1);
+      }
+    };
+
+    visit(value, 0);
+    return Array.from(out);
+  }
+
+  function rememberSpawnedSubagentBoardScope(childSessionKey: string, scope: BoardScope) {
+    const key = normalizeId(childSessionKey);
+    if (!key) return;
+    if (!parseSubagentSession(key)) return;
+    const inheritedScope: BoardScope = {
+      ...scope,
+      inherited: true,
+      updatedAt: nowMs(),
+    };
+    const sessionKeys = requestSessionKeys(key);
+    rememberBoardScope(inheritedScope, { sessionKeys, agentIds: [] });
+    getQueueDb()
+      .then((db) => {
+        for (const sessionKey of sessionKeys) {
+          db.saveBoardScopeForSession(sessionKey, inheritedScope);
+        }
+      })
+      .catch(() => {});
+  }
+
+  function uniqueSessionCandidates(values: Array<string | undefined | null>) {
+    const out = new Set<string>();
+    for (const value of values) {
+      const normalized = normalizeId(value);
+      if (!normalized) continue;
+      out.add(normalized);
+    }
+    return Array.from(out);
+  }
+
   async function resolveRoutingScope(
     effectiveSessionKey: string | undefined,
     ctx2: PluginHookContextBase,
@@ -904,16 +1059,27 @@ export default function register(api: OpenClawPluginApi) {
     const ctxSessionKey = normalizeId(ctx2.sessionKey);
     const metaSessionKey = typeof meta?.sessionKey === "string" ? normalizeId(meta.sessionKey) : undefined;
     const conversationKey = normalizeId(ctx2.conversationId);
-    const sessionCandidates = [normalizedSessionKey, ctxSessionKey, metaSessionKey, conversationKey];
+    const subagent = parseSubagentSession(normalizedSessionKey ?? ctxSessionKey);
+    const explicitSessionCandidates = uniqueSessionCandidates([normalizedSessionKey, ctxSessionKey, metaSessionKey]);
+    const sessionCandidates = subagent
+      ? explicitSessionCandidates
+      : uniqueSessionCandidates([...explicitSessionCandidates, conversationKey]);
+    const subagentSessionCandidates = subagent
+      ? uniqueSessionCandidates(
+          [normalizedSessionKey, ctxSessionKey, metaSessionKey].flatMap((candidate) => requestSessionKeys(candidate)),
+        )
+      : [];
 
     // Direct board scope from any supplied session key always wins.
     for (const candidate of sessionCandidates) {
       const direct = boardScopeFromSessionKey(candidate);
       if (!direct) continue;
-      const sub = parseSubagentSession(normalizedSessionKey ?? ctxSessionKey);
+      const sessionOwners = sessionCandidates
+        .map((rawKey) => parseAgentSessionOwner(rawKey))
+        .filter((value): value is string => Boolean(value));
       rememberBoardScope(direct, {
         sessionKeys: sessionCandidates,
-        agentIds: [normalizeId(ctx2.agentId), sub?.ownerAgentId],
+        agentIds: [normalizeId(ctx2.agentId), subagent?.ownerAgentId, ...sessionOwners],
       });
       return {
         topicId: direct.topicId,
@@ -922,34 +1088,32 @@ export default function register(api: OpenClawPluginApi) {
       };
     }
 
-    // Subagent sessions inherit from the owning agent's most-recent board scope.
-    // The spawner (e.g. main) holds the board session; scope is stored under the spawner's agent id,
-    // not the subagent's owner (e.g. coding). Fall back to the most recent scope from any agent
-    // (in-memory, then DB) so subagent logs stay in the same Task/Topic Chat that spawned them.
-    // Use a longer TTL when reading from DB so long-running subagents (e.g. a day) don't get
-    // orphaned or misaligned.
-    const subagent = parseSubagentSession(normalizedSessionKey ?? ctxSessionKey);
+    // Subagent sessions inherit board scope only when we have an explicit linkage
+    // for that child session (in-memory or persisted by session key from sessions_spawn).
+    // This prevents unrelated background/cron subagents from being pulled into a user's board chat.
     if (subagent) {
       const now = nowMs();
-      const exact = sessionCandidates
+      const exact = subagentSessionCandidates
         .map((candidate) => (candidate ? boardScopeBySession.get(candidate) : undefined))
-        .find((scope) => isFreshBoardScope(scope, now));
-      let inherited: BoardScope | undefined =
-        exact ??
-        boardScopeByAgent.get(subagent.ownerAgentId) ??
-        getMostRecentFreshBoardScopeFromAgents(now);
+        .find((scope) => Boolean(scope && now - scope.updatedAt <= BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS));
+      let inherited: BoardScope | undefined = exact;
       let inheritedFromDb = false;
-      if (!inherited) {
+      if (!inherited && subagentSessionCandidates.length > 0) {
         try {
           const db = await getQueueDb();
           const cutoffPersistence = now - BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS;
-          inherited = db.getMostRecentFreshBoardScope(cutoffPersistence);
-          if (inherited) inheritedFromDb = true;
+          for (const candidate of subagentSessionCandidates) {
+            const fromDb = db.getFreshBoardScopeForSession(candidate, cutoffPersistence);
+            if (!fromDb) continue;
+            inherited = fromDb;
+            inheritedFromDb = true;
+            break;
+          }
         } catch {
           // DB unavailable or not yet initialized; leave inherited undefined
         }
       }
-      const ttlMs = inheritedFromDb ? BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS : BOARD_SCOPE_TTL_MS;
+      const ttlMs = BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS;
       const accepted = inherited && now - inherited.updatedAt <= ttlMs;
       if (accepted) {
         const nextScope: BoardScope = {
@@ -958,9 +1122,18 @@ export default function register(api: OpenClawPluginApi) {
           updatedAt: now,
         };
         rememberBoardScope(nextScope, {
-          sessionKeys: sessionCandidates,
-          agentIds: [subagent.ownerAgentId, normalizeId(ctx2.agentId)],
+          sessionKeys: subagentSessionCandidates,
+          agentIds: [],
         });
+        if (!inheritedFromDb) {
+          getQueueDb()
+            .then((db) => {
+              for (const candidate of subagentSessionCandidates) {
+                db.saveBoardScopeForSession(candidate, nextScope);
+              }
+            })
+            .catch(() => {});
+        }
         return {
           topicId: nextScope.topicId,
           taskId: nextScope.kind === "task" ? nextScope.taskId : undefined,
@@ -1554,6 +1727,15 @@ export default function register(api: OpenClawPluginApi) {
     // Avoid expensive retrieval for internal classifier payloads (these can be huge JSON blobs and will
     // stampede /api/search). The classifier/log hooks already skip logging these.
     if (cleanInput && isClassifierPayloadText(cleanInput)) return;
+    if (
+      cleanInput &&
+      shouldSuppressNonSemanticConversation(cleanInput, {
+        sessionKey: effectiveSessionKey ?? ctx?.sessionKey,
+        channelId: ctx?.channelId,
+      })
+    ) {
+      return;
+    }
     const retrievalQuery =
       cleanInput && cleanInput.trim().length > 0
         ? clip(cleanInput, 320)
@@ -1651,6 +1833,10 @@ export default function register(api: OpenClawPluginApi) {
   };
 
   const resolveSessionKey = (meta: { sessionKey?: string } | undefined, ctx2: PluginHookContextBase) => {
+    const ctxSession = normalizeId(ctx2.sessionKey);
+    if (parseSubagentSession(ctxSession)) return ctxSession;
+    const metaSession = normalizeId(meta?.sessionKey);
+    if (parseSubagentSession(metaSession)) return metaSession;
     const metaObj = (meta as Record<string, unknown> | undefined) ?? undefined;
     return computeEffectiveSessionKey(metaObj, ctx2);
   };
@@ -1695,6 +1881,14 @@ export default function register(api: OpenClawPluginApi) {
       messageId,
     });
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
+    if (
+      shouldSuppressNonSemanticConversation(cleanRaw, {
+        sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+        channelId: ctx.channelId,
+      })
+    ) {
+      return;
+    }
     const channelId = typeof ctx.channelId === "string" ? ctx.channelId.trim().toLowerCase() : "";
     const inferredRequestId = inferRequestIdFromMessageId(messageId);
     if (
@@ -1879,6 +2073,14 @@ export default function register(api: OpenClawPluginApi) {
       messageId: meta?.messageId,
     });
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
+    if (
+      shouldSuppressNonSemanticConversation(cleanRaw, {
+        sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+        channelId: ctx.channelId,
+      })
+    ) {
+      return;
+    }
     const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
     const topicId = routing.topicId;
     const taskId = routing.taskId;
@@ -1958,6 +2160,7 @@ export default function register(api: OpenClawPluginApi) {
     });
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
     const routing = await resolveRoutingScope(effectiveSessionKey, ctx);
+    if (!hasSpecificSessionAnchor(effectiveSessionKey, ctx) && !hasToolRoutingAnchor(routing)) return;
     const topicId = routing.topicId;
     const taskId = routing.taskId;
 
@@ -2000,6 +2203,13 @@ export default function register(api: OpenClawPluginApi) {
     });
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
     const routing = await resolveRoutingScope(effectiveSessionKey, ctx);
+    if (!hasSpecificSessionAnchor(effectiveSessionKey, ctx) && !hasToolRoutingAnchor(routing)) return;
+    if (!event.error && event.toolName === "sessions_spawn" && routing.boardScope) {
+      const childSessionKeys = extractSpawnedSubagentSessionKeys(event.result);
+      for (const childSessionKey of childSessionKeys) {
+        rememberSpawnedSubagentBoardScope(childSessionKey, routing.boardScope);
+      }
+    }
     const topicId = routing.topicId;
     const taskId = routing.taskId;
 
@@ -2188,6 +2398,14 @@ export default function register(api: OpenClawPluginApi) {
         if (!cleanedContent) continue;
         if (isClassifierPayloadText(cleanedContent)) continue;
         if (cleanedContent.trim() === "NO_REPLY") continue;
+        if (
+          shouldSuppressNonSemanticConversation(cleanedContent, {
+            sessionKey: inferredSessionKey,
+            channelId: sourceChannel,
+          })
+        ) {
+          continue;
+        }
 
         const summary = summarize(cleanedContent);
         const fingerprint = dedupeFingerprint(cleanedContent);

@@ -851,6 +851,13 @@ def _source_channel(entry: dict) -> str:
     return str(source.get("channel") or "").strip().lower()
 
 
+def _entry_session_key(entry: dict) -> str:
+    source = entry.get("source")
+    if not isinstance(source, dict):
+        return ""
+    return str(source.get("sessionKey") or "").strip()
+
+
 def _is_truthy(value: object) -> bool:
     if isinstance(value, bool):
         return value
@@ -885,6 +892,129 @@ def _entry_locked_scope(entry: dict) -> tuple[str | None, str | None, str | None
 def _is_cron_event(entry: dict) -> bool:
     """True when the log originates from OpenClaw cron delivery/control messages."""
     return _source_channel(entry) in CRON_EVENT_CHANNELS
+
+
+def _is_subagent_session_key(session_key: str) -> bool:
+    base = (str(session_key or "").split("|", 1)[0] or "").strip().lower()
+    if not base:
+        return False
+    return ":subagent:" in base
+
+
+def _is_subagent_scaffold_conversation(entry: dict) -> bool:
+    if entry.get("type") != "conversation":
+        return False
+    session_key = _entry_session_key(entry)
+    if not _is_subagent_session_key(session_key):
+        return False
+    text = _log_text(entry)
+    if not text:
+        return False
+    return bool(re.match(r"^\s*\[subagent context\]", text, flags=re.IGNORECASE))
+
+
+def _is_heartbeat_control_plane_conversation(entry: dict) -> bool:
+    if entry.get("type") != "conversation":
+        return False
+    channel = _source_channel(entry)
+    if channel == "heartbeat":
+        return True
+    session_base = (_entry_session_key(entry).split("|", 1)[0] or "").strip().lower()
+    if session_base != "agent:main:main":
+        return False
+    text = _log_text(entry)
+    if not text:
+        return False
+    if re.match(r"^\s*\[cron:[^\]]+\]", text, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^\s*heartbeat\s*:", text, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^\s*heartbeat_ok\s*$", text, flags=re.IGNORECASE):
+        return True
+    return bool(re.search(r"heartbeat and watchdog recovery check", text, flags=re.IGNORECASE))
+
+
+def _control_plane_conversation_error(entry: dict) -> str | None:
+    if _is_subagent_scaffold_conversation(entry):
+        return "filtered_subagent_scaffold"
+    if _is_heartbeat_control_plane_conversation(entry):
+        return "filtered_control_plane"
+    return None
+
+
+def _is_tool_trace_action(entry: dict) -> bool:
+    if entry.get("type") != "action":
+        return False
+    text = _log_text(entry).lower()
+    if not text:
+        return False
+    return "tool call:" in text or "tool result:" in text or "tool error:" in text
+
+
+def _entry_scope_anchor(entry: dict) -> tuple[str | None, str | None]:
+    topic_id = str(entry.get("topicId") or "").strip() or None
+    task_id = str(entry.get("taskId") or "").strip() or None
+    source = entry.get("source")
+    source = source if isinstance(source, dict) else {}
+    if not topic_id:
+        topic_id = str(source.get("boardScopeTopicId") or "").strip() or None
+    if not task_id:
+        task_id = str(source.get("boardScopeTaskId") or "").strip() or None
+    parsed_topic, parsed_task = _parse_board_session_key(_entry_session_key(entry))
+    if not topic_id:
+        topic_id = parsed_topic or None
+    if not task_id:
+        task_id = parsed_task or None
+    return topic_id, task_id
+
+
+def _filtered_control_or_tool_patch(
+    entry: dict,
+    *,
+    attempts: int,
+    scoped_topic_id: str | None = None,
+    scoped_task_id: str | None = None,
+    allow_anchored_tool: bool = True,
+) -> dict | None:
+    control_error = _control_plane_conversation_error(entry)
+    if control_error:
+        return {
+            "topicId": None,
+            "taskId": None,
+            "classificationStatus": "failed",
+            "classificationAttempts": attempts + 1,
+            "classificationError": control_error,
+        }
+
+    if not _is_tool_trace_action(entry):
+        return None
+
+    anchor_topic_id, anchor_task_id = _entry_scope_anchor(entry)
+    has_anchor = bool(anchor_topic_id or anchor_task_id)
+    if not has_anchor:
+        return {
+            "topicId": None,
+            "taskId": None,
+            "classificationStatus": "failed",
+            "classificationAttempts": attempts + 1,
+            "classificationError": "filtered_unanchored_tool_activity",
+        }
+
+    if not allow_anchored_tool:
+        return None
+
+    topic_id = scoped_topic_id if scoped_topic_id is not None else anchor_topic_id
+    task_id = scoped_task_id if scoped_task_id is not None else anchor_task_id
+    if task_id and not topic_id:
+        topic_id = anchor_topic_id
+
+    return {
+        "topicId": topic_id,
+        "taskId": task_id,
+        "classificationStatus": "classified",
+        "classificationAttempts": attempts + 1,
+        "classificationError": "filtered_tool_activity",
+    }
 
 
 def _is_memory_action(entry: dict) -> bool:
@@ -3654,33 +3784,42 @@ def classify_session(session_key: str):
             ctx_logs.append(item)
     ctx_logs = sorted(ctx_logs, key=lambda e: e.get("createdAt") or "")
 
-    # Cron delivery/control messages should never be classified into topics/tasks. Mark them terminal
-    # immediately so they can't be swept into a bundle scope patch.
+    # Early terminal filters for obvious control-plane noise:
+    # - cron-event rows
+    # - control-plane conversations (heartbeat / subagent scaffolds)
+    # - unanchored tool traces
+    # Keep anchored tool traces for scope-aware handling later in this cycle.
     for e in ctx_logs:
-        if not _is_cron_event(e):
-            continue
         if (e.get("classificationStatus") or "pending") != "pending":
             continue
         attempts = int(e.get("classificationAttempts") or 0)
-        try:
-            patch_log(
-                e["id"],
-                {
-                    "topicId": None,
-                    "taskId": None,
-                    "classificationStatus": "failed",
-                    "classificationAttempts": attempts + 1,
-                    "classificationError": "filtered_cron_event",
-                },
+
+        patch_payload: dict | None = None
+        if _is_cron_event(e):
+            patch_payload = {
+                "topicId": None,
+                "taskId": None,
+                "classificationStatus": "failed",
+                "classificationAttempts": attempts + 1,
+                "classificationError": "filtered_cron_event",
+            }
+        else:
+            patch_payload = _filtered_control_or_tool_patch(
+                e,
+                attempts=attempts,
+                allow_anchored_tool=False,
             )
+
+        if not patch_payload:
+            continue
+
+        try:
+            patch_log(e["id"], patch_payload)
             # Keep local copy consistent so this turn doesn't re-process it.
-            e["topicId"] = None
-            e["taskId"] = None
-            e["classificationStatus"] = "failed"
-            e["classificationAttempts"] = attempts + 1
-            e["classificationError"] = "filtered_cron_event"
+            for key, value in patch_payload.items():
+                e[key] = value
         except Exception:
-            # Best-effort; if we can't patch, classification below still skips cron logs.
+            # Best-effort; if we can't patch, later guards still avoid allocating these rows.
             pass
     ctx_context = [e for e in ctx_logs if _is_context_log(e)]
 
@@ -3704,6 +3843,10 @@ def classify_session(session_key: str):
                         "classificationError": "filtered_cron_event",
                     },
                 )
+                continue
+            filtered_patch = _filtered_control_or_tool_patch(e, attempts=attempts)
+            if filtered_patch:
+                patch_log(e["id"], filtered_patch)
                 continue
             if attempts >= MAX_ATTEMPTS:
                 continue
@@ -3750,6 +3893,10 @@ def classify_session(session_key: str):
                         "classificationError": "filtered_cron_event",
                     },
                 )
+                continue
+            filtered_patch = _filtered_control_or_tool_patch(e, attempts=attempts)
+            if filtered_patch:
+                patch_log(e["id"], filtered_patch)
                 continue
             if attempts >= MAX_ATTEMPTS:
                 continue
@@ -3858,6 +4005,15 @@ def classify_session(session_key: str):
                     },
                 )
                 continue
+            filtered_patch = _filtered_control_or_tool_patch(
+                e,
+                attempts=attempts,
+                scoped_topic_id=forced_topic_id,
+                scoped_task_id=forced_task_id,
+            )
+            if filtered_patch:
+                patch_log(e["id"], filtered_patch)
+                continue
             if attempts >= MAX_ATTEMPTS:
                 continue
 
@@ -3943,6 +4099,10 @@ def classify_session(session_key: str):
                         "classificationError": "filtered_cron_event",
                     },
                 )
+                continue
+            filtered_patch = _filtered_control_or_tool_patch(e, attempts=attempts0)
+            if filtered_patch:
+                patch_log(e["id"], filtered_patch)
                 continue
             attempts = attempts0 + 1
             next_status = "failed" if attempts >= MAX_ATTEMPTS else "pending"
@@ -4816,6 +4976,15 @@ def classify_session(session_key: str):
                 },
             )
             continue
+        filtered_patch = _filtered_control_or_tool_patch(
+            e,
+            attempts=attempts,
+            scoped_topic_id=target_topic_id,
+            scoped_task_id=target_task_id,
+        )
+        if filtered_patch:
+            patch_log(e["id"], filtered_patch)
+            continue
         if attempts >= MAX_ATTEMPTS:
             continue
         if _is_command_conversation(e):
@@ -4968,6 +5137,33 @@ def main():
 
             filtered_pending: list[dict] = []
             for e in pending:
+                attempts0 = int(e.get("classificationAttempts") or 0)
+                if _is_cron_event(e):
+                    try:
+                        patch_log(
+                            e["id"],
+                            {
+                                "topicId": None,
+                                "taskId": None,
+                                "classificationStatus": "failed",
+                                "classificationAttempts": attempts0 + 1,
+                                "classificationError": "filtered_cron_event",
+                            },
+                        )
+                    except Exception:
+                        pass
+                    continue
+                filtered_patch = _filtered_control_or_tool_patch(
+                    e,
+                    attempts=attempts0,
+                    allow_anchored_tool=False,
+                )
+                if filtered_patch:
+                    try:
+                        patch_log(e["id"], filtered_patch)
+                    except Exception:
+                        pass
+                    continue
                 if not _is_noise_conversation(e):
                     filtered_pending.append(e)
                     continue

@@ -159,6 +159,20 @@ Hard relationship rules enforced in runtime:
 - Classifier patches only scope windows, not whole sessions.
 - Board task sessions are hard-locked to selected topic+task.
 
+### 4.1 Absolute Allocation Guardrails (Normative)
+
+Aligned with `CLASSIFICATION.md` section 4.1 and `CONTEXT.md` allocation guardrails.
+
+- Topic/Task allocation is allowed only for logs with direct user-request lineage.
+- Task chat keys (`clawboard:task:<topicId>:<taskId>`) are hard-pinned and never rerouted.
+- Topic chat keys (`clawboard:topic:<topicId>`) are topic-pinned; task inference/creation is allowed only within that same topic.
+- Subagent scope inheritance is allowed only via explicit lineage:
+  - explicit `source.boardScope*` metadata, or
+  - explicit `sessions_spawn` child-session linkage cached by exact child session key.
+- Cross-agent/global "latest scope" fallback is forbidden.
+- Background/control-plane activity (cron, backups, maintenance, unanchored tool churn) must never be allocated to user Topic/Task chats.
+- If lineage is not provable, logs must stay detached and/or terminal-filtered.
+
 ## 5) Spaces, Tags, and Visibility Scope
 
 Core files:
@@ -208,9 +222,14 @@ Flow:
    - strips injected context blocks
    - strips control/classifier artifacts
    - strips transport noise.
-3. Plugin resolves effective `sessionKey` and routing scope.
+3. Plugin resolves effective `sessionKey` and routing scope from explicit board keys/metadata plus explicit spawned-child linkage (no global recency fallback).
 4. Plugin sends `POST /api/log` (or `/api/ingest` queue mode), with stable idempotency key.
-5. API dedupes and normalizes scope metadata (`boardScope*`), enforces topic/task/space consistency.
+5. API dedupes and normalizes scope metadata (`boardScope*`), enforces topic/task/space consistency, and terminal-filters control-plane/tool noise:
+   - `filtered_cron_event`
+   - `filtered_control_plane`
+   - `filtered_subagent_scaffold`
+   - `filtered_tool_activity`
+   - `filtered_unanchored_tool_activity`
 6. API emits `log.appended` SSE.
 7. Classifier later processes pending conversation rows.
 
@@ -259,9 +278,12 @@ Flow:
 
 Safety filters:
 - cron events
+- heartbeat/control-plane conversations
+- subagent scaffold envelopes
 - slash commands
 - classifier payload artifacts
 - context-injection artifacts
+- tool-trace actions (`Tool call/result/error`) with anchored/unanchored terminalization
 - system/import/memory-action rows.
 
 ### 6.4 Search flow (`/api/search`)
@@ -579,6 +601,7 @@ If you are debugging a live issue:
 | CLS-03 | Normal session classification | candidate retrieval + LLM JSON | pending rows patched with assignments |
 | CLS-04 | Invalid LLM output | strict parse failure fallback | deterministic repair/heuristic fallback applies |
 | CLS-05 | Replay requested | `/api/classifier/replay` | older rows marked pending for re-derivation |
+| CLS-06 | Subagent child session from board-scoped request | logger `sessions_spawn` linkage + classifier same-session continuity | child logs stay in parent request scope; unrelated subagents stay detached |
 | SRCH-01 | Normal semantic query | `/api/search` -> `_search_impl` -> `semantic_search` | hybrid-ranked topics/tasks/logs/notes |
 | SRCH-02 | Low-signal query in scoped session | auto semantic hint expansion branch | stronger scoped recall without global noise |
 | SRCH-03 | Search system under pressure | concurrency gate/degraded branch | bounded results or busy-safe fallback response |

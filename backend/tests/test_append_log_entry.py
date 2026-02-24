@@ -186,6 +186,189 @@ class AppendLogEntryTests(unittest.TestCase):
         self.assertEqual(payload.get("classificationError"), "filtered_cron_event")
         self.assertEqual(payload.get("classificationAttempts"), 1)
 
+    def test_append_log_filters_main_session_heartbeat_control_plane_conversation(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+            session.add(
+                Task(
+                    id="task-a",
+                    topicId="topic-a",
+                    title="Task A",
+                    color="#4EA1FF",
+                    status="todo",
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "topicId": "topic-a",
+                "taskId": "task-a",
+                "content": "Heartbeat: heartbeat_ok",
+                "summary": "Heartbeat check",
+                "raw": "[Cron:watchdog] Heartbeat and watchdog recovery check",
+                "createdAt": ts,
+                "agentId": "system",
+                "agentLabel": "System",
+                "source": {
+                    "channel": "openclaw",
+                    "sessionKey": "agent:main:main",
+                    "messageId": "oc:heartbeat-1",
+                    "boardScopeTopicId": "topic-a",
+                    "boardScopeTaskId": "task-a",
+                    "boardScopeKind": "task",
+                    "boardScopeLock": True,
+                },
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertIsNone(payload.get("topicId"))
+        self.assertIsNone(payload.get("taskId"))
+        self.assertEqual(payload.get("classificationStatus"), "failed")
+        self.assertEqual(payload.get("classificationError"), "filtered_control_plane")
+        self.assertEqual(payload.get("classificationAttempts"), 1)
+        source = payload.get("source") or {}
+        self.assertNotIn("boardScopeTopicId", source)
+        self.assertNotIn("boardScopeTaskId", source)
+        self.assertNotIn("boardScopeKind", source)
+        self.assertNotIn("boardScopeLock", source)
+
+    def test_append_log_filters_subagent_scaffold_conversation(self):
+        ts = now_iso()
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "content": "[Subagent Context] You are running as a subagent (depth 1/1).",
+                "summary": "subagent context preface",
+                "raw": None,
+                "createdAt": ts,
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {
+                    "channel": "direct",
+                    "sessionKey": "agent:coding:subagent:abc123",
+                    "messageId": "oc:subagent-scaffold-1",
+                },
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertIsNone(payload.get("topicId"))
+        self.assertIsNone(payload.get("taskId"))
+        self.assertEqual(payload.get("classificationStatus"), "failed")
+        self.assertEqual(payload.get("classificationError"), "filtered_subagent_scaffold")
+        self.assertEqual(payload.get("classificationAttempts"), 1)
+
+    def test_append_log_marks_scoped_tool_trace_action_as_terminal_classified(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+            session.add(
+                Task(
+                    id="task-a",
+                    topicId="topic-a",
+                    title="Task A",
+                    color="#4EA1FF",
+                    status="todo",
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "action",
+                "topicId": "topic-a",
+                "taskId": "task-a",
+                "content": "Tool call: shell.exec",
+                "summary": "Tool call: shell.exec",
+                "raw": "Tool call: shell.exec {\"cmd\":\"echo hi\"}",
+                "createdAt": ts,
+                "agentId": "main",
+                "agentLabel": "Main Agent",
+                "source": {"channel": "openclaw", "sessionKey": "clawboard:task:topic-a:task-a", "messageId": "oc:tool-1"},
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertEqual(payload.get("topicId"), "topic-a")
+        self.assertEqual(payload.get("taskId"), "task-a")
+        self.assertEqual(payload.get("classificationStatus"), "classified")
+        self.assertEqual(payload.get("classificationError"), "filtered_tool_activity")
+        self.assertEqual(payload.get("classificationAttempts"), 1)
+
+    def test_append_log_marks_unanchored_tool_trace_action_as_terminal_failed(self):
+        ts = now_iso()
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "action",
+                "content": "Tool result: shell.exec",
+                "summary": "Tool result: shell.exec",
+                "raw": "Tool result: shell.exec exit=0",
+                "createdAt": ts,
+                "agentId": "main",
+                "agentLabel": "Main Agent",
+                "source": {"channel": "openclaw", "sessionKey": "agent:main:main", "messageId": "oc:tool-2"},
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertIsNone(payload.get("topicId"))
+        self.assertIsNone(payload.get("taskId"))
+        self.assertEqual(payload.get("classificationStatus"), "failed")
+        self.assertEqual(payload.get("classificationError"), "filtered_unanchored_tool_activity")
+        self.assertEqual(payload.get("classificationAttempts"), 1)
+
     def test_patch_log_classifier_aligns_stale_topic_to_task(self):
         ts = now_iso()
         with get_session() as session:

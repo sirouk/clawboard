@@ -152,6 +152,10 @@ Commands:
   test                                 Run full test suite (npm run test:all)
   demo-load                            Load demo data into the API database
   demo-clear                           Clear API data via seed helper
+  cleanup-orphan-tools [--dry-run] [--yes]
+                                       Remove unscoped OpenClaw control-plane tool traces from Logs
+  reconcile-allocation-guardrails [--dry-run] [--yes]
+                                       Reconcile control-plane/tool log allocation to match routing guardrails
 
   token-show                           Show masked backend/frontend token values
   token-be [value|--generate]          Set CLAWBOARD_TOKEN in .env
@@ -537,6 +541,358 @@ start_fresh_replay() {
   python3 "$ROOT_DIR/scripts/one_time_start_fresh_replay.py" --yes --integration-level full
 }
 
+cleanup_orphan_tools() {
+  local apply=true
+  local force=false
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run) apply=false ;;
+      --yes) force=true ;;
+      *)
+        echo "error: unknown flag for cleanup-orphan-tools: $1" >&2
+        echo "usage: bash deploy.sh cleanup-orphan-tools [--dry-run] [--yes]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ "$apply" = "true" ]; then
+    confirm_or_abort "Delete orphaned tool logs (unallocated control-plane traces)?" "$force"
+  fi
+
+  local apply_flag="0"
+  if [ "$apply" = "true" ]; then
+    apply_flag="1"
+  fi
+
+  if ! compose exec -T -e CLAWBOARD_CLEANUP_APPLY="$apply_flag" api python - <<'PY'; then
+import os
+from collections import Counter
+
+from sqlmodel import select
+
+from app.db import get_session
+from app.models import LogEntry
+
+
+CONTROL_CHANNEL_BUCKETS = {"channel:openclaw", "channel:clawboard"}
+TOOL_PREFIXES = ("tool call:", "tool result:", "tool error:")
+APPLY = os.getenv("CLAWBOARD_CLEANUP_APPLY", "0").strip() == "1"
+
+
+def _text(value):
+    return str(value or "").strip()
+
+
+def _is_orphan_tool_log(entry):
+    if _text(getattr(entry, "type", "")).lower() != "action":
+        return False
+    content = _text(getattr(entry, "content", "")).lower()
+    if not content.startswith(TOOL_PREFIXES):
+        return False
+    if _text(getattr(entry, "topicId", "")) or _text(getattr(entry, "taskId", "")):
+        return False
+
+    source = getattr(entry, "source", None)
+    source = source if isinstance(source, dict) else {}
+    session_key = _text(source.get("sessionKey")).lower()
+    has_specific_session = bool(session_key and session_key not in CONTROL_CHANNEL_BUCKETS)
+    has_board_scope = bool(_text(source.get("boardScopeTopicId")) or _text(source.get("boardScopeTaskId")))
+    return not has_specific_session and not has_board_scope
+
+
+def _tool_name(content):
+    raw = _text(content)
+    if ":" not in raw:
+        return "(unknown)"
+    value = raw.split(":", 1)[1].strip()
+    return value or "(unknown)"
+
+
+with get_session() as session:
+    rows = session.exec(select(LogEntry).where(LogEntry.type == "action")).all()
+    candidates = [row for row in rows if _is_orphan_tool_log(row)]
+    tool_counts = Counter(_tool_name(row.content) for row in candidates)
+
+    print(f"Scanned action logs: {len(rows)}")
+    print(f"Matched orphaned tool logs: {len(candidates)}")
+    if tool_counts:
+        print("Top tools:")
+        for name, count in tool_counts.most_common(10):
+            print(f"  - {name}: {count}")
+
+    if APPLY and candidates:
+        for row in candidates:
+            session.delete(row)
+        session.commit()
+        print(f"Deleted: {len(candidates)}")
+    elif APPLY:
+        print("Deleted: 0")
+    else:
+        print("Dry run only (no rows deleted).")
+PY
+    echo "error: failed to run cleanup in API container. Ensure API is running (e.g. 'bash deploy.sh up api')." >&2
+    exit 1
+  fi
+}
+
+reconcile_allocation_guardrails() {
+  local apply=true
+  local force=false
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run) apply=false ;;
+      --yes) force=true ;;
+      *)
+        echo "error: unknown flag for reconcile-allocation-guardrails: $1" >&2
+        echo "usage: bash deploy.sh reconcile-allocation-guardrails [--dry-run] [--yes]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ "$apply" = "true" ]; then
+    confirm_or_abort "Reconcile control-plane/tool logs to enforce allocation guardrails?" "$force"
+  fi
+
+  local apply_flag="0"
+  if [ "$apply" = "true" ]; then
+    apply_flag="1"
+  fi
+
+  if ! compose exec -T -e CLAWBOARD_RECONCILE_APPLY="$apply_flag" api python - <<'PY'; then
+import os
+import re
+from collections import Counter
+
+from sqlmodel import select
+
+from app.db import get_session
+from app.models import LogEntry, Task, Topic
+
+
+APPLY = os.getenv("CLAWBOARD_RECONCILE_APPLY", "0").strip() == "1"
+
+
+def _text(value):
+    return str(value or "").strip()
+
+
+def _combined_text(row):
+    return " ".join(part for part in (_text(row.content), _text(row.summary), _text(row.raw)) if part).strip()
+
+
+def _source_map(row):
+    src = getattr(row, "source", None)
+    return dict(src) if isinstance(src, dict) else {}
+
+
+def _session_base(source):
+    return (_text(source.get("sessionKey")).split("|", 1)[0] or "").strip().lower()
+
+
+def _parse_board_session_key(source):
+    base = (_text(source.get("sessionKey")).split("|", 1)[0] or "").strip()
+    if not base:
+        return (None, None)
+    task_match = re.search(r"clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)", base)
+    if task_match:
+        return (task_match.group(1), task_match.group(2))
+    topic_match = re.search(r"clawboard:topic:(topic-[a-zA-Z0-9-]+)", base)
+    if topic_match:
+        return (topic_match.group(1), None)
+    return (None, None)
+
+
+def _is_subagent_scaffold(row, source, text):
+    if _text(getattr(row, "type", "")).lower() != "conversation":
+        return False
+    if ":subagent:" not in _session_base(source):
+        return False
+    return bool(re.match(r"^\s*\[subagent context\]", text, flags=re.IGNORECASE))
+
+
+def _is_heartbeat_control_plane(row, source, text):
+    if _text(getattr(row, "type", "")).lower() != "conversation":
+        return False
+    channel = _text(source.get("channel")).lower()
+    if channel == "heartbeat":
+        return True
+    if _session_base(source) != "agent:main:main":
+        return False
+    if re.match(r"^\s*\[cron:[^\]]+\]", text, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^\s*heartbeat\s*:", text, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^\s*heartbeat_ok\s*$", text, flags=re.IGNORECASE):
+        return True
+    return bool(re.search(r"heartbeat and watchdog recovery check", text, flags=re.IGNORECASE))
+
+
+def _is_tool_trace(row, text):
+    if _text(getattr(row, "type", "")).lower() != "action":
+        return False
+    lower = text.lower()
+    return "tool call:" in lower or "tool result:" in lower or "tool error:" in lower
+
+
+def _scope_anchor(row, source):
+    topic_id = _text(getattr(row, "topicId", "")) or _text(source.get("boardScopeTopicId"))
+    task_id = _text(getattr(row, "taskId", "")) or _text(source.get("boardScopeTaskId"))
+    parsed_topic_id, parsed_task_id = _parse_board_session_key(source)
+    if not topic_id and parsed_topic_id:
+        topic_id = parsed_topic_id
+    if not task_id and parsed_task_id:
+        task_id = parsed_task_id
+    return (topic_id or None, task_id or None)
+
+
+def _reconciled_attempts(row):
+    return max(1, int(getattr(row, "classificationAttempts", 0) or 0))
+
+
+with get_session() as session:
+    valid_topic_ids = {str(row.id) for row in session.exec(select(Topic)).all() if getattr(row, "id", None)}
+    valid_tasks = {
+        str(row.id): str(row.topicId)
+        for row in session.exec(select(Task)).all()
+        if getattr(row, "id", None) and getattr(row, "topicId", None)
+    }
+    rows = session.exec(select(LogEntry).where(LogEntry.type.in_(["conversation", "action"]))).all()
+
+    touched = 0
+    reasons = Counter()
+
+    for row in rows:
+        source = _source_map(row)
+        text = _combined_text(row)
+        desired = None
+        desired_source = None
+        reason = None
+
+        channel = _text(source.get("channel")).lower()
+        if channel == "cron-event" and _text(getattr(row, "type", "")).lower() == "conversation":
+            desired = {
+                "topicId": None,
+                "taskId": None,
+                "classificationStatus": "failed",
+                "classificationAttempts": _reconciled_attempts(row),
+                "classificationError": "filtered_cron_event",
+            }
+            pruned = dict(source)
+            for key in ("boardScopeTopicId", "boardScopeTaskId", "boardScopeKind", "boardScopeLock"):
+                pruned.pop(key, None)
+            desired_source = pruned
+            reason = "control:filtered_cron_event"
+        elif _is_subagent_scaffold(row, source, text):
+            desired = {
+                "topicId": None,
+                "taskId": None,
+                "classificationStatus": "failed",
+                "classificationAttempts": _reconciled_attempts(row),
+                "classificationError": "filtered_subagent_scaffold",
+            }
+            pruned = dict(source)
+            for key in ("boardScopeTopicId", "boardScopeTaskId", "boardScopeKind", "boardScopeLock"):
+                pruned.pop(key, None)
+            desired_source = pruned
+            reason = "control:filtered_subagent_scaffold"
+        elif _is_heartbeat_control_plane(row, source, text):
+            desired = {
+                "topicId": None,
+                "taskId": None,
+                "classificationStatus": "failed",
+                "classificationAttempts": _reconciled_attempts(row),
+                "classificationError": "filtered_control_plane",
+            }
+            pruned = dict(source)
+            for key in ("boardScopeTopicId", "boardScopeTaskId", "boardScopeKind", "boardScopeLock"):
+                pruned.pop(key, None)
+            desired_source = pruned
+            reason = "control:filtered_control_plane"
+        elif _is_tool_trace(row, text):
+            anchor_topic_id, anchor_task_id = _scope_anchor(row, source)
+            if anchor_task_id and anchor_task_id not in valid_tasks:
+                anchor_task_id = None
+            if anchor_topic_id and anchor_topic_id not in valid_topic_ids:
+                anchor_topic_id = None
+            if anchor_task_id:
+                owner_topic_id = valid_tasks.get(anchor_task_id)
+                if owner_topic_id:
+                    anchor_topic_id = owner_topic_id
+            if anchor_topic_id and anchor_task_id:
+                owner_topic_id = valid_tasks.get(anchor_task_id)
+                if owner_topic_id and owner_topic_id != anchor_topic_id:
+                    anchor_topic_id = owner_topic_id
+
+            if anchor_topic_id or anchor_task_id:
+                desired = {
+                    "topicId": anchor_topic_id,
+                    "taskId": anchor_task_id,
+                    "classificationStatus": "classified",
+                    "classificationAttempts": _reconciled_attempts(row),
+                    "classificationError": "filtered_tool_activity",
+                }
+                reason = "tool:filtered_tool_activity"
+            else:
+                desired = {
+                    "topicId": None,
+                    "taskId": None,
+                    "classificationStatus": "failed",
+                    "classificationAttempts": _reconciled_attempts(row),
+                    "classificationError": "filtered_unanchored_tool_activity",
+                }
+                reason = "tool:filtered_unanchored_tool_activity"
+
+        if not desired or not reason:
+            continue
+
+        changed = False
+        for key, value in desired.items():
+            if getattr(row, key) != value:
+                changed = True
+                if APPLY:
+                    setattr(row, key, value)
+
+        if desired_source is not None:
+            current_source = _source_map(row)
+            if current_source != desired_source:
+                changed = True
+                if APPLY:
+                    row.source = desired_source
+
+        if not changed:
+            continue
+
+        touched += 1
+        reasons[reason] += 1
+        if APPLY:
+            session.add(row)
+
+    print(f"Scanned logs: {len(rows)}")
+    print(f"Rows needing reconciliation: {touched}")
+    if reasons:
+        print("Reconciled by reason:")
+        for name, count in reasons.most_common():
+            print(f"  - {name}: {count}")
+
+    if APPLY and touched:
+        session.commit()
+        print(f"Updated rows: {touched}")
+    elif APPLY:
+        print("Updated rows: 0")
+    else:
+        print("Dry run only (no rows updated).")
+PY
+    echo "error: failed to run reconciliation in API container. Ensure API is running (e.g. 'bash deploy.sh up api')." >&2
+    exit 1
+  fi
+}
+
 status() {
   compose ps
 }
@@ -692,7 +1048,9 @@ run_interactive() {
   echo "10) Clear demo data"
   echo "11) Ensure skill installed"
   echo "12) Reset OpenClaw sessions (clears agent session history, keeps memories)"
-  echo "13) Quit"
+  echo "13) Cleanup orphaned tool logs (control-plane noise)"
+  echo "14) Reconcile allocation guardrails (control-plane + tool traces)"
+  echo "15) Quit"
   read -r -p "Select an option: " choice
 
   case "$choice" in
@@ -708,7 +1066,9 @@ run_interactive() {
     10) demo_clear ;;
     11) ensure_skill ;;
     12) reset_openclaw_sessions ;;
-    13) exit 0 ;;
+    13) cleanup_orphan_tools ;;
+    14) reconcile_allocation_guardrails ;;
+    15) exit 0 ;;
     *) echo "Invalid choice"; exit 1 ;;
   esac
 }
@@ -730,6 +1090,8 @@ case "$cmd" in
   test) run_tests ;;
   demo-load) demo_load ;;
   demo-clear) demo_clear ;;
+  cleanup-orphan-tools|cleanup_orphan_tools) shift; cleanup_orphan_tools "$@" ;;
+  reconcile-allocation-guardrails|reconcile_allocation_guardrails) shift; reconcile_allocation_guardrails "$@" ;;
   token-show) token_show ;;
   token-be) shift; token_be "${1:-}" ;;
   token-fe) shift; token_fe "${1:-}" ;;

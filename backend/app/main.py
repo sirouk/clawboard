@@ -1580,19 +1580,80 @@ def _chunked_values(values: list[str], chunk_size: int) -> Iterable[list[str]]:
             yield chunk
 
 
+def _combined_log_text(content: str | None, summary: str | None, raw: str | None) -> str:
+    parts = [
+        _sanitize_log_text(content or ""),
+        _sanitize_log_text(summary or ""),
+        _sanitize_log_text(raw or ""),
+    ]
+    return " ".join(part for part in parts if part).strip()
+
+
+def _is_tool_trace_text(content: str | None, summary: str | None, raw: str | None) -> bool:
+    combined = _combined_log_text(content, summary, raw).lower()
+    if not combined:
+        return False
+    return (
+        "tool call:" in combined
+        or "tool result:" in combined
+        or "tool error:" in combined
+    )
+
+
+def _is_subagent_session_key(session_key: str | None) -> bool:
+    key = str(session_key or "").strip().lower()
+    if not key:
+        return False
+    base = key.split("|", 1)[0].strip()
+    return ":subagent:" in base
+
+
+def _is_subagent_scaffold_text(content: str | None, summary: str | None, raw: str | None) -> bool:
+    combined = _combined_log_text(content, summary, raw)
+    if not combined:
+        return False
+    return bool(re.match(r"^\s*\[subagent context\]", combined, flags=re.IGNORECASE))
+
+
+def _is_heartbeat_control_plane_text(content: str | None, summary: str | None, raw: str | None) -> bool:
+    combined = _combined_log_text(content, summary, raw)
+    if not combined:
+        return False
+    if re.match(r"^\s*\[cron:[^\]]+\]", combined, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^\s*heartbeat\s*:", combined, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^\s*heartbeat_ok\s*$", combined, flags=re.IGNORECASE):
+        return True
+    return bool(re.search(r"heartbeat and watchdog recovery check", combined, flags=re.IGNORECASE))
+
+
+def _is_control_plane_conversation_payload(
+    *,
+    content: str | None,
+    summary: str | None,
+    raw: str | None,
+    source_channel: str | None,
+    source_session_key: str | None,
+) -> bool:
+    channel = str(source_channel or "").strip().lower()
+    session_key = str(source_session_key or "").strip().lower()
+    is_main_session = (session_key.split("|", 1)[0].strip() == "agent:main:main")
+    if channel in {"heartbeat", "cron-event"}:
+        return True
+    if not is_main_session:
+        return False
+    return _is_heartbeat_control_plane_text(content, summary, raw)
+
+
 def _is_tool_call_log(entry: LogEntry) -> bool:
     if getattr(entry, "type", None) != "action":
         return False
-    combined = " ".join(
-        part
-        for part in [
-            str(entry.summary or ""),
-            str(entry.content or ""),
-            str(entry.raw or ""),
-        ]
-        if part
-    ).lower()
-    return "tool call:" in combined or "tool result:" in combined or "tool error:" in combined
+    return _is_tool_trace_text(
+        str(entry.content or ""),
+        str(entry.summary or ""),
+        str(entry.raw or ""),
+    )
 
 
 def _log_reindex_text(entry: LogEntry) -> str:
@@ -3001,8 +3062,44 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             topic_id = source_scope_topic_id
 
     source_channel = ""
+    source_session_key = ""
     if source_meta:
         source_channel = str(source_meta.get("channel") or "").strip().lower()
+        source_session_key = str(source_meta.get("sessionKey") or "").strip()
+
+    control_plane_filtered = False
+    control_plane_error: str | None = None
+    if str(payload.type or "").strip().lower() == "conversation":
+        if _is_subagent_session_key(source_session_key) and _is_subagent_scaffold_text(
+            payload.content,
+            payload.summary,
+            payload.raw,
+        ):
+            control_plane_filtered = True
+            control_plane_error = "filtered_subagent_scaffold"
+        elif _is_control_plane_conversation_payload(
+            content=payload.content,
+            summary=payload.summary,
+            raw=payload.raw,
+            source_channel=source_channel,
+            source_session_key=source_session_key,
+        ):
+            control_plane_filtered = True
+            control_plane_error = "filtered_control_plane"
+
+    if control_plane_filtered:
+        if not space_id:
+            space_id = source_scope_space_id or DEFAULT_SPACE_ID
+        topic_id = None
+        task_id = None
+        source_scope_topic_id = None
+        source_scope_task_id = None
+        scope_lock = False
+        if source_meta is not None:
+            source_meta.pop("boardScopeTopicId", None)
+            source_meta.pop("boardScopeTaskId", None)
+            source_meta.pop("boardScopeKind", None)
+            source_meta.pop("boardScopeLock", None)
 
     # OpenClaw cron delivery/control messages should never be routed into user topics/tasks.
     # Treat them as terminal noise at ingest time so they can't briefly appear in Unified View
@@ -3045,10 +3142,11 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         canonical_space = str(source_scope_space_id or space_id or "").strip()
         canonical_topic = str(topic_id or "").strip()
         canonical_task = str(task_id or "").strip()
-        if source_scope_topic_id and not canonical_topic:
-            canonical_topic = source_scope_topic_id
-        if source_scope_task_id and not canonical_task:
-            canonical_task = source_scope_task_id
+        if not control_plane_filtered:
+            if source_scope_topic_id and not canonical_topic:
+                canonical_topic = source_scope_topic_id
+            if source_scope_task_id and not canonical_task:
+                canonical_task = source_scope_task_id
         if canonical_task and not canonical_topic and task_row and task_row.topicId:
             canonical_topic = str(task_row.topicId).strip()
 
@@ -3066,6 +3164,33 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             source_meta["boardScopeLock"] = True
         if canonical_space:
             source_meta["boardScopeSpaceId"] = canonical_space
+
+    log_type = str(payload.type or "").strip().lower()
+    is_tool_trace_action = log_type == "action" and _is_tool_trace_text(payload.content, payload.summary, payload.raw)
+    has_scope_anchor = bool(topic_id or task_id or source_scope_topic_id or source_scope_task_id)
+    if is_tool_trace_action and not has_scope_anchor:
+        topic_id = None
+        task_id = None
+
+    classification_status = payload.classificationStatus or "pending"
+    classification_attempts = 0
+    classification_error: str | None = None
+    if cron_event_filtered:
+        classification_status = "failed"
+        classification_attempts = 1
+        classification_error = "filtered_cron_event"
+    elif control_plane_filtered:
+        classification_status = "failed"
+        classification_attempts = 1
+        classification_error = control_plane_error or "filtered_control_plane"
+    elif is_tool_trace_action:
+        classification_attempts = 1
+        if has_scope_anchor:
+            classification_status = "classified"
+            classification_error = "filtered_tool_activity"
+        else:
+            classification_status = "failed"
+            classification_error = "filtered_unanchored_tool_activity"
 
     attachments = None
     if payload.attachments:
@@ -3101,9 +3226,9 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         agentLabel=payload.agentLabel,
         source=source_meta,
         attachments=attachments,
-        classificationStatus="failed" if cron_event_filtered else (payload.classificationStatus or "pending"),
-        classificationAttempts=1 if cron_event_filtered else 0,
-        classificationError="filtered_cron_event" if cron_event_filtered else None,
+        classificationStatus=classification_status,
+        classificationAttempts=classification_attempts,
+        classificationError=classification_error,
     )
     session.add(entry)
     try:
