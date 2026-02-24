@@ -9516,6 +9516,35 @@ def _search_impl(
             if entry.taskId:
                 session_task_ids.add(entry.taskId)
 
+    routing_items: list[dict[str, Any]] = []
+    if session_key:
+        routing_row = session.get(SessionRoutingMemory, session_key)
+        if not routing_row and "|" in session_key:
+            routing_row = session.get(SessionRoutingMemory, session_key.split("|", 1)[0])
+        if routing_row and isinstance(getattr(routing_row, "items", None), list):
+            routing_items = [item for item in list(routing_row.items or []) if isinstance(item, dict)]
+
+    if routing_items and allowed_space_ids is not None:
+        filtered_routing_items: list[dict[str, Any]] = []
+        for item in routing_items:
+            topic_id_hint = str(item.get("topicId") or "").strip()
+            task_id_hint = str(item.get("taskId") or "").strip()
+            allowed = False
+            if task_id_hint:
+                candidate_task = all_task_by_id.get(task_id_hint)
+                if candidate_task and _task_matches_allowed_spaces(candidate_task, allowed_space_ids, all_topic_by_id):
+                    allowed = True
+            if not allowed and topic_id_hint:
+                candidate_topic = all_topic_by_id.get(topic_id_hint)
+                if candidate_topic and _topic_matches_allowed_spaces(candidate_topic, allowed_space_ids):
+                    allowed = True
+            if not topic_id_hint and not task_id_hint:
+                allowed = True
+            if allowed:
+                filtered_routing_items.append(item)
+        routing_items = filtered_routing_items
+
+    semantic_hint_sources: set[str] = set()
     semantic_query_effective = _sanitize_log_text(str(semantic_query or ""))
     semantic_query_source = "explicit" if semantic_query_effective else "query"
     if not semantic_query_effective:
@@ -9542,6 +9571,7 @@ def _search_impl(
             board_task = task_map.get(board_task_id)
             if board_task:
                 scoped_context = True
+                semantic_hint_sources.add("board_scope")
                 _append_semantic_hint(str(getattr(board_task, "title", "") or ""), max_chars=120)
                 board_task_topic_id = str(getattr(board_task, "topicId", "") or "").strip()
                 if board_task_topic_id:
@@ -9553,14 +9583,43 @@ def _search_impl(
             board_topic = topic_map.get(board_topic_id)
             if board_topic:
                 scoped_context = True
+                semantic_hint_sources.add("board_scope")
                 _append_semantic_hint(str(getattr(board_topic, "name", "") or ""), max_chars=120)
 
         if topic_id:
             scoped_topic = topic_map.get(topic_id)
             if scoped_topic:
                 scoped_context = True
+                semantic_hint_sources.add("topic_scope")
                 _append_semantic_hint(str(getattr(scoped_topic, "name", "") or ""), max_chars=120)
                 _append_semantic_hint(str(getattr(scoped_topic, "description", "") or ""), max_chars=180)
+
+        if routing_items:
+            hinted_rows = 0
+            for item in reversed(routing_items[-6:]):
+                if hinted_rows >= 4:
+                    break
+                before_count = len(semantic_hints)
+                topic_hint_id = str(item.get("topicId") or "").strip()
+                task_hint_id = str(item.get("taskId") or "").strip()
+                topic_hint_name = _sanitize_log_text(str(item.get("topicName") or ""))
+                task_hint_title = _sanitize_log_text(str(item.get("taskTitle") or ""))
+                anchor_hint = _sanitize_log_text(str(item.get("anchor") or ""))
+                if not topic_hint_name and topic_hint_id:
+                    topic_hint_row = topic_map.get(topic_hint_id)
+                    if topic_hint_row:
+                        topic_hint_name = _sanitize_log_text(str(getattr(topic_hint_row, "name", "") or ""))
+                if not task_hint_title and task_hint_id:
+                    task_hint_row = task_map.get(task_hint_id)
+                    if task_hint_row:
+                        task_hint_title = _sanitize_log_text(str(getattr(task_hint_row, "title", "") or ""))
+                _append_semantic_hint(topic_hint_name, max_chars=120)
+                _append_semantic_hint(task_hint_title, max_chars=140)
+                _append_semantic_hint(anchor_hint, max_chars=220)
+                if len(semantic_hints) > before_count:
+                    scoped_context = True
+                    semantic_hint_sources.add("routing_memory")
+                    hinted_rows += 1
 
         if scoped_context and session_key:
             hinted_rows = 0
@@ -9579,6 +9638,7 @@ def _search_impl(
                 if not text_hint:
                     continue
                 _append_semantic_hint(text_hint, max_chars=180)
+                semantic_hint_sources.add("session_logs")
                 hinted_rows += 1
 
         if semantic_hints:
@@ -9628,41 +9688,80 @@ def _search_impl(
         )
 
     topic_query_hints: dict[str, list[str]] = {}
+    task_query_hints: dict[str, list[str]] = {}
 
-    def _append_topic_hint(topic_id_hint: str | None, text_hint: str, *, max_items: int = 8) -> None:
-        topic_key = str(topic_id_hint or "").strip()
-        if not topic_key:
+    def _hint_overlaps_query(cleaned_hint_raw: str) -> bool:
+        if not hint_query_tokens:
+            return False
+        hint_tokens = _search_query_tokens(cleaned_hint_raw)
+        overlap = len(hint_query_tokens & hint_tokens)
+        phrase_hit = bool(hint_query_lowered and hint_query_lowered in cleaned_hint_raw.lower())
+        return overlap > 0 or phrase_hit
+
+    def _append_hint(
+        hint_map: dict[str, list[str]],
+        bucket_id: str | None,
+        text_hint: str,
+        *,
+        max_items: int = 8,
+    ) -> None:
+        bucket_key = str(bucket_id or "").strip()
+        if not bucket_key:
             return
         cleaned_hint_raw = _sanitize_log_text(text_hint)
         if not cleaned_hint_raw:
             return
-        if hint_query_tokens:
-            hint_tokens = _search_query_tokens(cleaned_hint_raw)
-            overlap = len(hint_query_tokens & hint_tokens)
-            phrase_hit = bool(hint_query_lowered and hint_query_lowered in cleaned_hint_raw.lower())
-            if overlap <= 0 and not phrase_hit:
-                return
+        if hint_query_tokens and not _hint_overlaps_query(cleaned_hint_raw):
+            return
         cleaned_hint = _clip(cleaned_hint_raw, 420)
-        bucket = topic_query_hints.setdefault(topic_key, [])
+        bucket = hint_map.setdefault(bucket_key, [])
         if cleaned_hint in bucket:
             return
         if len(bucket) >= max_items:
             return
         bucket.append(cleaned_hint)
 
+    def _append_topic_hint(topic_id_hint: str | None, text_hint: str, *, max_items: int = 8) -> None:
+        _append_hint(topic_query_hints, topic_id_hint, text_hint, max_items=max_items)
+
+    def _append_task_hint(task_id_hint: str | None, text_hint: str, *, max_items: int = 8) -> None:
+        _append_hint(task_query_hints, task_id_hint, text_hint, max_items=max_items)
+
     if hint_query_tokens:
         for task in tasks:
             _append_topic_hint(task.topicId, str(task.title or ""))
+            _append_task_hint(task.id, str(task.title or ""))
         for entry in logs:
             if not _log_allowed_for_semantic_search(entry):
                 continue
             topic_key = str(entry.topicId or "").strip()
+            task_key = str(entry.taskId or "").strip()
             if not topic_key:
-                continue
+                topic_key = None
+            if not task_key:
+                task_key = None
             _append_topic_hint(topic_key, str(entry.summary or ""))
+            _append_task_hint(task_key, str(entry.summary or ""))
             preview = content_preview_by_log_id.get(str(entry.id), "")
             if preview:
                 _append_topic_hint(topic_key, preview)
+                _append_task_hint(task_key, preview)
+        for item in routing_items[-6:]:
+            topic_id_hint = str(item.get("topicId") or "").strip() or None
+            task_id_hint = str(item.get("taskId") or "").strip() or None
+            if task_id_hint and not topic_id_hint:
+                candidate_task = task_map.get(task_id_hint)
+                if candidate_task and getattr(candidate_task, "topicId", None):
+                    topic_id_hint = str(candidate_task.topicId or "").strip() or None
+            topic_name_hint = str(item.get("topicName") or "")
+            task_title_hint = str(item.get("taskTitle") or "")
+            anchor_hint = str(item.get("anchor") or "")
+            _append_topic_hint(topic_id_hint, topic_name_hint)
+            _append_topic_hint(topic_id_hint, task_title_hint)
+            _append_topic_hint(topic_id_hint, anchor_hint)
+            _append_task_hint(task_id_hint, task_title_hint)
+            _append_task_hint(task_id_hint, topic_name_hint)
+            _append_task_hint(task_id_hint, anchor_hint)
 
     topics_payload: list[dict[str, Any]] = []
     for topic in topics:
@@ -9672,10 +9771,18 @@ def _search_impl(
             payload["searchText"] = _clip(" ".join(hints), 900)
         topics_payload.append(payload)
 
+    tasks_payload: list[dict[str, Any]] = []
+    for task in tasks:
+        payload = task.model_dump()
+        hints = task_query_hints.get(task.id) or []
+        if hints:
+            payload["searchText"] = _clip(" ".join(hints), 900)
+        tasks_payload.append(payload)
+
     search_result = semantic_search(
         semantic_query_effective or query,
         topics_payload,
-        [item.model_dump() for item in tasks],
+        tasks_payload,
         log_payloads,
         topic_limit=effective_limit_topics,
         task_limit=effective_limit_tasks,
@@ -9992,6 +10099,8 @@ def _search_impl(
             "semanticQuery": semantic_query_effective or query,
             "semanticQueryExpanded": bool((semantic_query_effective or "").strip().lower() != normalized_query),
             "semanticQuerySource": semantic_query_source,
+            "semanticHintSources": sorted(semantic_hint_sources),
+            "routingMemoryItems": int(len(routing_items)),
         },
     }
 

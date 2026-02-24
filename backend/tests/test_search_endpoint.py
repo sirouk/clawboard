@@ -755,6 +755,63 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertTrue(bool(meta.get("semanticQueryExpanded")))
         self.assertIn("scoped semantic task", str(meta.get("semanticQuery") or "").lower())
 
+    def test_search_low_signal_uses_routing_memory_anchor_for_semantic_and_task_hints(self):
+        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        read_headers = {"Host": "localhost:8010"}
+
+        topic = self.client.post("/api/topics", json={"name": "Routing Semantic Topic"}, headers=write_headers).json()
+        task = self.client.post(
+            "/api/tasks",
+            json={"topicId": topic["id"], "title": "Routing Semantic Task", "status": "doing"},
+            headers=write_headers,
+        ).json()
+
+        board_session_key = f"clawboard:task:{topic['id']}:{task['id']}"
+        routing_res = self.client.post(
+            "/api/classifier/session-routing",
+            json={
+                "sessionKey": board_session_key,
+                "topicId": topic["id"],
+                "topicName": topic["name"],
+                "taskId": task["id"],
+                "taskTitle": task["title"],
+                "anchor": "Compare retirement account rollover options and tax implications.",
+            },
+            headers=write_headers,
+        )
+        self.assertEqual(routing_res.status_code, 200, routing_res.text)
+
+        captured_calls: list[dict] = []
+
+        def fake_semantic_search(query, topics, tasks, logs, **kwargs):
+            captured_calls.append({"query": query, "topics": topics, "tasks": tasks, "logs": logs, "kwargs": kwargs})
+            return {"query": query, "mode": "mock", "topics": [], "tasks": [], "logs": []}
+
+        with patch("app.main.semantic_search", side_effect=fake_semantic_search):
+            res = self.client.get(
+                "/api/search",
+                params={"q": "continue", "sessionKey": board_session_key, "limitTopics": 10, "limitTasks": 10, "limitLogs": 100},
+                headers=read_headers,
+            )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertTrue(captured_calls, "Expected semantic_search to be called")
+
+        semantic_query = str((captured_calls[0] or {}).get("query") or "").lower()
+        self.assertIn("continue", semantic_query)
+        self.assertIn("retirement", semantic_query)
+        self.assertIn("rollover", semantic_query)
+        self.assertNotEqual(semantic_query.strip(), "continue")
+
+        tasks_payload = captured_calls[0].get("tasks") or []
+        task_row = next((item for item in tasks_payload if item.get("id") == task["id"]), None)
+        self.assertIsNotNone(task_row)
+        self.assertIn("retirement", str((task_row or {}).get("searchText") or "").lower())
+
+        payload = res.json()
+        meta = payload.get("searchMeta") or {}
+        self.assertIn("routing_memory", list(meta.get("semanticHintSources") or []))
+        self.assertGreaterEqual(int(meta.get("routingMemoryItems") or 0), 1)
+
     def test_search_caps_effective_semantic_limits_for_stability(self):
         read_headers = {"Host": "localhost:8010"}
         captured_calls: list[dict] = []

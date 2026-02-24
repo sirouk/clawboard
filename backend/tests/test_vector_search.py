@@ -153,6 +153,37 @@ class VectorSearchHybridTests(unittest.TestCase):
         self.assertEqual(result["logs"][0]["id"], "log-insurance")
         self.assertGreater(float(result["logs"][0].get("bm25Score") or 0.0), 0.0)
 
+    def test_semantic_search_multi_term_coverage_beats_single_token_repetition(self):
+        topics = [
+            {"id": "topic-repeat", "name": "Ops", "description": "docker docker docker backup backup backup"},
+            {"id": "topic-full", "name": "Infra", "description": "docker postgres backup restore checklist"},
+        ]
+        tasks: list[dict] = []
+        logs: list[dict] = []
+
+        original_vector_topk = vs._vector_topk
+        original_embed_query = vs._embed_query
+        vs._vector_topk = lambda *_args, **_kwargs: ({}, "none")
+        vs._embed_query = lambda _text: None
+        try:
+            result = vs.semantic_search(
+                "docker postgres backup",
+                topics,
+                tasks,
+                logs,
+                topic_limit=6,
+                task_limit=6,
+                log_limit=6,
+            )
+        finally:
+            vs._vector_topk = original_vector_topk
+            vs._embed_query = original_embed_query
+
+        self.assertTrue(result["topics"], "Expected topic matches")
+        self.assertGreaterEqual(len(result["topics"]), 2)
+        self.assertEqual(result["topics"][0]["id"], "topic-full")
+        self.assertGreater(float(result["topics"][0].get("coverageScore") or 0.0), float(result["topics"][1].get("coverageScore") or 0.0))
+
     def test_semantic_search_reports_qdrant_mode_when_qdrant_backend_serves_vectors(self):
         topics = [{"id": "topic-ops", "name": "Discord Operations", "description": "Retries"}]
         tasks = [{"id": "task-retry", "topicId": "topic-ops", "title": "Fix retry loop", "status": "doing"}]

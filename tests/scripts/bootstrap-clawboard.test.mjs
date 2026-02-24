@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, cp, lstat, readlink, access } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, cp, lstat, readlink, access, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -56,7 +56,7 @@ test("bootstrap_clawboard.sh: unknown option fails fast", async () => {
   assert.match(`${res.stdout}\n${res.stderr}`, /Unknown option: --definitely-not-a-real-flag/);
 });
 
-test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set", async () => {
+test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set and stays idempotent on rerun", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-"));
   const repoRoot = path.join(tmp, "repo");
   const installDir = path.join(tmp, "install");
@@ -104,26 +104,30 @@ exit 0
     CLAWBOARD_TOKEN: "test-token",
   };
 
-  const res = await run(
-    [
-      "bash",
-      path.join(bootstrapPath, "bootstrap_clawboard.sh"),
-      "--dir",
-      installDir,
-      "--skip-docker",
-      "--skip-memory-backup-setup",
-      "--no-access-url-prompt",
-      "--no-color",
-      "--integration-level",
-      "write",
-    ],
-    {
-      cwd: repoRoot,
-      env,
-    }
-  );
+  const bootstrapArgs = [
+    "bash",
+    path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+    "--dir",
+    installDir,
+    "--skip-docker",
+    "--skip-memory-backup-setup",
+    "--no-access-url-prompt",
+    "--no-color",
+    "--integration-level",
+    "write",
+  ];
 
-  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  const firstRun = await run(bootstrapArgs, {
+    cwd: repoRoot,
+    env,
+  });
+  assert.equal(firstRun.code, 0, `exit=${firstRun.code}\nstdout:\n${firstRun.stdout}\nstderr:\n${firstRun.stderr}`);
+
+  const secondRun = await run(bootstrapArgs, {
+    cwd: repoRoot,
+    env,
+  });
+  assert.equal(secondRun.code, 0, `exit=${secondRun.code}\nstdout:\n${secondRun.stdout}\nstderr:\n${secondRun.stderr}`);
 
   const installedSkill = path.join(openclawHome, "skills", "clawboard");
   const skillStats = await lstat(installedSkill);
@@ -132,4 +136,22 @@ exit 0
 
   const legacySkillPath = path.join(homeDir, ".openclaw", "skills", "clawboard");
   await assert.rejects(access(legacySkillPath));
+
+  const envPath = path.join(installDir, ".env");
+  const envText = await readFile(envPath, "utf8");
+  const envLines = envText.split(/\r?\n/);
+  const singleEntryKeys = [
+    "OPENCLAW_REQUEST_ID_MAX_ENTRIES",
+    "OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS",
+    "OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES",
+    "CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS",
+    "CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS",
+    "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TOPICS",
+    "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TASKS",
+    "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_LOGS",
+  ];
+  for (const key of singleEntryKeys) {
+    const count = envLines.filter((line) => line.startsWith(`${key}=`)).length;
+    assert.equal(count, 1, `expected ${key} to be written exactly once after rerun, found ${count}`);
+  }
 });

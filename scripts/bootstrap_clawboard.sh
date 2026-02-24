@@ -112,6 +112,114 @@ PY
   fi
 }
 
+resolve_agent_workspace_path() {
+  local agent_id="${1:-main}"
+  local fallback=""
+  if [ "$agent_id" = "main" ]; then
+    fallback="$(resolve_default_openclaw_workspace_root)"
+  else
+    fallback="$OPENCLAW_HOME/workspace-$agent_id"
+  fi
+
+  local resolved=""
+  if [ -f "$OPENCLAW_CONFIG_PATH" ] && command -v python3 >/dev/null 2>&1; then
+    resolved="$(
+      python3 - "$OPENCLAW_CONFIG_PATH" "$OPENCLAW_HOME" "${OPENCLAW_PROFILE:-}" "$agent_id" <<'PY' 2>/dev/null || true
+import json
+import os
+import re
+import sys
+
+cfg_path = sys.argv[1]
+openclaw_home = os.path.abspath(os.path.expanduser(sys.argv[2]))
+profile = (sys.argv[3] or "").strip()
+target_id = (sys.argv[4] or "main").strip().lower() or "main"
+
+def normalize_path(value):
+    p = os.path.expanduser(str(value or "").strip())
+    if not p:
+        return ""
+    return os.path.abspath(p)
+
+def profile_workspace(base_dir, profile_name):
+    raw = (profile_name or "").strip()
+    if not raw or raw.lower() == "default":
+        return os.path.join(base_dir, "workspace")
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-")
+    if not safe:
+        return os.path.join(base_dir, "workspace")
+    return os.path.join(base_dir, f"workspace-{safe}")
+
+def normalize_agent_id(value):
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "main"
+    raw = re.sub(r"[^a-z0-9-]+", "-", raw).strip("-")
+    return (raw[:64] or "main")
+
+cfg = {}
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        parsed = json.load(f)
+        if isinstance(parsed, dict):
+            cfg = parsed
+except Exception:
+    cfg = {}
+
+fallback_main = profile_workspace(openclaw_home, profile)
+defaults_workspace = (
+    (((cfg.get("agents") or {}).get("defaults") or {}).get("workspace"))
+    or ((cfg.get("agents") or {}).get("workspace"))
+    or ((cfg.get("agent") or {}).get("workspace"))
+    or cfg.get("workspace")
+    or fallback_main
+)
+defaults_workspace = normalize_path(defaults_workspace) or fallback_main
+if defaults_workspace == openclaw_home:
+    defaults_workspace = fallback_main
+
+agents = [entry for entry in ((cfg.get("agents") or {}).get("list") or []) if isinstance(entry, dict)]
+
+resolved = ""
+if target_id == "main":
+    main_entry = next((entry for entry in agents if normalize_agent_id(entry.get("id")) == "main"), None)
+    default_entry = next((entry for entry in agents if entry.get("default") is True), agents[0] if agents else None)
+    chosen_entry = main_entry if isinstance(main_entry, dict) else default_entry
+    if isinstance(chosen_entry, dict):
+        candidate = chosen_entry.get("workspace")
+        if isinstance(candidate, str) and candidate.strip():
+            resolved = candidate.strip()
+    if not resolved:
+        resolved = defaults_workspace
+else:
+    target_entry = next((entry for entry in agents if normalize_agent_id(entry.get("id")) == target_id), None)
+    if isinstance(target_entry, dict):
+        candidate = target_entry.get("workspace")
+        if isinstance(candidate, str) and candidate.strip():
+            resolved = candidate.strip()
+    if not resolved:
+        resolved = os.path.join(openclaw_home, f"workspace-{target_id}")
+
+resolved = normalize_path(resolved)
+if target_id == "main":
+    if not resolved or resolved == openclaw_home:
+        resolved = fallback_main
+else:
+    if not resolved or resolved == openclaw_home:
+        resolved = os.path.join(openclaw_home, f"workspace-{target_id}")
+
+print(resolved or "", end="")
+PY
+    )"
+  fi
+  resolved="${resolved//$'\r'/}"
+  if [ -z "$resolved" ]; then
+    resolved="$fallback"
+  fi
+  resolved="${resolved/#\~/$HOME}"
+  printf "%s" "$resolved"
+}
+
 ensure_openclaw_workspace_root_configured() {
   if [ -n "${OPENCLAW_WORKSPACE_DIR:-}" ]; then
     return 0
@@ -234,6 +342,7 @@ CONTEXT_MODE_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_MODE:-}"
 CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS:-}"
 CONTEXT_MAX_CHARS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS:-}"
 SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="${CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS:-}"
+VECTOR_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="${CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS:-}"
 SKILL_INSTALL_MODE="${CLAWBOARD_SKILL_INSTALL_MODE:-symlink}"
 MEMORY_BACKUP_SETUP_MODE="${CLAWBOARD_MEMORY_BACKUP_SETUP:-ask}"
 MEMORY_BACKUP_SETUP_STATUS="not-run"
@@ -246,6 +355,13 @@ OPENCLAW_HEAP_SETUP_MODE="${CLAWBOARD_OPENCLAW_HEAP_SETUP:-ask}"
 OPENCLAW_HEAP_SETUP_STATUS="not-run"
 OPENCLAW_HEAP_TARGET=""
 OPENCLAW_HEAP_MB="${CLAWBOARD_OPENCLAW_MAX_OLD_SPACE_MB:-6144}"
+APPLY_AGENT_DIRECTIVES_SETTING="${CLAWBOARD_APPLY_AGENT_DIRECTIVES:-1}"
+SKIP_AGENT_DIRECTIVES=false
+
+case "$(printf "%s" "$APPLY_AGENT_DIRECTIVES_SETTING" | tr '[:upper:]' '[:lower:]')" in
+  0|false|no|off) SKIP_AGENT_DIRECTIVES=true ;;
+  *) SKIP_AGENT_DIRECTIVES=false ;;
+esac
 
 SKIP_DOCKER=false
 SKIP_OPENCLAW=false
@@ -324,6 +440,8 @@ while [ $# -gt 0 ]; do
     --skip-obsidian-memory-setup) OBSIDIAN_MEMORY_SETUP_MODE="never"; shift ;;
     --setup-openclaw-heap) OPENCLAW_HEAP_SETUP_MODE="always"; shift ;;
     --skip-openclaw-heap-setup) OPENCLAW_HEAP_SETUP_MODE="never"; shift ;;
+    --apply-agent-directives) SKIP_AGENT_DIRECTIVES=false; shift ;;
+    --skip-agent-directives) SKIP_AGENT_DIRECTIVES=true; shift ;;
     --openclaw-max-old-space-mb)
       [ $# -ge 2 ] || log_error "--openclaw-max-old-space-mb requires a value"
       OPENCLAW_HEAP_MB="$2"; shift 2
@@ -363,6 +481,8 @@ Environment overrides:
                               Offer/run OpenClaw launcher heap tuning at bootstrap end (default: ask)
   CLAWBOARD_OPENCLAW_MAX_OLD_SPACE_MB=<int>
                               Heap size for launcher patch (default: 6144)
+  CLAWBOARD_APPLY_AGENT_DIRECTIVES=<0|1>
+                              Reconcile AGENTS/docs roster from directives during bootstrap (default: 1)
   CLAWBOARD_ENV_WIZARD=<0|1>  Force disable/enable interactive .env connection wizard
   --api-url <url>      Clawboard API base (default: http://localhost:8010)
   --web-url <url>      Clawboard web URL (default: http://localhost:3010)
@@ -404,6 +524,10 @@ Environment overrides:
                       Apply OpenClaw launcher heap tuning at the end of bootstrap (interactive)
   --skip-openclaw-heap-setup
                       Skip the OpenClaw launcher heap tuning prompt
+  --apply-agent-directives
+                      Reconcile directives + team roster in agent AGENTS.md files
+  --skip-agent-directives
+                      Skip automatic directive/roster reconciliation
   --openclaw-max-old-space-mb <int>
                       Heap limit for launcher patch (default: 6144)
   --skill-copy         Install skill by copying files into \$OPENCLAW_HOME/skills
@@ -1105,16 +1229,8 @@ resolve_local_memory_setup_script() {
 maybe_deploy_agent_templates() {
   local templates_dir="$INSTALL_DIR/agent-templates/main"
   local workspace_root=""
-  workspace_root="$(detect_openclaw_workspace_root 2>/dev/null || true)"
+  workspace_root="$(resolve_agent_workspace_path "main" 2>/dev/null || true)"
   workspace_root="${workspace_root//$'\r'/}"
-  if [ -z "$workspace_root" ]; then
-    OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-}"
-    if [ -n "${OPENCLAW_WORKSPACE_DIR:-}" ]; then
-      workspace_root="${OPENCLAW_WORKSPACE_DIR}"
-    else
-      workspace_root="$(resolve_default_openclaw_workspace_root)"
-    fi
-  fi
   workspace_root="${workspace_root/#\~/$HOME}"
   if [ ! -d "$templates_dir" ]; then
     log_warn "Agent templates directory not found: $templates_dir (skipping deploy)."
@@ -1137,6 +1253,32 @@ maybe_deploy_agent_templates() {
   fi
 }
 
+# Copy canonical Clawboard contract docs into the main workspace so AGENTS.md references
+# (ANATOMY/CONTEXT/CLASSIFICATION) always resolve to the latest repo versions.
+maybe_deploy_contract_docs() {
+  local workspace_root=""
+  workspace_root="$(resolve_agent_workspace_path "main" 2>/dev/null || true)"
+  workspace_root="${workspace_root//$'\r'/}"
+  workspace_root="${workspace_root/#\~/$HOME}"
+  if [ ! -d "$workspace_root" ]; then
+    log_warn "Workspace root not found: $workspace_root (skipping contract doc deploy)."
+    return 0
+  fi
+
+  local deployed=0
+  local doc=""
+  for doc in ANATOMY.md CONTEXT.md CLASSIFICATION.md CONTEXT_SPEC.md CLASSIFICATION_TEST_MATRIX.md; do
+    if [ -f "$INSTALL_DIR/$doc" ]; then
+      cp "$INSTALL_DIR/$doc" "$workspace_root/$doc"
+      log_info "Deployed $doc to $workspace_root"
+      deployed=$((deployed + 1))
+    fi
+  done
+  if [ "$deployed" -gt 0 ]; then
+    log_success "Deployed $deployed Clawboard contract doc(s) to main workspace."
+  fi
+}
+
 # Provision specialist agent workspaces (workspace-coding, workspace-docs, workspace-web, workspace-social).
 # Runs scripts/setup_specialist_agents.sh when present. Idempotent.
 setup_specialist_agents() {
@@ -1144,7 +1286,11 @@ setup_specialist_agents() {
     log_warn "setup_specialist_agents.sh not found; skipping specialist workspace provisioning."
     return 0
   fi
-  OPENCLAW_HOME="$OPENCLAW_HOME" INSTALL_DIR="$INSTALL_DIR" bash "$INSTALL_DIR/scripts/setup_specialist_agents.sh"
+  OPENCLAW_HOME="$OPENCLAW_HOME" \
+  OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG_PATH" \
+  OPENCLAW_PROFILE="${OPENCLAW_PROFILE:-}" \
+  INSTALL_DIR="$INSTALL_DIR" \
+  bash "$INSTALL_DIR/scripts/setup_specialist_agents.sh"
 }
 
 # Optionally ask the user to add specialist agents (coding, docs, web, social) to openclaw.json
@@ -1154,22 +1300,23 @@ maybe_offer_agentic_team_setup() {
   local existing_ids=""
   local raw=""
   local id=""
+  local ws_path=""
   local added=0
   local specialist_ids="coding docs web social"
 
   if [ ! -t 0 ]; then
-    log_info "No TTY; skipping agentic team prompt. Add specialists later with: openclaw agents add <id> --workspace \$OPENCLAW_HOME/workspace-<id> --non-interactive"
+    log_info "No TTY; skipping agentic team prompt. Add specialists later with: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"
     return 0
   fi
   if ! command -v openclaw >/dev/null 2>&1; then
-    log_warn "openclaw not in PATH; skipping agentic team setup. Install OpenClaw and run: openclaw agents add <id> --workspace \$OPENCLAW_HOME/workspace-<id> --non-interactive"
+    log_warn "openclaw not in PATH; skipping agentic team setup. Install OpenClaw and run: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"
     return 0
   fi
 
   printf "\nSet up the agentic team (main + coding, docs, web, social) so the main agent can delegate to specialists? [Y/n]: "
   read -r answer
   case "$(printf "%s" "$answer" | tr '[:upper:]' '[:lower:]')" in
-    n|no) log_info "Skipped. You can add specialists later: openclaw agents add <id> --workspace %s/workspace-<id> --non-interactive" "$OPENCLAW_HOME"; return 0 ;;
+    n|no) log_info "Skipped. You can add specialists later: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"; return 0 ;;
     *) ;;
   esac
 
@@ -1184,12 +1331,18 @@ maybe_offer_agentic_team_setup() {
 
   for id in $specialist_ids; do
     case "$existing_ids" in *" $id "*) continue ;; *) ;; esac
-    if [ ! -d "$OPENCLAW_HOME/workspace-$id" ]; then
-      log_warn "Workspace $OPENCLAW_HOME/workspace-$id missing; run setup_specialist_agents first. Skipping agent $id."
+    ws_path="$(resolve_agent_workspace_path "$id" 2>/dev/null || true)"
+    ws_path="${ws_path//$'\r'/}"
+    ws_path="${ws_path/#\~/$HOME}"
+    if [ -z "$ws_path" ]; then
+      ws_path="$OPENCLAW_HOME/workspace-$id"
+    fi
+    if [ ! -d "$ws_path" ]; then
+      log_warn "Workspace $ws_path missing; run setup_specialist_agents first. Skipping agent $id."
       continue
     fi
-    log_info "Adding agent: $id"
-    if OPENCLAW_HOME="$OPENCLAW_HOME" openclaw agents add "$id" --workspace "$OPENCLAW_HOME/workspace-$id" --non-interactive 2>/dev/null; then
+    log_info "Adding agent: $id (workspace: $ws_path)"
+    if OPENCLAW_HOME="$OPENCLAW_HOME" openclaw agents add "$id" --workspace "$ws_path" --non-interactive 2>/dev/null; then
       added=$((added + 1))
     else
       log_warn "Failed to add agent $id (may already exist). Continue."
@@ -1199,6 +1352,34 @@ maybe_offer_agentic_team_setup() {
   if [ "$added" -gt 0 ]; then
     OPENCLAW_GATEWAY_RESTART_NEEDED=true
     log_success "Added $added specialist agent(s) to config. Gateway will restart to apply."
+  fi
+}
+
+maybe_apply_agent_directives() {
+  if [ "$SKIP_AGENT_DIRECTIVES" = true ]; then
+    log_info "Skipping agent directive reconciliation by configuration."
+    return 0
+  fi
+  if [ ! -f "$INSTALL_DIR/scripts/apply_directives_to_agents.sh" ]; then
+    log_warn "apply_directives_to_agents.sh not found; skipping directive reconciliation."
+    return 0
+  fi
+  if [ ! -f "$OPENCLAW_CONFIG_PATH" ]; then
+    log_warn "OpenClaw config not found at $OPENCLAW_CONFIG_PATH; skipping directive reconciliation."
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    log_warn "python3 not found; skipping directive reconciliation."
+    return 0
+  fi
+
+  log_info "Reconciling agent directives + team roster from repository source of truth..."
+  if OPENCLAW_HOME="$OPENCLAW_HOME" \
+     OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG_PATH" \
+     bash "$INSTALL_DIR/scripts/apply_directives_to_agents.sh" --yes --no-color; then
+    log_success "Agent directives reconciled."
+  else
+    log_warn "Agent directive reconciliation failed. Re-run: bash $INSTALL_DIR/scripts/apply_directives_to_agents.sh --yes"
   fi
 }
 
@@ -1794,6 +1975,26 @@ OPENCLAW_REQUEST_ID_MAX_ENTRIES_VALUE="$(clamp_int "$OPENCLAW_REQUEST_ID_MAX_ENT
 log_info "Writing OPENCLAW_REQUEST_ID_MAX_ENTRIES=$OPENCLAW_REQUEST_ID_MAX_ENTRIES_VALUE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ID_MAX_ENTRIES" "$OPENCLAW_REQUEST_ID_MAX_ENTRIES_VALUE"
 
+OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS" >/dev/null 2>&1; then
+  OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS" || true)"
+else
+  OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS_VALUE="1209600"
+fi
+OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS_VALUE="$(clamp_int "$OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS_VALUE" 60 7776000 || echo "1209600")"
+log_info "Writing OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS=$OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS" "$OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS_VALUE"
+
+OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES" >/dev/null 2>&1; then
+  OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES" || true)"
+else
+  OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES_VALUE="24"
+fi
+OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES_VALUE="$(clamp_int "$OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES_VALUE" 1 200 || echo "24")"
+log_info "Writing OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES=$OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES" "$OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES_VALUE"
+
 SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE=""
 if [ -n "$SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE" ]; then
   SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE="$SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE"
@@ -1809,6 +2010,52 @@ case "$SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE" in
 esac
 log_info "Writing CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS=$SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS" "$SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE"
+
+VECTOR_INCLUDE_TOOL_CALL_LOGS_VALUE=""
+if [ -n "$VECTOR_INCLUDE_TOOL_CALL_LOGS_OVERRIDE" ]; then
+  VECTOR_INCLUDE_TOOL_CALL_LOGS_VALUE="$VECTOR_INCLUDE_TOOL_CALL_LOGS_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS" >/dev/null 2>&1; then
+  VECTOR_INCLUDE_TOOL_CALL_LOGS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS" || true)"
+else
+  VECTOR_INCLUDE_TOOL_CALL_LOGS_VALUE="0"
+fi
+VECTOR_INCLUDE_TOOL_CALL_LOGS_VALUE="$(printf "%s" "$VECTOR_INCLUDE_TOOL_CALL_LOGS_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+case "$VECTOR_INCLUDE_TOOL_CALL_LOGS_VALUE" in
+  1|true|yes|on) VECTOR_INCLUDE_TOOL_CALL_LOGS_VALUE="1" ;;
+  *) VECTOR_INCLUDE_TOOL_CALL_LOGS_VALUE="0" ;;
+esac
+log_info "Writing CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS=$VECTOR_INCLUDE_TOOL_CALL_LOGS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS" "$VECTOR_INCLUDE_TOOL_CALL_LOGS_VALUE"
+
+SEARCH_EFFECTIVE_LIMIT_TOPICS_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TOPICS" >/dev/null 2>&1; then
+  SEARCH_EFFECTIVE_LIMIT_TOPICS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TOPICS" || true)"
+else
+  SEARCH_EFFECTIVE_LIMIT_TOPICS_VALUE="120"
+fi
+SEARCH_EFFECTIVE_LIMIT_TOPICS_VALUE="$(clamp_int "$SEARCH_EFFECTIVE_LIMIT_TOPICS_VALUE" 1 120 || echo "120")"
+log_info "Writing CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TOPICS=$SEARCH_EFFECTIVE_LIMIT_TOPICS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TOPICS" "$SEARCH_EFFECTIVE_LIMIT_TOPICS_VALUE"
+
+SEARCH_EFFECTIVE_LIMIT_TASKS_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TASKS" >/dev/null 2>&1; then
+  SEARCH_EFFECTIVE_LIMIT_TASKS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TASKS" || true)"
+else
+  SEARCH_EFFECTIVE_LIMIT_TASKS_VALUE="240"
+fi
+SEARCH_EFFECTIVE_LIMIT_TASKS_VALUE="$(clamp_int "$SEARCH_EFFECTIVE_LIMIT_TASKS_VALUE" 1 240 || echo "240")"
+log_info "Writing CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TASKS=$SEARCH_EFFECTIVE_LIMIT_TASKS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TASKS" "$SEARCH_EFFECTIVE_LIMIT_TASKS_VALUE"
+
+SEARCH_EFFECTIVE_LIMIT_LOGS_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_LOGS" >/dev/null 2>&1; then
+  SEARCH_EFFECTIVE_LIMIT_LOGS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_LOGS" || true)"
+else
+  SEARCH_EFFECTIVE_LIMIT_LOGS_VALUE="320"
+fi
+SEARCH_EFFECTIVE_LIMIT_LOGS_VALUE="$(clamp_int "$SEARCH_EFFECTIVE_LIMIT_LOGS_VALUE" 10 320 || echo "320")"
+log_info "Writing CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_LOGS=$SEARCH_EFFECTIVE_LIMIT_LOGS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_LOGS" "$SEARCH_EFFECTIVE_LIMIT_LOGS_VALUE"
 
 SEARCH_CONCURRENCY_LIMIT_VALUE=""
 if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SEARCH_CONCURRENCY_LIMIT" >/dev/null 2>&1; then
@@ -2113,10 +2360,12 @@ PY
     fi
 
     maybe_deploy_agent_templates
+    maybe_deploy_contract_docs
 
     setup_specialist_agents
 
     maybe_offer_agentic_team_setup
+    maybe_apply_agent_directives
 
     maybe_run_local_memory_setup
 

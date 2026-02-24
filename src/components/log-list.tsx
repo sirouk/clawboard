@@ -214,6 +214,35 @@ function summarizeText(value: string) {
   return `${clean.slice(0, 139)}…`;
 }
 
+const UNKNOWN_DATE_KEY = "__unknown_date__";
+
+function extractDateKey(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if (normalized.length < 10) return null;
+  return normalized.slice(0, 10);
+}
+
+function getEntryDateKey(entry: Pick<LogEntry, "createdAt" | "updatedAt">): string {
+  return extractDateKey(entry.createdAt) ?? extractDateKey(entry.updatedAt) ?? UNKNOWN_DATE_KEY;
+}
+
+function compareDateKeysDesc(a: string, b: string): number {
+  const aUnknown = a === UNKNOWN_DATE_KEY;
+  const bUnknown = b === UNKNOWN_DATE_KEY;
+  if (aUnknown && bUnknown) return 0;
+  if (aUnknown) return 1;
+  if (bUnknown) return -1;
+  return b.localeCompare(a);
+}
+
+function formatDateGroupLabel(dateKey: string): string {
+  if (dateKey === UNKNOWN_DATE_KEY) return "Unknown date";
+  const parsed = Date.parse(dateKey);
+  if (!Number.isFinite(parsed)) return dateKey;
+  return new Date(parsed).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
 export function LogList({
   logs: initialLogs,
   topics,
@@ -282,7 +311,7 @@ export function LogList({
   const [collapsedDays, setCollapsedDays] = useState<Record<string, boolean>>(() => {
     if (variant === "chat") return {};
     if (initialLogs.length === 0) return {};
-    const dates = Array.from(new Set(initialLogs.map((entry) => entry.createdAt.slice(0, 10)))).sort((a, b) => b.localeCompare(a));
+    const dates = Array.from(new Set(initialLogs.map((entry) => getEntryDateKey(entry)))).sort(compareDateKeysDesc);
     if (dates.length === 0) return {};
     const mostRecent = dates[0];
     return dates.reduce<Record<string, boolean>>((acc, date) => {
@@ -569,7 +598,7 @@ export function LogList({
   const grouped = useMemo(() => {
     if (!groupByDay) return { all: visibleFiltered };
     return visibleFiltered.reduce<Record<string, LogEntry[]>>((acc, entry) => {
-      const date = entry.createdAt.slice(0, 10);
+      const date = getEntryDateKey(entry);
       acc[date] = acc[date] ?? [];
       acc[date].push(entry);
       return acc;
@@ -581,7 +610,7 @@ export function LogList({
       setCollapsedDays((prev) => (Object.keys(prev).length === 0 ? prev : {}));
       return;
     }
-    const dates = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
+    const dates = Object.keys(grouped).sort(compareDateKeysDesc);
     if (dates.length === 0) return;
     const mostRecent = dates[0];
     setCollapsedDays((prev) => {
@@ -798,9 +827,7 @@ export function LogList({
       <div className="space-y-3">
         {Object.entries(grouped).map(([date, entries]) => {
           const collapsed = collapsedDays[date];
-          const label = groupByDay
-            ? new Date(date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
-            : "All";
+          const label = groupByDay ? formatDateGroupLabel(date) : "All";
           return (
             <div key={date} className="space-y-3">
               {groupByDay && (

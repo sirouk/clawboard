@@ -192,11 +192,21 @@ def _hybrid_component_weights(query_token_count: int, *, sparse_available: bool)
     # Multi-token queries are usually higher intent and benefit from stronger sparse signals.
     if query_token_count >= 2 and sparse_available:
         return {
-            "rrf": 0.33,
+            "rrf": 0.29,
             "dense": 0.14,
-            "bm25": 0.27,
-            "lexical": 0.14,
-            "phrase": 0.12,
+            "bm25": 0.24,
+            "lexical": 0.12,
+            "phrase": 0.1,
+            "coverage": 0.11,
+        }
+    if query_token_count >= 2:
+        return {
+            "rrf": 0.42,
+            "dense": 0.26,
+            "bm25": 0.2,
+            "lexical": 0.08,
+            "phrase": 0.0,
+            "coverage": 0.04,
         }
     return {
         "rrf": 0.46,
@@ -204,6 +214,7 @@ def _hybrid_component_weights(query_token_count: int, *, sparse_available: bool)
         "bm25": 0.22,
         "lexical": 0.08,
         "phrase": 0.0,
+        "coverage": 0.0,
     }
 
 
@@ -945,6 +956,19 @@ def _hybrid_rank(
                 lexical_scores[doc.id] = score
     lexical_scores = _top_k_scores(lexical_scores, source_limit)
 
+    coverage_scores: dict[str, float] = {}
+    coverage_query_tokens = set(query_token_set) or {token for token in query_tokens if len(token) > 1}
+    if coverage_query_tokens:
+        denom = max(1, len(coverage_query_tokens))
+        for doc in docs:
+            if not doc.token_set:
+                continue
+            overlap = len(coverage_query_tokens & doc.token_set)
+            if overlap <= 0:
+                continue
+            coverage_scores[doc.id] = float(overlap) / float(denom)
+    coverage_scores = _top_k_scores(coverage_scores, source_limit)
+
     phrase_scores: dict[str, float] = {}
     if query_lower and query_token_count >= 2:
         phrase_candidates = set(dense_scores.keys()) | set(doc_bm25_scores.keys()) | set(lexical_scores.keys())
@@ -974,6 +998,9 @@ def _hybrid_rank(
     if phrase_scores:
         rrf_sources.append(phrase_scores)
         rrf_weights.append(0.66)
+    if query_token_count >= 2 and coverage_scores:
+        rrf_sources.append(coverage_scores)
+        rrf_weights.append(0.58)
     rrf_scores = _rrf_fuse(
         rrf_sources,
         weights=rrf_weights,
@@ -984,6 +1011,7 @@ def _hybrid_rank(
     bm25_norm = _normalize_scores(doc_bm25_scores)
     lexical_norm = _normalize_scores(lexical_scores)
     phrase_norm = _normalize_scores(phrase_scores)
+    coverage_norm = _normalize_scores(coverage_scores)
     rrf_norm = _normalize_scores(rrf_scores)
     component_weights = _hybrid_component_weights(
         query_token_count,
@@ -996,6 +1024,7 @@ def _hybrid_rank(
         | set(doc_bm25_scores.keys())
         | set(lexical_scores.keys())
         | set(phrase_scores.keys())
+        | set(coverage_scores.keys())
         | set(rrf_scores.keys())
     )
     for item_id in candidate_ids:
@@ -1005,6 +1034,7 @@ def _hybrid_rank(
             + (bm25_norm.get(item_id, 0.0) * component_weights["bm25"])
             + (lexical_norm.get(item_id, 0.0) * component_weights["lexical"])
             + (phrase_norm.get(item_id, 0.0) * component_weights["phrase"])
+            + (coverage_norm.get(item_id, 0.0) * component_weights["coverage"])
         )
         if score > 0:
             base_scores[item_id] = score
@@ -1080,6 +1110,7 @@ def _hybrid_rank(
                 "bm25Score": round(doc_bm25_scores.get(item_id, 0.0), 6),
                 "lexicalScore": round(lexical_scores.get(item_id, 0.0), 6),
                 "phraseScore": round(phrase_scores.get(item_id, 0.0), 6),
+                "coverageScore": round(coverage_scores.get(item_id, 0.0), 6),
                 "chunkScore": round(parent_chunk_scores.get(item_id, 0.0), 6),
                 "rerankScore": round(rerank_scores.get(item_id, 0.0), 6),
             }
