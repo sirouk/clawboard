@@ -596,6 +596,14 @@ class OpenClawChatCancelResponse(BaseModel):
     aborted: bool = Field(description="Whether chat.abort was sent to the gateway (best-effort).")
     queueCancelled: int = Field(description="Number of dispatch queue rows cancelled.")
     sessionKey: str = Field(description="Session key targeted.")
+    sessionKeys: List[str] = Field(
+        default_factory=list,
+        description="All session keys targeted for cancellation (primary + linked subagent sessions).",
+    )
+    gatewayAbortCount: int = Field(
+        default=0,
+        description="Number of chat.abort RPC attempts issued to the gateway.",
+    )
 
 
 class OpenClawChatDispatchQuarantineRequest(BaseModel):

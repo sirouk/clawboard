@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 import websockets
 
@@ -31,7 +32,7 @@ class OpenClawGatewayConfig:
     client_mode: str
     client_platform: str
     default_scopes: list[str]
-    host_header: str
+    host_header: str | None
     identity: OpenClawDeviceAuth | None
 
 
@@ -63,6 +64,75 @@ def _dedupe_scopes(values: list[str]) -> list[str]:
             seen.add(value)
             unique.append(value)
     return unique
+
+
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    raw = str(os.getenv(name) or "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except Exception:
+            value = default
+    else:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _gateway_ws_connect_timeout_seconds(request_timeout_seconds: float | None) -> float:
+    default = 30.0
+    if request_timeout_seconds is not None and request_timeout_seconds > 0:
+        default = min(default, request_timeout_seconds)
+    return _env_float("OPENCLAW_GATEWAY_WS_CONNECT_TIMEOUT_SECONDS", default, minimum=2.0, maximum=300.0)
+
+
+def _gateway_ws_recv_timeout_seconds(request_timeout_seconds: float | None) -> float:
+    default = 45.0
+    if request_timeout_seconds is not None and request_timeout_seconds > 0:
+        default = min(default, request_timeout_seconds)
+    return _env_float("OPENCLAW_GATEWAY_WS_RECV_TIMEOUT_SECONDS", default, minimum=2.0, maximum=300.0)
+
+
+def _gateway_ws_ping_interval_seconds() -> float | None:
+    value = _env_float("OPENCLAW_GATEWAY_WS_PING_INTERVAL_SECONDS", 20.0, minimum=0.0, maximum=300.0)
+    if value <= 0:
+        return None
+    return value
+
+
+def _gateway_ws_ping_timeout_seconds() -> float | None:
+    value = _env_float("OPENCLAW_GATEWAY_WS_PING_TIMEOUT_SECONDS", 20.0, minimum=0.0, maximum=300.0)
+    if value <= 0:
+        return None
+    return value
+
+
+def _gateway_ws_close_timeout_seconds() -> float:
+    return _env_float("OPENCLAW_GATEWAY_WS_CLOSE_TIMEOUT_SECONDS", 8.0, minimum=1.0, maximum=120.0)
+
+
+async def _recv_gateway_json(
+    ws: websockets.WebSocketClientProtocol,
+    *,
+    timeout_seconds: float | None,
+    context: str,
+) -> dict[str, Any]:
+    try:
+        if timeout_seconds is not None and timeout_seconds > 0:
+            raw = await asyncio.wait_for(ws.recv(), timeout=timeout_seconds)
+        else:
+            raw = await ws.recv()
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(f"gateway timeout while waiting for {context}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"gateway receive failed while waiting for {context}: {exc}") from exc
+
+    try:
+        payload = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"invalid gateway message while waiting for {context}: {raw!r}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"invalid gateway message while waiting for {context}: {payload!r}")
+    return payload
 
 
 def _read_json_file(path: str) -> dict[str, Any] | None:
@@ -229,6 +299,19 @@ def load_openclaw_gateway_config(
     scopes = _dedupe_scopes(_normalize_scopes(os.getenv("OPENCLAW_GATEWAY_SCOPES", "operator.read,operator.write")))
     if not scopes:
         scopes = ["operator.read", "operator.write"]
+    host_header_raw = str(os.getenv("OPENCLAW_GATEWAY_HOST_HEADER") or "").strip()
+    host_header = host_header_raw or None
+    if host_header is not None:
+        # Allow values like "ws://host:port" in env without breaking Host header.
+        try:
+            parsed = urlparse(host_header if "://" in host_header else f"ws://{host_header}")
+            if parsed.hostname:
+                if parsed.port and parsed.port not in {80, 443}:
+                    host_header = f"{parsed.hostname}:{parsed.port}"
+                else:
+                    host_header = str(parsed.hostname)
+        except Exception:
+            pass
 
     return OpenClawGatewayConfig(
         ws_url=ws_url,
@@ -238,7 +321,7 @@ def load_openclaw_gateway_config(
         client_mode=(os.getenv("OPENCLAW_GATEWAY_CLIENT_MODE") or "backend").strip() or "backend",
         client_platform=(os.getenv("OPENCLAW_GATEWAY_CLIENT_PLATFORM") or "server").strip() or "server",
         default_scopes=scopes,
-        host_header=(os.getenv("OPENCLAW_GATEWAY_HOST_HEADER") or "127.0.0.1").strip() or "127.0.0.1",
+        host_header=host_header,
         identity=_load_device_auth(enabled_override=use_device_auth_override),
     )
 
@@ -252,6 +335,15 @@ async def gateway_rpc(
     use_device_auth_override: bool | None = None,
     timeout_seconds: float | None = None,
 ) -> Any:
+    request_timeout_seconds: float | None = None
+    if timeout_seconds is not None:
+        try:
+            parsed = float(timeout_seconds)
+        except Exception:
+            parsed = 0.0
+        if parsed > 0:
+            request_timeout_seconds = parsed
+
     async def _call_once() -> Any:
         cfg = load_openclaw_gateway_config(
             token_override=token_override,
@@ -262,22 +354,20 @@ async def gateway_rpc(
         if not effective_scopes:
             effective_scopes = ["operator.read", "operator.write"]
 
-        headers = {"Host": cfg.host_header}
-        open_timeout = None
-        if timeout_seconds is not None and float(timeout_seconds) > 0:
-            open_timeout = float(timeout_seconds)
+        headers = {"Host": cfg.host_header} if cfg.host_header else None
+        open_timeout = _gateway_ws_connect_timeout_seconds(request_timeout_seconds)
+        recv_timeout = _gateway_ws_recv_timeout_seconds(request_timeout_seconds)
 
         async with websockets.connect(
             cfg.ws_url,
             max_size=8_000_000,
             extra_headers=headers,
             open_timeout=open_timeout,
+            ping_interval=_gateway_ws_ping_interval_seconds(),
+            ping_timeout=_gateway_ws_ping_timeout_seconds(),
+            close_timeout=_gateway_ws_close_timeout_seconds(),
         ) as ws:
-            first_raw = await ws.recv()
-            try:
-                first = json.loads(first_raw)
-            except Exception as exc:
-                raise RuntimeError(f"invalid gateway message: {first_raw!r}") from exc
+            first = await _recv_gateway_json(ws, timeout_seconds=recv_timeout, context="connect.challenge")
             if first.get("type") != "event" or first.get("event") != "connect.challenge":
                 raise RuntimeError(f"expected connect.challenge, got: {first}")
 
@@ -327,10 +417,8 @@ async def gateway_rpc(
                 connect_params["params"]["device"] = device
             await ws.send(json.dumps(connect_params))
 
-            connect_response_raw = None
             while True:
-                connect_response_raw = await ws.recv()
-                connect_response = json.loads(connect_response_raw)
+                connect_response = await _recv_gateway_json(ws, timeout_seconds=recv_timeout, context="connect response")
                 if connect_response.get("type") != "res" or connect_response.get("id") != connect_id:
                     continue
                 if not connect_response.get("ok"):
@@ -350,8 +438,7 @@ async def gateway_rpc(
             )
 
             while True:
-                raw = await ws.recv()
-                response = json.loads(raw)
+                response = await _recv_gateway_json(ws, timeout_seconds=recv_timeout, context=f"{method} response")
                 if response.get("type") != "res" or response.get("id") != req_id:
                     continue
                 if not response.get("ok"):
@@ -363,6 +450,6 @@ async def gateway_rpc(
                     raise RuntimeError(message)
                 return response.get("payload")
 
-    if timeout_seconds is not None and float(timeout_seconds) > 0:
-        return await asyncio.wait_for(_call_once(), timeout=float(timeout_seconds))
+    if request_timeout_seconds is not None:
+        return await asyncio.wait_for(_call_once(), timeout=request_timeout_seconds)
     return await _call_once()

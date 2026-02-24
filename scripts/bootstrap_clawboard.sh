@@ -31,6 +31,18 @@ log_success() { echo -e "${GREEN}success:${NC} $1"; }
 log_warn() { echo -e "${YELLOW}warning:${NC} $1"; }
 log_error() { echo -e "${RED}error:${NC} $1"; exit 1; }
 
+# Canonical docs copied into main workspace during bootstrap so shipped policy/docs stay
+# aligned with repo source of truth on every machine.
+CLAWBOARD_CONTRACT_DOCS=(
+  "ANATOMY.md"
+  "CONTEXT.md"
+  "CLASSIFICATION.md"
+  "CONTEXT_SPEC.md"
+  "CLASSIFICATION_TEST_MATRIX.md"
+  "OPENCLAW_CLAWBOARD_UML.md"
+  "TESTING.md"
+)
+
 REPO_URL="${CLAWBOARD_REPO_URL:-https://github.com/sirouk/clawboard}"
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
 if [ "$OPENCLAW_HOME" != "/" ]; then
@@ -38,6 +50,41 @@ if [ "$OPENCLAW_HOME" != "/" ]; then
 fi
 OPENCLAW_CONFIG_PATH="$OPENCLAW_HOME/openclaw.json"
 OPENCLAW_SKILLS_DIR="$OPENCLAW_HOME/skills"
+
+# Atomic file deploy helper:
+# - returns 0 when deployed/updated
+# - returns 10 when destination is already up to date
+# - returns 11 when source is missing
+# - returns 12 on copy/move error
+deploy_file_atomic_if_changed() {
+  local src="$1"
+  local dst="$2"
+  if [ ! -f "$src" ]; then
+    return 11
+  fi
+
+  local dst_dir
+  dst_dir="$(dirname "$dst")"
+  mkdir -p "$dst_dir"
+
+  if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+    return 10
+  fi
+
+  local base tmp
+  base="$(basename "$dst")"
+  tmp="$(mktemp "$dst_dir/.${base}.tmp.XXXXXX")" || return 12
+
+  if ! cp "$src" "$tmp"; then
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 12
+  fi
+  if ! mv -f "$tmp" "$dst"; then
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 12
+  fi
+  return 0
+}
 
 # Where to clone Clawboard.
 #
@@ -1225,7 +1272,8 @@ resolve_local_memory_setup_script() {
 
 # Deploy main agent templates (AGENTS.md, SOUL.md, HEARTBEAT.md) from the Clawboard repo.
 # Source of truth: INSTALL_DIR/agent-templates/main/ (repo). No policy text is hardcoded in this script.
-# Copies into the main agent workspace. Idempotent (overwrites). Call after skill/plugin install, before gateway restart.
+# Copies into the main agent workspace with atomic per-file updates only when content changed.
+# Call after skill/plugin install, before gateway restart.
 maybe_deploy_agent_templates() {
   local templates_dir="$INSTALL_DIR/agent-templates/main"
   local workspace_root=""
@@ -1241,20 +1289,45 @@ maybe_deploy_agent_templates() {
     return 0
   fi
   local deployed=0
+  local unchanged=0
+  local failed=0
+  local rc=0
+  local src=""
+  local dst=""
   for f in AGENTS.md SOUL.md HEARTBEAT.md; do
-    if [ -f "$templates_dir/$f" ]; then
-      cp "$templates_dir/$f" "$workspace_root/$f"
+    src="$templates_dir/$f"
+    dst="$workspace_root/$f"
+    if deploy_file_atomic_if_changed "$src" "$dst"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then
       log_info "Deployed $f to $workspace_root"
       deployed=$((deployed + 1))
+    elif [ "$rc" -eq 10 ]; then
+      unchanged=$((unchanged + 1))
+      log_info "$f already up to date in $workspace_root"
+    elif [ "$rc" -eq 11 ]; then
+      log_warn "Template missing in repo source: $src"
+    else
+      failed=$((failed + 1))
+      log_warn "Failed deploying $f to $workspace_root"
     fi
   done
+  if [ "$failed" -gt 0 ]; then
+    log_error "Agent template deploy failed for $failed file(s)."
+  fi
   if [ "$deployed" -gt 0 ]; then
-    log_success "Deployed $deployed agent template(s) to main workspace."
+    log_success "Deployed/updated $deployed agent template(s) to main workspace."
+  elif [ "$unchanged" -gt 0 ]; then
+    log_success "Agent templates already up to date in main workspace."
   fi
 }
 
 # Copy canonical Clawboard contract docs into the main workspace so AGENTS.md references
 # (ANATOMY/CONTEXT/CLASSIFICATION) always resolve to the latest repo versions.
+# Deploy is idempotent and atomic per-file.
 maybe_deploy_contract_docs() {
   local workspace_root=""
   workspace_root="$(resolve_agent_workspace_path "main" 2>/dev/null || true)"
@@ -1266,16 +1339,45 @@ maybe_deploy_contract_docs() {
   fi
 
   local deployed=0
+  local unchanged=0
+  local missing=0
+  local failed=0
+  local rc=0
+  local src=""
+  local dst=""
   local doc=""
-  for doc in ANATOMY.md CONTEXT.md CLASSIFICATION.md CONTEXT_SPEC.md CLASSIFICATION_TEST_MATRIX.md; do
-    if [ -f "$INSTALL_DIR/$doc" ]; then
-      cp "$INSTALL_DIR/$doc" "$workspace_root/$doc"
+  for doc in "${CLAWBOARD_CONTRACT_DOCS[@]}"; do
+    src="$INSTALL_DIR/$doc"
+    dst="$workspace_root/$doc"
+    if deploy_file_atomic_if_changed "$src" "$dst"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then
       log_info "Deployed $doc to $workspace_root"
       deployed=$((deployed + 1))
+    elif [ "$rc" -eq 10 ]; then
+      unchanged=$((unchanged + 1))
+      log_info "$doc already up to date in $workspace_root"
+    elif [ "$rc" -eq 11 ]; then
+      missing=$((missing + 1))
+      log_warn "Contract doc missing in repo source: $src"
+    else
+      failed=$((failed + 1))
+      log_warn "Failed deploying $doc to $workspace_root"
     fi
   done
+  if [ "$failed" -gt 0 ]; then
+    log_error "Contract doc deploy failed for $failed file(s)."
+  fi
   if [ "$deployed" -gt 0 ]; then
-    log_success "Deployed $deployed Clawboard contract doc(s) to main workspace."
+    log_success "Deployed/updated $deployed Clawboard contract doc(s) to main workspace."
+  elif [ "$unchanged" -gt 0 ]; then
+    log_success "Clawboard contract docs already up to date in main workspace."
+  fi
+  if [ "$missing" -gt 0 ]; then
+    log_warn "$missing contract doc(s) were missing in repository source and were not deployed."
   fi
 }
 

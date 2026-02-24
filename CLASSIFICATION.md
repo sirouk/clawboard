@@ -62,6 +62,7 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 - Bulk search/context paths must avoid loading unbounded raw payloads.
 - Tool call action logs are excluded from semantic search and graph extraction by default.
 - When a source space is resolved, classifier/context/search must stay within effective allowed-space visibility.
+- Main-agent delegated-run supervision cadence is deterministic and bootstrap-installed (`1m -> 3m -> 10m -> 15m -> 30m -> 1h`, cap `1h`), with explicit user progress updates once elapsed runtime exceeds 5 minutes.
 
 ### 4.1 Allocation Guardrails (Absolute)
 

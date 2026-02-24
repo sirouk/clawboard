@@ -592,8 +592,10 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   }, [sending, waiting, pendingRequestId, waitingRequestId, sessionKey, token, onCancel]);
 
   const isInFlight = sending || waiting;
-  const hardDisabled = Boolean(disabled || isInFlight || readOnly);
-  const sendDisabled = hardDisabled || draft.trim().length === 0;
+  // Keep the composer interactive while a prior response is in-flight so users can continue
+  // the conversation without waiting for Stop/typing to clear.
+  const hardDisabled = Boolean(disabled || readOnly);
+  const sendDisabled = hardDisabled || sending || draft.trim().length === 0;
   const wordCount = useMemo(() => {
     const text = draft.trim();
     if (!text) return 0;
@@ -832,25 +834,24 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
                 >
                   <StopIcon />
                 </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    void sendMessage();
-                  }}
-                  disabled={sendDisabled}
-                  aria-label="Send message"
-                  title="Send message"
-                  className={cn(
-                    "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
-                    "border-[rgba(255,90,45,0.6)] bg-[rgba(255,90,45,0.2)] backdrop-blur",
-                    "hover:bg-[rgba(255,90,45,0.3)]",
-                    "disabled:cursor-not-allowed disabled:border-[rgba(255,255,255,0.14)] disabled:bg-[rgba(255,255,255,0.06)] disabled:text-[rgb(var(--claw-muted))]"
-                  )}
-                >
-                  <SendIcon />
-                </button>
-              )}
+              ) : null}
+              <button
+                type="button"
+                onClick={() => {
+                  void sendMessage();
+                }}
+                disabled={sendDisabled}
+                aria-label="Send message"
+                title="Send message"
+                className={cn(
+                  "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
+                  "border-[rgba(255,90,45,0.6)] bg-[rgba(255,90,45,0.2)] backdrop-blur",
+                  "hover:bg-[rgba(255,90,45,0.3)]",
+                  "disabled:cursor-not-allowed disabled:border-[rgba(255,255,255,0.14)] disabled:bg-[rgba(255,255,255,0.06)] disabled:text-[rgb(var(--claw-muted))]"
+                )}
+              >
+                <SendIcon />
+              </button>
             </div>
           ) : null}
         </div>
@@ -904,19 +905,18 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
                   <StopIcon className="mr-1" />
                   Stop
                 </Button>
-              ) : (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="primary"
-                  onClick={() => {
-                    void sendMessage();
-                  }}
-                  disabled={sendDisabled}
-                >
-                  Send
-                </Button>
-              )}
+              ) : null}
+              <Button
+                type="button"
+                size="sm"
+                variant="primary"
+                onClick={() => {
+                  void sendMessage();
+                }}
+                disabled={sendDisabled}
+              >
+                Send
+              </Button>
             </div>
           </div>
         )}

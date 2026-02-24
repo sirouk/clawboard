@@ -554,6 +554,7 @@ Contracts:
 - Board session routing determinism (`clawboard:topic:*`, `clawboard:task:*:*`).
 - Retrieval pollution defenses (sanitize + classifier noise filters).
 - Async eventual consistency via SSE + reconcile.
+- Delegated-run supervision cadence is deterministic in bootstrap-installed main-agent policy: `1m -> 3m -> 10m -> 15m -> 30m -> 1h` (cap `1h`), with explicit user status updates after `>5m`.
 
 Non-goals:
 - Unbounded prompt stuffing.

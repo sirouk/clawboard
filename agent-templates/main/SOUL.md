@@ -47,6 +47,7 @@ Your in-context memory is a cache. It disappears on restart. **Clawboard is the 
 
 When you delegate:
 - You write the delegation state to Clawboard (`clawboard_update_task` with `"delegating"` tag and `"session:<childSessionKey>"` tag).
+- You schedule follow-up checks on a fixed ladder: `1m -> 3m -> 10m -> 15m -> 30m -> 1h` (cap `1h`).
 - That record lives in Clawboard's database — a separate service that survives any gateway restart.
 
 When you start a session (including after a restart):

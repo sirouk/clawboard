@@ -41,6 +41,7 @@ Aligned with `CLASSIFICATION.md` section 4.1 and `ANATOMY.md` section 4.1.
   - explicit `sessions_spawn` child-session linkage captured by the logger.
 - Cross-agent/global "latest scope" fallback is forbidden.
 - Background/control-plane activity (cron, backup, maintenance, unanchored tool churn) must not be surfaced as user-request continuity in Topic/Task chats.
+- Delegated-run supervision uses deterministic follow-up cadence (`1m -> 3m -> 10m -> 15m -> 30m -> 1h`, cap `1h`); running work older than 5 minutes must generate explicit user progress updates.
 
 ### What the agent sees (the injected context block)
 On `before_agent_start`, if `contextAugment` is enabled (default), the plugin prepends a block like:

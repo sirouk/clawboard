@@ -258,6 +258,21 @@ function compareLogCreatedAtDesc(a: LogEntry, b: LogEntry) {
   return compareLogCreatedAtAsc(b, a);
 }
 
+function normalizeOpenClawRequestId(value: unknown) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  if (!text.toLowerCase().startsWith("occhat-")) return text;
+  const base = text.split(":", 1)[0]?.trim() ?? "";
+  return base || text;
+}
+
+function requestIdForLogEntry(entry: LogEntry) {
+  const source = (entry.source && typeof entry.source === "object" ? entry.source : {}) as Record<string, unknown>;
+  const requestId = normalizeOpenClawRequestId(source.requestId);
+  if (requestId) return requestId;
+  return normalizeOpenClawRequestId(source.messageId);
+}
+
 function normalizeTagValue(value: string) {
   const lowered = String(value ?? "").toLowerCase();
   const withDashes = lowered.replace(/\s+/g, "-");
@@ -2517,10 +2532,18 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (mobileLayer === "chat" && mobileChatTarget?.kind === "task" && mobileChatTarget.taskId) {
       targets.add(mobileChatTarget.taskId);
     }
+    const topicTargets = new Set<string>();
     for (const taskId of targets) {
       void hydrateTaskLogs(taskId);
+      const topicId = taskTopicById.get(taskId);
+      if (topicId && topicId !== "unassigned") {
+        topicTargets.add(topicId);
+      }
     }
-  }, [expandedTasksSafe, hydrateTaskLogs, mobileChatTarget, mobileLayer]);
+    for (const topicId of topicTargets) {
+      void hydrateTopicLogs(topicId);
+    }
+  }, [expandedTasksSafe, hydrateTaskLogs, hydrateTopicLogs, mobileChatTarget, mobileLayer, taskTopicById]);
 
   useEffect(() => {
     const targets = new Set<string>();
@@ -2702,13 +2725,63 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   );
 
   const taskChatLogsByTask = useMemo(() => {
-    if (!normalizedSearch) return logsByTaskAll;
-    const map = new Map<string, LogEntry[]>();
-    for (const [taskId, rows] of logsByTaskAll.entries()) {
-      map.set(taskId, rows.filter(matchesLogSearchChat));
+    // Carry topic-root rows into task chat when they share the same request id.
+    // This preserves continuity when a topic chat is promoted to a task mid-request.
+    const byTask = new Map<string, LogEntry[]>();
+    const dedupeSortAsc = (rows: LogEntry[]) => {
+      const map = new Map<string, LogEntry>();
+      for (const row of rows) {
+        map.set(row.id, row);
+      }
+      return Array.from(map.values()).sort(compareLogCreatedAtAsc);
+    };
+
+    for (const task of tasks) {
+      const taskRows = logsByTaskAll.get(task.id) ?? [];
+      const topicId = String(task.topicId ?? "").trim();
+      if (!topicId || topicId === "unassigned") {
+        byTask.set(task.id, taskRows);
+        continue;
+      }
+
+      const topicRootRows = topicRootLogsByTopic.get(topicId) ?? [];
+      if (topicRootRows.length === 0 || taskRows.length === 0) {
+        byTask.set(task.id, taskRows);
+        continue;
+      }
+
+      const requestIds = new Set<string>();
+      for (const row of taskRows) {
+        const requestId = requestIdForLogEntry(row);
+        if (requestId) requestIds.add(requestId);
+      }
+      if (requestIds.size === 0) {
+        byTask.set(task.id, taskRows);
+        continue;
+      }
+
+      const carryRows = topicRootRows.filter((row) => {
+        if (row.taskId) return false;
+        const requestId = requestIdForLogEntry(row);
+        if (!requestId) return false;
+        return requestIds.has(requestId);
+      });
+      if (carryRows.length === 0) {
+        byTask.set(task.id, taskRows);
+        continue;
+      }
+
+      byTask.set(task.id, dedupeSortAsc([...taskRows, ...carryRows]));
     }
-    return map;
-  }, [logsByTaskAll, matchesLogSearchChat, normalizedSearch]);
+
+    if (!normalizedSearch) return byTask;
+
+    const filtered = new Map<string, LogEntry[]>();
+    for (const [taskId, rows] of byTask.entries()) {
+      filtered.set(taskId, rows.filter(matchesLogSearchChat));
+    }
+    return filtered;
+  }, [logsByTaskAll, matchesLogSearchChat, normalizedSearch, tasks, topicRootLogsByTopic]);
 
   const topicChatLogsByTopic = useMemo(() => {
     if (!normalizedSearch) return topicRootLogsByTopic;
@@ -6033,7 +6106,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                               className={cn(
                                 "mt-2.5 pt-2",
                                 taskChatFullscreen
-                                  ? "mt-0 flex min-h-0 flex-1 flex-col overflow-hidden overscroll-none px-4 pb-5 pt-[calc(env(safe-area-inset-top)+2.7rem)]"
+                                  ? "mt-0 flex min-h-0 flex-1 flex-col overflow-hidden overscroll-none px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-[calc(env(safe-area-inset-top)+2.7rem)]"
                                   : ""
                               )}
                               style={taskChatFullscreen ? mobileOverlaySurfaceStyle(taskColor) : undefined}

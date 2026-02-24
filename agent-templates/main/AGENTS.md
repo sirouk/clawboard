@@ -83,30 +83,35 @@ If no `taskId` is available (non-board session), skip this step — the cron in 
 
 ### Step 3 — Create a durable follow-up cron (REQUIRED for every delegation)
 
-Immediately after `sessions_spawn`, call `cron.add` to create a one-shot follow-up:
+Use this fixed follow-up ladder for delegated runs:
+
+`[1m, 3m, 10m, 15m, 30m, 1h]` (cap at `1h`)
+
+Immediately after `sessions_spawn`, call `cron.add` to create the first one-shot follow-up at `+1m`:
 
 ```
 cron.add({
   name: "follow-up: <short task label>",
-  schedule: { kind: "at", at: "<now + 10 minutes ISO>" },
+  schedule: { kind: "at", at: "<now + 1 minute ISO>" },
   sessionTarget: "main",
   wakeMode: "now",
   payload: {
     kind: "systemEvent",
-    text: "FOLLOW-UP: taskId=<taskId or 'none'> childSessionKey=<childSessionKey> agentId=<agentId> task=<original task summary>.
+    text: "FOLLOW-UP: taskId=<taskId or 'none'> childSessionKey=<childSessionKey> agentId=<agentId> task=<original task summary> attemptIndex=0 startedAt=<ISO>.
+    Ladder minutes: [1,3,10,15,30,60].
     Steps:
-    1. If taskId is not 'none': call clawboard_get_task(taskId) — if status is already 'done', work is complete; call cron.remove and stop.
+    1. If taskId is not 'none': call clawboard_get_task(taskId). If already done: call cron.remove and stop.
     2. Call sessions_history(childSessionKey).
-    - If COMPLETE: call clawboard_update_task(taskId, { status: 'done', tags: [] }) if taskId is available. Relay the full result to Chris. Call cron.remove.
-    - If STILL RUNNING: tell Chris it is still in progress. cron.add another check in 5 minutes with the same taskId/childSessionKey/agentId/task.
-    - If INCOMPLETE WITH NO RESULT (gateway restart killed it): sessions_spawn(agentId: '<agentId>', task: '<original task>'). If taskId is available: clawboard_update_task(taskId, { tags: ['delegating', 'agent:<agentId>', 'session:<newChildSessionKey>'] }). cron.add a new follow-up for the new childSessionKey.
-    - If FAILED: clawboard_update_task(taskId, { status: 'done', tags: [] }) if taskId available. Tell Chris what failed and why."
+    - If COMPLETE: call clawboard_update_task(taskId, { status: 'done', tags: [] }) if taskId is available. Relay full result to Chris. Call cron.remove.
+    - If STILL RUNNING: tell Chris status + what is still running + next check ETA. If elapsed >5m, explicitly say still in progress. Compute nextIndex=min(attemptIndex+1,5), nextMinutes=[1,3,10,15,30,60][nextIndex], then cron.add next follow-up at now+nextMinutes with updated attemptIndex.
+    - If INCOMPLETE WITH NO RESULT (gateway restart killed it): sessions_spawn(agentId: '<agentId>', task: '<original task>'). If taskId is available: clawboard_update_task(taskId, { tags: ['delegating', 'agent:<agentId>', 'session:<newChildSessionKey>'] }). Reset attemptIndex=0 and cron.add next follow-up at +1m for the new childSessionKey.
+    - If FAILED: clawboard_update_task(taskId, { status: 'done', tags: [] }) if taskId available. Tell Chris what failed and why. Call cron.remove."
   },
   deleteAfterRun: true
 })
 ```
 
-**Why this matters:** The cron job is written to `~/.openclaw/cron/jobs.json`. It fires even after a gateway restart. Combined with Clawboard tracking, there are now three independent recovery paths: the cron, the watchdog, and session-start recovery. Chris always gets an answer.
+**Why this matters:** The cron job is written to `~/.openclaw/cron/jobs.json`. It fires even after a gateway restart. Combined with Clawboard tracking, there are now three independent recovery paths: delegation cron ladder, heartbeat/session supervision, and session-start recovery. Chris always gets an answer.
 
 ### Step 4 — Confirm to Chris
 
@@ -138,8 +143,8 @@ The Clawboard context block at the top of this prompt already contains the worki
 
 **Step E — Act based on the result:**
 - **COMPLETE**: `clawboard_update_task(taskId, { status: "done", tags: [] })`. Deliver the result to Chris now.
-- **STILL RUNNING**: ensure a `cron.add` follow-up exists; tell Chris the status if it has been more than 10 minutes.
-- **LOST** (no session found, no output — gateway restart): `sessions_spawn(agentId, originalTask)` to re-spawn. Then `clawboard_update_task(taskId, { tags: ["delegating", "agent:<agentId>", "session:<newChildSessionKey>"] })`. Then `cron.add` a new follow-up.
+- **STILL RUNNING**: ensure a `cron.add` follow-up exists using the ladder `[1m,3m,10m,15m,30m,1h]` (cap `1h`). If elapsed is over 5 minutes, send a "still in progress" update that includes the next check ETA.
+- **LOST** (no session found, no output — gateway restart): `sessions_spawn(agentId, originalTask)` to re-spawn. Then `clawboard_update_task(taskId, { tags: ["delegating", "agent:<agentId>", "session:<newChildSessionKey>"] })`. Reset ladder to `1m` and `cron.add` a new follow-up.
 
 ### When this runs
 - **Every session start** — before doing anything else.
@@ -177,8 +182,8 @@ The Clawboard context block at the top of this prompt already contains the worki
 
 **Infrastructure layer (survives restarts — three independent paths):**
 - Every `sessions_spawn` MUST be paired with (a) a Clawboard ledger write and (b) a `cron.add` follow-up job.
-- **Path 1 — Cron**: fires at `+10m`, checks `sessions_history`, reschedules until result is delivered or work is re-spawned.
-- **Path 2 — Watchdog**: permanent cron every 5m, queries both `sessions_list` AND `clawboard_search("delegating")`, recovers lost work.
+- **Path 1 — Cron**: follow-up ladder `+1m -> +3m -> +10m -> +15m -> +30m -> +1h`, checks `sessions_history`, reschedules until result is delivered or work is re-spawned.
+- **Path 2 — Heartbeat watchdog**: main-agent heartbeat every 5m queries `sessions_list` and `clawboard_search("delegating")`, recovers lost work, and enforces ladder-based follow-ups.
 - **Path 3 — Session start**: on every new session, `clawboard_search("delegating")` finds in-flight tasks; the model re-spawns or delivers as needed.
 - Jobs are stored in `~/.openclaw/cron/jobs.json`; Clawboard state is in Clawboard's own database. Both survive gateway restarts.
 

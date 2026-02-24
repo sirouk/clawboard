@@ -1521,6 +1521,9 @@ export default function register(api) {
     const inboundBySession = new Map();
     const agentEndCursorBySession = new Map();
     const openclawRequestBySession = new Map();
+    const toolScopeByRunId = new Map();
+    const TOOL_SCOPE_MEMORY_TTL_MS = 15 * 60_000;
+    const TOOL_SCOPE_MEMORY_MAX_ENTRIES = 400;
     const pruneOpenclawRequestMap = (ts, forceTrim = false) => {
         for (const [key, value] of openclawRequestBySession.entries()) {
             if (ts - value.ts > OPENCLAW_REQUEST_ID_TTL_MS) {
@@ -1580,6 +1583,119 @@ export default function register(api) {
         }
         return recentOpenclawRequestId(params.sessionKey);
     };
+    const canonicalBoardScopeSessionKey = (scope) => {
+        if (!scope?.topicId)
+            return undefined;
+        if (scope.kind === "task" && scope.taskId) {
+            return `clawboard:task:${scope.topicId}:${scope.taskId}`;
+        }
+        return `clawboard:topic:${scope.topicId}`;
+    };
+    const resolveOpenclawRequestIdForBoardScope = async (params) => {
+        if (params.requestId)
+            return params.requestId;
+        const candidates = new Set();
+        const scopeSessionKey = normalizeId(params.boardScope?.sessionKey);
+        if (scopeSessionKey) {
+            for (const key of requestSessionKeys(scopeSessionKey))
+                candidates.add(key);
+        }
+        const canonicalScopeSessionKey = canonicalBoardScopeSessionKey(params.boardScope);
+        if (canonicalScopeSessionKey) {
+            for (const key of requestSessionKeys(canonicalScopeSessionKey))
+                candidates.add(key);
+        }
+        for (const candidate of candidates) {
+            const candidateRequestId = recentOpenclawRequestId(candidate);
+            if (!candidateRequestId)
+                continue;
+            rememberOpenclawRequestId(params.sessionKey, candidateRequestId);
+            return candidateRequestId;
+        }
+        if (!canonicalScopeSessionKey)
+            return params.requestId;
+        try {
+            const rows = await listLogs({
+                sessionKey: canonicalScopeSessionKey,
+                type: "conversation",
+                limit: 16,
+            });
+            for (const row of rows) {
+                if (!row || typeof row !== "object")
+                    continue;
+                const rowAgentId = normalizeId(typeof row.agentId === "string"
+                    ? (row.agentId ?? "")
+                    : undefined);
+                if (rowAgentId && rowAgentId.toLowerCase() !== "user")
+                    continue;
+                const source = row.source && typeof row.source === "object"
+                    ? (row.source ?? undefined)
+                    : undefined;
+                const candidateRequestId = normalizeRequestId(source?.requestId) ??
+                    inferRequestIdFromMessageId(source?.requestId) ??
+                    normalizeRequestId(source?.messageId) ??
+                    inferRequestIdFromMessageId(source?.messageId);
+                if (!candidateRequestId)
+                    continue;
+                rememberOpenclawRequestId(canonicalScopeSessionKey, candidateRequestId);
+                rememberOpenclawRequestId(params.sessionKey, candidateRequestId);
+                return candidateRequestId;
+            }
+        }
+        catch {
+            // Non-fatal fallback path when Clawboard API lookups fail transiently.
+        }
+        return params.requestId;
+    };
+    const pruneToolScopeMap = (ts, forceTrim = false) => {
+        for (const [key, value] of toolScopeByRunId.entries()) {
+            if (ts - value.ts > TOOL_SCOPE_MEMORY_TTL_MS) {
+                toolScopeByRunId.delete(key);
+            }
+        }
+        if (!forceTrim && toolScopeByRunId.size <= TOOL_SCOPE_MEMORY_MAX_ENTRIES)
+            return;
+        if (toolScopeByRunId.size <= TOOL_SCOPE_MEMORY_MAX_ENTRIES)
+            return;
+        const ordered = Array.from(toolScopeByRunId.entries()).sort((a, b) => a[1].ts - b[1].ts);
+        const overflow = toolScopeByRunId.size - TOOL_SCOPE_MEMORY_MAX_ENTRIES;
+        for (let i = 0; i < overflow; i += 1) {
+            const row = ordered[i];
+            if (!row)
+                break;
+            toolScopeByRunId.delete(row[0]);
+        }
+    };
+    const rememberToolScopeForRun = (runId, value) => {
+        const key = normalizeId(typeof runId === "string" ? runId : undefined);
+        if (!key)
+            return;
+        const ts = nowMs();
+        toolScopeByRunId.set(key, {
+            ts,
+            sessionKey: normalizeId(value.sessionKey),
+            requestId: normalizeRequestId(value.requestId),
+            routing: value.routing,
+        });
+        pruneToolScopeMap(ts, toolScopeByRunId.size > TOOL_SCOPE_MEMORY_MAX_ENTRIES);
+    };
+    const recentToolScopeForRun = (runId) => {
+        const key = normalizeId(typeof runId === "string" ? runId : undefined);
+        if (!key)
+            return undefined;
+        const ts = nowMs();
+        if (toolScopeByRunId.size > TOOL_SCOPE_MEMORY_MAX_ENTRIES) {
+            pruneToolScopeMap(ts, true);
+        }
+        const row = toolScopeByRunId.get(key);
+        if (!row)
+            return undefined;
+        if (ts - row.ts > TOOL_SCOPE_MEMORY_TTL_MS) {
+            toolScopeByRunId.delete(key);
+            return undefined;
+        }
+        return row;
+    };
     const resolveSessionKey = (meta, ctx2) => {
         const ctxSession = normalizeId(ctx2.sessionKey);
         if (parseSubagentSession(ctxSession))
@@ -1618,7 +1734,7 @@ export default function register(api) {
             : typeof event.messageId === "string"
                 ? (event.messageId ?? "")
                 : undefined;
-        const requestId = resolveOpenclawRequestId({
+        let requestId = resolveOpenclawRequestId({
             sessionKey: effectiveSessionKey ?? ctx.sessionKey,
             explicitRequestId: meta?.requestId,
             messageId,
@@ -1680,6 +1796,11 @@ export default function register(api) {
             });
         }
         const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
+        requestId = await resolveOpenclawRequestIdForBoardScope({
+            requestId,
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            boardScope: routing.boardScope,
+        });
         const topicId = routing.topicId;
         const taskId = routing.taskId;
         const metaSummary = meta?.summary;
@@ -1802,7 +1923,7 @@ export default function register(api) {
             return;
         const meta = normalizeEventMeta(sendEvent.metadata, sendEvent.sessionKey);
         const effectiveSessionKey = resolveSessionKey(meta, ctx);
-        const requestId = resolveOpenclawRequestId({
+        let requestId = resolveOpenclawRequestId({
             sessionKey: effectiveSessionKey ?? ctx.sessionKey,
             explicitRequestId: meta?.requestId,
             messageId: meta?.messageId,
@@ -1816,6 +1937,11 @@ export default function register(api) {
             return;
         }
         const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
+        requestId = await resolveOpenclawRequestIdForBoardScope({
+            requestId,
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            boardScope: routing.boardScope,
+        });
         const topicId = routing.topicId;
         const taskId = routing.taskId;
         // Outbound message content is always assistant-side.
@@ -1876,7 +2002,7 @@ export default function register(api) {
         const redacted = redact(event.params);
         const toolMeta = normalizeEventMeta(event.metadata, event.sessionKey);
         const effectiveSessionKey = resolveSessionKey(toolMeta, ctx);
-        const requestId = resolveOpenclawRequestId({
+        let requestId = resolveOpenclawRequestId({
             sessionKey: effectiveSessionKey ?? ctx.sessionKey,
             explicitRequestId: event.requestId ??
                 event.runId ??
@@ -1885,8 +2011,18 @@ export default function register(api) {
         if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
             return;
         const routing = await resolveRoutingScope(effectiveSessionKey, ctx);
+        requestId = await resolveOpenclawRequestIdForBoardScope({
+            requestId,
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            boardScope: routing.boardScope,
+        });
         if (!hasSpecificSessionAnchor(effectiveSessionKey, ctx) && !hasToolRoutingAnchor(routing))
             return;
+        rememberToolScopeForRun(event.runId, {
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            requestId,
+            routing,
+        });
         const topicId = routing.topicId;
         const taskId = routing.taskId;
         sendAsync({
@@ -1913,22 +2049,37 @@ export default function register(api) {
             ? { error: event.error }
             : { result: redact(event.result), durationMs: event.durationMs };
         const toolMeta = normalizeEventMeta(event.metadata, event.sessionKey);
-        const effectiveSessionKey = resolveSessionKey(toolMeta, ctx);
-        const requestId = resolveOpenclawRequestId({
+        const remembered = recentToolScopeForRun(event.runId);
+        const resolvedSessionKey = resolveSessionKey(toolMeta, ctx);
+        const effectiveSessionKey = hasSpecificSessionAnchor(resolvedSessionKey, ctx) || !remembered?.sessionKey
+            ? resolvedSessionKey
+            : remembered.sessionKey;
+        const explicitRequestId = event.requestId ??
+            event.runId ??
+            toolMeta?.requestId ??
+            remembered?.requestId;
+        let requestId = resolveOpenclawRequestId({
             sessionKey: effectiveSessionKey ?? ctx.sessionKey,
-            explicitRequestId: event.requestId ??
-                event.runId ??
-                toolMeta?.requestId,
+            explicitRequestId,
         });
         if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
             return;
-        const routing = await resolveRoutingScope(effectiveSessionKey, ctx);
+        const routingResolved = await resolveRoutingScope(effectiveSessionKey, ctx);
+        const routing = hasToolRoutingAnchor(routingResolved) || !remembered?.routing ? routingResolved : remembered.routing;
+        requestId = await resolveOpenclawRequestIdForBoardScope({
+            requestId,
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            boardScope: routing.boardScope,
+        });
         if (!hasSpecificSessionAnchor(effectiveSessionKey, ctx) && !hasToolRoutingAnchor(routing))
             return;
         if (!event.error && event.toolName === "sessions_spawn" && routing.boardScope) {
             const childSessionKeys = extractSpawnedSubagentSessionKeys(event.result);
             for (const childSessionKey of childSessionKeys) {
                 rememberSpawnedSubagentBoardScope(childSessionKey, routing.boardScope);
+                if (requestId) {
+                    rememberOpenclawRequestId(childSessionKey, requestId);
+                }
             }
         }
         const topicId = routing.topicId;
@@ -2007,7 +2158,7 @@ export default function register(api) {
             const agentTag = ctx.agentId ?? "unknown";
             inferredSessionKey = `agent:${agentTag}:adhoc:${Date.now()}`;
         }
-        const requestId = resolveOpenclawRequestId({
+        let requestId = resolveOpenclawRequestId({
             sessionKey: inferredSessionKey ?? ctx.sessionKey,
             explicitRequestId: eventRequestIdRaw,
             messageId: eventMeta?.messageId,
@@ -2022,6 +2173,11 @@ export default function register(api) {
             (typeof ctx.provider === "string" ? ctx.provider : undefined) ??
             "direct";
         const routing = await resolveRoutingScope(inferredSessionKey, { ...ctx, channelId: inferredChannelId ?? ctx.channelId });
+        requestId = await resolveOpenclawRequestIdForBoardScope({
+            requestId,
+            sessionKey: inferredSessionKey ?? ctx.sessionKey,
+            boardScope: routing.boardScope,
+        });
         const topicId = routing.topicId;
         const taskId = routing.taskId;
         // agent_end is always this agent's run: treat assistant-role messages as assistant output.
@@ -2087,15 +2243,9 @@ export default function register(api) {
                 const role = typeof msg.role === "string" ? msg.role : undefined;
                 if (role !== "assistant" && role !== "user")
                     continue;
-                if (isBoardSession && role === "user") {
-                    // Clawboard persists UI-originated user messages immediately via `/api/openclaw/chat`.
-                    // Logging them again from agent_end duplicates them (same content, different ids).
-                    continue;
-                }
-                if (isChannelSession && role === "user") {
-                    // Inbound user messages for channel sessions are logged via message_received with the
-                    // upstream messageId. agent_end often includes prior context prompts, so logging user
-                    // role messages here creates duplicate user entries in Clawboard.
+                if (role === "user" && !isSubagentSession) {
+                    // message_received is the source of truth for inbound user rows. agent_end commonly
+                    // includes prompt/context echoes as role=user; logging those duplicates/pollutes chats.
                     continue;
                 }
                 // Heartbeat (and similar system) runs inject the prompt as role=user. Do not log those as "User"

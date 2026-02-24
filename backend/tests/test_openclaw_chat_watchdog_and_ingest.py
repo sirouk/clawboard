@@ -45,7 +45,7 @@ try:
         Task,
         Topic,
     )  # noqa: E402
-    from app.schemas import LogAppend, OpenClawChatRequest  # noqa: E402
+    from app.schemas import LogAppend, OpenClawChatRequest, OpenClawChatCancelRequest  # noqa: E402
 
     _API_TESTS_AVAILABLE = True
 except Exception:
@@ -84,6 +84,10 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         # Keep history-sync unit paths deterministic regardless of local .env defaults.
         # Individual tests can still override this with patch.dict as needed.
         os.environ["OPENCLAW_GATEWAY_HISTORY_SYNC_SESSIONS_LIST_DISABLE"] = "0"
+        with main_module._OPENCLAW_WATCHDOG_BACKFILL_STATE_LOCK:
+            main_module._OPENCLAW_WATCHDOG_BACKFILL_STATE.clear()
+        with main_module._OPENCLAW_HISTORY_SYNC_SESSION_BACKOFF_LOCK:
+            main_module._OPENCLAW_HISTORY_SYNC_SESSION_BACKOFF.clear()
         with get_session() as session:
             for row in session.exec(select(Attachment)).all():
                 session.delete(row)
@@ -358,6 +362,55 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     },
                 ),
                 idempotency_key="src:conversation:webchat:user:webchat-msg-ing-020c",
+            )
+
+            rows = session.exec(select(LogEntry).where(LogEntry.type == "conversation")).all()
+
+        self.assertEqual(first.id, echoed.id)
+        self.assertEqual(len(rows), 1)
+
+    def test_ing_020c2_user_echo_dedupes_when_replay_lacks_request_and_message_ids(self):
+        request_id = "occhat-request-020c2"
+        session_key = "clawboard:task:topic-ing-020c2:task-ing-020c2"
+        created_at = now_iso()
+        duplicate_at = (
+            datetime.fromisoformat(created_at.replace("Z", "+00:00")) + timedelta(seconds=40)
+        ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        with get_session() as session:
+            first = main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    content="persisted by /api/openclaw/chat",
+                    summary="persisted by /api/openclaw/chat",
+                    createdAt=created_at,
+                    agentId="user",
+                    agentLabel="User",
+                    source={
+                        "channel": "openclaw",
+                        "sessionKey": session_key,
+                        "requestId": request_id,
+                        "messageId": request_id,
+                    },
+                ),
+                idempotency_key=f"openclaw-chat:user:{request_id}",
+            )
+
+            echoed = main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    content="persisted by /api/openclaw/chat",
+                    summary="persisted by /api/openclaw/chat",
+                    createdAt=duplicate_at,
+                    agentId="user",
+                    agentLabel="User",
+                    source={
+                        "channel": "clawboard",
+                        "sessionKey": session_key,
+                    },
+                ),
+                idempotency_key="src:conversation:clawboard:user:ing-020c2-unlabeled",
             )
 
             rows = session.exec(select(LogEntry).where(LogEntry.type == "conversation")).all()
@@ -668,6 +721,145 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertIsNotNone(queue_row)
             self.assertEqual(str(queue_row.status or ""), "pending")
             self.assertEqual(str(queue_row.sessionKey or ""), "clawboard:topic:topic-chat-001")
+
+    def test_chat_001b_cancel_fans_out_to_linked_subagent_sessions(self):
+        request_id = "occhat-cancel-001b"
+        parent_session = "clawboard:task:topic-cancel-001b:task-cancel-001b"
+        subagent_session = "agent:coding:subagent:cancel-001b"
+        created = now_iso()
+        with get_session() as session:
+            session.add(
+                OpenClawChatDispatchQueue(
+                    requestId=request_id,
+                    sessionKey=parent_session,
+                    agentId="main",
+                    sentAt=created,
+                    message="parent dispatch",
+                    attachmentIds=[],
+                    status="processing",
+                    attempts=1,
+                    nextAttemptAt=created,
+                    claimedAt=created,
+                    completedAt=None,
+                    lastError=None,
+                    createdAt=created,
+                    updatedAt=created,
+                )
+            )
+            main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="action",
+                    content="Tool call: sessions_spawn",
+                    summary="spawn subagent",
+                    raw='{"session":"agent:coding:subagent:cancel-001b"}',
+                    createdAt=created,
+                    agentId="main",
+                    agentLabel="Main",
+                    source={
+                        "channel": "clawboard",
+                        "sessionKey": parent_session,
+                        "requestId": request_id,
+                    },
+                ),
+                idempotency_key="cancel-001b-anchor",
+            )
+            main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="action",
+                    content="Tool result: exec_command",
+                    summary="subagent progress",
+                    raw='{"ok":true}',
+                    createdAt=created,
+                    agentId="coding",
+                    agentLabel="Agent coding",
+                    source={
+                        "channel": "direct",
+                        "sessionKey": subagent_session,
+                        "requestId": request_id,
+                        "boardScopeTopicId": "topic-cancel-001b",
+                        "boardScopeTaskId": "task-cancel-001b",
+                    },
+                ),
+                idempotency_key="cancel-001b-subagent",
+            )
+
+        rpc_calls: list[tuple[str, dict]] = []
+
+        async def _fake_gateway_rpc(method: str, params: dict, **kwargs):
+            rpc_calls.append((method, params))
+            return {"ok": True}
+
+        with patch.object(main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)):
+            response = main_module.openclaw_chat_cancel(
+                OpenClawChatCancelRequest(sessionKey=parent_session, requestId=request_id)
+            )
+
+        self.assertTrue(bool(response.get("aborted")))
+        self.assertEqual(int(response.get("queueCancelled") or 0), 1)
+        cancelled_sessions = set(response.get("sessionKeys") or [])
+        self.assertIn(parent_session, cancelled_sessions)
+        self.assertIn(subagent_session, cancelled_sessions)
+        self.assertEqual(int(response.get("gatewayAbortCount") or 0), len(rpc_calls))
+        called_sessions = {str(params.get("sessionKey") or "") for method, params in rpc_calls if method == "chat.abort"}
+        self.assertIn(parent_session, called_sessions)
+        self.assertIn(subagent_session, called_sessions)
+        self.assertTrue(
+            all(str(params.get("requestId") or "") == request_id for method, params in rpc_calls if method == "chat.abort")
+        )
+
+        with get_session() as session:
+            rows = session.exec(
+                select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == request_id)
+            ).all()
+            self.assertTrue(rows)
+            for row in rows:
+                self.assertEqual(str(row.status or ""), "failed")
+                self.assertEqual(str(row.lastError or ""), "user_cancelled")
+                self.assertIsNone(row.claimedAt)
+                self.assertTrue(bool(str(row.completedAt or "").strip()))
+
+    def test_chat_001c_cancel_request_filter_matches_retry_suffix_rows(self):
+        request_id_base = "occhat-cancel-001c"
+        request_id_retry = f"{request_id_base}:retry-2"
+        session_key = "clawboard:topic:topic-cancel-001c"
+        created = now_iso()
+        with get_session() as session:
+            session.add(
+                OpenClawChatDispatchQueue(
+                    requestId=request_id_retry,
+                    sessionKey=session_key,
+                    agentId="main",
+                    sentAt=created,
+                    message="retry dispatch",
+                    attachmentIds=[],
+                    status="pending",
+                    attempts=2,
+                    nextAttemptAt=created,
+                    claimedAt=None,
+                    completedAt=None,
+                    lastError=None,
+                    createdAt=created,
+                    updatedAt=created,
+                )
+            )
+            session.commit()
+
+        with patch.object(main_module, "gateway_rpc", new=AsyncMock(return_value={"ok": True})):
+            response = main_module.openclaw_chat_cancel(
+                OpenClawChatCancelRequest(sessionKey=session_key, requestId=request_id_base)
+            )
+
+        self.assertTrue(bool(response.get("aborted")))
+        self.assertEqual(int(response.get("queueCancelled") or 0), 1)
+        with get_session() as session:
+            row = session.exec(
+                select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == request_id_retry)
+            ).first()
+            self.assertIsNotNone(row)
+            self.assertEqual(str(row.status or ""), "failed")
+            self.assertEqual(str(row.lastError or ""), "user_cancelled")
 
     def test_chat_002_attachment_payload_is_bound_into_gateway_call(self):
         root = Path(TMP_DIR) / "attachments-chat-002"
@@ -2407,6 +2599,157 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             )
         )
         self.assertFalse(main_module._openclaw_history_session_key_likely_gateway("unrelated:session:key"))
+
+    def test_chat_037_watchdog_backfill_cooldown_applies_exponential_spacing(self):
+        session_key = "clawboard:topic:topic-history-037"
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_CHAT_ASSISTANT_LOG_BACKFILL_BASE_SECONDS": "60",
+                "OPENCLAW_CHAT_ASSISTANT_LOG_BACKFILL_MAX_SECONDS": "3600",
+            },
+            clear=False,
+        ):
+            self.assertTrue(main_module._openclaw_watchdog_backfill_should_run(session_key, now_mono=100.0))
+            main_module._openclaw_watchdog_backfill_record_result(
+                session_key,
+                changed=False,
+                failed=False,
+                now_mono=100.0,
+            )
+            self.assertFalse(main_module._openclaw_watchdog_backfill_should_run(session_key, now_mono=150.0))
+            self.assertTrue(main_module._openclaw_watchdog_backfill_should_run(session_key, now_mono=161.0))
+            main_module._openclaw_watchdog_backfill_record_result(
+                session_key,
+                changed=False,
+                failed=True,
+                now_mono=161.0,
+            )
+            self.assertFalse(main_module._openclaw_watchdog_backfill_should_run(session_key, now_mono=280.0))
+            self.assertTrue(main_module._openclaw_watchdog_backfill_should_run(session_key, now_mono=402.0))
+
+    def test_chat_038_history_sync_defers_session_after_timeout_failure(self):
+        session_key = "agent:main:clawboard:topic:topic-history-038"
+        chat_history_calls_first = {"count": 0}
+
+        def _failing_sync_rpc(method: str, params: dict, *, scopes=None):
+            if method == "sessions.list":
+                return {"sessions": [{"key": session_key, "updatedAt": 1000}]}
+            if method == "chat.history":
+                chat_history_calls_first["count"] += 1
+                raise TimeoutError("chat history timeout")
+            raise AssertionError(f"Unexpected RPC method: {method}")
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_GATEWAY_TOKEN": "test-token",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_DISABLE": "0",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_SESSION_LIMIT": "1",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_SESSION_BACKOFF_BASE_SECONDS": "600",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_TRANSPORT_RETRY_ATTEMPTS": "1",
+            },
+            clear=False,
+        ), patch.object(main_module, "_run_gateway_history_rpc_sync", side_effect=_failing_sync_rpc), patch.object(
+            main_module,
+            "_openclaw_gateway_history_cursor_seed_sessions",
+            return_value=[],
+        ), patch.object(
+            main_module,
+            "_openclaw_gateway_history_recent_log_seed_sessions",
+            return_value=[],
+        ), patch.object(
+            main_module,
+            "_openclaw_gateway_history_unresolved_seed_sessions",
+            return_value=[],
+        ):
+            first_stats = main_module._sync_openclaw_gateway_history_once()
+
+        # First cycle tries the configured limit, then a reduced timeout-retry limit.
+        self.assertEqual(chat_history_calls_first["count"], 2)
+        self.assertEqual(int(first_stats.get("failedSessions") or 0), 1)
+
+        chat_history_calls_second = {"count": 0}
+
+        def _recovered_sync_rpc(method: str, params: dict, *, scopes=None):
+            if method == "sessions.list":
+                return {"sessions": [{"key": session_key, "updatedAt": 2000}]}
+            if method == "chat.history":
+                chat_history_calls_second["count"] += 1
+                return {
+                    "messages": [
+                        {
+                            "timestamp": 1700001700000,
+                            "role": "assistant",
+                            "text": "history backoff should defer this call",
+                            "id": "hmsg-038",
+                        }
+                    ]
+                }
+            raise AssertionError(f"Unexpected RPC method: {method}")
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_GATEWAY_TOKEN": "test-token",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_DISABLE": "0",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_SESSION_LIMIT": "1",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_SESSION_BACKOFF_BASE_SECONDS": "600",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_TRANSPORT_RETRY_ATTEMPTS": "1",
+            },
+            clear=False,
+        ), patch.object(main_module, "_run_gateway_history_rpc_sync", side_effect=_recovered_sync_rpc), patch.object(
+            main_module,
+            "_openclaw_gateway_history_cursor_seed_sessions",
+            return_value=[],
+        ), patch.object(
+            main_module,
+            "_openclaw_gateway_history_recent_log_seed_sessions",
+            return_value=[],
+        ), patch.object(
+            main_module,
+            "_openclaw_gateway_history_unresolved_seed_sessions",
+            return_value=[],
+        ):
+            second_stats = main_module._sync_openclaw_gateway_history_once()
+
+        self.assertEqual(chat_history_calls_second["count"], 0)
+        self.assertEqual(int(second_stats.get("failedSessions") or 0), 0)
+        self.assertEqual(int(second_stats.get("deferredByBackoff") or 0), 1)
+        self.assertEqual(int(second_stats.get("ingested") or 0), 0)
+
+    def test_chat_039_history_rpc_retries_transient_transport_errors(self):
+        call_count = {"value": 0}
+
+        def _flaky_rpc(
+            method: str,
+            params: dict,
+            *,
+            scopes=None,
+            token_override=None,
+            use_device_auth_override=None,
+            rpc_timeout_seconds=None,
+        ):
+            call_count["value"] += 1
+            if call_count["value"] == 1:
+                raise RuntimeError("gateway connect failed: gateway client stopped")
+            return {"ok": True, "method": method}
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_GATEWAY_TOKEN": "test-token",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_TRANSPORT_RETRY_ATTEMPTS": "2",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_TRANSPORT_RETRY_BASE_SECONDS": "0.01",
+            },
+            clear=False,
+        ), patch.object(main_module, "_run_gateway_rpc_sync", side_effect=_flaky_rpc), patch.object(
+            main_module.time, "sleep", return_value=None
+        ):
+            payload = main_module._run_gateway_history_rpc_sync("sessions.list", {"limit": 1}, scopes=["operator.read"])
+
+        self.assertEqual(payload.get("ok"), True)
+        self.assertEqual(call_count["value"], 2)
 
     def test_chat_007_openclaw_chat_fail_closes_when_persist_fails(self):
         payload = OpenClawChatRequest(

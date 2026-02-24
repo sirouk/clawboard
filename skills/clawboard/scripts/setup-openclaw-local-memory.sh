@@ -255,7 +255,9 @@ resolve_model_path() {
 configure_memory_search() {
   local model_path="$1"
 
-  set_cfg agents.defaults.compaction.memoryFlush.enabled true json true
+  # Optional across OpenClaw versions: some builds do not expose memoryFlush.
+  # Keep best-effort so bootstrap remains portable/idempotent instead of hard-failing.
+  set_cfg agents.defaults.compaction.memoryFlush.enabled true json false
   set_cfg agents.defaults.memorySearch.enabled true json true
   set_cfg agents.defaults.memorySearch.provider local string true
   set_cfg agents.defaults.memorySearch.fallback "$MEMORY_FALLBACK" string false
@@ -435,11 +437,12 @@ PY
 
   run_cfg_set "${base}.tools.elevated.enabled" false json false
 
-  # Heartbeat: 5m interval, sessions_list-first prompt so missed announces are caught.
+  # Heartbeat: 5m interval as a durable sweep. Per-delegation follow-up cadence is
+  # model-driven via cron ladder (1m, 3m, 10m, 15m, 30m, 1h).
   run_cfg_set "${base}.heartbeat.every" "5m" string false
   run_cfg_set "${base}.heartbeat.target" "last" string false
   run_cfg_set "${base}.heartbeat.prompt" \
-    "Heartbeat: (1) read the Clawboard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call sessions_list; (3) call clawboard_search(\"delegating\") as a backup sweep. For any Clawboard task with status 'doing' and no matching active session: the work was lost — re-spawn it. For any completed sub-agent session not yet surfaced: call sessions_history and relay the result to Chris. If nothing needs attention, reply HEARTBEAT_OK." \
+    "Heartbeat: (1) read the Clawboard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call sessions_list; (3) call clawboard_search(\"delegating\") as a backup sweep; (4) enforce follow-up ladder 1m->3m->10m->15m->30m->1h (cap 1h): each in-flight delegation must have a one-shot cron follow-up and the next wait must come from this ladder; (5) if any run is still active beyond 5 minutes, send Chris a brief status update with next check ETA; (6) for any Clawboard task with status 'doing' and no matching active session: re-spawn and reset follow-up to +1m; (7) for any completed sub-agent session not yet surfaced: call sessions_history and relay the result to Chris. If nothing needs attention, reply HEARTBEAT_OK." \
     string false
   run_cfg_set "${base}.heartbeat.ackMaxChars" 300 json false
 
@@ -486,12 +489,12 @@ watchdog_text = (
     "3. For each Clawboard task with status \"doing\": extract childSessionKey from tag starting with \"session:\", "
     "extract agentId from tag starting with \"agent:\". Call sessions_history(childSessionKey). "
     "COMPLETE: clawboard_update_task(taskId, { status: \"done\", tags: [] }), deliver result to Chris. "
-    "STILL RUNNING: send brief status if >10 minutes. "
+    "STILL RUNNING: send brief status if >5 minutes and include next check ETA from ladder [1,3,10,15,30,60] minutes. "
     "LOST (no session, no output): sessions_spawn(agentId, originalTask), "
     "clawboard_update_task(taskId, { tags: [\"delegating\",\"agent:<agentId>\",\"session:<newKey>\"] }), "
-    "cron.add new follow-up in 10 minutes.\n"
+    "cron.add new follow-up at +1 minute and continue ladder progression.\n"
     "4. For sessions in step 1 not covered by step 3: COMPLETED not delivered: relay result. "
-    "INCOMPLETE: re-spawn and cron.add follow-up.\n"
+    "INCOMPLETE: re-spawn and cron.add follow-up at +1 minute.\n"
     "If nothing needs attention, reply HEARTBEAT_OK."
 )
 jobs.append({
@@ -546,7 +549,8 @@ main() {
   echo ""
   echo "Delegation tools: sessions_spawn, sessions_list, sessions_history, sessions_send, cron"
   echo "Clawboard ledger tools: clawboard_search, clawboard_update_task, clawboard_context, clawboard_get_task"
-  echo "Follow-up guarantee: 2 independent recovery paths (heartbeat + session-start clawboard_search)"
+  echo "Delegation check-in cadence: 1m -> 3m -> 10m -> 15m -> 30m -> 1h (cap 1h; >5m user updates)"
+  echo "Follow-up guarantee: heartbeat watchdog + session-start clawboard_search + delegation cron ladder"
 }
 
 main "$@"

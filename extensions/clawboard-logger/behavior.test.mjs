@@ -323,6 +323,47 @@ test("agent_end fallback reuses recent board-session requestId", async () => {
   }
 });
 
+test("agent_end ignores non-subagent user-role echoes", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const agentEnd = api.__handlers.get("agent_end");
+    assert.equal(typeof agentEnd, "function");
+    const sessionKey = "clawboard:task:topic-user-echo-1:task-user-echo-1";
+
+    await agentEnd(
+      {
+        success: true,
+        messages: [
+          {
+            role: "user",
+            content: "System: You are the main OpenClaw agent. Continue this task.",
+          },
+        ],
+      },
+      {
+        sessionKey,
+        channelId: "openclaw",
+        agentId: "main",
+      }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const conversationRows = meaningfulCalls(calls)
+      .map((call) => parseBody(call))
+      .filter((payload) => payload.type === "conversation")
+      .filter((payload) => String(payload?.source?.sessionKey || "") === sessionKey);
+    assert.equal(conversationRows.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("before_agent_start adds no-reply-directive hint for board sessions", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -558,6 +599,82 @@ test("before_tool_call inherits requestId across wrapped subagent session keys",
   }
 });
 
+test("before_tool_call recovers requestId from board session logs when in-memory request map is cold", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const calls = [];
+    globalThis.fetch = async (url, options = {}) => {
+      const call = { url: String(url), options };
+      calls.push(call);
+      if (String(url).includes("/api/log?")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return [
+              {
+                type: "conversation",
+                agentId: "user",
+                source: {
+                  requestId: "occhat-board-fallback-req-1",
+                  messageId: "occhat-board-fallback-req-1",
+                },
+              },
+            ];
+          },
+          async text() {
+            return '[{"type":"conversation","agentId":"user","source":{"requestId":"occhat-board-fallback-req-1"}}]';
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {};
+        },
+        async text() {
+          return "{}";
+        },
+      };
+    };
+
+    const api = makeApi();
+    register(api);
+
+    const toolCall = api.__handlers.get("before_tool_call");
+    assert.equal(typeof toolCall, "function");
+
+    await toolCall(
+      {
+        toolName: "sessions_spawn",
+        params: { agentId: "coding" },
+      },
+      {
+        sessionKey: "agent:main:clawboard:task:topic-board-fallback-1:task-board-fallback-1",
+        channelId: "openclaw",
+        agentId: "main",
+      }
+    );
+
+    await waitFor(
+      () =>
+        calls.some(
+          (call) => String(call.options?.method || "").toUpperCase() === "POST" && String(call.url).includes("/api/log")
+        ),
+      2000
+    );
+    const postCalls = calls.filter(
+      (call) => String(call.options?.method || "").toUpperCase() === "POST" && String(call.url).includes("/api/log")
+    );
+    const payload = parseBody(postCalls[postCalls.length - 1]);
+    assert.equal(payload.type, "action");
+    assert.equal(payload.source.requestId, "occhat-board-fallback-req-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("subagent tool logs inherit board scope from parent board session when ctx.agentId is absent", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -627,6 +744,95 @@ test("subagent tool logs inherit board scope from parent board session when ctx.
     assert.equal(childPayload.source.boardScopeTopicId, "topic-scope-inherit-1");
     assert.equal(childPayload.source.boardScopeTaskId, "task-scope-inherit-1");
     assert.equal(childPayload.source.boardScopeInherited, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("spawned subagent tool logs inherit parent requestId via board scope fallback", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const queuePath = path.join(
+      os.tmpdir(),
+      `clawboard-logger-request-inherit-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`
+    );
+    const api = makeApi({ queuePath });
+    register(api);
+
+    const received = api.__handlers.get("message_received");
+    const toolCall = api.__handlers.get("before_tool_call");
+    const toolResult = api.__handlers.get("after_tool_call");
+    assert.equal(typeof received, "function");
+    assert.equal(typeof toolCall, "function");
+    assert.equal(typeof toolResult, "function");
+
+    const requestId = "occhat-subagent-request-001";
+    const parentSessionKey = "agent:main:clawboard:task:topic-request-inherit-1:task-request-inherit-1";
+    const childSessionKey = "agent:coding:subagent:request-inherit-child-1";
+
+    await received(
+      {
+        content: "start delegated task",
+        metadata: {
+          sessionKey: "clawboard:task:topic-request-inherit-1:task-request-inherit-1",
+          messageId: requestId,
+          requestId,
+        },
+      },
+      {
+        channelId: "openclaw",
+        sessionKey: "clawboard:task:topic-request-inherit-1:task-request-inherit-1",
+        conversationId: "clawboard:task:topic-request-inherit-1:task-request-inherit-1",
+        agentId: "main",
+      }
+    );
+
+    await toolCall(
+      {
+        toolName: "sessions_spawn",
+        params: { agentId: "coding" },
+      },
+      {
+        sessionKey: parentSessionKey,
+        channelId: "openclaw",
+        agentId: "main",
+      }
+    );
+
+    await toolResult(
+      {
+        toolName: "sessions_spawn",
+        result: { status: "accepted", childSessionKey },
+        durationMs: 8,
+      },
+      {
+        sessionKey: parentSessionKey,
+        channelId: "openclaw",
+        agentId: "main",
+      }
+    );
+
+    await toolCall(
+      {
+        toolName: "exec",
+        params: { command: "pwd" },
+      },
+      {
+        sessionKey: childSessionKey,
+        channelId: "openclaw",
+        agentId: "coding",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 3);
+    const childPayload = meaningfulCalls(calls)
+      .map((call) => parseBody(call))
+      .find((payload) => payload?.source?.sessionKey === childSessionKey && payload?.content === "Tool call: exec");
+    assert.ok(childPayload, "expected child subagent action log");
+    assert.equal(childPayload.source.requestId, requestId);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -836,6 +1042,65 @@ test("after_tool_call emits action log for result and error (ING-004)", async ()
     assert.equal(errorPayload.content, "Tool error: web.search");
     assert.equal(resultPayload.type, "action");
     assert.equal(errorPayload.type, "action");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("after_tool_call reuses before_tool_call scope when result event lacks session metadata", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const beforeHandler = api.__handlers.get("before_tool_call");
+    const afterHandler = api.__handlers.get("after_tool_call");
+    assert.equal(typeof beforeHandler, "function");
+    assert.equal(typeof afterHandler, "function");
+
+    const runId = "run-scope-fallback-1";
+    const scopedCtx = {
+      sessionKey: "agent:main:clawboard:task:topic-fallback-1:task-fallback-1",
+      channelId: "openclaw",
+      agentId: "main",
+    };
+
+    await beforeHandler(
+      {
+        toolName: "sessions_spawn",
+        params: { agentId: "coding" },
+        runId,
+      },
+      scopedCtx
+    );
+
+    // Simulate runtime/provider result event where session metadata is missing.
+    await afterHandler(
+      {
+        toolName: "sessions_spawn",
+        result: { status: "accepted", childSessionKey: "agent:coding:subagent:fallback-worker-1" },
+        durationMs: 12,
+        runId,
+      },
+      {
+        channelId: "openclaw",
+        agentId: "main",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 2);
+    const relevant = meaningfulCalls(calls);
+    const resultPayload = parseBody(relevant[1]);
+
+    assert.equal(resultPayload.content, "Tool result: sessions_spawn");
+    assert.equal(resultPayload.topicId, "topic-fallback-1");
+    assert.equal(resultPayload.taskId, "task-fallback-1");
+    assert.equal(resultPayload.source.sessionKey, scopedCtx.sessionKey);
+    assert.equal(resultPayload.source.boardScopeTopicId, "topic-fallback-1");
+    assert.equal(resultPayload.source.boardScopeTaskId, "task-fallback-1");
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -68,11 +68,31 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   await mkdir(installDir, { recursive: true });
   await mkdir(homeDir, { recursive: true });
   await mkdir(binDir, { recursive: true });
+  await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
 
   await mkdir(path.join(installDir, ".git"), { recursive: true });
   await mkdir(path.join(installDir, "skills", "clawboard"), { recursive: true });
   await writeFile(path.join(installDir, "skills", "clawboard", "SKILL.md"), "name: clawboard\n");
   await mkdir(path.join(installDir, "extensions", "clawboard-logger"), { recursive: true });
+  await mkdir(path.join(installDir, "agent-templates", "main"), { recursive: true });
+
+  const templateFiles = ["AGENTS.md", "SOUL.md", "HEARTBEAT.md"];
+  for (const fileName of templateFiles) {
+    await writeFile(path.join(installDir, "agent-templates", "main", fileName), `${fileName} from install source\n`);
+  }
+
+  const contractDocs = [
+    "ANATOMY.md",
+    "CONTEXT.md",
+    "CLASSIFICATION.md",
+    "CONTEXT_SPEC.md",
+    "CLASSIFICATION_TEST_MATRIX.md",
+    "OPENCLAW_CLAWBOARD_UML.md",
+    "TESTING.md",
+  ];
+  for (const doc of contractDocs) {
+    await writeFile(path.join(installDir, doc), `${doc} from install source\n`);
+  }
 
   await makeStub(
     binDir,
@@ -129,6 +149,18 @@ exit 0
   });
   assert.equal(secondRun.code, 0, `exit=${secondRun.code}\nstdout:\n${secondRun.stdout}\nstderr:\n${secondRun.stderr}`);
 
+  const mainWorkspace = path.join(openclawHome, "workspace");
+  for (const fileName of templateFiles) {
+    const sourceText = await readFile(path.join(installDir, "agent-templates", "main", fileName), "utf8");
+    const deployedText = await readFile(path.join(mainWorkspace, fileName), "utf8");
+    assert.equal(deployedText, sourceText, `expected ${fileName} to match install source after bootstrap`);
+  }
+  for (const doc of contractDocs) {
+    const sourceText = await readFile(path.join(installDir, doc), "utf8");
+    const deployedText = await readFile(path.join(mainWorkspace, doc), "utf8");
+    assert.equal(deployedText, sourceText, `expected ${doc} to match install source after bootstrap`);
+  }
+
   const installedSkill = path.join(openclawHome, "skills", "clawboard");
   const skillStats = await lstat(installedSkill);
   assert.equal(skillStats.isSymbolicLink(), true, "expected clawboard skill install to be a symlink");
@@ -154,4 +186,43 @@ exit 0
     const count = envLines.filter((line) => line.startsWith(`${key}=`)).length;
     assert.equal(count, 1, `expected ${key} to be written exactly once after rerun, found ${count}`);
   }
+});
+
+test("delegation supervision cadence stays aligned across templates and setup script", async () => {
+  const root = process.cwd();
+  const agentsPath = path.join(root, "agent-templates", "main", "AGENTS.md");
+  const heartbeatPath = path.join(root, "agent-templates", "main", "HEARTBEAT.md");
+  const soulPath = path.join(root, "agent-templates", "main", "SOUL.md");
+  const setupPath = path.join(root, "skills", "clawboard", "scripts", "setup-openclaw-local-memory.sh");
+  const anatomyPath = path.join(root, "ANATOMY.md");
+  const contextPath = path.join(root, "CONTEXT.md");
+  const classificationPath = path.join(root, "CLASSIFICATION.md");
+
+  const [agentsText, heartbeatText, soulText, setupText, anatomyText, contextText, classificationText] =
+    await Promise.all([
+      readFile(agentsPath, "utf8"),
+      readFile(heartbeatPath, "utf8"),
+      readFile(soulPath, "utf8"),
+      readFile(setupPath, "utf8"),
+      readFile(anatomyPath, "utf8"),
+      readFile(contextPath, "utf8"),
+      readFile(classificationPath, "utf8"),
+    ]);
+
+  const ladderPattern =
+    /(1m\s*(?:-|=)?>\s*3m\s*(?:-|=)?>\s*10m\s*(?:-|=)?>\s*15m\s*(?:-|=)?>\s*30m\s*(?:-|=)?>\s*1h|\[?\s*1m\s*,\s*3m\s*,\s*10m\s*,\s*15m\s*,\s*30m\s*,\s*1h\s*\]?)/i;
+  assert.match(agentsText, ladderPattern);
+  assert.match(heartbeatText, ladderPattern);
+  assert.match(soulText, ladderPattern);
+  assert.match(setupText, ladderPattern);
+
+  assert.match(setupText, /heartbeat\.every"\s*"5m"/i);
+  assert.match(setupText, /still active beyond 5 minutes/i);
+  assert.match(setupText, /memoryFlush\.enabled true json false/i);
+  assert.match(agentsText, />5m|5 minutes/i);
+  assert.match(heartbeatText, />5m|5 minutes/i);
+
+  assert.match(anatomyText, ladderPattern);
+  assert.match(contextText, ladderPattern);
+  assert.match(classificationText, ladderPattern);
 });

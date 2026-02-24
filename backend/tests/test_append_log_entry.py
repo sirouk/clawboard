@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -368,6 +368,100 @@ class AppendLogEntryTests(unittest.TestCase):
         self.assertEqual(payload.get("classificationStatus"), "failed")
         self.assertEqual(payload.get("classificationError"), "filtered_unanchored_tool_activity")
         self.assertEqual(payload.get("classificationAttempts"), 1)
+
+    def test_append_log_recovers_subagent_scope_from_parent_handoff_action(self):
+        base_dt = datetime.now(timezone.utc)
+        anchor_ts = base_dt.isoformat()
+        child_ts = (base_dt + timedelta(seconds=2)).isoformat()
+        child_session_key = "agent:coding:subagent:scope-recover-1"
+
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=anchor_ts,
+                    updatedAt=anchor_ts,
+                )
+            )
+            session.commit()
+            session.add(
+                Task(
+                    id="task-a",
+                    topicId="topic-a",
+                    title="Task A",
+                    color="#4EA1FF",
+                    status="todo",
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=anchor_ts,
+                    updatedAt=anchor_ts,
+                )
+            )
+            session.commit()
+
+        anchor_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "action",
+                "topicId": "topic-a",
+                "taskId": "task-a",
+                "content": "Tool call: clawboard_update_task",
+                "summary": "Tool call: clawboard_update_task",
+                "raw": (
+                    '{"id":"task-a","status":"doing","tags":["delegating","agent:coding",'
+                    '"session:agent:coding:subagent:scope-recover-1"]}'
+                ),
+                "createdAt": anchor_ts,
+                "agentId": "main",
+                "agentLabel": "OpenClaw",
+                "source": {
+                    "channel": "openclaw",
+                    "sessionKey": "agent:main:clawboard:task:topic-a:task-a",
+                    "messageId": "oc:handoff-anchor-1",
+                },
+            },
+        )
+        self.assertEqual(anchor_res.status_code, 200, anchor_res.text)
+
+        child_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "action",
+                "content": "Tool call: exec",
+                "summary": "Tool call: exec",
+                "raw": '{"cmd":"pwd"}',
+                "createdAt": child_ts,
+                "agentId": "coding",
+                "agentLabel": "Agent coding",
+                "source": {
+                    "channel": "direct",
+                    "sessionKey": child_session_key,
+                    "boardScopeSpaceId": "space-default",
+                    "messageId": "oc:subagent-tool-1",
+                },
+            },
+        )
+        self.assertEqual(child_res.status_code, 200, child_res.text)
+        payload = child_res.json()
+        self.assertEqual(payload.get("topicId"), "topic-a")
+        self.assertEqual(payload.get("taskId"), "task-a")
+        self.assertEqual(payload.get("classificationStatus"), "classified")
+        self.assertEqual(payload.get("classificationError"), "filtered_tool_activity")
+        source = payload.get("source") or {}
+        self.assertEqual(source.get("boardScopeTopicId"), "topic-a")
+        self.assertEqual(source.get("boardScopeTaskId"), "task-a")
+        self.assertTrue(bool(source.get("boardScopeLock")))
 
     def test_patch_log_classifier_aligns_stale_topic_to_task(self):
         ts = now_iso()
