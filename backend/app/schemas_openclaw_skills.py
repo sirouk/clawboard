@@ -13,6 +13,7 @@ class OpenClawSkill(BaseModel):
     disabled: Optional[bool] = None
     always: Optional[bool] = None
     source: Optional[str] = None
+    commands: Optional[List[str]] = None
 
 
 class OpenClawSkillsResponse(BaseModel):

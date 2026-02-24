@@ -192,7 +192,7 @@ button {
 
 .claw-markdown {
   /* Chat bubbles should look like iMessage-style text: compact blocks, no default <p> margins. */
-  white-space: normal;
+  white-space: pre-wrap;
 }
 
 .claw-markdown :where(p, ul, ol, pre, blockquote, h1, h2, h3, h4, h5, h6) {

@@ -99,7 +99,7 @@ function CopyButton({ text, className }: { text: string; className?: string }) {
   );
 }
 
-export function Markdown({ children, className }: { children: string; className?: string }) {
+export function Markdown({ children, className, highlightCommands = true }: { children: string; className?: string; highlightCommands?: boolean }) {
   const text = typeof children === "string" ? children : String(children ?? "");
   if (!text.trim()) return null;
 
@@ -108,7 +108,25 @@ export function Markdown({ children, className }: { children: string; className?
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
         components={{
-          p: ({ children }) => <p className="break-words">{children}</p>,
+          p: ({ children }) => {
+            const content = children;
+            // Check if the paragraph starts with a forwardslash command
+            if (highlightCommands && typeof content === "string" && content.startsWith("/") && !content.includes("\n")) {
+              const parts = content.split(/\s+/, 2);
+              const cmd = parts[0];
+              const rest = parts[1] || "";
+              return (
+                <p className="break-words">
+                  <span className="font-bold text-[rgb(var(--claw-accent))]">{cmd}</span> {rest}
+                </p>
+              );
+            }
+            return (
+              <p className="break-words">
+                {children}
+              </p>
+            );
+          },
           a: ({ href, children }) => (
             <a
               href={href}

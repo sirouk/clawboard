@@ -120,6 +120,21 @@ SLASH_COMMANDS = {
     "/help",
     "/reset",
     "/clear",
+    "/skill",
+    "/model",
+    "/models",
+    "/think",
+    "/verbose",
+    "/reasoning",
+    "/elevated",
+    "/exec",
+    "/status",
+    "/whoami",
+    "/id",
+    "/context",
+    "/subagents",
+    "/usage",
+    "/stop",
 }
 
 

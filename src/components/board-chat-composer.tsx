@@ -19,6 +19,7 @@ import { cn } from "@/lib/cn";
 import { randomId } from "@/lib/id";
 import { AttachmentStrip, type AttachmentLike } from "@/components/attachments";
 import { usePersistentDraft } from "@/lib/drafts";
+import { ChatSuggestions, type SlashCommand } from "@/components/chat/chat-suggestions";
 
 const LAST_AGENT_KEY = "clawboard.chat.agentId";
 
@@ -112,6 +113,7 @@ export type BoardChatComposerSendEvent =
 
 type BoardChatComposerProps = {
   sessionKey: string;
+  topicId?: string | null;
   spaceId?: string;
   disabled?: boolean;
   placeholder?: string;
@@ -189,6 +191,7 @@ function SendIcon({ className }: { className?: string }) {
 export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatComposerProps>(function BoardChatComposer(
   {
     sessionKey,
+    topicId,
     spaceId,
     disabled,
     placeholder,
@@ -227,32 +230,89 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     () =>
       [
         { name: "help", description: "Show available commands", kind: "cmd" },
+        { name: "h", description: "Alias for /help", kind: "cmd" },
         { name: "commands", description: "List all slash commands", kind: "cmd" },
+        { name: "cmds", description: "Alias for /commands", kind: "cmd" },
         { name: "status", description: "Show current status", kind: "cmd" },
+        { name: "s", description: "Alias for /status", kind: "cmd" },
         { name: "whoami", description: "Show your sender id", kind: "cmd" },
+        { name: "who-am-i", description: "Alias for /whoami", kind: "cmd" },
+        { name: "me", description: "Alias for /whoami", kind: "cmd" },
         { name: "id", description: "Alias for /whoami", kind: "cmd" },
         { name: "context", description: "Explain how context is built and used", kind: "cmd" },
+        { name: "ctx", description: "Alias for /context", kind: "cmd" },
         { name: "subagents", description: "List/stop/log/info subagent runs", kind: "cmd" },
+        { name: "subs", description: "Alias for /subagents", kind: "cmd" },
+        { name: "subagent", description: "Alias for /subagents", kind: "cmd" },
         { name: "usage", description: "Usage footer or cost summary", kind: "cmd" },
+        { name: "u", description: "Alias for /usage", kind: "cmd" },
         { name: "model", description: "Show or set the model", kind: "cmd" },
+        { name: "m", description: "Alias for /model", kind: "cmd" },
         { name: "models", description: "List models/providers", kind: "cmd" },
+        { name: "providers", description: "Alias for /models", kind: "cmd" },
+        { name: "provider", description: "Alias for /models", kind: "cmd" },
         { name: "think", description: "Set thinking level", kind: "cmd" },
-        { name: "verbose", description: "Toggle verbose mode", kind: "cmd" },
+        { name: "thinking", description: "Alias for /think", kind: "cmd" },
+        { name: "thinklevel", description: "Alias for /think", kind: "cmd" },
+        { name: "think-level", description: "Alias for /think", kind: "cmd" },
+        { name: "t", description: "Alias for /think", kind: "cmd" },
+        { name: "thought", description: "Alias for /reasoning", kind: "cmd" },
+        { name: "reason", description: "Alias for /reasoning", kind: "cmd" },
+        { name: "th", description: "Alias for /thought", kind: "cmd" },
         { name: "reasoning", description: "Toggle reasoning visibility", kind: "cmd" },
+        { name: "r", description: "Alias for /reasoning", kind: "cmd" },
+        { name: "verbose", description: "Toggle verbose mode", kind: "cmd" },
+        { name: "v", description: "Alias for /verbose", kind: "cmd" },
         { name: "elevated", description: "Toggle elevated mode", kind: "cmd" },
-        { name: "exec", description: "Set exec defaults for this session", kind: "cmd" },
+        { name: "e", description: "Alias for /elevated", kind: "cmd" },
+        { name: "exec", description: "Execute a command", kind: "cmd" },
+        { name: "read", description: "Read a file", kind: "cmd" },
+        { name: "write", description: "Write a file", kind: "cmd" },
         { name: "reset", description: "Reset the current session", kind: "cmd" },
+        { name: "clear", description: "Alias for /reset", kind: "cmd" },
         { name: "new", description: "Start a new session", kind: "cmd" },
         { name: "stop", description: "Stop the current run", kind: "cmd" },
+        { name: "abort", description: "Alias for /stop", kind: "cmd" },
+        { name: "skill", description: "Invoke a skill explicitly", kind: "cmd" },
+        { name: "sk", description: "Alias for /skill", kind: "cmd" },
+        { name: "topic", description: "Update current topic", kind: "cmd" },
+        { name: "top", description: "Alias for /topic", kind: "cmd" },
+        { name: "topics", description: "List or update topics", kind: "cmd" },
+        { name: "task", description: "Update current task", kind: "cmd" },
+        { name: "tk", description: "Alias for /task", kind: "cmd" },
+        { name: "tasks", description: "List or update tasks", kind: "cmd" },
+        { name: "log", description: "Update current log", kind: "cmd" },
+        { name: "l", description: "Alias for /log", kind: "cmd" },
+        { name: "logs", description: "List or update logs", kind: "cmd" },
+        { name: "board", description: "Refresh board view", kind: "cmd" },
+        { name: "b", description: "Alias for /board", kind: "cmd" },
+        { name: "graph", description: "Show relationship graph", kind: "cmd" },
+        { name: "g", description: "Alias for /graph", kind: "cmd" },
+        { name: "voice", description: "Convert text to speech", kind: "cmd" },
+        { name: "tts", description: "Alias for /voice", kind: "cmd" },
+        { name: "bash", description: "Execute a shell command", kind: "cmd" },
+        { name: "sh", description: "Alias for /bash", kind: "cmd" },
+        { name: "config", description: "Show or update configuration", kind: "cmd" },
+        { name: "settings", description: "Alias for /config", kind: "cmd" },
+        { name: "debug", description: "Toggle debug mode", kind: "cmd" },
+        { name: "d", description: "Alias for /debug", kind: "cmd" },
+        { name: "restart", description: "Restart the gateway", kind: "cmd" },
+        { name: "scripts", description: "List available scripts", kind: "cmd" },
+        { name: "edit", description: "Edit a log/topic/task", kind: "cmd" },
+        { name: "delete", description: "Delete a log/topic/task", kind: "cmd" },
+        { name: "browser", description: "Control the browser", kind: "cmd" },
+        { name: "message", description: "Send a message", kind: "cmd" },
         // Note: /bash, /config, /debug, /restart are config-gated in OpenClaw.
-      ] as Array<{ name: string; description: string; kind: string }>,
+      ] as Array<SlashCommand>,
     []
   );
 
-  const [slashCommands, setSlashCommands] = useState<Array<{ name: string; description: string; kind: string }>>(
+  const [slashCommands, setSlashCommands] = useState<Array<SlashCommand>>(
     () => BUILTIN_SLASH_COMMANDS
   );
   const [slashCommandsLoadedAt, setSlashCommandsLoadedAt] = useState<number>(() => Date.now());
+  const [selectedIndex, setSelectedIndex] = useState(0);
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const resizeTextarea = useCallback(() => {
@@ -302,12 +362,24 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
         const payload = (await res.json().catch(() => null)) as { skills?: unknown } | null;
         const skills = Array.isArray(payload?.skills) ? payload?.skills : [];
         const normalized = skills
-          .map((entry) => {
-            const name = String((entry as { name?: unknown; description?: unknown })?.name ?? "").trim();
-            const description = String((entry as { name?: unknown; description?: unknown })?.description ?? "").trim();
-            return name ? { name, description, kind: "skill" } : null;
-          })
-          .filter(Boolean) as Array<{ name: string; description: string; kind: string }>;
+          .flatMap((entry) => {
+            const skill = entry as { name?: string; description?: string; commands?: string[] };
+            const skillName = (skill.name || "").trim();
+            if (!skillName) return [];
+            
+            const results = [{ name: skillName, description: skill.description || "", kind: "skill" }];
+            
+            if (Array.isArray(skill.commands)) {
+              for (const cmd of skill.commands) {
+                const cmdName = (cmd || "").trim();
+                if (cmdName && cmdName !== skillName) {
+                  results.push({ name: cmdName, description: `Command for ${skillName}`, kind: "skill" });
+                }
+              }
+            }
+            
+            return results;
+          });
         // Merge built-ins + skills (skills win on name collisions).
         const merged = new Map<string, { name: string; description: string; kind: string }>();
         for (const cmd of BUILTIN_SLASH_COMMANDS) merged.set(cmd.name.toLowerCase(), cmd);
@@ -462,6 +534,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
             sessionKey,
             spaceId: String(spaceId ?? "").trim() || undefined,
             message,
+            topicId: String(topicId ?? "").trim() || null,
             agentId,
             attachmentIds,
           }),
@@ -527,22 +600,56 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     return text.split(/\s+/).filter(Boolean).length;
   }, [draft]);
 
+  const applyCommand = useCallback(
+    (cmd: SlashCommand) => {
+      const message = cmd.kind === "skill" ? `/skill ${cmd.name} ` : `/${cmd.name} `;
+      setDraft(message);
+      setSelectedIndex(0);
+      textareaRef.current?.focus();
+      resizeTextarea();
+    },
+    [resizeTextarea, setDraft]
+  );
+
   const slashMenu = useMemo(() => {
     const trimmed = draft.trimStart();
     if (!trimmed.startsWith("/")) return null;
     // Only show for first-line command entry.
     const firstLine = trimmed.split("\n")[0] ?? "";
-    // If the user already started args, don't pop the menu.
-    if (/^\/\S+\s+/.test(firstLine)) return null;
+    
+    // If there is space after the first token, it's likely args.
+    const parts = firstLine.split(/\s+/);
+    if (parts.length > 1 && parts[1] !== "") return null;
+
     const tokenPart = firstLine.slice(1);
     const namePrefix = tokenPart.split(/\s+/)[0] ?? "";
     const prefix = namePrefix.toLowerCase();
     const matches = slashCommands
-      .filter((cmd) => !prefix || cmd.name.toLowerCase().startsWith(prefix))
+      .filter((cmd) => {
+        const matchesName = !prefix || cmd.name.toLowerCase().startsWith(prefix);
+        if (matchesName) return true;
+        // Also match description for better discoverability
+        if (prefix && cmd.description && cmd.description.toLowerCase().includes(prefix)) return true;
+        return false;
+      })
+      .sort((a, b) => {
+        // Exact name matches first
+        const aExact = a.name.toLowerCase() === prefix;
+        const bExact = b.name.toLowerCase() === prefix;
+        if (aExact !== bExact) return aExact ? -1 : 1;
+        // Built-ins first, then alpha
+        if (a.kind !== b.kind) return a.kind === "cmd" ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      })
       .slice(0, 10);
     if (matches.length === 0) return null;
     return { prefix: namePrefix, matches };
   }, [draft, slashCommands]);
+
+  useEffect(() => {
+    setSelectedIndex(0);
+  }, [slashMenu?.matches.length]);
+
   const handleDensePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLTextAreaElement>) => {
       if (!dense) return;
@@ -648,51 +755,52 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
               addFiles(files);
             }}
             onKeyDown={(event) => {
+              if (slashMenu) {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setSelectedIndex((prev) => (prev + 1) % slashMenu.matches.length);
+                  return;
+                }
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setSelectedIndex((prev) => (prev - 1 + slashMenu.matches.length) % slashMenu.matches.length);
+                  return;
+                }
+                if (event.key === "Tab" || event.key === "Enter") {
+                  event.preventDefault();
+                  const cmd = slashMenu.matches[selectedIndex];
+                  if (cmd) applyCommand(cmd);
+                  return;
+                }
+                if (event.key === " ") {
+                  const cmd = slashMenu.matches[selectedIndex];
+                  if (cmd && draft.trim() === `/${cmd.name}`) {
+                    event.preventDefault();
+                    applyCommand(cmd);
+                    return;
+                  }
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setDraft(draft.replace(/^\//, " /"));
+                  return;
+                }
+              }
+
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
                 void sendMessage();
               }
             }}
           />
-          {slashMenu ? (
-            <div
-              className={cn(
-                "absolute left-2 right-2 top-2 z-20 overflow-hidden rounded-[var(--radius-md)] border",
-                "border-[rgba(255,255,255,0.14)] bg-[rgba(8,10,14,0.96)] shadow-lg backdrop-blur"
-              )}
-            >
-              <div className="px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">
-                Slash commands
-              </div>
-              <div className="max-h-56 overflow-auto">
-                {slashMenu.matches.map((cmd) => (
-                  <button
-                    key={cmd.name}
-                    type="button"
-                    className={cn(
-                      "flex w-full items-start gap-3 px-3 py-2 text-left text-sm transition",
-                      "hover:bg-[rgba(255,255,255,0.06)]"
-                    )}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => {
-                      setDraft(cmd.kind === "skill" ? `/skill ${cmd.name} ` : `/${cmd.name} `);
-                      textareaRef.current?.focus();
-                    }}
-                  >
-                    <span className="min-w-0 flex-1">
-                      <span className="font-mono text-[rgb(var(--claw-text))]">/{cmd.name}</span>
-                      {cmd.description ? (
-                        <span className="ml-2 text-xs text-[rgb(var(--claw-muted))]">{cmd.description}</span>
-                      ) : null}
-                    </span>
-                    <span className="text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
-                      {cmd.kind === "skill" ? "skill" : "cmd"}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : null}
+          <ChatSuggestions
+            suggestions={slashMenu?.matches ?? []}
+            selectedIndex={selectedIndex}
+            onSelect={(idx) => {
+              const cmd = slashMenu?.matches[idx];
+              if (cmd) applyCommand(cmd);
+            }}
+          />
           {dense ? (
             <div className="absolute bottom-2.5 right-2.5 z-10 flex items-center gap-2">
               <button

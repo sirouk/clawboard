@@ -87,13 +87,17 @@ Rebuild the plugin after editing `index.ts` (e.g. `npm run build` in the extensi
 
 **Cause:** Subagent scope inheritance in the plugin looked up board scope by the **subagent’s owner** (`boardScopeByAgent.get("coding")`). When the user sends from Task Chat, the **main** agent runs with `sessionKey = clawboard:task:...`, and we store that scope under **main** (`boardScopeByAgent.set("main", scope)`). The coding subagent never gets a scope stored under `"coding"`, so `inherited` was undefined and the plugin fell back to `resolveTopicId` / `resolveTaskId` on the raw session key, producing an ad-hoc or wrong topic/task. The classifier then had no board lock and could assign the log elsewhere.
 
-**Fix:** When resolving scope for a subagent, if there is no scope for the subagent’s owner, **fall back to the most recent fresh board scope from any agent** (`getMostRecentFreshBoardScopeFromAgents()`), so subagent logs inherit the orchestrator’s board scope (the Task/Topic Chat that spawned them). This is **scalable** (no hardcoded `"main"`; works with multiple orchestrators; the most recently updated scope is typically the spawner). In `resolveRoutingScope`:
+**Initial fix (historical):** The first mitigation used a "most recent fresh board scope from any agent" fallback.
 
-`inherited = exact ?? boardScopeByAgent.get(subagent.ownerAgentId) ?? getMostRecentFreshBoardScopeFromAgents(now)`
+**Current guardrail (Feb 2026):** Subagent inheritance is now **explicit-link only**:
+- parent board-scoped runs that call `sessions_spawn` publish `childSessionKey` lineage
+- board scope is cached by **exact child session key** (memory + sqlite)
+- resolution accepts explicit board keys/metadata and exact child-session linkage only
+- cross-agent/global "latest scope" fallback is disallowed
 
-**Surviving restarts:** Board scope is also persisted to the plugin’s existing SQLite DB (`~/.openclaw/clawboard-queue.sqlite`) in a `board_scope_cache` table (per agent). When in-memory lookup finds no scope, the plugin reads the most recent scope from the DB, so subagent inheritance survives gateway/plugin restarts.
+**Surviving restarts:** Board scope linkage is persisted in the plugin SQLite cache (`~/.openclaw/clawboard-queue.sqlite`) and read back by exact session key so inheritance survives gateway/plugin restarts.
 
-**Long-running subagents:** When scope is taken from the DB for a subagent, a configurable persistence TTL is used (default **48 hours**). So subagents that run for a day or two still inherit the task/topic that spawned them and don’t get orphaned or misaligned. Set `CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS` (1–168) to override.
+**Long-running subagents:** Linked child sessions still use a bounded persistence TTL (default **48 hours**) so long jobs remain pinned to the originating task/topic without leaking into unrelated chats. Set `CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS` (1–168) to override.
 
 **Files:** `extensions/clawboard-logger/index.ts`, `extensions/clawboard-logger/index.js`.
 

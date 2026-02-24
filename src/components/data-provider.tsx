@@ -82,6 +82,26 @@ const UNSNOOZE_TOPICS_SUMMARY_TAG = "clawboard-unsnooze-topics";
 const UNSNOOZE_TASKS_SUMMARY_TAG = "clawboard-unsnooze-tasks";
 const CHAT_TAG_PREFIX = "clawboard-chat-";
 const CHAT_SUMMARY_TAG = "clawboard-chat-summary";
+const DEFAULT_INITIAL_CHANGES_LIMIT_LOGS = 2000;
+
+function parseIntegerEnv(
+  raw: string | undefined,
+  fallback: number,
+  min: number,
+  max: number
+) {
+  const parsed = Number(String(raw ?? "").trim());
+  if (!Number.isFinite(parsed)) return fallback;
+  const value = Math.floor(parsed);
+  return Math.max(min, Math.min(max, value));
+}
+
+const INITIAL_CHANGES_LIMIT_LOGS = parseIntegerEnv(
+  process.env.NEXT_PUBLIC_CLAWBOARD_INITIAL_CHANGES_LIMIT_LOGS,
+  DEFAULT_INITIAL_CHANGES_LIMIT_LOGS,
+  0,
+  20000
+);
 
 function unsnoozedTopicTag(topicId: string) {
   return `${UNSNOOZE_TOPIC_TAG_PREFIX}${topicId}`;
@@ -269,7 +289,13 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   }, [handleNotificationClickData]);
 
   const reconcile = async (since?: string) => {
-    const url = since ? `/api/changes?since=${encodeURIComponent(since)}` : "/api/changes";
+    const params = new URLSearchParams();
+    if (since) params.set("since", since);
+    if (!since && INITIAL_CHANGES_LIMIT_LOGS > 0) {
+      params.set("limitLogs", String(INITIAL_CHANGES_LIMIT_LOGS));
+    }
+    const query = params.toString();
+    const url = query ? `/api/changes?${query}` : "/api/changes";
     let res: Response;
     try {
       res = await apiFetch(url, { cache: "no-store" });

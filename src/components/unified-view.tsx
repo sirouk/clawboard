@@ -6324,6 +6324,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                         else composerHandlesRef.current.delete(key);
                                       }}
 			                                  sessionKey={taskSessionKey(topicId, task.id)}
+			                                  topicId={topicId}
 			                                  spaceId={selectedSpaceId || undefined}
 			                                  className={cn(
                                         "mt-4",
@@ -6680,8 +6681,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                   if (node) composerHandlesRef.current.set(key, node);
                                   else composerHandlesRef.current.delete(key);
                                 }}
-		                            sessionKey={topicSessionKey(topicId)}
-		                            spaceId={selectedSpaceId || undefined}
+			                            sessionKey={topicSessionKey(topicId)}
+			                            topicId={topicId}
+			                            spaceId={selectedSpaceId || undefined}
 		                            className={cn(
                                 "mt-4",
                                 topicChatFullscreen
