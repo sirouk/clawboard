@@ -17,14 +17,17 @@ os.environ["CLAWBOARD_TOKEN"] = "test-token"
 
 try:
     from fastapi.testclient import TestClient
+    from sqlmodel import select
 
-    from app.db import init_db  # noqa: E402
+    from app.db import get_session, init_db  # noqa: E402
     from app import main as main_module  # noqa: E402
     from app.main import app  # noqa: E402
+    from app.models import LogEntry, SessionRoutingMemory, Task, Topic  # noqa: E402
 
     _API_TESTS_AVAILABLE = True
 except Exception:
     TestClient = None  # type: ignore[assignment]
+    select = None  # type: ignore[assignment]
     _API_TESTS_AVAILABLE = False
 
 
@@ -38,6 +41,23 @@ class SearchEndpointTests(unittest.TestCase):
     def setUpClass(cls):
         init_db()
         cls.client = TestClient(app)
+
+    def setUp(self):
+        with get_session() as session:
+            for row in session.exec(select(SessionRoutingMemory)).all():
+                session.delete(row)
+            for row in session.exec(select(LogEntry)).all():
+                session.delete(row)
+            for row in session.exec(select(Task)).all():
+                session.delete(row)
+            for row in session.exec(select(Topic)).all():
+                session.delete(row)
+            session.commit()
+        try:
+            with main_module._SEARCH_RESULT_CACHE_LOCK:
+                main_module._SEARCH_RESULT_CACHE.clear()
+        except Exception:
+            pass
 
     def test_search_busy_falls_back_to_degraded_mode(self):
         read_headers = {"Host": "localhost:8010"}
@@ -652,6 +672,210 @@ class SearchEndpointTests(unittest.TestCase):
         joined = " ".join(str(item.get("content") or "") for item in logs_payload).lower()
         self.assertIn("health", joined)
         self.assertIn("insurance", joined)
+
+    def test_search_global_lexical_rescue_includes_older_match_outside_recent_window(self):
+        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        read_headers = {"Host": "localhost:8010"}
+
+        topic = self.client.post("/api/topics", json={"name": "Personal Memory Topic"}, headers=write_headers).json()
+        target = self.client.post(
+            "/api/log",
+            json={
+                "topicId": topic["id"],
+                "type": "conversation",
+                "summary": "Chelsea anniversary planning notes",
+                "content": "Older personal memory with Chelsea context.",
+                "createdAt": "2025-01-01T00:00:00.000Z",
+                "agentId": "user",
+                "agentLabel": "User",
+            },
+            headers=write_headers,
+        ).json()
+
+        for idx in range(260):
+            minute = idx % 60
+            self.client.post(
+                "/api/log",
+                json={
+                    "topicId": topic["id"],
+                    "type": "conversation",
+                    "summary": f"recent filler log {idx}",
+                    "content": f"recent filler content {idx}",
+                    "createdAt": f"2026-02-25T12:{minute:02d}:00.000Z",
+                    "agentId": "user",
+                    "agentLabel": "User",
+                },
+                headers=write_headers,
+            )
+
+        captured_payload_ids: set[str] = set()
+
+        def fake_semantic_search(query, topics, tasks, logs, **kwargs):
+            for row in logs:
+                row_id = str(row.get("id") or "").strip()
+                if row_id:
+                    captured_payload_ids.add(row_id)
+            matched: list[dict] = []
+            for row in logs:
+                text = " ".join(
+                    [str(row.get("summary") or ""), str(row.get("content") or "")]
+                ).lower()
+                if "chelsea" not in text:
+                    continue
+                matched.append(
+                    {
+                        "id": row.get("id"),
+                        "score": 0.92,
+                        "vectorScore": 0.0,
+                        "bm25Score": 0.92,
+                        "lexicalScore": 0.92,
+                        "rrfScore": 0.92,
+                        "rerankScore": 0.92,
+                    }
+                )
+            return {"query": query, "mode": "mock", "topics": [], "tasks": [], "logs": matched}
+
+        with patch.multiple(
+            main_module,
+            SEARCH_WINDOW_MULTIPLIER=1,
+            SEARCH_WINDOW_MIN_LOGS=20,
+            SEARCH_WINDOW_MAX_LOGS=20,
+            SEARCH_WINDOW_MULTIPLIER_CAP=1,
+            SEARCH_WINDOW_MIN_LOGS_CAP=20,
+            SEARCH_WINDOW_MAX_LOGS_CAP=20,
+            SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS=20,
+            SEARCH_LOG_FETCH_LIMIT_CAP=20,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_ENABLED=True,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_MIN_TOKEN_CHARS=3,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_MAX_TERMS=6,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_MULTIPLIER=4,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_MIN_LOGS=40,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_MAX_LOGS=180,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_SCORE_BOOST=0.08,
+        ):
+            with patch("app.main.semantic_search", side_effect=fake_semantic_search):
+                res = self.client.get(
+                    "/api/search",
+                    params={"q": "Chelsea", "limitTopics": 10, "limitTasks": 10, "limitLogs": 50},
+                    headers=read_headers,
+                )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        target_id = str(target["id"])
+        self.assertIn(target_id, captured_payload_ids, "Expected lexical rescue log in semantic payload")
+        self.assertTrue(any(str(item.get("id") or "") == target_id for item in payload.get("logs") or []))
+        meta = payload.get("searchMeta") or {}
+        self.assertGreaterEqual(int(meta.get("windowLogs") or 0), 200)
+        self.assertGreaterEqual(int(meta.get("globalLexicalRescueAdded") or 0), 1)
+
+    def test_search_global_lexical_rescue_skips_when_recent_window_already_has_hits(self):
+        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        read_headers = {"Host": "localhost:8010"}
+
+        topic = self.client.post("/api/topics", json={"name": "Window Hit Topic"}, headers=write_headers).json()
+        old_target = self.client.post(
+            "/api/log",
+            json={
+                "topicId": topic["id"],
+                "type": "conversation",
+                "summary": "Chelsea legacy archive note",
+                "content": "Older archival row containing Chelsea.",
+                "createdAt": "2025-01-01T00:00:00.000Z",
+                "agentId": "user",
+                "agentLabel": "User",
+            },
+            headers=write_headers,
+        ).json()
+        self.client.post(
+            "/api/log",
+            json={
+                "topicId": topic["id"],
+                "type": "conversation",
+                "summary": "Chelsea recent update",
+                "content": "Recent row containing Chelsea in summary.",
+                "createdAt": "2026-02-26T00:00:00.000Z",
+                "agentId": "user",
+                "agentLabel": "User",
+            },
+            headers=write_headers,
+        ).json()
+        for idx in range(260):
+            minute = idx % 60
+            self.client.post(
+                "/api/log",
+                json={
+                    "topicId": topic["id"],
+                    "type": "conversation",
+                    "summary": f"recent filler {idx}",
+                    "content": f"recent filler {idx}",
+                    "createdAt": f"2026-02-25T14:{minute:02d}:00.000Z",
+                    "agentId": "user",
+                    "agentLabel": "User",
+                },
+                headers=write_headers,
+            )
+
+        captured_payload_ids: set[str] = set()
+
+        def fake_semantic_search(query, topics, tasks, logs, **kwargs):
+            for row in logs:
+                row_id = str(row.get("id") or "").strip()
+                if row_id:
+                    captured_payload_ids.add(row_id)
+            matched: list[dict] = []
+            for row in logs:
+                text = " ".join([str(row.get("summary") or ""), str(row.get("content") or "")]).lower()
+                if "chelsea" not in text:
+                    continue
+                matched.append(
+                    {
+                        "id": row.get("id"),
+                        "score": 0.9,
+                        "vectorScore": 0.0,
+                        "bm25Score": 0.9,
+                        "lexicalScore": 0.9,
+                        "rrfScore": 0.9,
+                        "rerankScore": 0.9,
+                    }
+                )
+            return {"query": query, "mode": "mock", "topics": [], "tasks": [], "logs": matched}
+
+        with patch.multiple(
+            main_module,
+            SEARCH_WINDOW_MULTIPLIER=1,
+            SEARCH_WINDOW_MIN_LOGS=20,
+            SEARCH_WINDOW_MAX_LOGS=20,
+            SEARCH_WINDOW_MULTIPLIER_CAP=1,
+            SEARCH_WINDOW_MIN_LOGS_CAP=20,
+            SEARCH_WINDOW_MAX_LOGS_CAP=20,
+            SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS=20,
+            SEARCH_LOG_FETCH_LIMIT_CAP=20,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_ENABLED=True,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_SKIP_IF_WINDOW_HITS=True,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_WINDOW_HIT_THRESHOLD=1,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_MIN_TOKEN_CHARS=3,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_MAX_TERMS=6,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_MULTIPLIER=4,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_MIN_LOGS=40,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_MAX_LOGS=180,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_SCORE_BOOST=0.08,
+            SEARCH_GLOBAL_LEXICAL_RESCUE_PG_TSVECTOR_ENABLED=False,
+        ):
+            with patch("app.main.semantic_search", side_effect=fake_semantic_search):
+                res = self.client.get(
+                    "/api/search",
+                    params={"q": "Chelsea", "limitTopics": 10, "limitTasks": 10, "limitLogs": 50},
+                    headers=read_headers,
+                )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertNotIn(str(old_target["id"]), captured_payload_ids, "Expected old row to remain outside candidate set when rescue is skipped")
+        meta = payload.get("searchMeta") or {}
+        self.assertEqual(str(meta.get("globalLexicalRescueMode") or ""), "skipped_window_hits")
+        self.assertGreaterEqual(int(meta.get("globalLexicalRescueWindowHits") or 0), 1)
+        self.assertEqual(int(meta.get("globalLexicalRescueAdded") or 0), 0)
 
     def test_search_adds_query_aware_topic_hints(self):
         write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}

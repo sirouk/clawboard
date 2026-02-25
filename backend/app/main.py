@@ -25,7 +25,7 @@ from fastapi import FastAPI, Depends, Query, Body, HTTPException, Header, Backgr
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from typing import List, Any, Iterable, Callable
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, text, or_, and_, exists, case, inspect as sa_inspect
+from sqlalchemy import func, text, or_, and_, exists, case, inspect as sa_inspect, literal_column
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import defer, aliased
@@ -47,6 +47,9 @@ from .models import (
     Draft,
     OpenClawGatewayHistoryCursor,
     OpenClawGatewayHistorySyncState,
+    OrchestrationRun,
+    OrchestrationItem,
+    OrchestrationEvent,
 )
 from .schemas import (
     SpaceOut,
@@ -881,6 +884,58 @@ SEARCH_WINDOW_MULTIPLIER_CAP = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MULTIPLIER
 SEARCH_WINDOW_MIN_LOGS_CAP = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MIN_LOGS_CAP", "480") or "480")
 SEARCH_WINDOW_MAX_LOGS_CAP = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MAX_LOGS_CAP", "900") or "900")
 SEARCH_LOG_FETCH_LIMIT_CAP = int(os.getenv("CLAWBOARD_SEARCH_LOG_FETCH_LIMIT_CAP", "1200") or "1200")
+SEARCH_GLOBAL_LEXICAL_RESCUE_ENABLED = str(
+    os.getenv("CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_ENABLED", "1") or ""
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+SEARCH_GLOBAL_LEXICAL_RESCUE_MIN_TOKEN_CHARS = max(
+    2,
+    int(os.getenv("CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_MIN_TOKEN_CHARS", "3") or "3"),
+)
+SEARCH_GLOBAL_LEXICAL_RESCUE_MAX_TERMS = max(
+    1,
+    int(os.getenv("CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_MAX_TERMS", "6") or "6"),
+)
+SEARCH_GLOBAL_LEXICAL_RESCUE_MULTIPLIER = max(
+    1,
+    int(os.getenv("CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_MULTIPLIER", "5") or "5"),
+)
+SEARCH_GLOBAL_LEXICAL_RESCUE_MIN_LOGS = max(
+    20,
+    int(os.getenv("CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_MIN_LOGS", "120") or "120"),
+)
+SEARCH_GLOBAL_LEXICAL_RESCUE_MAX_LOGS = max(
+    SEARCH_GLOBAL_LEXICAL_RESCUE_MIN_LOGS,
+    int(os.getenv("CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_MAX_LOGS", "1200") or "1200"),
+)
+SEARCH_GLOBAL_LEXICAL_RESCUE_SCORE_BOOST = max(
+    0.0,
+    float(os.getenv("CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_SCORE_BOOST", "0.08") or "0.08"),
+)
+SEARCH_GLOBAL_LEXICAL_RESCUE_SKIP_IF_WINDOW_HITS = str(
+    os.getenv("CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_SKIP_IF_WINDOW_HITS", "1") or ""
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+SEARCH_GLOBAL_LEXICAL_RESCUE_WINDOW_HIT_THRESHOLD = max(
+    0,
+    int(os.getenv("CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_WINDOW_HIT_THRESHOLD", "2") or "2"),
+)
+SEARCH_GLOBAL_LEXICAL_RESCUE_PG_TSVECTOR_ENABLED = str(
+    os.getenv("CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_PG_TSVECTOR_ENABLED", "1") or ""
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 SEARCH_ENABLE_HEAVY_SEMANTIC = str(os.getenv("CLAWBOARD_SEARCH_ENABLE_HEAVY_SEMANTIC", "0") or "").strip().lower() in {
     "1",
     "true",
@@ -1644,6 +1699,11 @@ def _clip(value: str, limit: int) -> str:
     return value[: limit - 1].rstrip() + "…"
 
 
+def _escape_sql_like_term(value: str | None) -> str:
+    token = str(value or "")
+    return token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _chunked_values(values: list[str], chunk_size: int) -> Iterable[list[str]]:
     size = max(1, int(chunk_size or 1))
     for index in range(0, len(values), size):
@@ -2054,6 +2114,13 @@ def on_startup() -> None:
         thread = threading.Thread(
             target=_openclaw_gateway_history_sync_worker,
             name="clawboard-openclaw-history-sync",
+            daemon=True,
+        )
+        thread.start()
+    if _orchestration_enabled():
+        thread = threading.Thread(
+            target=_orchestration_worker,
+            name="clawboard-orchestration-worker",
             daemon=True,
         )
         thread.start()
@@ -4155,6 +4222,11 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         else:
             raise
 
+    try:
+        _orchestration_sync_log(str(entry.id or ""))
+    except Exception:
+        pass
+
     # Gmail-style behavior: new conversation activity should revive snoozed items.
     # This ensures a topic/task doesn't stay hidden if new messages arrive while snoozed.
     revived_topic: Topic | None = None
@@ -4533,6 +4605,1178 @@ def _openclaw_chat_acquire_session_lock(session_key: str) -> threading.Lock:
         lock = threading.Lock()
         _OPENCLAW_CHAT_SESSION_LOCKS[key] = lock
         return lock
+
+
+_ORCHESTRATION_TERMINAL_ITEM_STATUSES = {"done", "failed", "cancelled"}
+_ORCHESTRATION_ACTIVE_RUN_STATUSES = {"running", "stalled"}
+_ORCHESTRATION_CHECK_LADDER_SECONDS = [60, 180, 600, 900, 1800, 3600]
+_ORCHESTRATION_SUBAGENT_KEY_RE = re.compile(r"agent:[A-Za-z0-9._-]+:subagent:[A-Za-z0-9-]+(?:\|[^\s\"']+)?")
+_ORCHESTRATION_IN_BAND_EVENT_TYPES = {
+    "run_created",
+    "item_created",
+    "item_done",
+    "item_failed",
+    "item_cancelled",
+    "item_stalled",
+    "run_status_changed",
+}
+
+
+def _orchestration_enabled() -> bool:
+    raw = str(os.getenv("CLAWBOARD_ORCHESTRATION_ENABLED") or "").strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _orchestration_emit_chat_events_enabled() -> bool:
+    raw = str(os.getenv("CLAWBOARD_ORCHESTRATION_EMIT_CHAT_EVENTS") or "").strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _orchestration_poll_seconds() -> float:
+    raw = str(os.getenv("CLAWBOARD_ORCHESTRATION_POLL_SECONDS") or "").strip()
+    if not raw:
+        return 20.0
+    try:
+        value = float(raw)
+    except Exception:
+        return 20.0
+    return max(2.0, min(300.0, value))
+
+
+def _orchestration_lease_seconds() -> int:
+    raw = str(os.getenv("CLAWBOARD_ORCHESTRATION_LEASE_SECONDS") or "").strip()
+    if not raw:
+        return 120
+    try:
+        value = int(raw)
+    except Exception:
+        return 120
+    return max(30, min(3600, value))
+
+
+def _orchestration_stall_seconds() -> int:
+    raw = str(os.getenv("CLAWBOARD_ORCHESTRATION_STALL_SECONDS") or "").strip()
+    if not raw:
+        return 15 * 60
+    try:
+        value = int(raw)
+    except Exception:
+        return 15 * 60
+    return max(120, min(24 * 60 * 60, value))
+
+
+def _orchestration_recovery_lookback_seconds() -> int:
+    raw = str(os.getenv("CLAWBOARD_ORCHESTRATION_RECOVERY_LOOKBACK_SECONDS") or "").strip()
+    if not raw:
+        return 24 * 60 * 60
+    try:
+        value = int(raw)
+    except Exception:
+        return 24 * 60 * 60
+    return max(300, min(7 * 24 * 60 * 60, value))
+
+
+def _orchestration_batch_size() -> int:
+    raw = str(os.getenv("CLAWBOARD_ORCHESTRATION_BATCH_SIZE") or "").strip()
+    if not raw:
+        return 120
+    try:
+        value = int(raw)
+    except Exception:
+        return 120
+    return max(10, min(1000, value))
+
+
+def _orchestration_should_emit_in_band_event(
+    *,
+    event_type: str,
+    item_key: str | None,
+    payload: dict[str, Any] | None,
+) -> bool:
+    if not _orchestration_emit_chat_events_enabled():
+        return False
+    if event_type not in _ORCHESTRATION_IN_BAND_EVENT_TYPES:
+        return False
+    if event_type == "item_created" and str(item_key or "").strip().lower() == "main.response":
+        return False
+    if event_type == "run_status_changed":
+        next_status = str((payload or {}).get("to") or "").strip().lower()
+        if next_status and next_status not in {"done", "failed", "cancelled", "stalled"}:
+            return False
+    if event_type == "run_created":
+        source_text = str((payload or {}).get("source") or "").strip().lower()
+        if source_text == "log_recovery":
+            # History/log reconciliation can synthesize runs for older traffic; avoid
+            # emitting "delegation started" system rows for those recovered roots.
+            return False
+    return True
+
+
+def _orchestration_event_log_idempotency_key(
+    *,
+    run_id: str,
+    item_key: str | None,
+    event_type: str,
+    payload: dict[str, Any] | None,
+    idempotency_key: str | None,
+    created_at: str | None,
+) -> str:
+    base = str(idempotency_key or "").strip()
+    if base:
+        return f"orchestration:event-log:{base}"
+    payload_json = ""
+    if payload:
+        try:
+            payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            payload_json = str(payload)
+    digest_seed = "|".join(
+        [
+            str(run_id or "").strip(),
+            str(item_key or "").strip(),
+            str(event_type or "").strip(),
+            str(created_at or "").strip(),
+            payload_json,
+        ]
+    )
+    digest = hashlib.sha1(digest_seed.encode("utf-8")).hexdigest()[:16]
+    item_part = str(item_key or "-").strip() or "-"
+    return f"orchestration:event-log:{run_id}:{item_part}:{event_type}:{digest}"
+
+
+def _orchestration_event_summary_and_content(
+    *,
+    run: OrchestrationRun,
+    item: OrchestrationItem | None,
+    event_type: str,
+    payload: dict[str, Any] | None,
+) -> tuple[str, str]:
+    details = dict(payload or {})
+    run_id_short = str(getattr(run, "runId", "") or "").strip()[-8:]
+    agent_id = str((getattr(item, "agentId", None) if item is not None else "") or details.get("agentId") or "").strip() or "agent"
+    item_kind = str((getattr(item, "kind", None) if item is not None else "") or details.get("kind") or "").strip().lower()
+    child_session = str((details.get("sessionKey") or getattr(item, "sessionKey", None) or "")).strip()
+    reason = _clip(_sanitize_log_text(str(details.get("reason") or "")), 220)
+    objective = _clip(_sanitize_log_text(str(getattr(run, "objective", None) or "")), 260)
+
+    if event_type == "run_created":
+        summary = "Delegation started"
+        content_bits = [f"Run {run_id_short or str(getattr(run, 'runId', '') or '').strip()} created."]
+        if objective:
+            content_bits.append(f"Objective: {objective}")
+        return summary, " ".join(content_bits)
+
+    if event_type == "item_created":
+        if item_kind == "subagent":
+            summary = f"Delegated to {agent_id}"
+            content_bits = [f"Spawned {agent_id} subagent work item."]
+            if child_session:
+                content_bits.append(f"Session: {child_session}")
+            return summary, " ".join(content_bits)
+        summary = "Work item started"
+        return summary, f"Run item created for {agent_id}."
+
+    if event_type == "item_done":
+        summary = f"{agent_id} completed delegated work"
+        return summary, f"Work item marked done for {agent_id}."
+
+    if event_type == "item_failed":
+        summary = f"{agent_id} failed delegated work"
+        return summary, f"Work item marked failed for {agent_id}." + (f" Reason: {reason}" if reason else "")
+
+    if event_type == "item_cancelled":
+        summary = f"{agent_id} work item cancelled"
+        return summary, f"Work item cancelled for {agent_id}." + (f" Reason: {reason}" if reason else "")
+
+    if event_type == "item_stalled":
+        idle_seconds = int(float(details.get("idleSeconds") or 0.0))
+        summary = f"{agent_id} appears stalled"
+        return summary, f"No progress detected for ~{idle_seconds}s on {agent_id} item."
+
+    if event_type == "run_status_changed":
+        to_status = str(details.get("to") or "").strip().lower() or str(getattr(run, "status", "") or "running").strip().lower()
+        summary = f"Delegation run {to_status}"
+        if to_status == "done":
+            return summary, "All tracked work items reached terminal completion."
+        if to_status == "failed":
+            return summary, "At least one tracked work item failed."
+        if to_status == "cancelled":
+            return summary, "Delegation run was cancelled."
+        if to_status == "stalled":
+            return summary, "One or more active work items appear stalled."
+        return summary, f"Run transitioned to {to_status}."
+
+    summary = "Delegation status update"
+    return summary, "Orchestration event recorded."
+
+
+def _orchestration_append_in_band_log(
+    session: Any,
+    *,
+    run_id: str,
+    item_key: str | None,
+    event_type: str,
+    payload: dict[str, Any] | None,
+    idempotency_key: str | None,
+    created_at: str | None,
+) -> None:
+    if not _orchestration_should_emit_in_band_event(event_type=event_type, item_key=item_key, payload=payload):
+        return
+
+    run = session.exec(select(OrchestrationRun).where(OrchestrationRun.runId == run_id).limit(1)).first()
+    if run is None:
+        return
+    board_topic_scope = str(getattr(run, "topicId", "") or "").strip()
+    board_task_scope = str(getattr(run, "taskId", "") or "").strip()
+    if not board_topic_scope and not board_task_scope:
+        parsed_topic, parsed_task = _parse_board_session_key(str(getattr(run, "baseSessionKey", "") or getattr(run, "sessionKey", "") or ""))
+        board_topic_scope = str(parsed_topic or "").strip()
+        board_task_scope = str(parsed_task or "").strip()
+    # In-band orchestration logs are for board-origin runs only.
+    if not board_topic_scope and not board_task_scope:
+        return
+
+    log_idem = _orchestration_event_log_idempotency_key(
+        run_id=run_id,
+        item_key=item_key,
+        event_type=event_type,
+        payload=payload,
+        idempotency_key=idempotency_key,
+        created_at=created_at,
+    )
+    existing = session.exec(select(LogEntry.id).where(LogEntry.idempotencyKey == log_idem).limit(1)).first()
+    if existing is not None:
+        return
+
+    item: OrchestrationItem | None = None
+    item_key_norm = str(item_key or "").strip()
+    if item_key_norm:
+        item = session.exec(
+            select(OrchestrationItem)
+            .where(OrchestrationItem.runId == run_id)
+            .where(OrchestrationItem.itemKey == item_key_norm)
+            .limit(1)
+        ).first()
+
+    summary, content = _orchestration_event_summary_and_content(
+        run=run,
+        item=item,
+        event_type=event_type,
+        payload=payload,
+    )
+
+    run_space_id = _normalize_space_id(getattr(run, "spaceId", None))
+    if not run_space_id and str(getattr(run, "taskId", "") or "").strip():
+        task_row = session.get(Task, str(getattr(run, "taskId", "") or "").strip())
+        if task_row is not None:
+            run_space_id = _space_id_for_task(task_row)
+    if not run_space_id and str(getattr(run, "topicId", "") or "").strip():
+        topic_row = session.get(Topic, str(getattr(run, "topicId", "") or "").strip())
+        if topic_row is not None:
+            run_space_id = _space_id_for_topic(topic_row)
+    if not run_space_id:
+        run_space_id = DEFAULT_SPACE_ID
+
+    created_value = normalize_iso(created_at) or now_iso()
+    source: dict[str, Any] = {
+        "channel": "clawboard",
+        "sessionKey": str(getattr(run, "sessionKey", "") or "").strip() or str(getattr(run, "baseSessionKey", "") or "").strip(),
+        "requestId": str(getattr(run, "requestId", "") or "").strip(),
+        "boardScopeLock": True,
+        "orchestration": True,
+        "runId": str(getattr(run, "runId", "") or "").strip(),
+        "eventType": event_type,
+    }
+    board_space = _normalize_space_id(getattr(run, "spaceId", None))
+    if board_space:
+        source["boardScopeSpaceId"] = board_space
+    if board_topic_scope:
+        source["boardScopeTopicId"] = board_topic_scope
+        source["boardScopeKind"] = "task" if board_task_scope else "topic"
+    if board_task_scope:
+        source["boardScopeTaskId"] = board_task_scope
+    if item_key_norm:
+        source["itemKey"] = item_key_norm
+
+    compact_payload: dict[str, Any] = {}
+    for key, value in (payload or {}).items():
+        key_text = str(key or "").strip()
+        if not key_text:
+            continue
+        if isinstance(value, (int, float, bool)) or value is None:
+            compact_payload[key_text] = value
+            continue
+        compact_payload[key_text] = _clip(_sanitize_log_text(str(value or "")), 220)
+    if compact_payload:
+        source["eventPayload"] = compact_payload
+
+    board_topic_row: Topic | None = None
+    board_task_row: Task | None = None
+    board_topic = board_topic_scope
+    board_task = board_task_scope
+    if board_task:
+        board_task_row = session.get(Task, board_task)
+        if board_task_row is None:
+            board_task = ""
+        else:
+            task_topic = str(getattr(board_task_row, "topicId", "") or "").strip()
+            if task_topic:
+                board_topic = task_topic
+    if board_topic:
+        board_topic_row = session.get(Topic, board_topic)
+        if board_topic_row is None:
+            board_topic = ""
+
+    session.add(
+        LogEntry(
+            id=create_id("log"),
+            spaceId=run_space_id,
+            topicId=board_topic or None,
+            taskId=board_task or None,
+            relatedLogId=None,
+            idempotencyKey=log_idem,
+            type="system",
+            content=_clip(_sanitize_log_text(content), 1200),
+            summary=_clip(_sanitize_log_text(summary), 160),
+            raw="",
+            createdAt=created_value,
+            updatedAt=created_value,
+            agentId="system",
+            agentLabel="System",
+            source=source,
+            attachments=None,
+            classificationStatus="classified",
+            classificationAttempts=1,
+            classificationError="orchestration_event",
+        )
+    )
+
+
+def _orchestration_convergence_state(run: OrchestrationRun, items: list[OrchestrationItem]) -> dict[str, Any]:
+    run_status = str(getattr(run, "status", "") or "").strip().lower() or "running"
+    active_items = [item for item in items if str(item.status or "").strip().lower() not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES]
+    waiting_item_keys = [str(item.itemKey or "").strip() for item in active_items if str(item.itemKey or "").strip()]
+    subagent_items = [item for item in items if str(item.kind or "").strip().lower() == "subagent"]
+    subagent_done = sum(1 for item in subagent_items if str(item.status or "").strip().lower() == "done")
+    subagent_terminal = sum(
+        1 for item in subagent_items if str(item.status or "").strip().lower() in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
+    )
+
+    ready = False
+    reason = "awaiting_run"
+    if active_items:
+        reason = "awaiting_items"
+    elif run_status in {"cancelled", "failed"}:
+        ready = True
+        reason = run_status
+    elif run_status == "done":
+        if subagent_items and subagent_terminal == 0:
+            reason = "awaiting_subagent_terminal"
+        else:
+            ready = True
+            reason = "converged"
+    elif run_status == "stalled":
+        reason = "stalled"
+
+    return {
+        "ready": bool(ready),
+        "reason": reason,
+        "runStatus": run_status,
+        "activeItems": int(len(active_items)),
+        "waitingItemKeys": waiting_item_keys[:6],
+        "subagentsTotal": int(len(subagent_items)),
+        "subagentsDone": int(subagent_done),
+    }
+
+
+def _orchestration_request_base(value: str | None) -> str:
+    request_base = _openclaw_request_id_base(value)
+    if not request_base or not request_base.lower().startswith("occhat-"):
+        return ""
+    return request_base
+
+
+def _orchestration_next_check_iso(*, attempts: int, now_dt: datetime | None = None) -> str:
+    index = max(0, min(len(_ORCHESTRATION_CHECK_LADDER_SECONDS) - 1, int(attempts)))
+    base_dt = now_dt or datetime.now(timezone.utc)
+    return _iso_after_seconds(base_dt, float(_ORCHESTRATION_CHECK_LADDER_SECONDS[index]))
+
+
+def _orchestration_parse_item_agent_id(session_key: str | None, fallback: str = "coding") -> str:
+    key = _base_session_key(session_key)
+    if key.startswith("agent:"):
+        parts = key.split(":")
+        if len(parts) >= 2:
+            candidate = str(parts[1] or "").strip()
+            if candidate:
+                return candidate
+    return fallback
+
+
+def _orchestration_extract_child_session_keys(entry: LogEntry) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    combined = _combined_log_text(
+        _safe_log_attr_text(entry, "content"),
+        _safe_log_attr_text(entry, "summary"),
+        _safe_log_attr_text(entry, "raw"),
+    )
+    for match in _ORCHESTRATION_SUBAGENT_KEY_RE.findall(combined):
+        base = _base_session_key(match)
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        keys.append(base)
+    return keys
+
+
+def _orchestration_is_sessions_spawn_action(entry: LogEntry) -> bool:
+    if str(getattr(entry, "type", "") or "").strip().lower() != "action":
+        return False
+    combined = _combined_log_text(
+        _safe_log_attr_text(entry, "content"),
+        _safe_log_attr_text(entry, "summary"),
+        _safe_log_attr_text(entry, "raw"),
+    ).lower()
+    if "sessions_spawn" not in combined:
+        return False
+    return ("tool result:" in combined) or ("tool call:" in combined) or ("tool error:" in combined)
+
+
+def _orchestration_append_event(
+    session: Any,
+    *,
+    run_id: str,
+    item_key: str | None,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
+    created_at: str | None = None,
+) -> None:
+    idem = str(idempotency_key or "").strip() or None
+    if idem:
+        existing = session.exec(select(OrchestrationEvent.id).where(OrchestrationEvent.idempotencyKey == idem).limit(1)).first()
+        if existing is not None:
+            return
+    created_value = created_at or now_iso()
+    event_row = OrchestrationEvent(
+        runId=run_id,
+        itemKey=item_key,
+        eventType=event_type,
+        payload=dict(payload or {}),
+        idempotencyKey=idem,
+        createdAt=created_value,
+    )
+    session.add(event_row)
+    _orchestration_append_in_band_log(
+        session,
+        run_id=run_id,
+        item_key=item_key,
+        event_type=event_type,
+        payload=payload,
+        idempotency_key=idem,
+        created_at=created_value,
+    )
+
+
+def _orchestration_ensure_main_item(session: Any, run: OrchestrationRun, *, now_value: str) -> OrchestrationItem:
+    existing = session.exec(
+        select(OrchestrationItem)
+        .where(OrchestrationItem.runId == run.runId)
+        .where(OrchestrationItem.itemKey == "main.response")
+        .limit(1)
+    ).first()
+    if existing is not None:
+        return existing
+    item = OrchestrationItem(
+        runId=run.runId,
+        itemKey="main.response",
+        parentItemKey=None,
+        requestId=run.requestId,
+        agentId=run.agentId or "main",
+        kind="main",
+        goal=run.objective,
+        sessionKey=_base_session_key(run.sessionKey),
+        status="running",
+        attempts=0,
+        nextCheckAt=_orchestration_next_check_iso(attempts=0),
+        startedAt=run.startedAt,
+        completedAt=None,
+        lastError=None,
+        meta={"role": "primary_response", "lastActivityAt": run.startedAt},
+        createdAt=now_value,
+        updatedAt=now_value,
+    )
+    session.add(item)
+    _orchestration_append_event(
+        session,
+        run_id=run.runId,
+        item_key=item.itemKey,
+        event_type="item_created",
+        payload={"kind": item.kind, "agentId": item.agentId},
+        idempotency_key=f"orchestration:item-created:{run.runId}:{item.itemKey}",
+        created_at=now_value,
+    )
+    return item
+
+
+def _orchestration_resolve_scope(
+    *,
+    session_key: str | None,
+    topic_id: str | None,
+    task_id: str | None,
+) -> tuple[str | None, str | None]:
+    resolved_topic = str(topic_id or "").strip() or None
+    resolved_task = str(task_id or "").strip() or None
+    parsed_topic, parsed_task = _parse_board_session_key(session_key or "")
+    if parsed_task and not resolved_task:
+        resolved_task = str(parsed_task).strip() or None
+    if parsed_topic and not resolved_topic:
+        resolved_topic = str(parsed_topic).strip() or None
+    return resolved_topic, resolved_task
+
+
+def _orchestration_create_or_get_run(
+    session: Any,
+    *,
+    request_id: str,
+    session_key: str,
+    agent_id: str,
+    message: str,
+    sent_at: str,
+    space_id: str | None = None,
+    topic_id: str | None = None,
+    task_id: str | None = None,
+    source: str = "chat",
+) -> OrchestrationRun | None:
+    request_base = _orchestration_request_base(request_id)
+    if not request_base:
+        return None
+    resolved_topic_id, resolved_task_id = _orchestration_resolve_scope(
+        session_key=session_key,
+        topic_id=topic_id,
+        task_id=task_id,
+    )
+    resolved_space_id = _normalize_space_id(space_id)
+    if not resolved_space_id and resolved_task_id:
+        task_row = session.get(Task, resolved_task_id)
+        if task_row is not None:
+            resolved_space_id = _space_id_for_task(task_row)
+            if not resolved_topic_id:
+                resolved_topic_id = str(getattr(task_row, "topicId", "") or "").strip() or None
+    if not resolved_space_id and resolved_topic_id:
+        topic_row = session.get(Topic, resolved_topic_id)
+        if topic_row is not None:
+            resolved_space_id = _space_id_for_topic(topic_row)
+
+    existing = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_base).limit(1)).first()
+    if existing is not None:
+        changed = False
+        now_value = now_iso()
+        existing_topic = str(getattr(existing, "topicId", "") or "").strip() or None
+        existing_task = str(getattr(existing, "taskId", "") or "").strip() or None
+        existing_space = _normalize_space_id(getattr(existing, "spaceId", None))
+        if resolved_topic_id and not existing_topic:
+            existing.topicId = resolved_topic_id
+            changed = True
+        if resolved_task_id and not existing_task:
+            existing.taskId = resolved_task_id
+            changed = True
+        if resolved_space_id and not existing_space:
+            existing.spaceId = resolved_space_id
+            changed = True
+
+        base_session_key = _base_session_key(session_key)
+        if base_session_key and not str(getattr(existing, "baseSessionKey", "") or "").strip():
+            existing.baseSessionKey = base_session_key
+            changed = True
+        if session_key and not str(getattr(existing, "sessionKey", "") or "").strip():
+            existing.sessionKey = session_key
+            changed = True
+
+        if changed:
+            existing.updatedAt = now_value
+            try:
+                existing.version = int(getattr(existing, "version", 0) or 0) + 1
+            except Exception:
+                existing.version = 1
+            session.add(existing)
+            # If this run was created from an unscoped recovery path, emit the run-created
+            # in-band status once board scope becomes available.
+            if str(getattr(existing, "topicId", "") or "").strip() or str(getattr(existing, "taskId", "") or "").strip():
+                _orchestration_append_in_band_log(
+                    session,
+                    run_id=existing.runId,
+                    item_key=None,
+                    event_type="run_created",
+                    payload={"requestId": request_base, "source": source, "scopeBackfill": True},
+                    idempotency_key=f"orchestration:run-created:{request_base}",
+                    created_at=str(getattr(existing, "createdAt", "") or now_value),
+                )
+        elif str(source or "").strip().lower() != "log_recovery":
+            # openclaw_chat can race with synchronous log recovery run creation in the same request.
+            # Ensure run_created still appears in-band for live board interactions.
+            if str(getattr(existing, "topicId", "") or "").strip() or str(getattr(existing, "taskId", "") or "").strip():
+                _orchestration_append_in_band_log(
+                    session,
+                    run_id=existing.runId,
+                    item_key=None,
+                    event_type="run_created",
+                    payload={"requestId": request_base, "source": source, "existingRun": True},
+                    idempotency_key=f"orchestration:run-created:{request_base}",
+                    created_at=str(getattr(existing, "createdAt", "") or now_value),
+                )
+        _orchestration_ensure_main_item(session, existing, now_value=now_iso())
+        return existing
+
+    now_value = now_iso()
+    started_at = normalize_iso(sent_at) or now_value
+    base_session_key = _base_session_key(session_key)
+    run = OrchestrationRun(
+        runId=create_id("ocorun"),
+        requestId=request_base,
+        sessionKey=session_key,
+        baseSessionKey=base_session_key or session_key,
+        spaceId=resolved_space_id,
+        topicId=resolved_topic_id,
+        taskId=resolved_task_id,
+        mode="single",
+        status="running",
+        objective=_clip(_sanitize_log_text(message or ""), 800) or None,
+        agentId=(agent_id or "main").strip() or "main",
+        leaseUntil=_iso_after_seconds(datetime.now(timezone.utc), float(_orchestration_lease_seconds())),
+        startedAt=started_at,
+        completedAt=None,
+        version=1,
+        meta={"source": source},
+        createdAt=now_value,
+        updatedAt=now_value,
+    )
+    session.add(run)
+    _orchestration_append_event(
+        session,
+        run_id=run.runId,
+        item_key=None,
+        event_type="run_created",
+        payload={"requestId": request_base, "source": source},
+        idempotency_key=f"orchestration:run-created:{request_base}",
+        created_at=now_value,
+    )
+    _orchestration_ensure_main_item(session, run, now_value=now_value)
+    return run
+
+
+def _orchestration_mark_item_status(
+    session: Any,
+    *,
+    run_id: str,
+    item: OrchestrationItem,
+    status: str,
+    now_value: str,
+    reason: str | None = None,
+    source_log_id: str | None = None,
+) -> bool:
+    next_status = str(status or "").strip().lower()
+    if not next_status:
+        return False
+    current = str(getattr(item, "status", "") or "").strip().lower()
+    if current == next_status:
+        return False
+    item.status = next_status
+    if next_status in _ORCHESTRATION_TERMINAL_ITEM_STATUSES and not item.completedAt:
+        item.completedAt = now_value
+        item.nextCheckAt = None
+    if reason:
+        item.lastError = _clip(_sanitize_log_text(reason), 1200)
+    item.updatedAt = now_value
+    session.add(item)
+    _orchestration_append_event(
+        session,
+        run_id=run_id,
+        item_key=item.itemKey,
+        event_type=f"item_{next_status}",
+        payload={"from": current, "to": next_status, "reason": reason or "", "sourceLogId": source_log_id or ""},
+        idempotency_key=(
+            f"orchestration:item-status:{run_id}:{item.itemKey}:{source_log_id}:{next_status}"
+            if source_log_id
+            else None
+        ),
+        created_at=now_value,
+    )
+    return True
+
+
+def _orchestration_recompute_run_status(
+    session: Any,
+    *,
+    run: OrchestrationRun,
+    items: list[OrchestrationItem],
+    now_value: str,
+) -> bool:
+    prev = str(getattr(run, "status", "") or "").strip().lower() or "running"
+    active_items = [item for item in items if str(item.status or "").strip().lower() not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES]
+    if active_items:
+        next_status = "stalled" if all(str(item.status or "").strip().lower() == "stalled" for item in active_items) else "running"
+        run.completedAt = None
+    else:
+        terminal = [str(item.status or "").strip().lower() for item in items]
+        if terminal and any(value == "failed" for value in terminal):
+            next_status = "failed"
+        elif terminal and all(value == "cancelled" for value in terminal):
+            next_status = "cancelled"
+        elif terminal and any(value == "cancelled" for value in terminal) and not any(value == "done" for value in terminal):
+            next_status = "cancelled"
+        else:
+            next_status = "done"
+        if not run.completedAt:
+            run.completedAt = now_value
+
+    changed = prev != next_status
+    run.status = next_status
+    run.updatedAt = now_value
+    run.version = int(getattr(run, "version", 0) or 0) + 1
+    run.leaseUntil = _iso_after_seconds(datetime.now(timezone.utc), float(_orchestration_lease_seconds()))
+    session.add(run)
+    if changed:
+        _orchestration_append_event(
+            session,
+            run_id=run.runId,
+            item_key=None,
+            event_type="run_status_changed",
+            payload={"from": prev, "to": next_status},
+            created_at=now_value,
+        )
+    return changed
+
+
+def _orchestration_resolve_run_for_log(session: Any, *, request_id: str | None, session_key: str | None) -> OrchestrationRun | None:
+    request_base = _orchestration_request_base(request_id)
+    if request_base:
+        direct = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_base).limit(1)).first()
+        if direct is not None:
+            return direct
+    session_base = _base_session_key(session_key)
+    if not session_base:
+        return None
+    item = session.exec(
+        select(OrchestrationItem)
+        .where(OrchestrationItem.sessionKey == session_base)
+        .order_by(OrchestrationItem.updatedAt.desc(), OrchestrationItem.id.desc())
+        .limit(1)
+    ).first()
+    if item is None:
+        return None
+    return session.exec(select(OrchestrationRun).where(OrchestrationRun.runId == item.runId).limit(1)).first()
+
+
+def _orchestration_sync_log(log_id: str) -> None:
+    if not _orchestration_enabled():
+        return
+    entry_id = str(log_id or "").strip()
+    if not entry_id:
+        return
+    try:
+        with get_session() as session:
+            entry = session.get(LogEntry, entry_id)
+            if entry is None:
+                return
+            source = entry.source if isinstance(entry.source, dict) else {}
+            if bool(source.get("orchestration")):
+                return
+            request_id = str(source.get("requestId") or source.get("messageId") or "").strip() or None
+            session_key = str(source.get("sessionKey") or "").strip() or None
+            run = _orchestration_resolve_run_for_log(session, request_id=request_id, session_key=session_key)
+            if run is None and request_id:
+                source_channel = str(source.get("channel") or "").strip().lower()
+                if (
+                    str(getattr(entry, "type", "") or "").strip().lower() == "conversation"
+                    and str(getattr(entry, "agentId", "") or "").strip().lower() == "user"
+                    and source_channel in {"openclaw", "clawboard", "webchat"}
+                ):
+                    scope_space_id = _normalize_space_id(getattr(entry, "spaceId", None) or source.get("boardScopeSpaceId"))
+                    scope_topic_id = str(getattr(entry, "topicId", None) or source.get("boardScopeTopicId") or "").strip() or None
+                    scope_task_id = str(getattr(entry, "taskId", None) or source.get("boardScopeTaskId") or "").strip() or None
+                    run = _orchestration_create_or_get_run(
+                        session,
+                        request_id=request_id,
+                        session_key=session_key or "",
+                        agent_id="main",
+                        message=_safe_log_attr_text(entry, "content"),
+                        sent_at=str(getattr(entry, "createdAt", "") or now_iso()),
+                        space_id=scope_space_id,
+                        topic_id=scope_topic_id,
+                        task_id=scope_task_id,
+                        source="log_recovery",
+                    )
+            if run is None:
+                return
+
+            now_value = now_iso()
+            _orchestration_ensure_main_item(session, run, now_value=now_value)
+            items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            item_by_key = {item.itemKey: item for item in items}
+
+            request_base = _orchestration_request_base(request_id)
+            source_session = _base_session_key(session_key)
+            request_matches_run = bool(request_base and _openclaw_request_ids_equivalent(request_base, run.requestId))
+
+            if _orchestration_is_sessions_spawn_action(entry) and (request_matches_run or source_session == run.baseSessionKey):
+                children = _orchestration_extract_child_session_keys(entry)
+                for child in children:
+                    item_key = f"subagent:{child}"
+                    if item_key in item_by_key:
+                        continue
+                    sub_item = OrchestrationItem(
+                        runId=run.runId,
+                        itemKey=item_key,
+                        parentItemKey="main.response",
+                        requestId=run.requestId,
+                        agentId=_orchestration_parse_item_agent_id(child),
+                        kind="subagent",
+                        goal=_clip(_sanitize_log_text(_safe_log_attr_text(entry, "summary") or _safe_log_attr_text(entry, "content")), 800)
+                        or "Subagent delegated work",
+                        sessionKey=child,
+                        status="running",
+                        attempts=0,
+                        nextCheckAt=_orchestration_next_check_iso(attempts=0),
+                        startedAt=str(getattr(entry, "createdAt", "") or now_value),
+                        completedAt=None,
+                        lastError=None,
+                        meta={"spawnLogId": str(getattr(entry, "id", "") or "")},
+                        createdAt=now_value,
+                        updatedAt=now_value,
+                    )
+                    session.add(sub_item)
+                    item_by_key[item_key] = sub_item
+                    _orchestration_append_event(
+                        session,
+                        run_id=run.runId,
+                        item_key=sub_item.itemKey,
+                        event_type="item_created",
+                        payload={"kind": "subagent", "sessionKey": child, "agentId": sub_item.agentId},
+                        idempotency_key=f"orchestration:item-created:{run.runId}:{sub_item.itemKey}",
+                        created_at=now_value,
+                    )
+
+            items = list(item_by_key.values())
+            matched_items: list[OrchestrationItem] = []
+            if source_session:
+                for item in items:
+                    item_session = _base_session_key(getattr(item, "sessionKey", None))
+                    if item_session and item_session == source_session:
+                        matched_items.append(item)
+            main_item = item_by_key.get("main.response")
+            if request_matches_run and main_item is not None and main_item not in matched_items:
+                matched_items.append(main_item)
+            if not matched_items and source_session == run.baseSessionKey and main_item is not None:
+                matched_items.append(main_item)
+
+            activity_ts = str(getattr(entry, "createdAt", "") or now_value)
+            for item in matched_items:
+                if str(item.status or "").strip().lower() in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
+                    continue
+                item_status = str(item.status or "").strip().lower()
+                if item_status in {"queued", "stalled"}:
+                    item.status = "running"
+                item.updatedAt = now_value
+                item.startedAt = item.startedAt or activity_ts
+                if not item.nextCheckAt:
+                    item.nextCheckAt = _orchestration_next_check_iso(attempts=int(item.attempts or 0))
+                meta = dict(item.meta or {})
+                meta["lastActivityAt"] = normalize_iso(activity_ts) or activity_ts
+                item.meta = meta
+                session.add(item)
+
+            combined_lower = _combined_log_text(
+                _safe_log_attr_text(entry, "content"),
+                _safe_log_attr_text(entry, "summary"),
+                _safe_log_attr_text(entry, "raw"),
+            ).lower()
+            request_terminal = bool((source.get("requestTerminal") is True) or str(source.get("requestTerminal") or "").strip().lower() in {"1", "true", "yes", "on"})
+
+            if request_terminal:
+                terminal_status = "cancelled" if ("cancel" in combined_lower or "user_cancelled" in combined_lower) else "failed"
+                targets = matched_items or ([main_item] if main_item is not None else [])
+                for item in targets:
+                    _orchestration_mark_item_status(
+                        session,
+                        run_id=run.runId,
+                        item=item,
+                        status=terminal_status,
+                        now_value=now_value,
+                        reason=_safe_log_attr_text(entry, "summary") or _safe_log_attr_text(entry, "content"),
+                        source_log_id=str(getattr(entry, "id", "") or ""),
+                    )
+            elif str(getattr(entry, "type", "") or "").strip().lower() == "conversation" and str(getattr(entry, "agentId", "") or "").strip().lower() == "assistant":
+                if source_session and _is_subagent_session_key(source_session):
+                    for item in matched_items:
+                        _orchestration_mark_item_status(
+                            session,
+                            run_id=run.runId,
+                            item=item,
+                            status="done",
+                            now_value=now_value,
+                            source_log_id=str(getattr(entry, "id", "") or ""),
+                        )
+                elif main_item is not None and (request_matches_run or source_session == run.baseSessionKey):
+                    _orchestration_mark_item_status(
+                        session,
+                        run_id=run.runId,
+                        item=main_item,
+                        status="done",
+                        now_value=now_value,
+                        source_log_id=str(getattr(entry, "id", "") or ""),
+                    )
+
+            _orchestration_recompute_run_status(session, run=run, items=list(item_by_key.values()), now_value=now_value)
+            session.commit()
+    except Exception:
+        # Best-effort only; orchestration updates must not block ingest.
+        return
+
+
+def _orchestration_cancel_runs(*, session_keys: list[str], request_ids: list[str], reason: str = "user_cancelled") -> int:
+    if not _orchestration_enabled():
+        return 0
+    request_bases = [value for value in {_orchestration_request_base(item) for item in (request_ids or [])} if value]
+    session_bases = {key for key in {_base_session_key(item) for item in (session_keys or [])} if key}
+    if not request_bases and not session_bases:
+        return 0
+    changed = 0
+    now_value = now_iso()
+    with get_session() as session:
+        runs = session.exec(
+            select(OrchestrationRun).where(OrchestrationRun.status.in_(list(_ORCHESTRATION_ACTIVE_RUN_STATUSES) + ["running"]))
+        ).all()
+        for run in runs:
+            run_request = _orchestration_request_base(getattr(run, "requestId", None))
+            run_base = _base_session_key(getattr(run, "baseSessionKey", None) or getattr(run, "sessionKey", None))
+            if request_bases and run_request in request_bases:
+                pass
+            elif session_bases and run_base in session_bases:
+                pass
+            else:
+                continue
+            items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            for item in items:
+                if str(item.status or "").strip().lower() in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
+                    continue
+                _orchestration_mark_item_status(
+                    session,
+                    run_id=run.runId,
+                    item=item,
+                    status="cancelled",
+                    now_value=now_value,
+                    reason=reason,
+                )
+            if str(run.status or "").strip().lower() != "cancelled":
+                prev = str(run.status or "").strip().lower() or "running"
+                run.status = "cancelled"
+                run.completedAt = run.completedAt or now_value
+                run.updatedAt = now_value
+                run.version = int(getattr(run, "version", 0) or 0) + 1
+                run.leaseUntil = None
+                session.add(run)
+                _orchestration_append_event(
+                    session,
+                    run_id=run.runId,
+                    item_key=None,
+                    event_type="run_status_changed",
+                    payload={"from": prev, "to": "cancelled", "reason": reason},
+                    created_at=now_value,
+                )
+                changed += 1
+        session.commit()
+    return changed
+
+
+def _orchestration_recover_missing_runs(session: Any, *, now_dt: datetime, limit: int = 120) -> int:
+    cutoff_iso = _iso_after_seconds(now_dt, -float(_orchestration_recovery_lookback_seconds()))
+    rows = session.exec(
+        select(LogEntry)
+        .where(LogEntry.type == "conversation")
+        .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "user")
+        .where(LogEntry.createdAt >= cutoff_iso)
+        .order_by(LogEntry.createdAt.desc())
+        .limit(max(10, min(2000, limit)))
+    ).all()
+    recovered = 0
+    for row in rows:
+        source = row.source if isinstance(row.source, dict) else {}
+        if str(source.get("channel") or "").strip().lower() != "openclaw":
+            continue
+        request_id = str(source.get("requestId") or source.get("messageId") or "").strip()
+        session_key = str(source.get("sessionKey") or "").strip()
+        request_base = _orchestration_request_base(request_id)
+        if not request_base or not session_key:
+            continue
+        exists = session.exec(select(OrchestrationRun.id).where(OrchestrationRun.requestId == request_base).limit(1)).first()
+        if exists is not None:
+            continue
+        created = _orchestration_create_or_get_run(
+            session,
+            request_id=request_base,
+            session_key=session_key,
+            agent_id=str(source.get("agentId") or "main"),
+            message=str(getattr(row, "content", "") or ""),
+            sent_at=str(getattr(row, "createdAt", "") or now_iso()),
+            space_id=getattr(row, "spaceId", None),
+            topic_id=getattr(row, "topicId", None),
+            task_id=getattr(row, "taskId", None),
+            source="log_recovery_scan",
+        )
+        if created is not None:
+            recovered += 1
+    return recovered
+
+
+def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int]:
+    if not _orchestration_enabled():
+        return {"recoveredRuns": 0, "touchedRuns": 0, "stalledItems": 0}
+    current_dt = now_dt or datetime.now(timezone.utc)
+    current_iso = current_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    touched_runs = 0
+    stalled_items = 0
+    recovered_runs = 0
+    with get_session() as session:
+        recovered_runs = _orchestration_recover_missing_runs(
+            session,
+            now_dt=current_dt,
+            limit=max(40, _orchestration_batch_size()),
+        )
+        active_rows = session.exec(
+            select(OrchestrationRun)
+            .where(OrchestrationRun.status.in_(list(_ORCHESTRATION_ACTIVE_RUN_STATUSES) + ["running"]))
+            .order_by(OrchestrationRun.updatedAt.asc(), OrchestrationRun.id.asc())
+            .limit(_orchestration_batch_size())
+        ).all()
+        for run in active_rows:
+            items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            if not items:
+                _orchestration_ensure_main_item(session, run, now_value=current_iso)
+                items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            for item in items:
+                status = str(item.status or "").strip().lower()
+                if status in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
+                    continue
+                next_check = _iso_to_timestamp(item.nextCheckAt)
+                now_ts = current_dt.timestamp()
+                if next_check is None or now_ts >= next_check:
+                    item.attempts = int(item.attempts or 0) + 1
+                    item.nextCheckAt = _orchestration_next_check_iso(attempts=int(item.attempts or 0), now_dt=current_dt)
+                    item.updatedAt = current_iso
+                    session.add(item)
+                meta = dict(item.meta or {})
+                last_activity = normalize_iso(str(meta.get("lastActivityAt") or "")) or item.startedAt or item.updatedAt
+                idle_seconds = 0.0
+                last_ts = _iso_to_timestamp(last_activity)
+                if last_ts is not None:
+                    idle_seconds = max(0.0, now_ts - last_ts)
+                if idle_seconds >= float(_orchestration_stall_seconds()):
+                    if status != "stalled":
+                        item.status = "stalled"
+                        item.updatedAt = current_iso
+                        session.add(item)
+                        stalled_items += 1
+                        _orchestration_append_event(
+                            session,
+                            run_id=run.runId,
+                            item_key=item.itemKey,
+                            event_type="item_stalled",
+                            payload={"idleSeconds": round(idle_seconds, 1)},
+                            created_at=current_iso,
+                        )
+                elif status == "stalled":
+                    item.status = "running"
+                    item.updatedAt = current_iso
+                    session.add(item)
+                    _orchestration_append_event(
+                        session,
+                        run_id=run.runId,
+                        item_key=item.itemKey,
+                        event_type="item_resumed",
+                        payload={"idleSeconds": round(idle_seconds, 1)},
+                        created_at=current_iso,
+                    )
+            _orchestration_recompute_run_status(session, run=run, items=items, now_value=current_iso)
+            touched_runs += 1
+        session.commit()
+    return {
+        "recoveredRuns": int(recovered_runs),
+        "touchedRuns": int(touched_runs),
+        "stalledItems": int(stalled_items),
+    }
+
+
+def _orchestration_worker() -> None:
+    poll_seconds = _orchestration_poll_seconds()
+    while True:
+        try:
+            _orchestration_tick_once()
+        except Exception:
+            pass
+        time.sleep(poll_seconds)
+
+
+def _orchestration_context_snapshot(session: Any, *, session_key: str | None, limit: int = 3) -> list[dict[str, Any]]:
+    if not _orchestration_enabled():
+        return []
+    base_key = _base_session_key(session_key)
+    if not base_key:
+        return []
+    rows = session.exec(
+        select(OrchestrationRun)
+        .where(OrchestrationRun.baseSessionKey == base_key)
+        .order_by(OrchestrationRun.updatedAt.desc(), OrchestrationRun.id.desc())
+        .limit(max(1, min(8, int(limit))))
+    ).all()
+    if not rows:
+        return []
+    run_ids = [row.runId for row in rows]
+    items = session.exec(
+        select(OrchestrationItem)
+        .where(OrchestrationItem.runId.in_(run_ids))
+        .order_by(OrchestrationItem.createdAt.asc(), OrchestrationItem.id.asc())
+    ).all()
+    by_run: dict[str, list[OrchestrationItem]] = {}
+    for item in items:
+        by_run.setdefault(item.runId, []).append(item)
+    out: list[dict[str, Any]] = []
+    for run in rows:
+        run_items = by_run.get(run.runId, [])
+        terminal_count = sum(
+            1 for item in run_items if str(item.status or "").strip().lower() in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
+        )
+        convergence = _orchestration_convergence_state(run, run_items)
+        out.append(
+            {
+                "runId": run.runId,
+                "requestId": run.requestId,
+                "mode": run.mode,
+                "status": run.status,
+                "startedAt": run.startedAt,
+                "updatedAt": run.updatedAt,
+                "completedAt": run.completedAt,
+                "itemsTotal": len(run_items),
+                "itemsTerminal": terminal_count,
+                "convergence": convergence,
+                "items": [
+                    {
+                        "itemKey": item.itemKey,
+                        "kind": item.kind,
+                        "agentId": item.agentId,
+                        "status": item.status,
+                        "sessionKey": item.sessionKey,
+                    }
+                    for item in run_items[:6]
+                ],
+            }
+        )
+    return out
 
 
 def _run_openclaw_chat(
@@ -5259,16 +6503,20 @@ def _openclaw_watchdog_has_terminal_system_log(session: Any, request_id: str) ->
                 "json_extract(source, '$.requestId') = :rid "
                 "AND lower(agentId) = 'system' "
                 "AND lower(COALESCE(CAST(json_extract(source, '$.watchdogMissingAssistant') AS TEXT), '')) "
+                "NOT IN ('1', 'true', 'yes', 'on') "
+                "AND lower(COALESCE(CAST(json_extract(source, '$.orchestration') AS TEXT), '')) "
                 "NOT IN ('1', 'true', 'yes', 'on')"
             )
         ).params(rid=rid)
     else:
         warning_flag = func.lower(func.coalesce(LogEntry.source["watchdogMissingAssistant"].as_string(), ""))
+        orchestration_flag = func.lower(func.coalesce(LogEntry.source["orchestration"].as_string(), ""))
         query = query.where(
             and_(
                 LogEntry.source["requestId"].as_string() == rid,
                 func.lower(LogEntry.agentId) == "system",
                 warning_flag.notin_(["1", "true", "yes", "on"]),
+                orchestration_flag.notin_(["1", "true", "yes", "on"]),
             )
         )
     return bool(session.exec(query.limit(1)).first())
@@ -7333,6 +8581,23 @@ def openclaw_chat(payload: OpenClawChatRequest, _background_tasks: BackgroundTas
                 message=message,
                 attachment_ids=attachment_ids,
             )
+            if _orchestration_enabled():
+                try:
+                    _orchestration_create_or_get_run(
+                        session,
+                        request_id=request_id,
+                        session_key=session_key,
+                        agent_id=agent_id,
+                        message=message,
+                        sent_at=created_at,
+                        space_id=space_scope_id,
+                        topic_id=topic_id,
+                        task_id=task_id,
+                        source="openclaw_chat",
+                    )
+                    session.commit()
+                except Exception:
+                    session.rollback()
     except HTTPException:
         raise
     except Exception as exc:
@@ -7404,6 +8669,15 @@ def openclaw_chat_cancel(payload: OpenClawChatCancelRequest):
             db.add(row)
             cancelled_count += 1
         db.commit()
+
+    try:
+        _orchestration_cancel_runs(
+            session_keys=cancel_session_keys,
+            request_ids=cancel_request_ids,
+            reason="user_cancelled",
+        )
+    except Exception:
+        pass
 
     # --- Step 2: send chat.abort to the gateway for parent + linked sessions ---
     abort_request_id = request_id_filter
@@ -10718,6 +11992,13 @@ def _hybrid_prefilter_limit(effective_limit: int, corpus_size: int, max_docs: in
     return max(1, min(corpus_size, bounded))
 
 
+def _postgres_logentry_search_vector_expr() -> Any:
+    # Keep this expression aligned with ix_logentry_search_tsv_simple in db.py.
+    # Switching to concat(...) prevents GIN usage and degrades to sequential scans.
+    search_text = func.coalesce(LogEntry.summary, "") + literal_column("' '") + func.coalesce(LogEntry.content, "")
+    return func.to_tsvector("simple", search_text)
+
+
 def _resolve_search_engine_for_request(
     *,
     query: str,
@@ -10917,9 +12198,71 @@ def _search_impl(
     # For content, we fetch bounded snippets in a separate query so lexical/BM25 can still
     # use query terms that were not preserved in summaries.
     logs: list[Any] = []
+    lexical_rescue_terms: list[str] = []
+    lexical_rescue_log_ids: set[str] = set()
+    lexical_rescue_log_ids_ordered: list[str] = []
+    lexical_rescue_added = 0
+    lexical_rescue_mode = "disabled"
+    lexical_rescue_window_hits = 0
+    window_log_count = 0
     if allowed_space_ids is None or allowed_space_values:
         summary_fetch_chars = max(120, int(SEARCH_LOG_SUMMARY_FETCH_CHARS or 120))
         summary_expr = func.substr(func.coalesce(LogEntry.summary, ""), 1, summary_fetch_chars).label("summary")
+
+        def _to_lightweight_log(row: Any) -> SimpleNamespace | None:
+            try:
+                (
+                    row_id,
+                    row_topic_id,
+                    row_task_id,
+                    row_related_log_id,
+                    row_idempotency_key,
+                    row_type,
+                    row_summary,
+                    row_created_at,
+                    row_updated_at,
+                    row_agent_id,
+                    row_agent_label,
+                    row_source,
+                    row_space_id,
+                ) = row
+            except Exception:
+                mapping = getattr(row, "_mapping", None)
+                if mapping is None:
+                    return None
+                row_id = mapping.get("id")
+                row_topic_id = mapping.get("topicId")
+                row_task_id = mapping.get("taskId")
+                row_related_log_id = mapping.get("relatedLogId")
+                row_idempotency_key = mapping.get("idempotencyKey")
+                row_type = mapping.get("type")
+                row_summary = mapping.get("summary")
+                row_created_at = mapping.get("createdAt")
+                row_updated_at = mapping.get("updatedAt")
+                row_agent_id = mapping.get("agentId")
+                row_agent_label = mapping.get("agentLabel")
+                row_source = mapping.get("source")
+                row_space_id = mapping.get("spaceId")
+            if not row_id:
+                return None
+            return SimpleNamespace(
+                id=row_id,
+                topicId=row_topic_id,
+                taskId=row_task_id,
+                relatedLogId=row_related_log_id,
+                idempotencyKey=row_idempotency_key,
+                type=row_type,
+                summary=row_summary,
+                content=None,
+                raw=None,
+                createdAt=row_created_at,
+                updatedAt=row_updated_at,
+                agentId=row_agent_id,
+                agentLabel=row_agent_label,
+                source=row_source if isinstance(row_source, dict) else {},
+                spaceId=row_space_id,
+            )
+
         log_query = select(
             LogEntry.id,
             LogEntry.topicId,
@@ -10955,69 +12298,159 @@ def _search_impl(
         raw_rows = session.exec(log_query).all()
         lightweight_logs: list[Any] = []
         for row in raw_rows:
-            try:
-                (
-                    row_id,
-                    row_topic_id,
-                    row_task_id,
-                    row_related_log_id,
-                    row_idempotency_key,
-                    row_type,
-                    row_summary,
-                    row_created_at,
-                    row_updated_at,
-                    row_agent_id,
-                    row_agent_label,
-                    row_source,
-                    row_space_id,
-                ) = row
-            except Exception:
-                mapping = getattr(row, "_mapping", None)
-                if mapping is None:
-                    continue
-                row_id = mapping.get("id")
-                row_topic_id = mapping.get("topicId")
-                row_task_id = mapping.get("taskId")
-                row_related_log_id = mapping.get("relatedLogId")
-                row_idempotency_key = mapping.get("idempotencyKey")
-                row_type = mapping.get("type")
-                row_summary = mapping.get("summary")
-                row_created_at = mapping.get("createdAt")
-                row_updated_at = mapping.get("updatedAt")
-                row_agent_id = mapping.get("agentId")
-                row_agent_label = mapping.get("agentLabel")
-                row_source = mapping.get("source")
-                row_space_id = mapping.get("spaceId")
-            lightweight_logs.append(
-                SimpleNamespace(
-                    id=row_id,
-                    topicId=row_topic_id,
-                    taskId=row_task_id,
-                    relatedLogId=row_related_log_id,
-                    idempotencyKey=row_idempotency_key,
-                    type=row_type,
-                    summary=row_summary,
-                    content=None,
-                    raw=None,
-                    createdAt=row_created_at,
-                    updatedAt=row_updated_at,
-                    agentId=row_agent_id,
-                    agentLabel=row_agent_label,
-                    source=row_source if isinstance(row_source, dict) else {},
-                    spaceId=row_space_id,
-                )
-            )
+            parsed = _to_lightweight_log(row)
+            if parsed is not None:
+                lightweight_logs.append(parsed)
         logs = lightweight_logs
         if allowed_space_ids is not None:
             logs = logs[:window_logs]
-    recent_log_ids = [str(entry.id or "").strip() for entry in logs if getattr(entry, "id", None)]
+        window_log_count = len(logs)
+
+        if SEARCH_GLOBAL_LEXICAL_RESCUE_ENABLED:
+            seen_terms: set[str] = set()
+            if normalized_query and len(normalized_query) >= SEARCH_GLOBAL_LEXICAL_RESCUE_MIN_TOKEN_CHARS:
+                seen_terms.add(normalized_query)
+                lexical_rescue_terms.append(normalized_query)
+            for token in sorted(query_tokens):
+                if len(token) < SEARCH_GLOBAL_LEXICAL_RESCUE_MIN_TOKEN_CHARS:
+                    continue
+                if token in seen_terms:
+                    continue
+                seen_terms.add(token)
+                lexical_rescue_terms.append(token)
+                if len(lexical_rescue_terms) >= SEARCH_GLOBAL_LEXICAL_RESCUE_MAX_TERMS:
+                    break
+            if lexical_rescue_terms:
+                lexical_rescue_mode = "candidate"
+                lowered_terms = [term.lower() for term in lexical_rescue_terms if term]
+                if lowered_terms:
+                    for entry in logs:
+                        summary_text = _sanitize_log_text(str(getattr(entry, "summary", "") or "")).lower()
+                        if not summary_text:
+                            continue
+                        if any(term in summary_text for term in lowered_terms):
+                            lexical_rescue_window_hits += 1
+                            if SEARCH_GLOBAL_LEXICAL_RESCUE_SKIP_IF_WINDOW_HITS and (
+                                lexical_rescue_window_hits >= SEARCH_GLOBAL_LEXICAL_RESCUE_WINDOW_HIT_THRESHOLD
+                            ):
+                                lexical_rescue_mode = "skipped_window_hits"
+                                break
+
+                if lexical_rescue_mode == "skipped_window_hits":
+                    lowered_terms = []
+
+            if lexical_rescue_terms and lexical_rescue_mode != "skipped_window_hits":
+                rescue_limit = max(
+                    int(effective_limit_logs),
+                    min(
+                        SEARCH_GLOBAL_LEXICAL_RESCUE_MAX_LOGS,
+                        max(
+                            SEARCH_GLOBAL_LEXICAL_RESCUE_MIN_LOGS,
+                            int(effective_limit_logs) * SEARCH_GLOBAL_LEXICAL_RESCUE_MULTIPLIER,
+                        ),
+                    ),
+                )
+                rescue_query = select(
+                    LogEntry.id,
+                    LogEntry.topicId,
+                    LogEntry.taskId,
+                    LogEntry.relatedLogId,
+                    LogEntry.idempotencyKey,
+                    LogEntry.type,
+                    summary_expr,
+                    LogEntry.createdAt,
+                    LogEntry.updatedAt,
+                    LogEntry.agentId,
+                    LogEntry.agentLabel,
+                    LogEntry.source,
+                    LogEntry.spaceId,
+                )
+                if topic_id:
+                    rescue_query = rescue_query.where(LogEntry.topicId == topic_id)
+                if not include_pending:
+                    rescue_query = rescue_query.where(LogEntry.classificationStatus == "classified")
+                if allowed_space_ids is not None:
+                    rescue_query = rescue_query.where(LogEntry.spaceId.in_(allowed_space_values))
+
+                rescue_filter_clauses: list[Any] = []
+                rescue_rank_expr: Any | None = None
+                use_pg_tsvector = DATABASE_URL.startswith("postgresql") and SEARCH_GLOBAL_LEXICAL_RESCUE_PG_TSVECTOR_ENABLED
+                if use_pg_tsvector:
+                    search_vector = _postgres_logentry_search_vector_expr()
+                    for term in lexical_rescue_terms:
+                        ts_query = func.plainto_tsquery("simple", str(term))
+                        clause = search_vector.op("@@")(ts_query)
+                        rescue_filter_clauses.append(clause)
+                        rank_piece = func.ts_rank_cd(search_vector, ts_query)
+                        rescue_rank_expr = rank_piece if rescue_rank_expr is None else (rescue_rank_expr + rank_piece)
+                    lexical_rescue_mode = "pg_tsvector"
+                else:
+                    summary_lower = func.lower(func.coalesce(LogEntry.summary, ""))
+                    content_lower = func.lower(func.coalesce(LogEntry.content, ""))
+                    for term in lexical_rescue_terms:
+                        pattern = f"%{_escape_sql_like_term(term)}%"
+                        rescue_filter_clauses.append(
+                            or_(
+                                summary_lower.like(pattern, escape="\\"),
+                                content_lower.like(pattern, escape="\\"),
+                            )
+                        )
+                    lexical_rescue_mode = "like"
+
+                if rescue_filter_clauses:
+                    rescue_query = rescue_query.where(or_(*rescue_filter_clauses))
+                    if rescue_rank_expr is not None:
+                        rescue_query = rescue_query.order_by(
+                            rescue_rank_expr.desc(),
+                            LogEntry.createdAt.desc(),
+                            LogEntry.updatedAt.desc(),
+                            LogEntry.id.desc(),
+                        )
+                    else:
+                        rescue_query = rescue_query.order_by(
+                            LogEntry.createdAt.desc(),
+                            LogEntry.updatedAt.desc(),
+                            (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
+                        )
+                    rescue_query = rescue_query.limit(rescue_limit)
+                    rescue_rows = session.exec(rescue_query).all()
+                    existing_ids = {str(getattr(entry, "id", "") or "").strip() for entry in logs if getattr(entry, "id", None)}
+                    for row in rescue_rows:
+                        parsed = _to_lightweight_log(row)
+                        if parsed is None:
+                            continue
+                        parsed_id = str(getattr(parsed, "id", "") or "").strip()
+                        if not parsed_id or parsed_id in existing_ids:
+                            continue
+                        existing_ids.add(parsed_id)
+                        logs.append(parsed)
+                        lexical_rescue_log_ids.add(parsed_id)
+                        lexical_rescue_log_ids_ordered.append(parsed_id)
+                    lexical_rescue_added = len(lexical_rescue_log_ids_ordered)
+
+    recent_window_log_ids = [str(entry.id or "").strip() for entry in logs[:window_log_count] if getattr(entry, "id", None)]
     preview_scan_cap_base = max(0, int(SEARCH_LOG_CONTENT_PREVIEW_SCAN_LIMIT))
-    preview_dynamic_cap = max(80, min(320, effective_limit_logs * 2))
+    # Keep previews aligned with the actual candidate window so semantically-matched rows
+    # do not fall back to summary-only content when they sit past a small top-N slice.
+    preview_dynamic_cap = max(
+        80,
+        min(
+            320,
+            max(int(effective_limit_logs) * 2, int(window_log_count)),
+        ),
+    )
     preview_scan_cap = min(preview_scan_cap_base, preview_dynamic_cap) if preview_scan_cap_base > 0 else 0
     if not allow_deep_content_scan:
         preview_scan_cap = min(preview_scan_cap, max(24, min(60, max(10, effective_limit_logs // 2))))
     if preview_scan_cap > 0:
-        preview_scan_ids = recent_log_ids[:preview_scan_cap]
+        preview_scan_ids = recent_window_log_ids[:preview_scan_cap]
+        if allow_deep_content_scan and lexical_rescue_log_ids_ordered:
+            rescue_preview_cap = min(
+                len(lexical_rescue_log_ids_ordered),
+                max(20, min(160, int(effective_limit_logs))),
+            )
+            preview_scan_ids = list(dict.fromkeys(lexical_rescue_log_ids_ordered[:rescue_preview_cap] + preview_scan_ids))
+            preview_scan_ids = preview_scan_ids[: max(preview_scan_cap, rescue_preview_cap)]
     else:
         preview_scan_ids = []
 
@@ -11709,6 +13142,9 @@ def _search_impl(
         note_count = int(note_count_by_log.get(log_id2) or 0)
         note_weight = min(0.24, 0.06 * note_count)
         score += note_weight
+        lexical_rescue_hit = log_id2 in lexical_rescue_log_ids
+        if lexical_rescue_hit:
+            score += SEARCH_GLOBAL_LEXICAL_RESCUE_SCORE_BOOST
         if log_id2 in session_log_ids:
             score += 0.08
         log_rows.append(
@@ -11731,6 +13167,7 @@ def _search_impl(
                 "bestChunk": best_chunk if isinstance(best_chunk, dict) else None,
                 "noteCount": note_count,
                 "noteWeight": round(note_weight, 6),
+                "lexicalRescueHit": lexical_rescue_hit,
                 "sessionBoosted": log_id2 in session_log_ids,
             }
         )
@@ -11793,7 +13230,13 @@ def _search_impl(
             "queryTokenCount": int(len(query_tokens)),
             "singleTokenQuery": bool(single_token_query),
             "requireSparseForPropagation": bool(require_sparse_for_propagation),
-            "windowLogs": int(len(logs)),
+            "windowLogs": int(window_log_count),
+            "candidateLogs": int(len(logs)),
+            "globalLexicalRescueEnabled": bool(SEARCH_GLOBAL_LEXICAL_RESCUE_ENABLED),
+            "globalLexicalRescueMode": lexical_rescue_mode,
+            "globalLexicalRescueTerms": list(lexical_rescue_terms),
+            "globalLexicalRescueWindowHits": int(lexical_rescue_window_hits),
+            "globalLexicalRescueAdded": int(lexical_rescue_added),
             "allowDeepContentScan": bool(allow_deep_content_scan),
             "semanticQuery": semantic_query_effective or query,
             "semanticQueryExpanded": bool((semantic_query_effective or "").strip().lower() != normalized_query),
@@ -12225,6 +13668,23 @@ def context(
                 working_topics = [board_topic, *[t for t in working_topics if t.id != board_topic.id]]
             if board_task:
                 working_tasks = [board_task, *[t for t in working_tasks if t.id != board_task.id]]
+
+        orchestration_runs = _orchestration_context_snapshot(session, session_key=sessionKey, limit=3)
+        if orchestration_runs:
+            data["orchestration"] = {"runs": orchestration_runs}
+            layers.append("A:orchestration")
+            lines.append("Active orchestration runs:")
+            for run in orchestration_runs:
+                mode_label = str(run.get("mode") or "single")
+                status_label = str(run.get("status") or "running")
+                terminal = int(run.get("itemsTerminal") or 0)
+                total = int(run.get("itemsTotal") or 0)
+                request_id = str(run.get("requestId") or "")
+                convergence = run.get("convergence") if isinstance(run.get("convergence"), dict) else {}
+                gate_ready = bool(convergence.get("ready"))
+                gate_reason = str(convergence.get("reason") or "").strip().lower()
+                gate_label = "ready" if gate_ready else (f"waiting:{gate_reason}" if gate_reason else "waiting")
+                lines.append(f"- {status_label} [{mode_label}] {terminal}/{total} items | gate {gate_label} | request {request_id}")
 
         continuity_topic_ids: list[str] = []
         continuity_task_ids: list[str] = []

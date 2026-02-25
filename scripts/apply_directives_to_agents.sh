@@ -364,6 +364,7 @@ EXISTS_COUNT=0
 DECLINED_COUNT=0
 ERROR_COUNT=0
 TEAM_ROSTER_STATUS="not-run"
+PHASE4_STATUS="not-run"
 
 upsert_main_team_roster_section() {
   local idx main_workspace main_agents_file
@@ -1105,6 +1106,59 @@ PY
   esac
 }
 
+phase4_validate_alignment() {
+  local ladder_pattern
+  ladder_pattern='(1m[[:space:]]*(->|=>|-|=)>?[[:space:]]*3m[[:space:]]*(->|=>|-|=)>?[[:space:]]*10m[[:space:]]*(->|=>|-|=)>?[[:space:]]*15m[[:space:]]*(->|=>|-|=)>?[[:space:]]*30m[[:space:]]*(->|=>|-|=)>?[[:space:]]*1h|\[[[:space:]]*1m[[:space:]]*,[[:space:]]*3m[[:space:]]*,[[:space:]]*10m[[:space:]]*,[[:space:]]*15m[[:space:]]*,[[:space:]]*30m[[:space:]]*,[[:space:]]*1h[[:space:]]*\])'
+
+  local strict_failures=0
+  local file=""
+  local -a strict_files=(
+    "$REPO_DIR/agent-templates/main/AGENTS.md"
+    "$REPO_DIR/agent-templates/main/SOUL.md"
+    "$REPO_DIR/agent-templates/main/HEARTBEAT.md"
+    "$REPO_DIR/skills/clawboard/scripts/setup-openclaw-local-memory.sh"
+    "$REPO_DIR/ANATOMY.md"
+    "$REPO_DIR/CONTEXT.md"
+    "$REPO_DIR/CLASSIFICATION.md"
+  )
+
+  log_info "Phase 4: validating supervision cadence + rail alignment"
+
+  for file in "${strict_files[@]}"; do
+    if [ ! -f "$file" ]; then
+      strict_failures=$((strict_failures + 1))
+      log_warn "Phase 4 missing required file: $file"
+      continue
+    fi
+    if ! grep -Eiq "$ladder_pattern" "$file"; then
+      strict_failures=$((strict_failures + 1))
+      log_warn "Phase 4 cadence mismatch (ladder not found): $file"
+    fi
+  done
+
+  local setup_file="$REPO_DIR/skills/clawboard/scripts/setup-openclaw-local-memory.sh"
+  if [ -f "$setup_file" ]; then
+    if ! grep -Eiq 'heartbeat\.every".*"5m"' "$setup_file"; then
+      strict_failures=$((strict_failures + 1))
+      log_warn "Phase 4 mismatch: heartbeat.every=5m not found in setup script."
+    fi
+    if ! grep -Eiq 'still active beyond 5 minutes|>5m' "$setup_file"; then
+      strict_failures=$((strict_failures + 1))
+      log_warn "Phase 4 mismatch: >5m user-update requirement not found in setup script."
+    fi
+  fi
+
+  if [ "$strict_failures" -gt 0 ]; then
+    PHASE4_STATUS="failed"
+    log_warn "Phase 4 validation failed ($strict_failures issue(s))."
+    return 1
+  fi
+
+  PHASE4_STATUS="passed"
+  log_success "Phase 4 validation passed."
+  return 0
+}
+
 main() {
   discover_agents
   discover_directives
@@ -1155,6 +1209,12 @@ main() {
   log_info "Phase 3: updating team roster section in main AGENTS.md"
   upsert_main_team_roster_section
 
+  if phase4_validate_alignment; then
+    :
+  else
+    ERROR_COUNT=$((ERROR_COUNT + 1))
+  fi
+
   echo ""
   log_success "Directive apply run complete."
   echo "Applied: $APPLIED_COUNT"
@@ -1162,8 +1222,13 @@ main() {
   echo "Declined: $DECLINED_COUNT"
   echo "Errors: $ERROR_COUNT"
   echo "Team roster status: $TEAM_ROSTER_STATUS"
+  echo "Phase 4 status: $PHASE4_STATUS"
   if [ "$DRY_RUN" = true ]; then
     echo "Mode: dry-run (no files were modified)"
+  fi
+
+  if [ "$ERROR_COUNT" -gt 0 ] || [ "$PHASE4_STATUS" = "failed" ]; then
+    exit 1
   fi
 }
 

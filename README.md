@@ -74,6 +74,23 @@ Statuses are how the system tracks state:
 - `qdrant` (required for production): primary vector index for dense retrieval.
 - `extensions/clawboard-logger`: OpenClaw plugin for capture and context hook integration.
 
+## Runtime Guarantees (Current)
+
+- Board-session scope is deterministic:
+  - `clawboard:task:<topicId>:<taskId>` is hard-pinned to that topic/task.
+  - `clawboard:topic:<topicId>` is topic-pinned; task promotion/inference can happen only inside that same topic.
+- Only direct user-request lineage is allocatable into Topic/Task continuity.
+- Control-plane/background noise is filtered from conversational continuity:
+  - heartbeat/control-plane, cron-event, subagent scaffold payloads, and unanchored tool traces are detached/terminal-filtered.
+- Ingest is idempotent:
+  - dedupe prefers idempotency keys and falls back to source identifiers.
+- Search/context/graph respect Space visibility allowlists when source space can be resolved.
+- Chat bridge is persist-first:
+  - user row is stored before gateway dispatch.
+  - durable dispatch queue + watchdog/history-sync recovery guard long-running requests.
+
+See `ANATOMY.md`, `CONTEXT.md`, and `CLASSIFICATION.md` for full contracts.
+
 ## OpenClaw Complement Model
 
 Clawboard is additive to OpenClaw, not a replacement.
@@ -124,6 +141,14 @@ curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/scripts/boots
 
 This can configure token + URLs, install skill/plugin, and wire logger behavior for end-to-end flow.
 
+Bootstrap characteristics (current):
+
+- idempotent reruns (safe to run repeatedly)
+- atomic per-file deployment of shipped docs/templates
+- deploys main-agent templates (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`) into the resolved OpenClaw main workspace
+- deploys Clawboard contract docs (`ANATOMY.md`, `CONTEXT.md`, `CLASSIFICATION.md`, etc.) into the same workspace
+- migrates legacy `CLAWBOARD_LOGGER_DISABLE_OPENCLAW_MEMORY_SEARCH` to `CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH`
+
 If OpenClaw is not installed and you want Chutes first:
 
 ```bash
@@ -148,6 +173,36 @@ Important envs:
 - `OPENCLAW_GATEWAY_TOKEN` (if your gateway requires auth)
 - `CLASSIFIER_INTERVAL_SECONDS`
 
+Operationally important groups:
+
+- Context injection/plugin behavior:
+  - `CLAWBOARD_LOGGER_CONTEXT_MODE`
+  - `CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS`
+  - `CLAWBOARD_LOGGER_CONTEXT_FETCH_RETRIES`
+  - `CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES`
+  - `CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS`
+  - `CLAWBOARD_LOGGER_CONTEXT_CACHE_TTL_MS`
+  - `CLAWBOARD_LOGGER_CONTEXT_CACHE_MAX_ENTRIES`
+  - `CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE`
+  - `CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH`
+- Search behavior:
+  - `CLAWBOARD_SEARCH_MODE` (`auto|hybrid|fast`)
+  - `CLAWBOARD_SEARCH_ENABLE_DENSE`
+  - `CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS`
+  - `CLAWBOARD_SEARCH_ENABLE_HEAVY_SEMANTIC` (legacy compatibility toggle)
+  - `CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_*` (full-history lexical rescue with PostgreSQL tsvector + GIN index path, index-aligned SQL expression, and bounded fallback behavior)
+- Cross-agent request lineage persistence:
+  - `OPENCLAW_REQUEST_ID_TTL_SECONDS`
+  - `OPENCLAW_REQUEST_ID_MAX_ENTRIES`
+  - `OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS`
+  - `OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES`
+  - `CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS`
+- Gateway dispatch/watchdog/history sync:
+  - `OPENCLAW_CHAT_DISPATCH_*`
+  - `OPENCLAW_CHAT_IN_FLIGHT_*`
+  - `OPENCLAW_CHAT_ASSISTANT_LOG_*`
+  - `OPENCLAW_GATEWAY_HISTORY_SYNC_*`
+
 ## Operations
 
 Fresh data reset:
@@ -164,6 +219,12 @@ curl -s http://localhost:8010/api/health
 curl -s http://localhost:8010/api/config
 ```
 
+Dispatch/watchdog visibility:
+
+```bash
+curl -s -H "X-Clawboard-Token: $CLAWBOARD_TOKEN" http://localhost:8010/api/openclaw/chat-dispatch/status
+```
+
 Legacy SQLite to Postgres migration helper (one-time, older installs only):
 
 ```bash
@@ -178,9 +239,20 @@ docker compose run --rm -v "$PWD":/workspace -w /workspace api \
 Core commands:
 
 ```bash
+npm run lint
 npm run test:e2e
 npm run test:backend
+npm run test:classifier
+npm run test:logger
+npm run test:scripts
 npm run test:all
+```
+
+Formal full-system soak (docker + security + classifier e2e + backend + frontend + Playwright):
+
+```bash
+./tests.sh
+./tests.sh --skip-e2e
 ```
 
 Visual regression:
@@ -211,21 +283,15 @@ This check blocks common leaks in tracked files:
 - high-confidence secret literals
 - machine-local absolute paths
 
-## Recent Improvements (Last Few Days)
-
-- Mobile fullscreen chat UX stabilized (layering, status handling, keyboard behavior).
-- Status transitions now behave predictably in fullscreen task chat flows.
-- Visual regression suite added (`tests/visual`) with dedicated Playwright visual config.
-- API route contracts aligned with backend payload expectations.
-- CI + test coverage expanded across E2E, backend, classifier, scripts, and visual checks.
-- Publish-safety checks added for public sharing hygiene.
-
 ## Project Docs
 
+- Core architecture map: `ANATOMY.md`
+- Context contract and plugin bridge: `CONTEXT.md`
+- Classification/routing spec and scenario matrix: `CLASSIFICATION.md`
+- Context spec companion: `CONTEXT_SPEC.md`
 - Operator runbook: `design/operator-runbook.md`
 - Visual system spec: `design/visual-end-state-spec.md`
 - Testing guide: `TESTING.md`
-- Context details: `CONTEXT.md`
 
 ## Thanks
 

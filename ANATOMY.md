@@ -81,7 +81,8 @@ Related specs:
 - FastAPI backend (`backend/app/main.py`) is the canonical runtime authority for lifecycle, scope, search, context, and graph.
 - Next.js UI is the canonical operator surface and consumes backend APIs directly.
 - Classifier and logger plugin are always-on in normal operation.
-- SQLite is baseline persistence; optional vector backends accelerate retrieval but do not change scope contracts.
+- Postgres is the default runtime store (`CLAWBOARD_DB_URL`); SQLite remains supported for local/legacy flows with runtime migration/index guards.
+- Qdrant is the primary dense-vector backend in production; lexical/BM25 paths continue to operate when dense retrieval is disabled or unavailable.
 
 ## Unknowns and Blockers
 
@@ -248,10 +249,13 @@ Flow:
 1. User sends board chat message in topic/task pane.
 2. Optional upload through `/api/attachments`.
 3. `/api/openclaw/chat` persists user log first (fail-closed).
-4. API queues background gateway RPC `chat.send`.
+4. API enqueues durable dispatch work in `OpenClawChatDispatchQueue` and worker threads execute gateway `chat.send`.
 5. API emits typing lifecycle events (`openclaw.typing` true/false).
-6. OpenClaw logger plugin returns assistant/tool rows through normal ingest path.
-7. Watchdog logs a system warning if assistant output never returns.
+6. Worker retry/backoff, stale-processing recovery, and optional auto-quarantine keep queue forward-progress under failures/restarts.
+7. Optional in-flight probe logic (`OPENCLAW_CHAT_IN_FLIGHT_*`) can abort/retry long-stalled sends.
+8. OpenClaw logger plugin returns assistant/tool rows through normal ingest path.
+9. Watchdog and history-sync backfill paths log warnings/recover when assistant output is delayed/missing.
+10. Stop/cancel path (`/api/openclaw/chat/cancel`) attempts gateway `chat.abort` and marks queue rows cancelled for the request chain.
 
 Key invariant:
 - User prompt is persisted before gateway dispatch so thread history remains coherent.
@@ -296,22 +300,23 @@ Primary code:
 Pipeline:
 1. Resolve source space and effective allowed spaces.
 2. Build bounded windows (topics/tasks/logs).
-3. Build log content previews/snippets without full raw scans.
-4. Expand semantic query for low-signal board-scoped prompts when useful.
-5. Run hybrid rank:
-   - dense vectors (sqlite/qdrant backend)
+3. Run full-history lexical rescue for query terms and merge older matching logs into the candidate set (visibility-scoped, capped).
+4. Build log content previews/snippets without full raw scans.
+5. Expand semantic query for low-signal board-scoped prompts when useful.
+6. Run hybrid rank:
+   - dense vectors (qdrant backend when enabled/available)
    - BM25
    - lexical
    - phrase
    - RRF
    - late chunk rerank.
-6. Apply propagation boosts:
+7. Apply propagation boosts:
    - log -> task/topic
    - task -> topic
    - direct label boosts
    - note linkage weights
    - session continuity boosts.
-7. Return ranked `topics`, `tasks`, `logs`, `notes` and `searchMeta`.
+8. Return ranked `topics`, `tasks`, `logs`, `notes` and `searchMeta`.
 
 Load safety:
 - concurrency gate with degraded busy fallback.
@@ -360,8 +365,10 @@ Flow:
    - structural topic/task nodes
    - entity/agent nodes
    - edges: `has_task`, `mentions`, `co_occurs`, `related_topic`, `related_task`, `agent_focus`.
-5. Frontend applies edge-threshold slider (default `90`).
-6. Graph refreshes on visibility and data revision changes.
+5. Graph query runs scoped semantic search (`/api/search` with same space guardrails).
+6. Frontend regenerates a query-rooted subgraph from semantic+lexical roots (bounded BFS neighborhood, capped nodes/edges).
+7. Frontend applies edge-threshold slider (default `90`).
+8. Graph refreshes on visibility and data revision changes.
 
 ### 6.7 Realtime sync flow (SSE + reconcile)
 
@@ -501,10 +508,11 @@ These are not top-level features, but they are why the system stays robust:
 ## 10) Performance and Scalability Patterns
 
 Backend:
-- sqlite WAL + tuned indexes in `backend/app/db.py`.
+- Postgres connection-pool tuning + runtime indexes in `backend/app/db.py`.
+- SQLite WAL/timeout/null-pool safeguards are kept for local/legacy sqlite deployments.
 - deferred large fields (`raw`, large content) in heavy endpoints.
 - bounded windows and chunked query patterns.
-- optional qdrant acceleration for dense retrieval.
+- qdrant-backed dense retrieval plus sparse fallback paths.
 
 Classifier:
 - session fairness and cycle budget enforcement.
@@ -516,11 +524,17 @@ Frontend:
 - visibility-revision keyed recalculation.
 - SSE + reconcile watchdog to prevent stale state.
 
+OpenClaw bridge dynamics:
+- durable dispatch queue workers with retry/backoff and stale-row recovery.
+- assistant-log watchdog + history-sync fallback for delayed/missing assistant rows.
+- request-chain cancel semantics fan out to linked sessions where available.
+
 ## 11) Data Age, Size, and Recall Limits
 
 Important distinction:
 - There is no hard coded "topic/task age cap" that prevents accessing old rows.
 - Old data remains queryable if it exists in storage.
+- `/api/search` uses bounded recent windows for hot-path performance, plus gated full-history lexical rescue (PostgreSQL tsvector/GIN when available, with SQL expression kept index-aligned; bounded fallback otherwise) so older matching logs still enter ranking.
 
 What is bounded:
 - endpoint response windows (`/api/log` limit/offset, `/api/search` bounded scan limits, `/api/context` max chars and limits).

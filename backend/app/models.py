@@ -310,6 +310,77 @@ class OpenClawChatDispatchQueue(SQLModel, table=True):
     updatedAt: str = Field(description="Last queue row update timestamp.")
 
 
+class OrchestrationRun(SQLModel, table=True):
+    """Durable orchestration run anchored to one user request."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    runId: str = Field(description="Stable run identifier (ocrun-...).")
+    requestId: str = Field(description="Primary request identifier (occhat-...).")
+    sessionKey: str = Field(description="Originating session key.")
+    baseSessionKey: str = Field(description="Base session key without thread suffix.")
+    spaceId: Optional[str] = Field(default=None, description="Resolved source space id (if known).")
+    topicId: Optional[str] = Field(default=None, description="Resolved topic scope (if known).")
+    taskId: Optional[str] = Field(default=None, description="Resolved task scope (if known).")
+    mode: str = Field(default="single", description="Execution mode (single|parallel|consensus).")
+    status: str = Field(default="running", description="Run state (running|stalled|done|failed|cancelled).")
+    objective: Optional[str] = Field(default=None, description="Compact objective extracted from user message.")
+    agentId: str = Field(default="main", description="Primary OpenClaw agent handling this run.")
+    leaseUntil: Optional[str] = Field(default=None, description="Lease timestamp for worker ownership.")
+    startedAt: str = Field(description="Run start timestamp (ISO).")
+    completedAt: Optional[str] = Field(default=None, description="Run completion timestamp (ISO).")
+    version: int = Field(default=0, description="Monotonic update version for optimistic state updates.")
+    meta: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON),
+        description="Auxiliary orchestration metadata (durable JSON).",
+    )
+    createdAt: str = Field(description="Row creation timestamp (ISO).")
+    updatedAt: str = Field(description="Row update timestamp (ISO).")
+
+
+class OrchestrationItem(SQLModel, table=True):
+    """One delegated work item inside an orchestration run."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    runId: str = Field(description="Parent orchestration run id (runId).")
+    itemKey: str = Field(description="Stable item key unique within the run.")
+    parentItemKey: Optional[str] = Field(default=None, description="Optional parent item key for DAG linkage.")
+    requestId: Optional[str] = Field(default=None, description="Request id associated with this item when available.")
+    agentId: str = Field(default="main", description="Assigned agent id.")
+    kind: str = Field(default="main", description="Item kind (main|subagent|verify|synthesize).")
+    goal: Optional[str] = Field(default=None, description="Deliverable goal for this item.")
+    sessionKey: Optional[str] = Field(default=None, description="Bound child session key (for subagent items).")
+    status: str = Field(default="running", description="Item state (running|stalled|done|failed|cancelled).")
+    attempts: int = Field(default=0, description="Supervision/check attempts.")
+    nextCheckAt: Optional[str] = Field(default=None, description="Next scheduled check timestamp (ISO).")
+    startedAt: Optional[str] = Field(default=None, description="Item start timestamp (ISO).")
+    completedAt: Optional[str] = Field(default=None, description="Item completion timestamp (ISO).")
+    lastError: Optional[str] = Field(default=None, description="Last error/status detail.")
+    meta: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON),
+        description="Auxiliary item metadata (durable JSON).",
+    )
+    createdAt: str = Field(description="Row creation timestamp (ISO).")
+    updatedAt: str = Field(description="Row update timestamp (ISO).")
+
+
+class OrchestrationEvent(SQLModel, table=True):
+    """Append-only event stream for orchestration lifecycle transitions."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    runId: str = Field(description="Parent orchestration run id (runId).")
+    itemKey: Optional[str] = Field(default=None, description="Associated item key when event is item-scoped.")
+    eventType: str = Field(description="Event type (run_created, item_done, run_failed, etc.).")
+    payload: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON),
+        description="Structured event payload.",
+    )
+    idempotencyKey: Optional[str] = Field(default=None, description="Optional idempotency key for exact-once events.")
+    createdAt: str = Field(description="Event creation timestamp (ISO).")
+
+
 class OpenClawGatewayHistoryCursor(SQLModel, table=True):
     """Per-session cursor for gateway history sync fallback.
 

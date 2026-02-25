@@ -68,8 +68,8 @@ classDiagram
     }
 
     class EmbeddingStore {
-      +SQLite mirror
-      +Optional Qdrant
+      +Qdrant-backed vectors
+      +dense optional at query-time
       +upsert/delete/topk
     }
 
@@ -179,6 +179,7 @@ sequenceDiagram
     participant UI as Clawboard UI (BoardChatComposer)
     participant API as Clawboard API
     participant DB as Clawboard DB + attachments storage
+    participant DQ as Durable dispatch queue/workers
     participant GW as OpenClaw Gateway WS RPC
     participant OC as OpenClaw Runtime
     participant PL as clawboard-logger plugin
@@ -195,7 +196,8 @@ sequenceDiagram
     API->>DB: persist user conversation log immediately
     API->>EV: publish openclaw.typing true
     API-->>UI: queued=true, requestId
-    API->>GW: background chat.send(idempotencyKey=requestId)
+    API->>DQ: enqueue requestId/sessionKey/message
+    DQ->>GW: chat.send(idempotencyKey=requestId)
     GW->>OC: dispatch user message
 
     OC->>PL: assistant conversation/tool hooks
@@ -209,6 +211,7 @@ sequenceDiagram
         WD->>API: check for assistant output and non-user activity
     end
     Note over API,WD: On API restart, watchdog recovers unresolved requestIds from persisted user logs.
+    Note over DQ: worker retry/backoff + stale-processing recovery + optional auto-quarantine
     alt no assistant output after inactivity window
         WD->>API: append system warning log
         API->>DB: persist warning
@@ -276,8 +279,8 @@ stateDiagram-v2
     state PatchScope {
       [*] --> PendingRow
       PendingRow --> ClassifiedSemantic : normal semantic row
-      PendingRow --> ClassifiedFiltered : filtered_command or filtered_non_semantic or filtered_memory_action
-      PendingRow --> FailedFiltered : filtered_cron_event or noise code
+      PendingRow --> ClassifiedFiltered : filtered_command or filtered_non_semantic or filtered_memory_action or filtered_tool_activity
+      PendingRow --> FailedFiltered : filtered_cron_event or filtered_control_plane or filtered_subagent_scaffold or filtered_unanchored_tool_activity or noise code
       ClassifiedSemantic --> [*]
       ClassifiedFiltered --> [*]
       FailedFiltered --> [*]

@@ -191,9 +191,12 @@ Two separate protections exist to keep injected context from poisoning logs, emb
 3. **Tool activity filtering for semantic retrieval**
    - API indexing/search excludes `action` logs that are tool call/result/error traces by default
    - opt-in switch: `CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS=1`
+   - search mode switch: `CLAWBOARD_SEARCH_MODE=auto|hybrid|fast` (`auto` default)
+   - dense retrieval toggle: `CLAWBOARD_SEARCH_ENABLE_DENSE=1|0` (`1` default)
+   - legacy compatibility: `CLAWBOARD_SEARCH_ENABLE_HEAVY_SEMANTIC=1` implies hybrid when `CLAWBOARD_SEARCH_MODE` is unset
    - Clawgraph memory map excludes tool call/result/error `action` logs unconditionally
    - burst protection: bounded search gate (`CLAWBOARD_SEARCH_CONCURRENCY_*`) keeps `/api/search` responsive under rapid typing by failing fast with `429 search_busy`
-   - efficiency tuning: `CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS`, `CLAWBOARD_SEARCH_SOURCE_TOPK_*`, `CLAWBOARD_RERANK_CHUNKS_PER_DOC`, and `CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE`
+   - efficiency tuning: `CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS`, `CLAWBOARD_SEARCH_SOURCE_TOPK_*`, `CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_*`, `CLAWBOARD_RERANK_CHUNKS_PER_DOC`, and `CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE`
 
 4. **Control-plane and tool-trace suppression at ingest/classification**
    - logger conversation hooks suppress heartbeat/control-plane and subagent scaffold payloads before they hit Clawboard
@@ -272,12 +275,23 @@ Key settings:
 - `enabled` (default true)
 - `queuePath` (default `~/.openclaw/clawboard-queue.sqlite`): local durable queue for log delivery
 - `queue` (default false): if true, send to `/api/ingest` (server-side async queue) instead of `/api/log`
+- `ingestPath` (optional): override ingest endpoint path
 - `contextAugment` (default true): turn prompt injection on/off
+- `contextMode` (`auto|cheap|full|patient`, default `auto`)
+- `contextFetchTimeoutMs` (clamped 200..20000)
+- `contextFetchRetries` (clamped 0..3)
+- `contextFallbackModes` (ordered fallback modes when context fetch fails)
 - `contextMaxChars` (default 2200)
-- `contextTopicLimit` (default 3)
-- `contextTaskLimit` (default 3)
+- `contextTaskLimit` (default 3, sent as `workingSetLimit` lower bound)
 - `contextLogLimit` (default 6)
+- `contextCacheTtlMs` / `contextCacheMaxEntries` / `contextUseCacheOnFailure`
+- `enableOpenClawMemorySearch` (or env `CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH`)
 - `autoTopicBySession` (default OFF): if enabled, the plugin can auto-create a synthetic topic per OpenClaw session key (tagged `["openclaw"]`). Most setups rely on the classifier instead.
+
+Notes:
+- `contextTopicLimit` is currently parsed for compatibility but not applied in request parameters; `contextTaskLimit` and `contextLogLimit` are the active sizing knobs sent to `/api/context`.
+- Request-lineage persistence for cross-agent attribution is controlled by env (`OPENCLAW_REQUEST_ID_TTL_SECONDS`, `OPENCLAW_REQUEST_ID_MAX_ENTRIES`, `OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS`, `OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES`).
+- Subagent board-scope persistence horizon is controlled by `CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS`.
 
 ---
 

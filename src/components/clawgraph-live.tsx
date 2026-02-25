@@ -36,6 +36,10 @@ const DEFAULT_STRENGTH_PERCENT = 90;
 const DEFAULT_LAYOUT_STRENGTH = DEFAULT_STRENGTH_PERCENT;
 const INITIAL_REMOTE_WAIT_MS = 900;
 const REMOTE_REFRESH_DEBOUNCE_MS = 320;
+const QUERY_ROOT_MAX_HOPS = 2;
+const QUERY_ROOT_MAX_BRANCH_PER_NODE = 24;
+const QUERY_ROOT_MAX_NODES = 180;
+const QUERY_ROOT_MAX_EDGES = 520;
 
 const EMPTY_GRAPH: ClawgraphData = {
   generatedAt: "",
@@ -216,6 +220,151 @@ function edgeThresholdAtPercent(edges: ClawgraphEdge[], percent: number) {
   return weights[rank] ?? weights[weights.length - 1];
 }
 
+function buildGraphStats(nodes: ClawgraphNode[], edges: ClawgraphEdge[]): ClawgraphData["stats"] {
+  const topicCount = nodes.filter((node) => node.type === "topic").length;
+  const taskCount = nodes.filter((node) => node.type === "task").length;
+  const entityCount = nodes.filter((node) => node.type === "entity").length;
+  const agentCount = nodes.filter((node) => node.type === "agent").length;
+  const densityBase = Math.max(1, (nodes.length * (nodes.length - 1)) / 2);
+  const density = Math.min(1, edges.length / densityBase);
+  return {
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
+    topicCount,
+    taskCount,
+    entityCount,
+    agentCount,
+    density: Number(density.toFixed(4)),
+  };
+}
+
+function buildQueryRootedSubgraph(
+  graph: ClawgraphData,
+  rootNodeIds: Set<string>,
+  options: {
+    includeCoOccurs: boolean;
+  },
+): ClawgraphData | null {
+  const { includeCoOccurs } = options;
+  if (!graph.nodes.length || rootNodeIds.size === 0) return null;
+  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const roots = Array.from(rootNodeIds).filter((id) => nodeById.has(id));
+  if (roots.length === 0) return null;
+
+  const traversalEdges = graph.edges.filter((edge) => includeCoOccurs || edge.type !== "co_occurs");
+  if (traversalEdges.length === 0) {
+    const rootNodes = graph.nodes.filter((node) => roots.includes(node.id));
+    return {
+      generatedAt: graph.generatedAt,
+      nodes: rootNodes,
+      edges: [],
+      stats: buildGraphStats(rootNodes, []),
+    };
+  }
+
+  const adjacency = new Map<string, ClawgraphEdge[]>();
+  for (const edge of traversalEdges) {
+    if (!nodeById.has(edge.source) || !nodeById.has(edge.target)) continue;
+    const fromSource = adjacency.get(edge.source) ?? [];
+    fromSource.push(edge);
+    adjacency.set(edge.source, fromSource);
+    const fromTarget = adjacency.get(edge.target) ?? [];
+    fromTarget.push(edge);
+    adjacency.set(edge.target, fromTarget);
+  }
+  for (const [nodeId, edges] of adjacency.entries()) {
+    adjacency.set(
+      nodeId,
+      [...edges].sort((a, b) => b.weight - a.weight)
+    );
+  }
+
+  const includedNodes = new Set<string>(roots);
+  const includedEdges = new Set<string>();
+  let frontier = [...roots];
+  for (let hop = 0; hop < QUERY_ROOT_MAX_HOPS; hop += 1) {
+    if (frontier.length === 0) break;
+    const nextFrontier: string[] = [];
+    for (const nodeId of frontier) {
+      const neighbors = adjacency.get(nodeId) ?? [];
+      let branchCount = 0;
+      for (const edge of neighbors) {
+        if (includedEdges.size >= QUERY_ROOT_MAX_EDGES) break;
+        const otherId = edge.source === nodeId ? edge.target : edge.source;
+        includedEdges.add(edge.id);
+        if (!includedNodes.has(otherId)) {
+          includedNodes.add(otherId);
+          nextFrontier.push(otherId);
+        }
+        branchCount += 1;
+        if (branchCount >= QUERY_ROOT_MAX_BRANCH_PER_NODE || includedNodes.size >= QUERY_ROOT_MAX_NODES) break;
+      }
+      if (includedNodes.size >= QUERY_ROOT_MAX_NODES || includedEdges.size >= QUERY_ROOT_MAX_EDGES) break;
+    }
+    frontier = nextFrontier;
+    if (includedNodes.size >= QUERY_ROOT_MAX_NODES || includedEdges.size >= QUERY_ROOT_MAX_EDGES) break;
+  }
+
+  if (includedEdges.size === 0) {
+    const fallback = [...traversalEdges]
+      .filter((edge) => roots.includes(edge.source) || roots.includes(edge.target))
+      .sort((a, b) => b.weight - a.weight)
+      .slice(0, Math.min(24, QUERY_ROOT_MAX_EDGES));
+    for (const edge of fallback) {
+      includedEdges.add(edge.id);
+      includedNodes.add(edge.source);
+      includedNodes.add(edge.target);
+    }
+  }
+
+  let edges = traversalEdges
+    .filter((edge) => includedEdges.has(edge.id) && includedNodes.has(edge.source) && includedNodes.has(edge.target))
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, QUERY_ROOT_MAX_EDGES);
+
+  const rootSet = new Set<string>(roots);
+  const rankedNodeIds = Array.from(includedNodes).sort((left, right) => {
+    const leftRoot = rootSet.has(left) ? 1 : 0;
+    const rightRoot = rootSet.has(right) ? 1 : 0;
+    if (leftRoot !== rightRoot) return rightRoot - leftRoot;
+    const leftScore = Number(nodeById.get(left)?.score ?? 0);
+    const rightScore = Number(nodeById.get(right)?.score ?? 0);
+    return rightScore - leftScore;
+  });
+  const keepNodeIds = new Set<string>(rankedNodeIds.slice(0, QUERY_ROOT_MAX_NODES));
+  for (const rootId of roots) {
+    if (keepNodeIds.size >= QUERY_ROOT_MAX_NODES) break;
+    keepNodeIds.add(rootId);
+  }
+  edges = edges.filter((edge) => keepNodeIds.has(edge.source) && keepNodeIds.has(edge.target));
+
+  const nodeIdsFromEdges = new Set<string>();
+  for (const edge of edges) {
+    nodeIdsFromEdges.add(edge.source);
+    nodeIdsFromEdges.add(edge.target);
+  }
+  for (const rootId of roots) {
+    if (keepNodeIds.has(rootId)) nodeIdsFromEdges.add(rootId);
+  }
+
+  let nodes = graph.nodes.filter((node) => keepNodeIds.has(node.id) && nodeIdsFromEdges.has(node.id));
+  if (nodes.length === 0) return null;
+
+  nodes = [...nodes].sort((left, right) => {
+    const leftRoot = rootSet.has(left.id) ? 1 : 0;
+    const rightRoot = rootSet.has(right.id) ? 1 : 0;
+    if (leftRoot !== rightRoot) return rightRoot - leftRoot;
+    return Number(right.score || 0) - Number(left.score || 0);
+  });
+
+  return {
+    generatedAt: graph.generatedAt,
+    nodes,
+    edges,
+    stats: buildGraphStats(nodes, edges),
+  };
+}
+
 export function ClawgraphLive() {
   const router = useRouter();
   const pathname = usePathname();
@@ -225,6 +374,7 @@ export function ClawgraphLive() {
   const spaceFromUrl = (searchParams.get("space") ?? "").trim();
   const spaceQueryInitializedRef = useRef(false);
   const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLowerCase();
   const [strengthPercent, setStrengthPercent] = useState(DEFAULT_STRENGTH_PERCENT);
   const [showEntityLinks, setShowEntityLinks] = useState(false);
   const [showLabels, setShowLabels] = useState(true);
@@ -485,7 +635,70 @@ export function ClawgraphLive() {
     };
   }, [isMapFullScreen]);
 
-  const graph = graphMode === "remote" && remoteGraph ? remoteGraph : graphMode === "local" ? localGraph : EMPTY_GRAPH;
+  const semanticRefreshKey = useMemo(() => {
+    const latestTopic = topics.reduce((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), "");
+    const latestTask = tasks.reduce((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), "");
+    const latestLog = logs.reduce((acc, item) => {
+      const stamp = item.updatedAt || item.createdAt || "";
+      return stamp > acc ? stamp : acc;
+    }, "");
+    return `${topics.length}:${tasks.length}:${logs.length}:${latestTopic}:${latestTask}:${latestLog}:${spaceVisibilityRevision}`;
+  }, [logs, spaceVisibilityRevision, tasks, topics]);
+  const semanticSearch = useSemanticSearch({
+    query: normalizedQuery,
+    spaceId: selectedSpaceId || undefined,
+    allowedSpaceIds,
+    includePending: true,
+    limitTopics: Math.min(Math.max(topics.length, 120), 500),
+    limitTasks: Math.min(Math.max(tasks.length, 240), 1200),
+    limitLogs: Math.min(Math.max(logs.length, 800), 4000),
+    refreshKey: semanticRefreshKey,
+  });
+
+  const semanticForQuery = useMemo(() => {
+    if (!semanticSearch.data) return null;
+    const resultQuery = semanticSearch.data.query.trim().toLowerCase();
+    if (!resultQuery || resultQuery !== normalizedQuery) return null;
+    return semanticSearch.data;
+  }, [normalizedQuery, semanticSearch.data]);
+
+  const graphBase = graphMode === "remote" && remoteGraph ? remoteGraph : graphMode === "local" ? localGraph : EMPTY_GRAPH;
+  const queryRootNodeIds = useMemo(() => {
+    if (!normalizedQuery || normalizedQuery.length < 2) return new Set<string>();
+    const ids = new Set<string>();
+    for (const topicId of semanticForQuery?.matchedTopicIds ?? []) {
+      if (!topicId) continue;
+      ids.add(`topic:${topicId}`);
+    }
+    for (const taskId of semanticForQuery?.matchedTaskIds ?? []) {
+      if (!taskId) continue;
+      ids.add(`task:${taskId}`);
+    }
+    const matchedLogIds = new Set(semanticForQuery?.matchedLogIds ?? []);
+    if (matchedLogIds.size > 0) {
+      for (const entry of logs) {
+        if (!matchedLogIds.has(entry.id)) continue;
+        if (entry.topicId) ids.add(`topic:${entry.topicId}`);
+        if (entry.taskId) ids.add(`task:${entry.taskId}`);
+        const agentLabel = String(entry.agentLabel || entry.agentId || "").trim();
+        if (agentLabel) ids.add(`agent:${slug(agentLabel)}`);
+      }
+    }
+    for (const node of graphBase.nodes) {
+      const haystack = `${node.label} ${JSON.stringify(node.meta ?? {})}`.toLowerCase();
+      if (!haystack.includes(normalizedQuery)) continue;
+      ids.add(node.id);
+    }
+    return ids;
+  }, [graphBase.nodes, logs, normalizedQuery, semanticForQuery]);
+  const queryRootedGraph = useMemo(() => {
+    if (!normalizedQuery || queryRootNodeIds.size === 0) return null;
+    return buildQueryRootedSubgraph(graphBase, queryRootNodeIds, {
+      includeCoOccurs: showEntityLinks,
+    });
+  }, [graphBase, normalizedQuery, queryRootNodeIds, showEntityLinks]);
+
+  const graph = queryRootedGraph ?? graphBase;
   const nodeById = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph.nodes]);
 
   const candidateEdges = useMemo(() => {
@@ -585,34 +798,6 @@ export function ClawgraphLive() {
     });
     if (changed) setNodeOffsets(next);
   }, [displayNodes, nodeOffsets]);
-
-  const normalizedQuery = query.trim().toLowerCase();
-  const semanticRefreshKey = useMemo(() => {
-    const latestTopic = topics.reduce((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), "");
-    const latestTask = tasks.reduce((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), "");
-    const latestLog = logs.reduce((acc, item) => {
-      const stamp = item.updatedAt || item.createdAt || "";
-      return stamp > acc ? stamp : acc;
-    }, "");
-    return `${topics.length}:${tasks.length}:${logs.length}:${latestTopic}:${latestTask}:${latestLog}:${spaceVisibilityRevision}`;
-  }, [logs, spaceVisibilityRevision, tasks, topics]);
-  const semanticSearch = useSemanticSearch({
-    query: normalizedQuery,
-    spaceId: selectedSpaceId || undefined,
-    allowedSpaceIds,
-    includePending: true,
-    limitTopics: Math.min(Math.max(topics.length, 120), 500),
-    limitTasks: Math.min(Math.max(tasks.length, 240), 1200),
-    limitLogs: Math.min(Math.max(logs.length, 800), 4000),
-    refreshKey: semanticRefreshKey,
-  });
-
-  const semanticForQuery = useMemo(() => {
-    if (!semanticSearch.data) return null;
-    const resultQuery = semanticSearch.data.query.trim().toLowerCase();
-    if (!resultQuery || resultQuery !== normalizedQuery) return null;
-    return semanticSearch.data;
-  }, [normalizedQuery, semanticSearch.data]);
 
   const semanticMatchedNodes = useMemo(() => {
     if (!semanticForQuery) return new Set<string>();
@@ -953,12 +1138,19 @@ export function ClawgraphLive() {
             {semanticSearch.loading
               ? "Searching semantic index…"
               : semanticForQuery
-                ? `Semantic search (${semanticForQuery.mode}) + graph label match`
+                ? queryRootedGraph
+                  ? `Semantic search (${semanticForQuery.mode}) + query-rooted subgraph`
+                  : `Semantic search (${semanticForQuery.mode}) + graph label match`
                 : semanticSearch.error === "search_timeout"
                   ? "Semantic search timed out, using graph label fallback."
                   : semanticSearch.error
                   ? "Semantic search unavailable, using graph label fallback."
                   : "Searching…"}
+          </p>
+        )}
+        {normalizedQuery && queryRootedGraph && (
+          <p className="text-xs text-[rgb(var(--claw-muted))]">
+            Subgraph: {graph.stats.nodeCount} nodes · {graph.stats.edgeCount} edges · rooted on query matches
           </p>
         )}
         <div className="mt-3 grid gap-3 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.9)] p-3 md:grid-cols-[1fr_auto]">

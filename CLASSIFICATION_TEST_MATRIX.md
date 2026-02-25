@@ -2,6 +2,11 @@
 
 This doc maps **classifier behavior** to the tests that cover it, so we can expand coverage without duplicating tests.
 
+Snapshot date: `2026-02-25`
+
+Canonical comprehensive matrix lives in `CLASSIFICATION.md` sections 16 and 17.
+This file is a quick-lookup companion.
+
 ## End-State Spec
 
 When a log enters Clawboard as `classificationStatus=pending`, the classifier must eventually transition it to one of:
@@ -23,7 +28,11 @@ For user-visible conversation logs, the classifier must also maintain:
     - Topic scope: `clawboard:topic:<topicId>`
     - Task scope: `clawboard:task:<topicId>:<taskId>`
   - Mixed log scopes where actions/system/import appear between conversations and are patched in-scope.
-  - Filtering behaviors (commands, injected noise, memory tool noise) do not strand rows in `pending`.
+- Filtering behaviors (commands, injected noise, memory tool noise) do not strand rows in `pending`.
+- Filtering behaviors for control-plane and tool traces remain deterministic:
+  - anchored tool traces => `classified` + `filtered_tool_activity`
+  - unanchored tool traces => `failed` + `filtered_unanchored_tool_activity`
+  - heartbeat/subagent scaffold control-plane payloads => terminal detached filters
 - Unit tests cover the strict JSON contract and summary repair logic used when the LLM path is enabled.
 
 ## Defaults Assumed By Tests

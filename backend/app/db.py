@@ -168,6 +168,24 @@ def _ensure_runtime_indexes() -> None:
         'ON openclawchatdispatchqueue("sessionKey", "createdAt");',
         "CREATE INDEX IF NOT EXISTS ix_openclawchatdispatchqueue_updated "
         'ON openclawchatdispatchqueue("updatedAt");',
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_orchestrationrun_run_id "
+        'ON orchestrationrun("runId");',
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_orchestrationrun_request_id "
+        'ON orchestrationrun("requestId");',
+        "CREATE INDEX IF NOT EXISTS ix_orchestrationrun_status_lease "
+        'ON orchestrationrun("status", "leaseUntil", "updatedAt");',
+        "CREATE INDEX IF NOT EXISTS ix_orchestrationrun_session_created "
+        'ON orchestrationrun("sessionKey", "createdAt");',
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_orchestrationitem_run_item "
+        'ON orchestrationitem("runId", "itemKey");',
+        "CREATE INDEX IF NOT EXISTS ix_orchestrationitem_run_status_check "
+        'ON orchestrationitem("runId", "status", "nextCheckAt", "updatedAt");',
+        "CREATE INDEX IF NOT EXISTS ix_orchestrationitem_session_status "
+        'ON orchestrationitem("sessionKey", "status", "updatedAt");',
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_orchestrationevent_idempotency "
+        'ON orchestrationevent("idempotencyKey") WHERE "idempotencyKey" IS NOT NULL;',
+        "CREATE INDEX IF NOT EXISTS ix_orchestrationevent_run_created "
+        'ON orchestrationevent("runId", "createdAt");',
         "CREATE INDEX IF NOT EXISTS ix_topic_space_updated_at "
         'ON topic("spaceId", "updatedAt");',
         "CREATE INDEX IF NOT EXISTS ix_topic_created_at "
@@ -177,6 +195,12 @@ def _ensure_runtime_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_task_created_at "
         'ON task("createdAt");',
     ]
+    if not DATABASE_URL.startswith("sqlite"):
+        # Full-text search index for scalable lexical rescue over historical logs.
+        statements.append(
+            "CREATE INDEX IF NOT EXISTS ix_logentry_search_tsv_simple "
+            "ON logentry USING GIN (to_tsvector('simple', coalesce(summary, '') || ' ' || coalesce(content, '')));"
+        )
     with engine.connect() as conn:
         for statement in statements:
             conn.exec_driver_sql(statement)

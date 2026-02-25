@@ -5063,7 +5063,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               className={cn(
                 "border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300 md:p-5",
                 topicChatFullscreen
-                  ? "fixed inset-0 z-[1400] m-0 flex h-[var(--claw-mobile-vh)] flex-col overflow-hidden rounded-none border-0 p-0"
+                  ? "fixed inset-0 z-[1400] m-0 flex h-[var(--claw-mobile-vh)] flex-col overflow-hidden rounded-none border-0 bg-[rgb(10,12,16)] p-0"
                   : "relative rounded-[var(--radius-lg)]",
                 // Mobile UX: keep the topic header visible and scroll the expanded body when it would
                 // exceed the viewport.
@@ -5623,7 +5623,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                          className={cn(
 		                            "border border-[rgb(var(--claw-border))] p-3.5 transition-colors duration-300 sm:p-4",
                                 taskChatFullscreen
-                                  ? "fixed inset-0 z-[1400] m-0 flex h-[var(--claw-mobile-vh)] flex-col overflow-hidden rounded-none border-0 p-0"
+                                  ? "fixed inset-0 z-[1400] m-0 flex h-[var(--claw-mobile-vh)] flex-col overflow-hidden rounded-none border-0 bg-[rgb(10,12,16)] p-0"
                                   : "relative rounded-[var(--radius-md)]",
 		                            draggingTaskId && taskDropTargetId === task.id ? "border-[rgba(77,171,158,0.55)]" : "",
                                 statusMenuTaskId === task.id ? "z-40" : ""

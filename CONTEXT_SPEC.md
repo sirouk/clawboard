@@ -11,6 +11,7 @@ For "what exists today", see `CONTEXT.md`.
 - **Bidirectional improvement loop**:
   - OpenClaw emits conversation + tool activity into Clawboard (durable memory).
   - OpenClaw can *query and update* Clawboard through explicit tools (notes, task status, etc.).
+- **Visibility-safe retrieval**: when a source space can be resolved, context/search is filtered to effective allowed spaces.
 - **Production-safe defaults**: no noisy auditing enabled by default; stable retention/rotation where logs are enabled.
 - **No retrieval pollution**: system metadata and injected context must not poison embeddings/search.
 
@@ -53,7 +54,7 @@ Triggering rules (default):
 - `mode=cheap`: Layer A only
 - `mode=full`: Layer A + Layer B
 - `mode=patient`: Layer A + Layer B, but the server may use larger bounded recall limits (slower; best for planning)
-- `mode=auto`: Layer B only if the query has signal (not "ok/yes") or the server decides recall is helpful
+- `mode=auto`: Layer B only if the query has signal, plus low-signal board-session turns (`clawboard:topic|task`) where scoped continuity recall is intentionally enabled
 
 ## Server Endpoint: `GET /api/context`
 
@@ -65,6 +66,8 @@ Return a **prompt-ready**, size-bounded context block plus structured data for a
 
 - `sessionKey` (optional): continuity bucket
 - `q` (optional): retrieval hint; may be empty for cheap continuity
+- `spaceId` (optional): explicit source space for visibility resolution
+- `allowedSpaceIds` (optional): explicit allowed space ids (comma-separated)
 - `mode` (optional): `auto|cheap|full|patient` (default `auto`)
 - `includePending` (optional): include unclassified logs when building context
 - `maxChars` (optional): hard cap for returned `block`
@@ -86,6 +89,8 @@ Return a **prompt-ready**, size-bounded context block plus structured data for a
 - `block.length <= maxChars` always
 - bounded query execution (no unbounded scans)
 - cacheable-by-key on the server side (implementation detail): `(sessionKey, q, mode, includePending, limits)`
+- when source space is resolved, context and recall content are restricted to effective allowed spaces
+- topic/task/log scope checks include tag-derived topic spaces, not only primary `spaceId`
 
 ## Agent Tools (OpenClaw plugin)
 
@@ -125,6 +130,7 @@ Each topic/task can hold a short **digest** that compresses long history into st
 
 - Injected context blocks must be sanitized out of logs before re-ingestion.
 - Reserved/system tags must not pollute embeddings or search ranking.
+- Tool trace actions and control-plane scaffolding must stay filtered from semantic continuity by default.
 - Audit logging:
   - disabled by default in production
   - if enabled, must have rotation/retention to prevent unbounded growth

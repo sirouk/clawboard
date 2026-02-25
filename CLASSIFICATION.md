@@ -343,13 +343,17 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
 
 ### 10.3 Search
 
+- `CLAWBOARD_SEARCH_MODE` (`auto|hybrid|fast`)
+- `CLAWBOARD_SEARCH_ENABLE_DENSE`
 - `CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS`
+- `CLAWBOARD_SEARCH_ENABLE_HEAVY_SEMANTIC` (legacy compatibility toggle)
 - `CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_*`
 - `CLAWBOARD_SEARCH_WINDOW_*`
 - `CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS`
 - `CLAWBOARD_SEARCH_CONCURRENCY_*`
 - `CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS`
 - `CLAWBOARD_SEARCH_SOURCE_TOPK_*`
+- `CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_*`
 - `CLAWBOARD_RERANK_CHUNKS_PER_DOC`
 - `CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE`
 
@@ -359,6 +363,13 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
 - `CLAWBOARD_QUEUE_POLL_SECONDS`
 - `CLAWBOARD_QUEUE_BATCH`
 - `CLAWBOARD_SQLITE_TIMEOUT_SECONDS`
+
+### 10.5 OpenClaw Bridge Dynamics
+
+- `OPENCLAW_CHAT_DISPATCH_*` (durable send queue workers, retries, stale recovery, quarantine)
+- `OPENCLAW_CHAT_IN_FLIGHT_*` (optional post-send progress probe and abort/retry window)
+- `OPENCLAW_CHAT_ASSISTANT_LOG_*` (watchdog cadence and backfill throttles)
+- `OPENCLAW_GATEWAY_HISTORY_SYNC_*` (gateway history fallback reconciliation)
 
 ## 11) Offworld Readiness Requirements
 
@@ -546,7 +557,7 @@ This catalog enumerates the complete engineered scenario surface at the methodol
   - all unit suites under `classifier/tests/*` pass,
   - `scripts/classifier_e2e_check.py` passes all scenarios,
   - no unbounded pending growth in `/api/metrics.logs.oldestPendingAt` under sustained test load.
-- Current audited status (`2026-02-17`) is tracked in sections 16 and 17:
+- Current audited status (`2026-02-25`) is tracked in sections 16 and 17:
   - Trace coverage (code-path): `77/77` (`100.0%`) in section 17
   - Trace gate: `MET`
   - `Covered: 77/77`
@@ -574,7 +585,7 @@ This section is merged from the former `CLASSIFICATION_TEST_MATRIX.md`.
 
 This matrix maps every normative scenario in `CLASSIFICATION.md` section 14 to current automated evidence.
 
-Snapshot date: `2026-02-17`
+Snapshot date: `2026-02-25`
 
 Trace-level companion:
 - section 17 confirms path-level trace coverage for all scenarios: `77/77` (`100.0%`).
@@ -680,7 +691,7 @@ Automated behavior full-coverage gate status: `MET` (`77/77` covered).
 | FIL-008 | fallback semantic route -> `classified` + `fallback:<reason>` | `classifier/tests/test_classifier_failure_paths.py::test_fil_008_fallback_route_sets_fallback_error_code` | Covered |
 | FIL-009 | heartbeat/control-plane conversation -> `failed` + detached | `classifier/tests/test_control_plane_and_tool_filtering.py::test_classify_session_filters_main_session_heartbeat_control_plane_conversation` | Covered |
 | FIL-010 | subagent scaffold conversation -> `failed` + detached | `classifier/tests/test_control_plane_and_tool_filtering.py::test_classify_session_filters_subagent_scaffold_conversation` | Covered |
-| FIL-011 | tool trace action -> anchored classified, unanchored failed | `classifier/tests/test_control_plane_and_tool_filtering.py::test_classify_session_marks_scoped_tool_action_filtered_in_forced_task_scope`; `classifier/tests/test_control_plane_and_tool_filtering.py::test_classify_session_marks_unanchored_tool_action_as_terminal_failed` | Covered |
+| FIL-011 | tool trace action -> anchored classified, unanchored failed | `classifier/tests/test_control_plane_and_tool_filtering.py::test_classify_session_marks_scoped_tool_action_filtered_in_forced_task_scope`; `classifier/tests/test_control_plane_and_tool_filtering.py::test_classify_session_marks_unanchored_tool_action_as_terminal_failed`; assertion expects `classificationError=filtered_tool_activity` for the anchored path | Covered |
 
 ### SRCH and Context Scenarios
 
