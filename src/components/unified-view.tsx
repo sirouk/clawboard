@@ -2400,14 +2400,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         const pSession = normalizeBoardSessionKey(pending.sessionKey);
         if (!pSession) return true;
         const pMessage = norm(pending.message);
-        const pRequest = (pending.requestId ?? "").trim();
+        const pRequest = normalizeOpenClawRequestId(pending.requestId);
         const pTs = Date.parse(pending.createdAt);
         const matches = logs.some((entry) => {
           const lSession = normalizeBoardSessionKey(entry.source?.sessionKey);
           if (!lSession) return false;
           if ((entry.agentId ?? "").toLowerCase() !== "user") return false;
           if (lSession !== pSession) return false;
-          const req = String(entry.source?.requestId ?? "").trim();
+          const req = requestIdForLogEntry(entry);
           if (pRequest && req && req === pRequest) return true;
           if (pRequest) return false;
           if (norm(entry.content ?? "") !== pMessage) return false;
@@ -2898,8 +2898,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (effectiveView !== "snoozed" && effectiveView !== "archived") {
       filtered.push({
         id: "unassigned",
-        name: "Deleted",
-        description: "Tasks not assigned to any topic.",
+        name: "Unassigned",
+        description: "Recycle bin for tasks from deleted topics.",
         pinned: false,
         lastActivity: new Date().toISOString(),
         createdAt: new Date().toISOString(),
@@ -3745,11 +3745,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setRenameError(deleteKey);
     try {
       const removed = new Set<string>();
-      for (const task of unassignedTasks) {
-        const res = await apiFetch(`/api/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" }, token);
-        if (!res.ok) continue;
-        const payload = (await res.json().catch(() => null)) as { deleted?: boolean } | null;
-        if (payload?.deleted) removed.add(task.id);
+      const bulkRes = await apiFetch("/api/tasks/unassigned/empty", { method: "DELETE" }, token);
+      if (bulkRes.status === 404) {
+        // Backward compatibility with older backends: fall back to per-task deletes.
+        for (const task of unassignedTasks) {
+          const res = await apiFetch(`/api/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" }, token);
+          if (!res.ok) continue;
+          const payload = (await res.json().catch(() => null)) as { deleted?: boolean } | null;
+          if (payload?.deleted) removed.add(task.id);
+        }
+      } else if (bulkRes.ok) {
+        for (const task of unassignedTasks) removed.add(task.id);
       }
       if (removed.size === 0) {
         setRenameError(deleteKey, "Failed to clear unassigned tasks.");
@@ -4760,10 +4766,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         {normalizedSearch && (
           <span className="text-xs text-[rgb(var(--claw-muted))]">
             {semanticSearch.loading
-              ? "Searching memory index…"
+              ? "Searching semantic index…"
               : semanticForQuery
                 ? `Semantic search (${semanticForQuery.mode})`
-                : semanticSearch.error
+                : semanticSearch.error === "search_timeout"
+                  ? "Semantic search timed out, using local match fallback."
+                  : semanticSearch.error
                   ? "Semantic search unavailable, using local match fallback."
                   : "Searching…"}
           </span>
@@ -5447,45 +5455,51 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                    >
                       {!topicChatFullscreen ? (
                         <>
-	                      <div className="flex flex-wrap items-center gap-2">
-                        <Input
-                          value={newTaskDraftByTopicId[topicId === "unassigned" ? "unassigned" : topicId] ?? ""}
-                          onChange={(event) => {
-                            const key = topicId === "unassigned" ? "unassigned" : topicId;
-                            const next = event.target.value;
-                            newTaskDraftEditedAtRef.current.set(key, Date.now());
-                            setNewTaskDraftByTopicId((prev) => ({ ...prev, [key]: next }));
-                            queueDraftUpsert(`draft:new-task:${key}`, next);
-                          }}
-                          onKeyDown={(event) => {
-                            if (event.key !== "Enter") return;
-                            event.preventDefault();
-                            const key = topicId === "unassigned" ? "unassigned" : topicId;
-                            const scopeTopicId = topicId === "unassigned" ? null : topicId;
-                            const draft = newTaskDraftByTopicId[key] ?? "";
-                            void createTask(scopeTopicId, draft);
-                          }}
-                          placeholder="Add a task…"
-                          disabled={readOnly || newTaskSavingKey === (topicId === "unassigned" ? "unassigned" : topicId)}
-                          className="h-9 min-w-[220px] flex-1 text-sm"
-                        />
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          disabled={readOnly || newTaskSavingKey === (topicId === "unassigned" ? "unassigned" : topicId)}
-                          onClick={() => {
-                            const key = topicId === "unassigned" ? "unassigned" : topicId;
-                            const scopeTopicId = topicId === "unassigned" ? null : topicId;
-                            const draft = newTaskDraftByTopicId[key] ?? "";
-                            void createTask(scopeTopicId, draft);
-                          }}
-                        >
-                          {newTaskSavingKey === (topicId === "unassigned" ? "unassigned" : topicId) ? "Adding..." : "+ Task"}
-                        </Button>
-                        {readOnly ? (
-                          <span className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add token in Setup to add tasks.</span>
-                        ) : null}
-                      </div>
+                      {!isUnassigned ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Input
+                            value={newTaskDraftByTopicId[topicId === "unassigned" ? "unassigned" : topicId] ?? ""}
+                            onChange={(event) => {
+                              const key = topicId === "unassigned" ? "unassigned" : topicId;
+                              const next = event.target.value;
+                              newTaskDraftEditedAtRef.current.set(key, Date.now());
+                              setNewTaskDraftByTopicId((prev) => ({ ...prev, [key]: next }));
+                              queueDraftUpsert(`draft:new-task:${key}`, next);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key !== "Enter") return;
+                              event.preventDefault();
+                              const key = topicId === "unassigned" ? "unassigned" : topicId;
+                              const scopeTopicId = topicId === "unassigned" ? null : topicId;
+                              const draft = newTaskDraftByTopicId[key] ?? "";
+                              void createTask(scopeTopicId, draft);
+                            }}
+                            placeholder="Add a task…"
+                            disabled={readOnly || newTaskSavingKey === (topicId === "unassigned" ? "unassigned" : topicId)}
+                            className="h-9 min-w-[220px] flex-1 text-sm"
+                          />
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            disabled={readOnly || newTaskSavingKey === (topicId === "unassigned" ? "unassigned" : topicId)}
+                            onClick={() => {
+                              const key = topicId === "unassigned" ? "unassigned" : topicId;
+                              const scopeTopicId = topicId === "unassigned" ? null : topicId;
+                              const draft = newTaskDraftByTopicId[key] ?? "";
+                              void createTask(scopeTopicId, draft);
+                            }}
+                          >
+                            {newTaskSavingKey === (topicId === "unassigned" ? "unassigned" : topicId) ? "Adding..." : "+ Task"}
+                          </Button>
+                          {readOnly ? (
+                            <span className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add token in Setup to add tasks.</span>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-[rgb(var(--claw-muted))]">
+                          Recycle bin: tasks appear here after their topic is deleted. Swipe left and tap EMPTY to clear all.
+                        </p>
+                      )}
 	                  {taskList.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No tasks yet.</p>}
 	                  {taskList
 	                    .filter((task) => {
@@ -5814,7 +5828,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                         disabled={readOnly}
                                         onClick={(event) => event.stopPropagation()}
                                       >
-                                        <option value="">Unassigned</option>
+                                        {!task.topicId ? (
+                                          <option value="">Unassigned (Recycle Bin)</option>
+                                        ) : null}
                                         {topics.map((topicOption) => (
                                           <option key={topicOption.id} value={topicOption.id}>
                                             {topicOption.name}

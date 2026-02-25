@@ -121,12 +121,55 @@ class BoardSessionClassificationTests(unittest.TestCase):
                 "id": "log-1",
                 "type": "conversation",
                 "agentId": "user",
-                "content": "Ship it.",
+                "content": "Ship portal hotfix Z4FF462D9. Also include the requested copy fix on the login form.",
                 "classificationStatus": "pending",
                 "classificationAttempts": 0,
                 "createdAt": "2026-02-09T09:10:00.000Z",
                 "source": {"sessionKey": session_key},
-            }
+            },
+            {
+                "id": "log-2",
+                "type": "conversation",
+                "agentId": "user",
+                "content": "/new",
+                "classificationStatus": "pending",
+                "classificationAttempts": 0,
+                "createdAt": "2026-02-09T09:10:01.000Z",
+                "source": {"sessionKey": session_key},
+            },
+            {
+                "id": "log-3",
+                "type": "action",
+                "agentId": "assistant",
+                "content": "Tool call: memory_search login copy",
+                "classificationStatus": "pending",
+                "classificationAttempts": 0,
+                "createdAt": "2026-02-09T09:10:02.000Z",
+                "source": {"sessionKey": session_key},
+            },
+            {
+                "id": "log-4",
+                "type": "system",
+                "agentId": "system",
+                "content": "System: heartbeat",
+                "classificationStatus": "pending",
+                "classificationAttempts": 0,
+                "createdAt": "2026-02-09T09:10:03.000Z",
+                "source": {"sessionKey": session_key},
+            },
+            {
+                "id": "log-5",
+                "type": "action",
+                "agentId": "assistant",
+                "content": "Tool call: memory_search login copy",
+                "classificationStatus": "classified",
+                "classificationAttempts": 1,
+                "classificationError": "filtered_tool_activity",
+                "topicId": "topic-abc",
+                "taskId": "task-old",
+                "createdAt": "2026-02-09T09:10:04.000Z",
+                "source": {"sessionKey": session_key},
+            },
         ]
 
         patched: list[tuple[str, dict]] = []
@@ -134,7 +177,7 @@ class BoardSessionClassificationTests(unittest.TestCase):
         def fake_list_logs_by_session(_sk: str, **kwargs):
             self.assertEqual(_sk, session_key)
             if kwargs.get("classificationStatus") == "pending":
-                return logs
+                return [item for item in logs if item.get("classificationStatus") == "pending"]
             return logs
 
         def fake_patch_log(log_id: str, patch: dict):
@@ -145,10 +188,26 @@ class BoardSessionClassificationTests(unittest.TestCase):
         ):
             c.classify_session(session_key)
 
-        self.assertTrue(patched)
-        for _lid, payload in patched:
-            self.assertEqual(payload.get("topicId"), "topic-abc")
-            self.assertEqual(payload.get("taskId"), "task-xyz")
+        by_id = {lid: payload for lid, payload in patched}
+        self.assertEqual(by_id["log-1"].get("topicId"), "topic-abc")
+        self.assertEqual(by_id["log-1"].get("taskId"), "task-xyz")
+
+        self.assertEqual(by_id["log-2"].get("classificationError"), "filtered_command")
+        self.assertEqual(by_id["log-2"].get("topicId"), "topic-abc")
+        self.assertEqual(by_id["log-2"].get("taskId"), "task-xyz")
+
+        self.assertEqual(by_id["log-3"].get("classificationError"), "filtered_memory_action")
+        self.assertEqual(by_id["log-3"].get("topicId"), "topic-abc")
+        self.assertEqual(by_id["log-3"].get("taskId"), "task-xyz")
+
+        self.assertEqual(by_id["log-4"].get("classificationError"), "filtered_non_semantic")
+        self.assertEqual(by_id["log-4"].get("topicId"), "topic-abc")
+        self.assertEqual(by_id["log-4"].get("taskId"), "task-xyz")
+
+        # Backfill previously-classified action traces that drifted to the wrong task.
+        self.assertEqual(by_id["log-5"].get("classificationError"), "filtered_memory_action")
+        self.assertEqual(by_id["log-5"].get("topicId"), "topic-abc")
+        self.assertEqual(by_id["log-5"].get("taskId"), "task-xyz")
 
     def test_subagent_session_with_existing_task_scope_stays_pinned(self):
         session_key = "agent:main:subagent:abc-123"

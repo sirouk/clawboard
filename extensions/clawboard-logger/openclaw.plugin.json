@@ -14,10 +14,19 @@
       "contextAugment": { "type": "boolean" },
       "contextMode": { "type": "string", "enum": ["auto", "cheap", "full", "patient"] },
       "contextFetchTimeoutMs": { "type": "number" },
+      "contextFetchRetries": { "type": "number" },
+      "contextFallbackModes": {
+        "type": "array",
+        "items": { "type": "string", "enum": ["auto", "cheap", "full", "patient"] }
+      },
+      "contextCacheTtlMs": { "type": "number" },
+      "contextCacheMaxEntries": { "type": "number" },
+      "contextUseCacheOnFailure": { "type": "boolean" },
       "contextMaxChars": { "type": "number" },
       "contextTopicLimit": { "type": "number" },
       "contextTaskLimit": { "type": "number" },
-      "contextLogLimit": { "type": "number" }
+      "contextLogLimit": { "type": "number" },
+      "enableOpenClawMemorySearch": { "type": "boolean" }
     },
     "required": ["baseUrl"]
   },
@@ -29,9 +38,15 @@
     "contextAugment": { "label": "Inject context before agent start" },
     "contextMode": { "label": "Context mode", "placeholder": "auto" },
     "contextFetchTimeoutMs": { "label": "Context fetch timeout (ms)" },
+    "contextFetchRetries": { "label": "Context fetch retries per mode" },
+    "contextFallbackModes": { "label": "Context fallback modes (ordered)" },
+    "contextCacheTtlMs": { "label": "Context cache TTL (ms)" },
+    "contextCacheMaxEntries": { "label": "Context cache max entries" },
+    "contextUseCacheOnFailure": { "label": "Use cached context on fetch failure" },
     "contextMaxChars": { "label": "Max context chars" },
     "contextTopicLimit": { "label": "Max context topics" },
     "contextTaskLimit": { "label": "Max context tasks" },
-    "contextLogLimit": { "label": "Max recent thread entries" }
+    "contextLogLimit": { "label": "Max recent thread entries" },
+    "enableOpenClawMemorySearch": { "label": "Allow OpenClaw memory search" }
   }
 }

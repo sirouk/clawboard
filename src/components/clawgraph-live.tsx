@@ -951,10 +951,12 @@ export function ClawgraphLive() {
         {normalizedQuery && (
           <p className="text-xs text-[rgb(var(--claw-muted))]">
             {semanticSearch.loading
-              ? "Searching memory index…"
+              ? "Searching semantic index…"
               : semanticForQuery
                 ? `Semantic search (${semanticForQuery.mode}) + graph label match`
-                : semanticSearch.error
+                : semanticSearch.error === "search_timeout"
+                  ? "Semantic search timed out, using graph label fallback."
+                  : semanticSearch.error
                   ? "Semantic search unavailable, using graph label fallback."
                   : "Searching…"}
           </p>

@@ -470,6 +470,112 @@ test("before_agent_start skips no-reply-directive hint for non-board sessions", 
   }
 });
 
+test("before_agent_start defaults to clawboard-only memory instruction", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, _options = {}) => {
+      if (String(url).includes("/api/context")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { block: "memory policy context block" };
+          },
+          async text() {
+            return '{"block":"memory policy context block"}';
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {};
+        },
+        async text() {
+          return "{}";
+        },
+      };
+    };
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("before_agent_start");
+    assert.equal(typeof handler, "function");
+
+    const result = await handler(
+      {
+        prompt: "Plan next steps",
+        messages: [],
+      },
+      {
+        sessionKey: "channel:discord-123",
+        conversationId: "channel:discord-123",
+      }
+    );
+
+    const prependContext = String(result?.prependContext || "");
+    assert.ok(prependContext.includes("Do not run OpenClaw memory_search/memory_get"));
+    assert.equal(prependContext.includes("merged with existing OpenClaw memory/turn context"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("before_agent_start can allow openclaw memory merge when explicitly enabled", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, _options = {}) => {
+      if (String(url).includes("/api/context")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { block: "memory policy context block" };
+          },
+          async text() {
+            return '{"block":"memory policy context block"}';
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {};
+        },
+        async text() {
+          return "{}";
+        },
+      };
+    };
+
+    const api = makeApi({ enableOpenClawMemorySearch: true });
+    register(api);
+
+    const handler = api.__handlers.get("before_agent_start");
+    assert.equal(typeof handler, "function");
+
+    const result = await handler(
+      {
+        prompt: "Plan next steps",
+        messages: [],
+      },
+      {
+        sessionKey: "channel:discord-123",
+        conversationId: "channel:discord-123",
+      }
+    );
+
+    const prependContext = String(result?.prependContext || "");
+    assert.ok(prependContext.includes("merged with existing OpenClaw memory/turn context"));
+    assert.equal(prependContext.includes("Do not run OpenClaw memory_search/memory_get"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("before_agent_start skips context retrieval for heartbeat control-plane prompts", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -508,6 +614,147 @@ test("before_agent_start skips context retrieval for heartbeat control-plane pro
 
     assert.equal(result, undefined);
     assert.equal(calls.some((url) => url.includes("/api/context")), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("before_agent_start falls back to configured context mode when primary mode retrieval fails", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const calls = [];
+    globalThis.fetch = async (url, _options = {}) => {
+      const rawUrl = String(url);
+      calls.push(rawUrl);
+      if (!rawUrl.includes("/api/context")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {};
+          },
+          async text() {
+            return "{}";
+          },
+        };
+      }
+      const parsed = new URL(rawUrl);
+      const mode = parsed.searchParams.get("mode");
+      if (mode === "auto") {
+        throw new Error("simulated timeout");
+      }
+      if (mode === "full") {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { block: "fallback full context block" };
+          },
+          async text() {
+            return '{"block":"fallback full context block"}';
+          },
+        };
+      }
+      return {
+        ok: false,
+        status: 503,
+        async json() {
+          return {};
+        },
+        async text() {
+          return "{}";
+        },
+      };
+    };
+
+    const api = makeApi({
+      contextMode: "auto",
+      contextFetchRetries: 0,
+      contextFallbackModes: ["full", "cheap"],
+    });
+    register(api);
+
+    const handler = api.__handlers.get("before_agent_start");
+    assert.equal(typeof handler, "function");
+
+    const result = await handler(
+      {
+        prompt: "Plan next steps",
+        messages: [],
+      },
+      {
+        sessionKey: "channel:test-fallback",
+        conversationId: "channel:test-fallback",
+      }
+    );
+
+    const prependContext = String(result?.prependContext || "");
+    assert.ok(prependContext.includes("fallback full context block"));
+    const contextCalls = calls.filter((url) => url.includes("/api/context"));
+    assert.equal(contextCalls.length >= 2, true);
+    assert.equal(new URL(contextCalls[0]).searchParams.get("mode"), "auto");
+    assert.equal(new URL(contextCalls[1]).searchParams.get("mode"), "full");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("before_agent_start injects context for subagent scaffold prompts using generic retrieval query", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const calls = [];
+    globalThis.fetch = async (url, _options = {}) => {
+      const rawUrl = String(url);
+      calls.push(rawUrl);
+      if (rawUrl.includes("/api/context")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { block: "subagent context block" };
+          },
+          async text() {
+            return '{"block":"subagent context block"}';
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {};
+        },
+        async text() {
+          return "{}";
+        },
+      };
+    };
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("before_agent_start");
+    assert.equal(typeof handler, "function");
+
+    const result = await handler(
+      {
+        prompt:
+          "[Subagent Context] You are running as a subagent (depth 1/1). Results auto-announce to your requester.",
+        messages: [],
+      },
+      {
+        sessionKey: "agent:coding:subagent:test-scaffold",
+        conversationId: "agent:coding:subagent:test-scaffold",
+        channelId: "direct",
+      }
+    );
+
+    const prependContext = String(result?.prependContext || "");
+    assert.ok(prependContext.includes("subagent context block"));
+    const contextCall = calls.find((url) => url.includes("/api/context"));
+    assert.ok(contextCall, "expected /api/context call");
+    const q = new URL(contextCall).searchParams.get("q");
+    assert.equal(q, "current conversation continuity, active topics, active tasks, and curated notes");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1101,6 +1348,85 @@ test("after_tool_call reuses before_tool_call scope when result event lacks sess
     assert.equal(resultPayload.source.sessionKey, scopedCtx.sessionKey);
     assert.equal(resultPayload.source.boardScopeTopicId, "topic-fallback-1");
     assert.equal(resultPayload.source.boardScopeTaskId, "task-fallback-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("after_tool_call reuses before scope via tool fingerprint when runId is absent", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const beforeHandler = api.__handlers.get("before_tool_call");
+    const afterHandler = api.__handlers.get("after_tool_call");
+    assert.equal(typeof beforeHandler, "function");
+    assert.equal(typeof afterHandler, "function");
+
+    const parentSessionKey = "agent:main:clawboard:task:topic-fp-fallback-1:task-fp-fallback-1";
+    const childSessionKey = "agent:coding:subagent:fp-fallback-worker-1";
+
+    await beforeHandler(
+      {
+        toolName: "sessions_spawn",
+        params: { agentId: "coding" },
+      },
+      {
+        sessionKey: parentSessionKey,
+        channelId: "openclaw",
+        agentId: "main",
+      }
+    );
+
+    // Runtime path where after_tool_call can arrive without session + runId.
+    await afterHandler(
+      {
+        toolName: "sessions_spawn",
+        params: { agentId: "coding" },
+        result: { status: "accepted", childSessionKey },
+        durationMs: 9,
+      },
+      {
+        channelId: "openclaw",
+        agentId: "main",
+      }
+    );
+
+    // Child subagent call should now inherit scope from the recovered spawn linkage.
+    await beforeHandler(
+      {
+        toolName: "exec",
+        params: { command: "pwd" },
+      },
+      {
+        sessionKey: childSessionKey,
+        channelId: "openclaw",
+        agentId: "coding",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 3);
+    const payloads = meaningfulCalls(calls).map((call) => parseBody(call));
+    const spawnResult = payloads.find((payload) => payload?.content === "Tool result: sessions_spawn");
+    const childCall = payloads.find(
+      (payload) => payload?.source?.sessionKey === childSessionKey && payload?.content === "Tool call: exec"
+    );
+
+    assert.ok(spawnResult, "expected sessions_spawn result log");
+    assert.equal(spawnResult.topicId, "topic-fp-fallback-1");
+    assert.equal(spawnResult.taskId, "task-fp-fallback-1");
+    assert.equal(spawnResult.source.sessionKey, parentSessionKey);
+
+    assert.ok(childCall, "expected child subagent tool call log");
+    assert.equal(childCall.topicId, "topic-fp-fallback-1");
+    assert.equal(childCall.taskId, "task-fp-fallback-1");
+    assert.equal(childCall.source.boardScopeTopicId, "topic-fp-fallback-1");
+    assert.equal(childCall.source.boardScopeTaskId, "task-fp-fallback-1");
+    assert.equal(childCall.source.boardScopeInherited, true);
   } finally {
     globalThis.fetch = originalFetch;
   }

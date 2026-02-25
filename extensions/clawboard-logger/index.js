@@ -12,6 +12,11 @@ const DEFAULT_CONTEXT_MAX_CHARS = 2200;
 const DEFAULT_CONTEXT_TOPIC_LIMIT = 3;
 const DEFAULT_CONTEXT_TASK_LIMIT = 3;
 const DEFAULT_CONTEXT_LOG_LIMIT = 6;
+const DEFAULT_CONTEXT_FETCH_TIMEOUT_MS = 3000;
+const DEFAULT_CONTEXT_FETCH_RETRIES = 1;
+const DEFAULT_CONTEXT_CACHE_TTL_MS = 45_000;
+const DEFAULT_CONTEXT_CACHE_MAX_ENTRIES = 120;
+const DEFAULT_CONTEXT_CACHE_FRESH_MS = 2500;
 const CLAWBOARD_CONTEXT_BEGIN = "[CLAWBOARD_CONTEXT_BEGIN]";
 const CLAWBOARD_CONTEXT_END = "[CLAWBOARD_CONTEXT_END]";
 const IGNORE_SESSION_PREFIXES = getIgnoreSessionPrefixesFromEnv(process.env);
@@ -25,6 +30,39 @@ function envInt(name, fallback, min, max) {
     const parsed = Number.parseInt(raw, 10);
     const value = Number.isFinite(parsed) ? parsed : fallback;
     return Math.max(min, Math.min(max, value));
+}
+function envBool(name, fallback) {
+    const raw = (process.env[name] ?? "").trim().toLowerCase();
+    if (!raw)
+        return fallback;
+    if (["1", "true", "yes", "on"].includes(raw))
+        return true;
+    if (["0", "false", "no", "off"].includes(raw))
+        return false;
+    return fallback;
+}
+function isContextMode(value) {
+    return value === "auto" || value === "cheap" || value === "full" || value === "patient";
+}
+function parseContextModes(value, fallback = []) {
+    const input = typeof value === "string" ? value : "";
+    if (!input.trim())
+        return [...fallback];
+    const items = input
+        .split(",")
+        .map((item) => item.trim().toLowerCase())
+        .filter((item) => Boolean(item) && isContextMode(item));
+    if (items.length === 0)
+        return [...fallback];
+    const seen = new Set();
+    const deduped = [];
+    for (const mode of items) {
+        if (seen.has(mode))
+            continue;
+        seen.add(mode);
+        deduped.push(mode);
+    }
+    return deduped;
 }
 const OPENCLAW_REQUEST_ID_TTL_MS = envInt("OPENCLAW_REQUEST_ID_TTL_SECONDS", 7 * OPENCLAW_DAY_SECONDS, 5 * 60, 90 * OPENCLAW_DAY_SECONDS) * 1000;
 const OPENCLAW_REQUEST_ID_MAX_ENTRIES = envInt("OPENCLAW_REQUEST_ID_MAX_ENTRIES", 5000, 200, 50000);
@@ -276,12 +314,14 @@ export default function register(api) {
     // Stage-2 classifier will attach real topics asynchronously.
     const autoTopicBySession = rawConfig.autoTopicBySession === true;
     const contextAugment = rawConfig.contextAugment !== false;
-    const contextMode = (rawConfig.contextMode && ["auto", "cheap", "full", "patient"].includes(rawConfig.contextMode)
+    const rawContextMode = typeof rawConfig.contextMode === "string" && rawConfig.contextMode.trim()
         ? rawConfig.contextMode
-        : "auto");
+        : (process.env.CLAWBOARD_LOGGER_CONTEXT_MODE ?? "");
+    const normalizedContextMode = rawContextMode.trim().toLowerCase();
+    const effectiveContextMode = isContextMode(normalizedContextMode) ? normalizedContextMode : "auto";
     const contextFetchTimeoutMs = typeof rawConfig.contextFetchTimeoutMs === "number" && Number.isFinite(rawConfig.contextFetchTimeoutMs)
         ? Math.max(200, Math.min(20_000, Math.floor(rawConfig.contextFetchTimeoutMs)))
-        : 1200;
+        : envInt("CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS", DEFAULT_CONTEXT_FETCH_TIMEOUT_MS, 200, 20_000);
     const contextMaxChars = typeof rawConfig.contextMaxChars === "number" && Number.isFinite(rawConfig.contextMaxChars)
         ? Math.max(400, Math.min(12000, Math.floor(rawConfig.contextMaxChars)))
         : DEFAULT_CONTEXT_MAX_CHARS;
@@ -294,6 +334,39 @@ export default function register(api) {
     const contextLogLimit = typeof rawConfig.contextLogLimit === "number" && Number.isFinite(rawConfig.contextLogLimit)
         ? Math.max(2, Math.min(20, Math.floor(rawConfig.contextLogLimit)))
         : DEFAULT_CONTEXT_LOG_LIMIT;
+    const contextFetchRetries = typeof rawConfig.contextFetchRetries === "number" && Number.isFinite(rawConfig.contextFetchRetries)
+        ? Math.max(0, Math.min(3, Math.floor(rawConfig.contextFetchRetries)))
+        : envInt("CLAWBOARD_LOGGER_CONTEXT_FETCH_RETRIES", DEFAULT_CONTEXT_FETCH_RETRIES, 0, 3);
+    const contextCacheTtlMs = typeof rawConfig.contextCacheTtlMs === "number" && Number.isFinite(rawConfig.contextCacheTtlMs)
+        ? Math.max(0, Math.min(5 * 60_000, Math.floor(rawConfig.contextCacheTtlMs)))
+        : envInt("CLAWBOARD_LOGGER_CONTEXT_CACHE_TTL_MS", DEFAULT_CONTEXT_CACHE_TTL_MS, 0, 5 * 60_000);
+    const contextCacheMaxEntries = typeof rawConfig.contextCacheMaxEntries === "number" && Number.isFinite(rawConfig.contextCacheMaxEntries)
+        ? Math.max(8, Math.min(1000, Math.floor(rawConfig.contextCacheMaxEntries)))
+        : envInt("CLAWBOARD_LOGGER_CONTEXT_CACHE_MAX_ENTRIES", DEFAULT_CONTEXT_CACHE_MAX_ENTRIES, 8, 1000);
+    const contextUseCacheOnFailure = typeof rawConfig.contextUseCacheOnFailure === "boolean"
+        ? rawConfig.contextUseCacheOnFailure
+        : envBool("CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE", true);
+    const contextFallbackModes = Array.isArray(rawConfig.contextFallbackModes)
+        ? parseContextModes(rawConfig.contextFallbackModes.join(","))
+        : parseContextModes(process.env.CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES, []);
+    const enableOpenClawMemorySearch = (() => {
+        if (typeof rawConfig.enableOpenClawMemorySearch === "boolean") {
+            return rawConfig.enableOpenClawMemorySearch;
+        }
+        if (typeof rawConfig.disableOpenClawMemorySearch === "boolean") {
+            return !rawConfig.disableOpenClawMemorySearch;
+        }
+        const rawEnable = (process.env.CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH ?? "").trim();
+        if (rawEnable) {
+            return envBool("CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH", false);
+        }
+        const rawDisable = (process.env.CLAWBOARD_LOGGER_DISABLE_OPENCLAW_MEMORY_SEARCH ?? "").trim();
+        if (rawDisable) {
+            return !envBool("CLAWBOARD_LOGGER_DISABLE_OPENCLAW_MEMORY_SEARCH", true);
+        }
+        // Default: keep OpenClaw memory search off and prefer Clawboard retrieval context.
+        return false;
+    })();
     if (!enabled) {
         api.logger.warn("[clawboard-logger] disabled by config");
         return;
@@ -1449,25 +1522,185 @@ export default function register(api) {
         });
     }
     registerAgentTools();
+    const contextCache = new Map();
+    function contextSessionCacheKey(sessionKey) {
+        const normalized = normalizeWhitespace(String(sessionKey ?? ""));
+        return normalized || "global";
+    }
+    function contextQueryHash(query) {
+        return crypto.createHash("sha256").update(query).digest("hex").slice(0, 24);
+    }
+    function contextCacheKey(sessionKey, query, mode) {
+        return `${contextSessionCacheKey(sessionKey)}|${mode}|${contextQueryHash(query)}`;
+    }
+    function contextModePlan(primary) {
+        const defaultsByPrimary = {
+            auto: ["full", "cheap"],
+            cheap: ["auto", "full"],
+            full: ["auto", "cheap"],
+            patient: ["full", "auto", "cheap"],
+        };
+        const configured = contextFallbackModes.length > 0 ? contextFallbackModes : defaultsByPrimary[primary];
+        const ordered = [primary, ...configured];
+        const seen = new Set();
+        const deduped = [];
+        for (const mode of ordered) {
+            if (!isContextMode(mode) || seen.has(mode))
+                continue;
+            seen.add(mode);
+            deduped.push(mode);
+        }
+        return deduped.length > 0 ? deduped : [primary];
+    }
+    function pruneContextCache() {
+        if (contextCache.size === 0)
+            return;
+        const now = nowMs();
+        if (contextCacheTtlMs > 0) {
+            for (const [key, entry] of contextCache.entries()) {
+                if (now - entry.cachedAtMs > contextCacheTtlMs)
+                    contextCache.delete(key);
+            }
+        }
+        else {
+            contextCache.clear();
+            return;
+        }
+        if (contextCache.size <= contextCacheMaxEntries)
+            return;
+        const sorted = Array.from(contextCache.entries()).sort((a, b) => a[1].cachedAtMs - b[1].cachedAtMs);
+        const overflow = contextCache.size - contextCacheMaxEntries;
+        for (let i = 0; i < overflow; i += 1) {
+            const row = sorted[i];
+            if (!row)
+                break;
+            contextCache.delete(row[0]);
+        }
+    }
+    function readContextCacheEntry(sessionKey, query, mode, maxAgeMs) {
+        if (contextCacheTtlMs <= 0 || maxAgeMs <= 0)
+            return undefined;
+        const entry = contextCache.get(contextCacheKey(sessionKey, query, mode));
+        if (!entry)
+            return undefined;
+        if (nowMs() - entry.cachedAtMs > maxAgeMs)
+            return undefined;
+        return entry;
+    }
+    function writeContextCache(sessionKey, query, mode, block) {
+        if (contextCacheTtlMs <= 0)
+            return;
+        contextCache.set(contextCacheKey(sessionKey, query, mode), {
+            mode,
+            block,
+            cachedAtMs: nowMs(),
+        });
+        pruneContextCache();
+    }
+    async function fetchContextBlockViaContextApi(query, sessionKey, mode) {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), contextFetchTimeoutMs);
+        try {
+            const url = new URL(`${baseUrl}/api/context`);
+            url.searchParams.set("q", query);
+            if (sessionKey)
+                url.searchParams.set("sessionKey", sessionKey);
+            url.searchParams.set("mode", mode);
+            url.searchParams.set("includePending", "1");
+            url.searchParams.set("maxChars", String(contextMaxChars));
+            // Working set should be a bit larger than semantic shortlist.
+            url.searchParams.set("workingSetLimit", String(Math.max(6, contextTaskLimit)));
+            url.searchParams.set("timelineLimit", String(contextLogLimit));
+            const res = await fetch(url.toString(), { headers: apiHeaders, signal: controller.signal });
+            if (!res.ok) {
+                return {
+                    status: res.status,
+                    error: `http_${res.status}`,
+                };
+            }
+            let payload;
+            try {
+                payload = await res.json();
+            }
+            catch (err) {
+                return {
+                    status: res.status,
+                    error: `invalid_json:${formatSendError(err)}`,
+                };
+            }
+            if (!payload || typeof payload !== "object") {
+                return {
+                    status: res.status,
+                    error: "empty_payload",
+                };
+            }
+            const block = payload.block;
+            if (typeof block === "string" && block.trim().length > 0) {
+                return {
+                    status: res.status,
+                    block: block.trim(),
+                };
+            }
+            return {
+                status: res.status,
+                error: "empty_block",
+            };
+        }
+        catch (err) {
+            return {
+                status: 0,
+                error: formatSendError(err),
+            };
+        }
+        finally {
+            clearTimeout(t);
+        }
+    }
     async function retrieveContextViaContextApi(query, sessionKey, mode = "auto") {
         const normalizedQuery = clip(normalizeWhitespace(sanitizeMessageContent(query)), 500);
         if (!normalizedQuery)
             return undefined;
-        const payload = await getJson("/api/context", {
-            q: normalizedQuery,
-            sessionKey,
-            mode,
-            includePending: 1,
-            maxChars: contextMaxChars,
-            // Working set should be a bit larger than semantic shortlist.
-            workingSetLimit: Math.max(6, contextTaskLimit),
-            timelineLimit: contextLogLimit,
-        });
-        if (!payload || typeof payload !== "object")
-            return undefined;
-        const block = payload.block;
-        if (typeof block === "string" && block.trim().length > 0) {
-            return block.trim();
+        const modes = contextModePlan(mode);
+        const freshCacheTtlMs = Math.max(0, Math.min(contextCacheTtlMs, DEFAULT_CONTEXT_CACHE_FRESH_MS));
+        if (freshCacheTtlMs > 0) {
+            for (const currentMode of modes) {
+                const cached = readContextCacheEntry(sessionKey, normalizedQuery, currentMode, freshCacheTtlMs);
+                if (cached)
+                    return cached.block;
+            }
+        }
+        let lastError = "";
+        for (const currentMode of modes) {
+            for (let attempt = 0; attempt <= contextFetchRetries; attempt += 1) {
+                const result = await fetchContextBlockViaContextApi(normalizedQuery, sessionKey, currentMode);
+                if (result.block) {
+                    writeContextCache(sessionKey, normalizedQuery, currentMode, result.block);
+                    return result.block;
+                }
+                const status = typeof result.status === "number" ? result.status : 0;
+                lastError = result.error ?? (status > 0 ? `http_${status}` : "unknown_error");
+                const hardClientError = status >= 400 && status < 500 && status !== 408 && status !== 429;
+                if (hardClientError)
+                    break;
+                if (attempt < contextFetchRetries) {
+                    await sleep(computeBackoffMs(attempt + 1, 1500));
+                }
+            }
+        }
+        if (contextUseCacheOnFailure && contextCacheTtlMs > 0) {
+            for (const currentMode of modes) {
+                const cached = readContextCacheEntry(sessionKey, normalizedQuery, currentMode, contextCacheTtlMs);
+                if (!cached)
+                    continue;
+                if (debug) {
+                    const ageMs = Math.max(0, nowMs() - cached.cachedAtMs);
+                    api.logger.warn(`[clawboard-logger] context retrieval failed (${lastError || "unknown"}); using cached context mode=${cached.mode} ageMs=${ageMs}`);
+                }
+                return cached.block;
+            }
+        }
+        if (debug && lastError) {
+            api.logger.warn(`[clawboard-logger] context retrieval unavailable: ${lastError}`);
         }
         return undefined;
     }
@@ -1478,31 +1711,43 @@ export default function register(api) {
         const input = latestUserInput(event.prompt, event.messages);
         const cleanInput = sanitizeMessageContent(input ?? "");
         const effectiveSessionKey = computeEffectiveSessionKey(undefined, ctx);
-        if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
+        const sessionKeyForContext = effectiveSessionKey ?? ctx?.sessionKey;
+        if (shouldIgnoreSessionKey(sessionKeyForContext, IGNORE_SESSION_PREFIXES))
             return;
         // Avoid expensive retrieval for internal classifier payloads (these can be huge JSON blobs and will
         // stampede /api/search). The classifier/log hooks already skip logging these.
         if (cleanInput && isClassifierPayloadText(cleanInput))
             return;
         if (cleanInput &&
-            shouldSuppressNonSemanticConversation(cleanInput, {
-                sessionKey: effectiveSessionKey ?? ctx?.sessionKey,
+            isHeartbeatControlPlaneText(cleanInput, {
+                sessionKey: sessionKeyForContext,
                 channelId: ctx?.channelId,
             })) {
             return;
         }
-        const retrievalQuery = cleanInput && cleanInput.trim().length > 0
+        const isSubagentScaffoldPrompt = cleanInput &&
+            isSubagentScaffoldText(cleanInput, sessionKeyForContext);
+        if (cleanInput &&
+            shouldSuppressNonSemanticConversation(cleanInput, {
+                sessionKey: sessionKeyForContext,
+                channelId: ctx?.channelId,
+            }) &&
+            !isSubagentScaffoldPrompt) {
+            return;
+        }
+        const retrievalQuery = cleanInput && cleanInput.trim().length > 0 && !isSubagentScaffoldPrompt
             ? clip(cleanInput, 320)
             : "current conversation continuity, active topics, active tasks, and curated notes";
-        const sessionKeyForContext = effectiveSessionKey ?? ctx?.sessionKey;
-        const primaryMode = contextMode;
+        const primaryMode = effectiveContextMode;
         const context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, primaryMode);
         if (!context)
             return;
         const prependLines = [
             CLAWBOARD_CONTEXT_BEGIN,
             "Clawboard continuity hook is active for this turn. The block below already comes from Clawboard retrieval. Do not claim Clawboard is unavailable unless this block explicitly says retrieval failed.",
-            "Use this Clawboard retrieval context merged with existing OpenClaw memory/turn context. Prioritize curated user notes when present.",
+            enableOpenClawMemorySearch
+                ? "Use this Clawboard retrieval context merged with existing OpenClaw memory/turn context. Prioritize curated user notes when present."
+                : "Use this Clawboard retrieval context as the primary memory source for this turn. Do not run OpenClaw memory_search/memory_get unless the user explicitly asks for OpenClaw memory.",
         ];
         if (shouldSuppressReplyDirectivesForSession(sessionKeyForContext)) {
             prependLines.push("This session is Clawboard UI-native. Reply in plain text and never emit [[reply_to_current]] or [[reply_to:<id>]] tags.");
@@ -1522,8 +1767,11 @@ export default function register(api) {
     const agentEndCursorBySession = new Map();
     const openclawRequestBySession = new Map();
     const toolScopeByRunId = new Map();
+    const toolScopeByFingerprint = new Map();
+    const toolScopeByName = new Map();
     const TOOL_SCOPE_MEMORY_TTL_MS = 15 * 60_000;
     const TOOL_SCOPE_MEMORY_MAX_ENTRIES = 400;
+    const TOOL_SCOPE_FINGERPRINT_QUEUE_MAX = 8;
     const pruneOpenclawRequestMap = (ts, forceTrim = false) => {
         for (const [key, value] of openclawRequestBySession.entries()) {
             if (ts - value.ts > OPENCLAW_REQUEST_ID_TTL_MS) {
@@ -1653,18 +1901,114 @@ export default function register(api) {
                 toolScopeByRunId.delete(key);
             }
         }
-        if (!forceTrim && toolScopeByRunId.size <= TOOL_SCOPE_MEMORY_MAX_ENTRIES)
-            return;
-        if (toolScopeByRunId.size <= TOOL_SCOPE_MEMORY_MAX_ENTRIES)
-            return;
-        const ordered = Array.from(toolScopeByRunId.entries()).sort((a, b) => a[1].ts - b[1].ts);
-        const overflow = toolScopeByRunId.size - TOOL_SCOPE_MEMORY_MAX_ENTRIES;
-        for (let i = 0; i < overflow; i += 1) {
-            const row = ordered[i];
-            if (!row)
-                break;
-            toolScopeByRunId.delete(row[0]);
+        for (const [key, rows] of toolScopeByFingerprint.entries()) {
+            const freshRows = rows.filter((row) => ts - row.ts <= TOOL_SCOPE_MEMORY_TTL_MS);
+            if (freshRows.length > 0) {
+                toolScopeByFingerprint.set(key, freshRows);
+            }
+            else {
+                toolScopeByFingerprint.delete(key);
+            }
         }
+        for (const [key, rows] of toolScopeByName.entries()) {
+            const freshRows = rows.filter((row) => ts - row.ts <= TOOL_SCOPE_MEMORY_TTL_MS);
+            if (freshRows.length > 0) {
+                toolScopeByName.set(key, freshRows);
+            }
+            else {
+                toolScopeByName.delete(key);
+            }
+        }
+        const fingerprintEntryCount = Array.from(toolScopeByFingerprint.values()).reduce((acc, rows) => acc + rows.length, 0);
+        const nameEntryCount = Array.from(toolScopeByName.values()).reduce((acc, rows) => acc + rows.length, 0);
+        const totalEntries = toolScopeByRunId.size + fingerprintEntryCount + nameEntryCount;
+        if (!forceTrim && totalEntries <= TOOL_SCOPE_MEMORY_MAX_ENTRIES)
+            return;
+        if (totalEntries <= TOOL_SCOPE_MEMORY_MAX_ENTRIES)
+            return;
+        const runEntries = Array.from(toolScopeByRunId.entries())
+            .map(([key, value]) => ({ kind: "run", key, ts: value.ts }))
+            .sort((a, b) => a.ts - b.ts);
+        const fingerprintEntries = Array.from(toolScopeByFingerprint.entries())
+            .flatMap(([fingerprint, rows]) => rows.map((row, idx) => ({
+            kind: "fingerprint",
+            key: fingerprint,
+            index: idx,
+            ts: row.ts,
+        })))
+            .sort((a, b) => a.ts - b.ts);
+        const nameEntries = Array.from(toolScopeByName.entries())
+            .flatMap(([name, rows]) => rows.map((row) => ({
+            kind: "name",
+            key: name,
+            ts: row.ts,
+        })))
+            .sort((a, b) => a.ts - b.ts);
+        let overflow = totalEntries - TOOL_SCOPE_MEMORY_MAX_ENTRIES;
+        let runCursor = 0;
+        let fpCursor = 0;
+        let nameCursor = 0;
+        while (overflow > 0) {
+            const nextRun = runEntries[runCursor];
+            const nextFp = fingerprintEntries[fpCursor];
+            const nextName = nameEntries[nameCursor];
+            const pickRun = nextRun && (!nextFp || nextRun.ts <= nextFp.ts) && (!nextName || nextRun.ts <= nextName.ts);
+            if (pickRun && nextRun) {
+                toolScopeByRunId.delete(nextRun.key);
+                runCursor += 1;
+                overflow -= 1;
+                continue;
+            }
+            const pickFp = nextFp && (!nextName || nextFp.ts <= nextName.ts);
+            if (pickFp && nextFp) {
+                const rows = toolScopeByFingerprint.get(nextFp.key) ?? [];
+                if (rows.length > 0) {
+                    rows.shift();
+                    if (rows.length > 0) {
+                        toolScopeByFingerprint.set(nextFp.key, rows);
+                    }
+                    else {
+                        toolScopeByFingerprint.delete(nextFp.key);
+                    }
+                    overflow -= 1;
+                }
+                fpCursor += 1;
+                continue;
+            }
+            if (nextName) {
+                const rows = toolScopeByName.get(nextName.key) ?? [];
+                if (rows.length > 0) {
+                    rows.shift();
+                    if (rows.length > 0) {
+                        toolScopeByName.set(nextName.key, rows);
+                    }
+                    else {
+                        toolScopeByName.delete(nextName.key);
+                    }
+                    overflow -= 1;
+                }
+                nameCursor += 1;
+                continue;
+            }
+            break;
+        }
+    };
+    const toolScopeNameKey = (toolName) => {
+        return normalizeId(typeof toolName === "string" ? toolName : undefined)?.toLowerCase();
+    };
+    const toolScopeFingerprint = (toolName, params) => {
+        const normalizedToolName = toolScopeNameKey(toolName);
+        if (!normalizedToolName)
+            return undefined;
+        let serialized = "";
+        try {
+            serialized = JSON.stringify(redact(params ?? {})) ?? "";
+        }
+        catch {
+            serialized = "";
+        }
+        const digest = crypto.createHash("sha1").update(`${normalizedToolName}|${serialized}`).digest("hex").slice(0, 24);
+        return `${normalizedToolName}:${digest}`;
     };
     const rememberToolScopeForRun = (runId, value) => {
         const key = normalizeId(typeof runId === "string" ? runId : undefined);
@@ -1678,6 +2022,42 @@ export default function register(api) {
             routing: value.routing,
         });
         pruneToolScopeMap(ts, toolScopeByRunId.size > TOOL_SCOPE_MEMORY_MAX_ENTRIES);
+    };
+    const rememberToolScopeForFingerprint = (toolName, params, value) => {
+        const key = toolScopeFingerprint(toolName, params);
+        if (!key)
+            return;
+        const ts = nowMs();
+        const rows = toolScopeByFingerprint.get(key) ?? [];
+        rows.push({
+            ts,
+            sessionKey: normalizeId(value.sessionKey),
+            requestId: normalizeRequestId(value.requestId),
+            routing: value.routing,
+        });
+        while (rows.length > TOOL_SCOPE_FINGERPRINT_QUEUE_MAX) {
+            rows.shift();
+        }
+        toolScopeByFingerprint.set(key, rows);
+        pruneToolScopeMap(ts, toolScopeByRunId.size + rows.length > TOOL_SCOPE_MEMORY_MAX_ENTRIES);
+    };
+    const rememberToolScopeForName = (toolName, value) => {
+        const key = toolScopeNameKey(toolName);
+        if (!key)
+            return;
+        const ts = nowMs();
+        const rows = toolScopeByName.get(key) ?? [];
+        rows.push({
+            ts,
+            sessionKey: normalizeId(value.sessionKey),
+            requestId: normalizeRequestId(value.requestId),
+            routing: value.routing,
+        });
+        while (rows.length > TOOL_SCOPE_FINGERPRINT_QUEUE_MAX) {
+            rows.shift();
+        }
+        toolScopeByName.set(key, rows);
+        pruneToolScopeMap(ts, toolScopeByRunId.size + rows.length > TOOL_SCOPE_MEMORY_MAX_ENTRIES);
     };
     const recentToolScopeForRun = (runId) => {
         const key = normalizeId(typeof runId === "string" ? runId : undefined);
@@ -1693,6 +2073,56 @@ export default function register(api) {
         if (ts - row.ts > TOOL_SCOPE_MEMORY_TTL_MS) {
             toolScopeByRunId.delete(key);
             return undefined;
+        }
+        return row;
+    };
+    const recentToolScopeForFingerprint = (toolName, params) => {
+        const key = toolScopeFingerprint(toolName, params);
+        if (!key)
+            return undefined;
+        const ts = nowMs();
+        if (toolScopeByRunId.size > TOOL_SCOPE_MEMORY_MAX_ENTRIES) {
+            pruneToolScopeMap(ts, true);
+        }
+        const rows = toolScopeByFingerprint.get(key);
+        if (!rows || rows.length === 0)
+            return undefined;
+        const freshRows = rows.filter((row) => ts - row.ts <= TOOL_SCOPE_MEMORY_TTL_MS);
+        if (freshRows.length === 0) {
+            toolScopeByFingerprint.delete(key);
+            return undefined;
+        }
+        const row = freshRows.pop();
+        if (freshRows.length > 0) {
+            toolScopeByFingerprint.set(key, freshRows);
+        }
+        else {
+            toolScopeByFingerprint.delete(key);
+        }
+        return row;
+    };
+    const recentToolScopeForName = (toolName) => {
+        const key = toolScopeNameKey(toolName);
+        if (!key)
+            return undefined;
+        const ts = nowMs();
+        if (toolScopeByRunId.size > TOOL_SCOPE_MEMORY_MAX_ENTRIES) {
+            pruneToolScopeMap(ts, true);
+        }
+        const rows = toolScopeByName.get(key);
+        if (!rows || rows.length === 0)
+            return undefined;
+        const freshRows = rows.filter((row) => ts - row.ts <= TOOL_SCOPE_MEMORY_TTL_MS);
+        if (freshRows.length === 0) {
+            toolScopeByName.delete(key);
+            return undefined;
+        }
+        const row = freshRows.pop();
+        if (freshRows.length > 0) {
+            toolScopeByName.set(key, freshRows);
+        }
+        else {
+            toolScopeByName.delete(key);
         }
         return row;
     };
@@ -1999,7 +2429,10 @@ export default function register(api) {
     });
     api.on("before_tool_call", async (event, ctx) => {
         const createdAt = new Date().toISOString();
-        const redacted = redact(event.params);
+        const toolParamsRaw = event.params ??
+            event.input ??
+            {};
+        const redacted = redact(toolParamsRaw);
         const toolMeta = normalizeEventMeta(event.metadata, event.sessionKey);
         const effectiveSessionKey = resolveSessionKey(toolMeta, ctx);
         let requestId = resolveOpenclawRequestId({
@@ -2019,6 +2452,16 @@ export default function register(api) {
         if (!hasSpecificSessionAnchor(effectiveSessionKey, ctx) && !hasToolRoutingAnchor(routing))
             return;
         rememberToolScopeForRun(event.runId, {
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            requestId,
+            routing,
+        });
+        rememberToolScopeForFingerprint(event.toolName, toolParamsRaw, {
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            requestId,
+            routing,
+        });
+        rememberToolScopeForName(event.toolName, {
             sessionKey: effectiveSessionKey ?? ctx.sessionKey,
             requestId,
             routing,
@@ -2045,11 +2488,18 @@ export default function register(api) {
     });
     api.on("after_tool_call", async (event, ctx) => {
         const createdAt = new Date().toISOString();
+        const toolResult = event.result ??
+            event.output;
+        const toolParamsRaw = event.params ??
+            event.input ??
+            {};
         const payload = event.error
             ? { error: event.error }
-            : { result: redact(event.result), durationMs: event.durationMs };
+            : { result: redact(toolResult), durationMs: event.durationMs };
         const toolMeta = normalizeEventMeta(event.metadata, event.sessionKey);
-        const remembered = recentToolScopeForRun(event.runId);
+        const remembered = recentToolScopeForRun(event.runId) ??
+            recentToolScopeForFingerprint(event.toolName, toolParamsRaw) ??
+            recentToolScopeForName(event.toolName);
         const resolvedSessionKey = resolveSessionKey(toolMeta, ctx);
         const effectiveSessionKey = hasSpecificSessionAnchor(resolvedSessionKey, ctx) || !remembered?.sessionKey
             ? resolvedSessionKey
@@ -2074,7 +2524,7 @@ export default function register(api) {
         if (!hasSpecificSessionAnchor(effectiveSessionKey, ctx) && !hasToolRoutingAnchor(routing))
             return;
         if (!event.error && event.toolName === "sessions_spawn" && routing.boardScope) {
-            const childSessionKeys = extractSpawnedSubagentSessionKeys(event.result);
+            const childSessionKeys = extractSpawnedSubagentSessionKeys(toolResult);
             for (const childSessionKey of childSessionKeys) {
                 rememberSpawnedSubagentBoardScope(childSessionKey, routing.boardScope);
                 if (requestId) {

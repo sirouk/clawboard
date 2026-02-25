@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import copy
 import hashlib
 import base64
 import heapq
@@ -17,13 +18,14 @@ import urllib.request
 import urllib.error
 from difflib import SequenceMatcher
 from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace
 from fastapi import Request
 from uuid import uuid4
 from fastapi import FastAPI, Depends, Query, Body, HTTPException, Header, BackgroundTasks, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from typing import List, Any, Iterable, Callable
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, text, or_, and_, exists, case
+from sqlalchemy import func, text, or_, and_, exists, case, inspect as sa_inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import defer, aliased
@@ -863,6 +865,7 @@ TASK_LOG_PROPAGATION_TOP_K = 6
 TASK_LOG_PROPAGATION_CAP = 0.48
 SEARCH_LOG_CONTENT_SNIPPET_CHARS = int(os.getenv("CLAWBOARD_SEARCH_LOG_CONTENT_SNIPPET_CHARS", "640") or "640")
 SEARCH_LOG_TEXT_BUDGET_CHARS = int(os.getenv("CLAWBOARD_SEARCH_LOG_TEXT_BUDGET_CHARS", "960") or "960")
+SEARCH_LOG_SUMMARY_FETCH_CHARS = int(os.getenv("CLAWBOARD_SEARCH_LOG_SUMMARY_FETCH_CHARS", "520") or "520")
 SEARCH_LOG_CONTENT_PREVIEW_SCAN_LIMIT = int(os.getenv("CLAWBOARD_SEARCH_LOG_CONTENT_PREVIEW_SCAN_LIMIT", "320") or "320")
 SEARCH_LOG_CONTENT_MATCH_SCAN_LIMIT = int(os.getenv("CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_SCAN_LIMIT", "120") or "120")
 SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS = int(os.getenv("CLAWBOARD_SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS", "1800") or "1800")
@@ -874,6 +877,33 @@ SEARCH_WINDOW_MULTIPLIER = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MULTIPLIER", "
 SEARCH_WINDOW_MIN_LOGS = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MIN_LOGS", "320") or "320")
 SEARCH_WINDOW_MAX_LOGS = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MAX_LOGS", "2000") or "2000")
 SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS = int(os.getenv("CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS", "360") or "360")
+SEARCH_WINDOW_MULTIPLIER_CAP = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MULTIPLIER_CAP", "2") or "2")
+SEARCH_WINDOW_MIN_LOGS_CAP = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MIN_LOGS_CAP", "480") or "480")
+SEARCH_WINDOW_MAX_LOGS_CAP = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MAX_LOGS_CAP", "900") or "900")
+SEARCH_LOG_FETCH_LIMIT_CAP = int(os.getenv("CLAWBOARD_SEARCH_LOG_FETCH_LIMIT_CAP", "1200") or "1200")
+SEARCH_ENABLE_HEAVY_SEMANTIC = str(os.getenv("CLAWBOARD_SEARCH_ENABLE_HEAVY_SEMANTIC", "0") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_search_mode_raw = str(os.getenv("CLAWBOARD_SEARCH_MODE", "") or "").strip().lower()
+if not _search_mode_raw:
+    _search_mode_raw = "hybrid" if SEARCH_ENABLE_HEAVY_SEMANTIC else "auto"
+if _search_mode_raw in {"1", "true", "yes", "on"}:
+    _search_mode_raw = "hybrid"
+elif _search_mode_raw in {"0", "false", "no", "off"}:
+    _search_mode_raw = "fast"
+if _search_mode_raw not in {"auto", "fast", "hybrid"}:
+    _search_mode_raw = "auto"
+SEARCH_MODE = _search_mode_raw
+SEARCH_AUTO_HYBRID_MIN_QUERY_TOKENS = max(1, int(os.getenv("CLAWBOARD_SEARCH_AUTO_HYBRID_MIN_QUERY_TOKENS", "2") or "2"))
+SEARCH_AUTO_HYBRID_MIN_QUERY_CHARS = max(1, int(os.getenv("CLAWBOARD_SEARCH_AUTO_HYBRID_MIN_QUERY_CHARS", "6") or "6"))
+SEARCH_AUTO_HYBRID_MAX_LOG_DOCS = max(120, int(os.getenv("CLAWBOARD_SEARCH_AUTO_HYBRID_MAX_LOG_DOCS", "520") or "520"))
+SEARCH_HYBRID_PREFILTER_MULTIPLIER = max(1, int(os.getenv("CLAWBOARD_SEARCH_HYBRID_PREFILTER_MULTIPLIER", "4") or "4"))
+SEARCH_HYBRID_MAX_TOPIC_DOCS = max(40, int(os.getenv("CLAWBOARD_SEARCH_HYBRID_MAX_TOPIC_DOCS", "320") or "320"))
+SEARCH_HYBRID_MAX_TASK_DOCS = max(60, int(os.getenv("CLAWBOARD_SEARCH_HYBRID_MAX_TASK_DOCS", "460") or "460"))
+SEARCH_HYBRID_MAX_LOG_DOCS = max(120, int(os.getenv("CLAWBOARD_SEARCH_HYBRID_MAX_LOG_DOCS", "380") or "380"))
 SEARCH_CONCURRENCY_LIMIT = int(os.getenv("CLAWBOARD_SEARCH_CONCURRENCY_LIMIT", "3") or "3")
 SEARCH_CONCURRENCY_WAIT_SECONDS = float(os.getenv("CLAWBOARD_SEARCH_CONCURRENCY_WAIT_SECONDS", "0.25") or "0.25")
 SEARCH_BUSY_FALLBACK_LIMIT_TOPICS = int(os.getenv("CLAWBOARD_SEARCH_BUSY_FALLBACK_LIMIT_TOPICS", "64") or "64")
@@ -883,6 +913,13 @@ SEARCH_DIRECT_LABEL_EXACT_BOOST = float(os.getenv("CLAWBOARD_SEARCH_DIRECT_LABEL
 SEARCH_DIRECT_LABEL_PREFIX_BOOST = float(os.getenv("CLAWBOARD_SEARCH_DIRECT_LABEL_PREFIX_BOOST", "0.2") or "0.2")
 SEARCH_DIRECT_LABEL_COVERAGE_BOOST = float(os.getenv("CLAWBOARD_SEARCH_DIRECT_LABEL_COVERAGE_BOOST", "0.16") or "0.16")
 _SEARCH_QUERY_GATE = threading.BoundedSemaphore(max(1, SEARCH_CONCURRENCY_LIMIT))
+SEARCH_RESULT_CACHE_TTL_SECONDS = max(
+    0.0,
+    float(os.getenv("CLAWBOARD_SEARCH_RESULT_CACHE_TTL_SECONDS", "10") or "10"),
+)
+SEARCH_RESULT_CACHE_MAX_KEYS = max(0, int(os.getenv("CLAWBOARD_SEARCH_RESULT_CACHE_MAX_KEYS", "96") or "96"))
+_SEARCH_RESULT_CACHE_LOCK = threading.Lock()
+_SEARCH_RESULT_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -1564,10 +1601,33 @@ def _extract_query_snippet(value: str | None, terms: list[str], *, radius: int =
     return _clip(snippet, cap)
 
 
+def _safe_log_attr_text(entry: LogEntry, field: str) -> str:
+    """Return a log field without triggering ORM lazy-load queries for deferred columns."""
+    name = str(field or "").strip()
+    if not name:
+        return ""
+    try:
+        state = sa_inspect(entry)
+        unloaded = getattr(state, "unloaded", None)
+        if unloaded and name in unloaded:
+            return ""
+    except Exception:
+        pass
+    try:
+        return str(getattr(entry, name) or "")
+    except Exception:
+        return ""
+
+
 def _is_command_log(entry: LogEntry) -> bool:
     if getattr(entry, "type", None) != "conversation":
         return False
-    text = _sanitize_log_text(str(entry.content or entry.summary or entry.raw or ""))
+    text = _sanitize_log_text(
+        _safe_log_attr_text(entry, "content")
+        or _safe_log_attr_text(entry, "summary")
+        or _safe_log_attr_text(entry, "raw")
+        or ""
+    )
     if not text.startswith("/"):
         return False
     command = text.split(None, 1)[0].lower()
@@ -1612,12 +1672,33 @@ def _is_tool_trace_text(content: str | None, summary: str | None, raw: str | Non
     )
 
 
+def _is_memory_action_text(content: str | None, summary: str | None, raw: str | None) -> bool:
+    combined = _combined_log_text(content, summary, raw).lower()
+    if not combined:
+        return False
+    if "tool call:" in combined or "tool result:" in combined or "tool error:" in combined:
+        if re.search(r"\bmemory[_-]?(search|get|query|fetch|retrieve|read|write|store|list|prune|delete)\b", combined):
+            return True
+    return False
+
+
 def _is_subagent_session_key(session_key: str | None) -> bool:
     key = str(session_key or "").strip().lower()
     if not key:
         return False
     base = key.split("|", 1)[0].strip()
     return ":subagent:" in base
+
+
+def _session_key_supports_bundle_tool_scoping(session_key: str | None) -> bool:
+    base = str(session_key or "").strip().lower().split("|", 1)[0].strip()
+    if not base:
+        return False
+    if base.startswith("channel:"):
+        return True
+    if base.startswith("clawboard:topic:") or base.startswith("clawboard:task:"):
+        return True
+    return ":clawboard:topic:" in base or ":clawboard:task:" in base
 
 
 def _is_subagent_scaffold_text(content: str | None, summary: str | None, raw: str | None) -> bool:
@@ -1662,9 +1743,9 @@ def _is_tool_call_log(entry: LogEntry) -> bool:
     if getattr(entry, "type", None) != "action":
         return False
     return _is_tool_trace_text(
-        str(entry.content or ""),
-        str(entry.summary or ""),
-        str(entry.raw or ""),
+        _safe_log_attr_text(entry, "content"),
+        _safe_log_attr_text(entry, "summary"),
+        _safe_log_attr_text(entry, "raw"),
     )
 
 
@@ -1677,9 +1758,9 @@ def _log_reindex_text(entry: LogEntry) -> str:
     if _is_memory_action_log(entry) or _is_command_log(entry):
         return ""
     parts = [
-        _sanitize_log_text(entry.summary or ""),
-        _sanitize_log_text(entry.content or ""),
-        _sanitize_log_text(entry.raw or ""),
+        _sanitize_log_text(_safe_log_attr_text(entry, "summary")),
+        _sanitize_log_text(_safe_log_attr_text(entry, "content")),
+        _sanitize_log_text(_safe_log_attr_text(entry, "raw")),
     ]
     text = " ".join(part for part in parts if part)
     return _clip(text, 1200)
@@ -1691,9 +1772,9 @@ def _is_memory_action_log(entry: LogEntry) -> bool:
     combined = " ".join(
         part
         for part in [
-            str(entry.summary or ""),
-            str(entry.content or ""),
-            str(entry.raw or ""),
+            _safe_log_attr_text(entry, "summary"),
+            _safe_log_attr_text(entry, "content"),
+            _safe_log_attr_text(entry, "raw"),
         ]
         if part
     ).lower()
@@ -2566,29 +2647,26 @@ def _snooze_worker() -> None:
                 due_tasks = (
                     session.exec(select(Task).where(Task.snoozedUntil.is_not(None)).where(Task.snoozedUntil <= now)).all()
                 )
-                if not due_topics and not due_tasks:
-                    time.sleep(poll_interval)
-                    continue
+                if due_topics or due_tasks:
+                    for topic in due_topics:
+                        topic.snoozedUntil = None
+                        status = str(topic.status or "active").strip().lower()
+                        if status in {"snoozed", "paused"}:
+                            topic.status = "active"
+                        topic.updatedAt = now
+                        session.add(topic)
 
-                for topic in due_topics:
-                    topic.snoozedUntil = None
-                    status = str(topic.status or "active").strip().lower()
-                    if status in {"snoozed", "paused"}:
-                        topic.status = "active"
-                    topic.updatedAt = now
-                    session.add(topic)
+                    for task in due_tasks:
+                        task.snoozedUntil = None
+                        task.updatedAt = now
+                        session.add(task)
 
-                for task in due_tasks:
-                    task.snoozedUntil = None
-                    task.updatedAt = now
-                    session.add(task)
+                    session.commit()
 
-                session.commit()
-
-                for topic in due_topics:
-                    event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
-                for task in due_tasks:
-                    event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
+                    for topic in due_topics:
+                        event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
+                    for task in due_tasks:
+                        event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
         except Exception:
             pass
         time.sleep(poll_interval)
@@ -2971,12 +3049,16 @@ def _validated_scope_candidate(
     if task_candidate:
         task_row = session.get(Task, task_candidate)
         if not task_row:
-            return (None, None, None)
-        task_candidate = str(getattr(task_row, "id", "") or "").strip()
-        topic_candidate = str(getattr(task_row, "topicId", "") or "").strip()
-        if not topic_candidate:
-            return (None, None, None)
-        space_candidate = _space_id_for_task(task_row)
+            # Keep topic fallback when a stale task reference is present in memory.
+            # This can happen after task deletion or promotion churn; routing should still
+            # preserve topic-level continuity instead of dropping scope entirely.
+            task_candidate = ""
+        else:
+            task_candidate = str(getattr(task_row, "id", "") or "").strip()
+            topic_candidate = str(getattr(task_row, "topicId", "") or "").strip()
+            if not topic_candidate:
+                return (None, None, None)
+            space_candidate = _space_id_for_task(task_row)
 
     if topic_candidate:
         topic_row = session.get(Topic, topic_candidate)
@@ -3120,10 +3202,142 @@ def _infer_subagent_scope_from_recent_anchors(
     return (None, None, None)
 
 
+def _retro_scope_subagent_unanchored_tool_activity(
+    session: Any,
+    *,
+    session_key: str,
+    created_at: str,
+    space_id: str | None,
+    topic_id: str | None,
+    task_id: str | None,
+) -> list[LogEntry]:
+    """Backfill scope for early subagent tool logs that arrived before anchor metadata."""
+    base_key = _base_session_key(session_key)
+    if not base_key or not _is_subagent_session_key(base_key):
+        return []
+
+    canonical_space, canonical_topic, canonical_task = _validated_scope_candidate(
+        session,
+        topic_id=topic_id,
+        task_id=task_id,
+        space_id=space_id,
+    )
+    if not canonical_topic and not canonical_task:
+        return []
+
+    lookback_seconds = _subagent_scope_inference_lookback_seconds()
+    created_ts = _iso_to_timestamp(created_at)
+    lower_bound: str | None = None
+    if created_ts is not None:
+        lower_dt = datetime.fromtimestamp(max(0.0, created_ts - lookback_seconds), tz=timezone.utc)
+        lower_bound = lower_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    query = (
+        select(LogEntry)
+        .where(LogEntry.type == "action")
+        .where(LogEntry.classificationStatus == "failed")
+        .where(LogEntry.classificationError == "filtered_unanchored_tool_activity")
+        .where(LogEntry.topicId.is_(None))
+        .where(LogEntry.taskId.is_(None))
+        .where(LogEntry.createdAt <= created_at)
+    )
+    if lower_bound:
+        query = query.where(LogEntry.createdAt >= lower_bound)
+
+    if DATABASE_URL.startswith("sqlite"):
+        query = query.where(
+            text(
+                "(json_extract(source, '$.sessionKey') = :base_key OR "
+                "json_extract(source, '$.sessionKey') LIKE :base_like)"
+            )
+        ).params(base_key=base_key, base_like=f"{base_key}|%")
+    else:
+        source_session_expr = LogEntry.source["sessionKey"].as_string()
+        query = query.where(or_(source_session_expr == base_key, source_session_expr.like(f"{base_key}|%")))
+
+    rows = session.exec(
+        query.order_by(
+            LogEntry.createdAt.asc(),
+            (text("rowid ASC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.asc()),
+        ).limit(260)
+    ).all()
+    if not rows:
+        return []
+
+    patched: list[LogEntry] = []
+    stamp = now_iso()
+    for row in rows:
+        if not _is_tool_call_log(row):
+            continue
+        row.topicId = canonical_topic
+        row.taskId = canonical_task
+        if canonical_space:
+            row.spaceId = canonical_space
+        elif not _normalize_space_id(getattr(row, "spaceId", None)):
+            row.spaceId = DEFAULT_SPACE_ID
+        row.classificationStatus = "classified"
+        row.classificationError = "filtered_tool_activity"
+        row.classificationAttempts = max(1, int(getattr(row, "classificationAttempts", 0) or 0))
+        row.updatedAt = stamp
+
+        source_map = row.source.copy() if isinstance(row.source, dict) else {}
+        if canonical_space:
+            source_map["boardScopeSpaceId"] = canonical_space
+        if canonical_topic:
+            source_map["boardScopeTopicId"] = canonical_topic
+            source_map["boardScopeKind"] = "task" if canonical_task else "topic"
+            source_map["boardScopeLock"] = bool(canonical_task)
+            if canonical_task:
+                source_map["boardScopeTaskId"] = canonical_task
+            else:
+                source_map.pop("boardScopeTaskId", None)
+        row.source = source_map or None
+        session.add(row)
+        patched.append(row)
+
+    if not patched:
+        return []
+
+    try:
+        session.commit()
+    except OperationalError as exc:
+        if not DATABASE_URL.startswith("sqlite") or "database is locked" not in str(exc).lower():
+            raise
+        session.rollback()
+        last_exc: OperationalError | None = exc
+        for attempt in range(6):
+            try:
+                for row in patched:
+                    session.add(row)
+                time.sleep(min(0.75, 0.05 * (2**attempt)))
+                session.commit()
+                last_exc = None
+                break
+            except OperationalError as retry_exc:
+                if "database is locked" not in str(retry_exc).lower():
+                    raise
+                session.rollback()
+                last_exc = retry_exc
+        if last_exc is not None:
+            raise last_exc
+
+    refreshed: list[LogEntry] = []
+    for row in patched:
+        try:
+            session.refresh(row)
+            refreshed.append(row)
+        except Exception:
+            persisted = session.get(LogEntry, row.id)
+            if persisted:
+                refreshed.append(persisted)
+    return refreshed
+
+
 def _canonical_openclaw_assistant_idempotency_key(
     *,
     payload: LogAppend,
     source_meta: dict[str, Any] | None,
+    created_at: str | None = None,
 ) -> str | None:
     if not source_meta:
         return None
@@ -3135,7 +3349,49 @@ def _canonical_openclaw_assistant_idempotency_key(
     base_request_id = _openclaw_request_id_base(request_id)
     if not base_request_id or not base_request_id.lower().startswith("occhat-"):
         return None
+    message_id = str(source_meta.get("messageId") or "").strip()
+    if message_id and not _openclaw_request_ids_equivalent(message_id, base_request_id):
+        message_digest = hashlib.sha1(message_id.encode("utf-8")).hexdigest()[:16]
+        return f"openclaw-assistant:{base_request_id}:m:{message_digest}"
+
+    normalized_content = _normalize_openclaw_assistant_dedupe_text(
+        str(payload.content or payload.summary or payload.raw or "")
+    )
+    if normalized_content:
+        content_digest = hashlib.sha1(normalized_content.encode("utf-8")).hexdigest()[:16]
+        return f"openclaw-assistant:{base_request_id}:c:{content_digest}"
+
+    created_ts = _iso_to_timestamp(created_at) if created_at else None
+    if created_ts is not None:
+        return f"openclaw-assistant:{base_request_id}:t:{int(created_ts * 1000.0)}"
     return f"openclaw-assistant:{base_request_id}"
+
+
+def _normalize_openclaw_assistant_dedupe_text(value: str | None) -> str:
+    cleaned = _sanitize_log_text(str(value or ""))
+    if not cleaned:
+        return ""
+    cleaned = re.sub(
+        r"^\s*\[\[\s*reply_to(?:_current|:[^\]]+)?\s*\]\]\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
+    return cleaned
+
+
+def _assistant_conversation_payload_matches_existing(existing: LogEntry, payload: LogAppend) -> bool:
+    existing_text = _normalize_openclaw_assistant_dedupe_text(
+        str(getattr(existing, "content", None) or getattr(existing, "summary", None) or getattr(existing, "raw", None) or "")
+    )
+    payload_text = _normalize_openclaw_assistant_dedupe_text(
+        str(payload.content or payload.summary or payload.raw or "")
+    )
+    if existing_text and payload_text:
+        return existing_text == payload_text
+    # If either side lacks text, preserve legacy dedupe behavior.
+    return True
 
 
 def _canonical_board_scope_session_key(
@@ -3205,6 +3461,48 @@ def _find_existing_openclaw_user_request_log(
             query = query.where(or_(source_session_expr == base_key, source_session_expr.like(f"{base_key}|%")))
 
     return session.exec(query.limit(1)).first()
+
+
+def _find_existing_openclaw_user_request_created_at(
+    session: Any,
+    *,
+    session_key: str,
+    request_id: str,
+) -> str | None:
+    rid = str(request_id or "").strip()
+    if not rid:
+        return None
+
+    base_key = _base_session_key(session_key)
+    query = (
+        select(LogEntry.createdAt)
+        .where(LogEntry.type == "conversation")
+        .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "user")
+    )
+
+    if DATABASE_URL.startswith("sqlite"):
+        query = query.where(
+            text("(json_extract(source, '$.requestId') = :rid OR json_extract(source, '$.messageId') = :rid)")
+        ).params(rid=rid)
+        if base_key:
+            query = query.where(
+                text(
+                    "(json_extract(source, '$.sessionKey') = :base_key OR "
+                    "json_extract(source, '$.sessionKey') LIKE :base_like)"
+                )
+            ).params(base_key=base_key, base_like=f"{base_key}|%")
+    else:
+        request_match = or_(
+            LogEntry.source["requestId"].as_string() == rid,
+            LogEntry.source["messageId"].as_string() == rid,
+        )
+        query = query.where(request_match)
+        if base_key:
+            source_session_expr = LogEntry.source["sessionKey"].as_string()
+            query = query.where(or_(source_session_expr == base_key, source_session_expr.like(f"{base_key}|%")))
+
+    created_at = session.exec(query.order_by(LogEntry.createdAt.desc()).limit(1)).first()
+    return normalize_iso(str(created_at or "")) if created_at else None
 
 
 def _find_existing_openclaw_user_near_duplicate(
@@ -3422,7 +3720,11 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
 
     source_meta = payload.source.copy() if isinstance(payload.source, dict) else None
     _maybe_attach_openclaw_request_id(session, payload=payload, source_meta=source_meta, created_at=created_at)
-    canonical_assistant_idem = _canonical_openclaw_assistant_idempotency_key(payload=payload, source_meta=source_meta)
+    canonical_assistant_idem = _canonical_openclaw_assistant_idempotency_key(
+        payload=payload,
+        source_meta=source_meta,
+        created_at=created_at,
+    )
     if canonical_assistant_idem:
         idempotency_key = canonical_assistant_idem
         existing = _find_by_idempotency(session, idempotency_key)
@@ -3542,6 +3844,13 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                     query = query.where(or_(*message_matches))
 
             existing = session.exec(query).first()
+            if existing:
+                if (
+                    agent_id_lower == "assistant"
+                    and str(payload.type or "").strip().lower() == "conversation"
+                    and not _assistant_conversation_payload_matches_existing(existing, payload)
+                ):
+                    existing = None
             if existing:
                 return existing
 
@@ -3714,8 +4023,17 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
 
     log_type = str(payload.type or "").strip().lower()
     is_tool_trace_action = log_type == "action" and _is_tool_trace_text(payload.content, payload.summary, payload.raw)
+    is_memory_action = (
+        log_type == "action"
+        and _is_memory_action_text(payload.content, payload.summary, payload.raw)
+    )
     has_scope_anchor = bool(topic_id or task_id or source_scope_topic_id or source_scope_task_id)
-    if is_tool_trace_action and not has_scope_anchor:
+    defer_unanchored_tool_classification = (
+        is_tool_trace_action
+        and not has_scope_anchor
+        and _session_key_supports_bundle_tool_scoping(source_session_key)
+    )
+    if is_tool_trace_action and not has_scope_anchor and not defer_unanchored_tool_classification:
         topic_id = None
         task_id = None
 
@@ -3730,11 +4048,19 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         classification_status = "failed"
         classification_attempts = 1
         classification_error = control_plane_error or "filtered_control_plane"
+    elif log_type in {"system", "import"}:
+        classification_status = "classified"
+        classification_attempts = 1
+        classification_error = "filtered_non_semantic"
     elif is_tool_trace_action:
         classification_attempts = 1
         if has_scope_anchor:
             classification_status = "classified"
-            classification_error = "filtered_tool_activity"
+            classification_error = "filtered_memory_action" if is_memory_action else "filtered_tool_activity"
+        elif defer_unanchored_tool_classification:
+            classification_status = "pending"
+            classification_attempts = 0
+            classification_error = None
         else:
             classification_status = "failed"
             classification_error = "filtered_unanchored_tool_activity"
@@ -3890,6 +4216,21 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             revived_topic = None
             revived_task = None
 
+    retro_scoped_rows: list[LogEntry] = []
+    if source_session_key and _is_subagent_session_key(source_session_key) and (topic_id or task_id):
+        try:
+            retro_scoped_rows = _retro_scope_subagent_unanchored_tool_activity(
+                session,
+                session_key=source_session_key,
+                created_at=created_at,
+                space_id=space_id,
+                topic_id=topic_id,
+                task_id=task_id,
+            )
+        except Exception:
+            # Best-effort only: never fail primary ingestion because retro-scope repair fails.
+            retro_scoped_rows = []
+
     if revived_topic:
         event_hub.publish({"type": "topic.upserted", "data": revived_topic.model_dump(), "eventTs": revived_topic.updatedAt})
     if revived_task:
@@ -3910,6 +4251,9 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 },
                 "eventTs": entry.updatedAt
             })
+    for scoped in retro_scoped_rows:
+        event_hub.publish({"type": "log.patched", "data": scoped.model_dump(exclude={"raw"}), "eventTs": scoped.updatedAt})
+        _enqueue_log_reindex(scoped)
     _enqueue_log_reindex(entry)
     return entry
 
@@ -6220,6 +6564,19 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 source["messageId"] = message_id
             if request_id:
                 source["requestId"] = request_id
+            if entry_type == "conversation" and str(agent_id or "").strip().lower() == "assistant" and request_id:
+                existing_user_created_at = _find_existing_openclaw_user_request_created_at(
+                    session,
+                    session_key=session_key,
+                    request_id=request_id,
+                )
+                if existing_user_created_at:
+                    existing_user_ts = _iso_to_timestamp(existing_user_created_at)
+                    created_at_ts = _iso_to_timestamp(created_at)
+                    if existing_user_ts is not None and (created_at_ts is None or created_at_ts <= existing_user_ts):
+                        created_at = datetime.fromtimestamp(existing_user_ts + 0.001, tz=timezone.utc).isoformat(
+                            timespec="milliseconds"
+                        ).replace("+00:00", "Z")
 
             idempotency_key = None
             if entry_type == "conversation":
@@ -6247,6 +6604,13 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 exact_identifiers, like_identifiers = _openclaw_identifier_match_terms([message_id or "", request_id or ""])
                 if exact_identifiers or like_identifiers:
                     query = select(LogEntry.id).where(LogEntry.type == "conversation")
+                    agent_id_for_query = str(agent_id or "").strip().lower()
+                    if agent_id_for_query:
+                        # Keep identifier dedupe actor-scoped. OpenClaw can reuse requestId across
+                        # user + assistant rows in the same request lifecycle; if we dedupe only on
+                        # requestId/messageId globally, history replay can incorrectly drop legitimate
+                        # assistant completions after a persisted user prompt.
+                        query = query.where(func.lower(func.coalesce(LogEntry.agentId, "")) == agent_id_for_query)
                     if DATABASE_URL.startswith("sqlite"):
                         query_text_parts: list[str] = []
                         query_params: dict[str, Any] = {}
@@ -8885,6 +9249,48 @@ def upsert_task(
         return task
 
 
+@app.delete("/api/tasks/unassigned/empty", dependencies=[Depends(require_token)], tags=["tasks"])
+def empty_unassigned_tasks():
+    """Delete all unassigned tasks and detach their logs in a single transaction."""
+    with get_session() as session:
+        tasks = session.exec(select(Task).where(Task.topicId.is_(None))).all()
+        if not tasks:
+            return {
+                "ok": True,
+                "deleted": False,
+                "deletedTasks": 0,
+                "detachedLogs": 0,
+            }
+
+        task_ids = [task.id for task in tasks]
+        logs = session.exec(select(LogEntry).where(LogEntry.taskId.in_(task_ids))).all()
+        detached_at = now_iso()
+
+        for entry in logs:
+            entry.taskId = None
+            entry.updatedAt = detached_at
+            session.add(entry)
+
+        for task in tasks:
+            session.delete(task)
+
+        session.commit()
+
+        for task_id in task_ids:
+            enqueue_reindex_request({"op": "delete", "kind": "task", "id": task_id})
+        for entry in logs:
+            event_hub.publish({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
+        for task_id in task_ids:
+            event_hub.publish({"type": "task.deleted", "data": {"id": task_id}, "eventTs": detached_at})
+
+        return {
+            "ok": True,
+            "deleted": True,
+            "deletedTasks": len(task_ids),
+            "detachedLogs": len(logs),
+        }
+
+
 @app.delete("/api/tasks/{task_id}", dependencies=[Depends(require_token)], tags=["tasks"])
 def delete_task(task_id: str):
     """Delete a task and detach dependent logs so conversation history remains visible."""
@@ -10174,6 +10580,275 @@ def clawgraph(
         return payload
 
 
+def _search_result_cache_key(
+    *,
+    query: str,
+    revision: str,
+    topic_id: str | None,
+    session_key: str | None,
+    include_pending: bool,
+    limit_topics: int,
+    limit_tasks: int,
+    limit_logs: int,
+    allow_deep_content_scan: bool,
+    allowed_space_ids: set[str] | None,
+) -> str:
+    allowed_key = "__all__"
+    if allowed_space_ids is not None:
+        allowed_key = ",".join(sorted(str(item).strip() for item in allowed_space_ids if str(item).strip()))
+    return "|".join(
+        [
+            _sanitize_log_text(query).lower(),
+            str(topic_id or "").strip(),
+            str(session_key or "").strip(),
+            "1" if include_pending else "0",
+            str(int(limit_topics)),
+            str(int(limit_tasks)),
+            str(int(limit_logs)),
+            "1" if allow_deep_content_scan else "0",
+            str(SEARCH_MODE),
+            allowed_key,
+            str(revision or ""),
+        ]
+    )
+
+
+def _search_result_cache_get(cache_key: str) -> dict[str, Any] | None:
+    if SEARCH_RESULT_CACHE_TTL_SECONDS <= 0 or SEARCH_RESULT_CACHE_MAX_KEYS <= 0:
+        return None
+    now_mono = time.monotonic()
+    with _SEARCH_RESULT_CACHE_LOCK:
+        entry = _SEARCH_RESULT_CACHE.get(cache_key)
+        if not entry:
+            return None
+        expires_at = float(entry.get("expiresAtMonotonic") or 0.0)
+        if expires_at <= now_mono:
+            _SEARCH_RESULT_CACHE.pop(cache_key, None)
+            return None
+        entry["lastAccessMonotonic"] = now_mono
+        payload = entry.get("payload")
+        if payload is None:
+            return None
+        return copy.deepcopy(payload)
+
+
+def _search_result_cache_set(cache_key: str, payload: dict[str, Any]) -> None:
+    if SEARCH_RESULT_CACHE_TTL_SECONDS <= 0 or SEARCH_RESULT_CACHE_MAX_KEYS <= 0:
+        return
+    now_mono = time.monotonic()
+    with _SEARCH_RESULT_CACHE_LOCK:
+        _SEARCH_RESULT_CACHE[cache_key] = {
+            "payload": copy.deepcopy(payload),
+            "builtAtMonotonic": now_mono,
+            "lastAccessMonotonic": now_mono,
+            "expiresAtMonotonic": now_mono + SEARCH_RESULT_CACHE_TTL_SECONDS,
+        }
+        if len(_SEARCH_RESULT_CACHE) <= SEARCH_RESULT_CACHE_MAX_KEYS:
+            return
+        overflow = len(_SEARCH_RESULT_CACHE) - SEARCH_RESULT_CACHE_MAX_KEYS
+        oldest = sorted(
+            _SEARCH_RESULT_CACHE.items(),
+            key=lambda item: float(item[1].get("lastAccessMonotonic") or item[1].get("builtAtMonotonic") or 0.0),
+        )
+        for cache_id, _entry in oldest[:overflow]:
+            _SEARCH_RESULT_CACHE.pop(cache_id, None)
+
+
+def _search_prefilter_score(query: str, text: str) -> float:
+    normalized_query = _sanitize_log_text(query).lower()
+    cleaned = _sanitize_log_text(text).lower()
+    if not normalized_query or not cleaned:
+        return 0.0
+    query_tokens = _search_query_tokens(normalized_query)
+    if not query_tokens:
+        return 0.0
+    tokens = _search_query_tokens(cleaned)
+    if not tokens:
+        return 0.0
+    overlap = len(query_tokens & tokens)
+    coverage = float(overlap) / float(max(1, len(query_tokens)))
+    phrase = 1.0 if normalized_query in cleaned else 0.0
+    prefix = 0.0
+    if len(query_tokens) == 1:
+        needle = next(iter(query_tokens), "")
+        if needle:
+            if any(token.startswith(needle) for token in tokens):
+                prefix = 0.75
+            elif any(needle in token for token in tokens):
+                prefix = 0.55
+    return max(coverage, (coverage * 0.78) + (phrase * 0.22), prefix)
+
+
+def _prefilter_payloads_for_hybrid(
+    query: str,
+    rows: list[dict[str, Any]],
+    *,
+    max_docs: int,
+    text_fn: Callable[[dict[str, Any]], str],
+) -> list[dict[str, Any]]:
+    if max_docs <= 0:
+        return []
+    if len(rows) <= max_docs:
+        return rows
+    scored: list[tuple[float, str, int, dict[str, Any]]] = []
+    for idx, row in enumerate(rows):
+        score = _search_prefilter_score(query, text_fn(row))
+        if score <= 0:
+            continue
+        created_at = str(row.get("createdAt") or "")
+        scored.append((float(score), created_at, idx, row))
+    if not scored:
+        return rows[:max_docs]
+    scored.sort(
+        key=lambda item: (
+            float(item[0]),
+            item[1],
+            -int(item[2]),
+        ),
+        reverse=True,
+    )
+    return [item[3] for item in scored[:max_docs]]
+
+
+def _hybrid_prefilter_limit(effective_limit: int, corpus_size: int, max_docs: int) -> int:
+    if corpus_size <= 0:
+        return 0
+    dynamic = max(int(effective_limit), int(effective_limit) * SEARCH_HYBRID_PREFILTER_MULTIPLIER)
+    bounded = min(max(dynamic, int(effective_limit)), max(int(effective_limit), int(max_docs)))
+    return max(1, min(corpus_size, bounded))
+
+
+def _resolve_search_engine_for_request(
+    *,
+    query: str,
+    query_tokens: set[str],
+    allow_deep_content_scan: bool,
+    log_doc_count: int,
+) -> str:
+    if SEARCH_MODE == "fast":
+        return "fast"
+    if SEARCH_MODE == "hybrid":
+        return "hybrid"
+
+    has_signal = len(query_tokens) >= SEARCH_AUTO_HYBRID_MIN_QUERY_TOKENS or len(_sanitize_log_text(query)) >= SEARCH_AUTO_HYBRID_MIN_QUERY_CHARS
+    if not has_signal:
+        return "fast"
+    if not allow_deep_content_scan and log_doc_count > max(120, SEARCH_AUTO_HYBRID_MAX_LOG_DOCS // 2):
+        return "fast"
+    if log_doc_count > SEARCH_AUTO_HYBRID_MAX_LOG_DOCS:
+        return "fast"
+    return "hybrid"
+
+
+def _cheap_semantic_search(
+    query: str,
+    topics_payload: list[dict[str, Any]],
+    tasks_payload: list[dict[str, Any]],
+    log_payloads: list[dict[str, Any]],
+    *,
+    topic_limit: int,
+    task_limit: int,
+    log_limit: int,
+) -> dict[str, Any]:
+    normalized_query = _sanitize_log_text(query).lower()
+    query_tokens = _search_query_tokens(normalized_query)
+    single_query_token = next(iter(query_tokens), "")
+
+    def _score_text(value: str) -> float:
+        cleaned = _sanitize_log_text(value).lower()
+        if not cleaned:
+            return 0.0
+        tokens = _search_query_tokens(cleaned)
+        if not tokens:
+            return 0.0
+        overlap = len(query_tokens & tokens)
+        coverage = float(overlap) / float(max(1, len(query_tokens)))
+        phrase = 1.0 if normalized_query and normalized_query in cleaned else 0.0
+        prefix = 0.0
+        if len(query_tokens) == 1 and single_query_token:
+            if any(token.startswith(single_query_token) for token in tokens):
+                prefix = 0.75
+            elif any(single_query_token in token for token in tokens):
+                prefix = 0.55
+        return max(coverage, (coverage * 0.78) + (phrase * 0.22), prefix)
+
+    def _rank_rows(
+        rows: list[dict[str, Any]],
+        text_fn: Callable[[dict[str, Any]], str],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for row in rows:
+            score = _score_text(text_fn(row))
+            if score <= 0:
+                continue
+            scored.append((score, row))
+        scored.sort(key=lambda item: float(item[0]), reverse=True)
+        out: list[dict[str, Any]] = []
+        for score, row in scored[: max(1, int(limit))]:
+            out.append(
+                {
+                    "id": row.get("id"),
+                    "score": round(float(score), 6),
+                    "vectorScore": 0.0,
+                    "bm25Score": round(float(score), 6),
+                    "lexicalScore": round(float(score), 6),
+                    "rrfScore": round(float(score), 6),
+                    "rerankScore": round(float(score), 6),
+                    "bestChunk": None,
+                }
+            )
+        return out
+
+    topic_rows = _rank_rows(
+        topics_payload,
+        lambda row: " ".join(
+            part
+            for part in [
+                str(row.get("name") or ""),
+                str(row.get("description") or ""),
+                str(row.get("searchText") or ""),
+            ]
+            if part
+        ),
+        limit=topic_limit,
+    )
+    task_rows = _rank_rows(
+        tasks_payload,
+        lambda row: " ".join(
+            part
+            for part in [
+                str(row.get("title") or ""),
+                str(row.get("status") or ""),
+                str(row.get("searchText") or ""),
+            ]
+            if part
+        ),
+        limit=task_limit,
+    )
+    log_rows = _rank_rows(
+        log_payloads,
+        lambda row: " ".join(
+            part
+            for part in [
+                str(row.get("summary") or ""),
+                str(row.get("content") or ""),
+            ]
+            if part
+        ),
+        limit=log_limit,
+    )
+
+    return {
+        "query": query,
+        "mode": "lexical-fast",
+        "topics": topic_rows,
+        "tasks": task_rows,
+        "logs": log_rows,
+    }
+
+
 def _search_impl(
     session: Any,
     query: str,
@@ -10201,14 +10876,28 @@ def _search_impl(
     effective_limit_tasks = max(1, min(int(limit_tasks), max(1, SEARCH_EFFECTIVE_LIMIT_TASKS)))
     effective_limit_logs = max(10, min(int(limit_logs), max(10, SEARCH_EFFECTIVE_LIMIT_LOGS)))
 
-    all_topics = session.exec(select(Topic)).all()
+    allowed_space_values = sorted(allowed_space_ids) if allowed_space_ids is not None else []
+
+    if allowed_space_ids is not None:
+        if not allowed_space_values:
+            all_topics = []
+        else:
+            all_topics = session.exec(select(Topic).where(Topic.spaceId.in_(allowed_space_values))).all()
+    else:
+        all_topics = session.exec(select(Topic)).all()
     all_topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in all_topics if getattr(topic, "id", None)}
     topics = (
         [topic for topic in all_topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
         if allowed_space_ids is not None
         else all_topics
     )
-    all_tasks = session.exec(select(Task)).all()
+    if allowed_space_ids is not None:
+        if not allowed_space_values:
+            all_tasks = []
+        else:
+            all_tasks = session.exec(select(Task).where(Task.spaceId.in_(allowed_space_values))).all()
+    else:
+        all_tasks = session.exec(select(Task)).all()
     tasks = (
         [task for task in all_tasks if _task_matches_allowed_spaces(task, allowed_space_ids, all_topic_by_id)]
         if allowed_space_ids is not None
@@ -10217,9 +10906,9 @@ def _search_impl(
     all_task_by_id = {str(getattr(task, "id", "") or ""): task for task in all_tasks if getattr(task, "id", None)}
     # Never load the entire log table into memory for search.
     # This endpoint is used from the UI and must remain safe for large instances.
-    window_multiplier = max(1, SEARCH_WINDOW_MULTIPLIER)
-    window_min_logs = max(200, SEARCH_WINDOW_MIN_LOGS)
-    window_max_logs = max(window_min_logs, SEARCH_WINDOW_MAX_LOGS)
+    window_multiplier = max(1, min(SEARCH_WINDOW_MULTIPLIER, max(1, SEARCH_WINDOW_MULTIPLIER_CAP)))
+    window_min_logs = max(200, min(SEARCH_WINDOW_MIN_LOGS, max(200, SEARCH_WINDOW_MIN_LOGS_CAP)))
+    window_max_logs = max(window_min_logs, min(SEARCH_WINDOW_MAX_LOGS, max(window_min_logs, SEARCH_WINDOW_MAX_LOGS_CAP)))
     window_logs = max(window_min_logs, min(window_max_logs, effective_limit_logs * window_multiplier))
     if single_token_query:
         single_token_window_cap = max(200, SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS)
@@ -10227,32 +10916,106 @@ def _search_impl(
     # Raw payloads can be very large; exclude from bulk search window.
     # For content, we fetch bounded snippets in a separate query so lexical/BM25 can still
     # use query terms that were not preserved in summaries.
-    log_query = select(LogEntry).options(defer(LogEntry.raw), defer(LogEntry.content))
-    if topic_id:
-        log_query = log_query.where(LogEntry.topicId == topic_id)
-    if not include_pending:
-        log_query = log_query.where(LogEntry.classificationStatus == "classified")
-    log_fetch_limit = window_logs
-    if allowed_space_ids is not None:
-        log_fetch_limit = min(max(window_logs * 4, window_logs + 320), max(window_logs, SEARCH_WINDOW_MAX_LOGS))
-    log_query = log_query.order_by(
-        LogEntry.createdAt.desc(),
-        LogEntry.updatedAt.desc(),
-        (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
-    ).limit(log_fetch_limit)
-    logs = session.exec(log_query).all()
-    if allowed_space_ids is not None:
-        logs = [
-            entry
-            for entry in logs
-            if _log_matches_allowed_spaces(entry, allowed_space_ids, all_topic_by_id, all_task_by_id)
-        ][:window_logs]
+    logs: list[Any] = []
+    if allowed_space_ids is None or allowed_space_values:
+        summary_fetch_chars = max(120, int(SEARCH_LOG_SUMMARY_FETCH_CHARS or 120))
+        summary_expr = func.substr(func.coalesce(LogEntry.summary, ""), 1, summary_fetch_chars).label("summary")
+        log_query = select(
+            LogEntry.id,
+            LogEntry.topicId,
+            LogEntry.taskId,
+            LogEntry.relatedLogId,
+            LogEntry.idempotencyKey,
+            LogEntry.type,
+            summary_expr,
+            LogEntry.createdAt,
+            LogEntry.updatedAt,
+            LogEntry.agentId,
+            LogEntry.agentLabel,
+            LogEntry.source,
+            LogEntry.spaceId,
+        )
+        if topic_id:
+            log_query = log_query.where(LogEntry.topicId == topic_id)
+        if not include_pending:
+            log_query = log_query.where(LogEntry.classificationStatus == "classified")
+        if allowed_space_ids is not None:
+            # Keep search bounded to visible spaces at SQL level. This avoids loading large
+            # cross-space windows and dramatically reduces hot-path latency.
+            log_query = log_query.where(LogEntry.spaceId.in_(allowed_space_values))
+        log_fetch_limit = window_logs
+        if allowed_space_ids is not None:
+            log_fetch_limit = min(max(window_logs * 2, window_logs + 200), max(window_logs, SEARCH_WINDOW_MAX_LOGS))
+        log_fetch_limit = min(log_fetch_limit, max(window_logs, SEARCH_LOG_FETCH_LIMIT_CAP))
+        log_query = log_query.order_by(
+            LogEntry.createdAt.desc(),
+            LogEntry.updatedAt.desc(),
+            (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
+        ).limit(log_fetch_limit)
+        raw_rows = session.exec(log_query).all()
+        lightweight_logs: list[Any] = []
+        for row in raw_rows:
+            try:
+                (
+                    row_id,
+                    row_topic_id,
+                    row_task_id,
+                    row_related_log_id,
+                    row_idempotency_key,
+                    row_type,
+                    row_summary,
+                    row_created_at,
+                    row_updated_at,
+                    row_agent_id,
+                    row_agent_label,
+                    row_source,
+                    row_space_id,
+                ) = row
+            except Exception:
+                mapping = getattr(row, "_mapping", None)
+                if mapping is None:
+                    continue
+                row_id = mapping.get("id")
+                row_topic_id = mapping.get("topicId")
+                row_task_id = mapping.get("taskId")
+                row_related_log_id = mapping.get("relatedLogId")
+                row_idempotency_key = mapping.get("idempotencyKey")
+                row_type = mapping.get("type")
+                row_summary = mapping.get("summary")
+                row_created_at = mapping.get("createdAt")
+                row_updated_at = mapping.get("updatedAt")
+                row_agent_id = mapping.get("agentId")
+                row_agent_label = mapping.get("agentLabel")
+                row_source = mapping.get("source")
+                row_space_id = mapping.get("spaceId")
+            lightweight_logs.append(
+                SimpleNamespace(
+                    id=row_id,
+                    topicId=row_topic_id,
+                    taskId=row_task_id,
+                    relatedLogId=row_related_log_id,
+                    idempotencyKey=row_idempotency_key,
+                    type=row_type,
+                    summary=row_summary,
+                    content=None,
+                    raw=None,
+                    createdAt=row_created_at,
+                    updatedAt=row_updated_at,
+                    agentId=row_agent_id,
+                    agentLabel=row_agent_label,
+                    source=row_source if isinstance(row_source, dict) else {},
+                    spaceId=row_space_id,
+                )
+            )
+        logs = lightweight_logs
+        if allowed_space_ids is not None:
+            logs = logs[:window_logs]
     recent_log_ids = [str(entry.id or "").strip() for entry in logs if getattr(entry, "id", None)]
     preview_scan_cap_base = max(0, int(SEARCH_LOG_CONTENT_PREVIEW_SCAN_LIMIT))
     preview_dynamic_cap = max(80, min(320, effective_limit_logs * 2))
     preview_scan_cap = min(preview_scan_cap_base, preview_dynamic_cap) if preview_scan_cap_base > 0 else 0
     if not allow_deep_content_scan:
-        preview_scan_cap = min(preview_scan_cap, max(48, min(120, effective_limit_logs)))
+        preview_scan_cap = min(preview_scan_cap, max(24, min(60, max(10, effective_limit_logs // 2))))
     if preview_scan_cap > 0:
         preview_scan_ids = recent_log_ids[:preview_scan_cap]
     else:
@@ -10641,15 +11404,82 @@ def _search_impl(
             payload["searchText"] = _clip(" ".join(hints), 900)
         tasks_payload.append(payload)
 
-    search_result = semantic_search(
-        semantic_query_effective or query,
-        topics_payload,
-        tasks_payload,
-        log_payloads,
-        topic_limit=effective_limit_topics,
-        task_limit=effective_limit_tasks,
-        log_limit=effective_limit_logs,
+    semantic_query_for_search = semantic_query_effective or query
+    selected_search_engine = _resolve_search_engine_for_request(
+        query=semantic_query_for_search,
+        query_tokens=query_tokens,
+        allow_deep_content_scan=allow_deep_content_scan,
+        log_doc_count=len(log_payloads),
     )
+    topics_payload_for_search = topics_payload
+    tasks_payload_for_search = tasks_payload
+    logs_payload_for_search = log_payloads
+    if selected_search_engine == "hybrid":
+        topic_prefilter_limit = _hybrid_prefilter_limit(
+            effective_limit_topics,
+            len(topics_payload),
+            SEARCH_HYBRID_MAX_TOPIC_DOCS,
+        )
+        task_prefilter_limit = _hybrid_prefilter_limit(
+            effective_limit_tasks,
+            len(tasks_payload),
+            SEARCH_HYBRID_MAX_TASK_DOCS,
+        )
+        log_prefilter_limit = _hybrid_prefilter_limit(
+            effective_limit_logs,
+            len(log_payloads),
+            SEARCH_HYBRID_MAX_LOG_DOCS,
+        )
+        topics_payload_for_search = _prefilter_payloads_for_hybrid(
+            semantic_query_for_search,
+            topics_payload,
+            max_docs=topic_prefilter_limit,
+            text_fn=lambda row: " ".join(
+                part for part in [str(row.get("name") or ""), str(row.get("description") or ""), str(row.get("searchText") or "")] if part
+            ),
+        )
+        tasks_payload_for_search = _prefilter_payloads_for_hybrid(
+            semantic_query_for_search,
+            tasks_payload,
+            max_docs=task_prefilter_limit,
+            text_fn=lambda row: " ".join(
+                part for part in [str(row.get("title") or ""), str(row.get("status") or ""), str(row.get("searchText") or "")] if part
+            ),
+        )
+        logs_payload_for_search = _prefilter_payloads_for_hybrid(
+            semantic_query_for_search,
+            log_payloads,
+            max_docs=log_prefilter_limit,
+            text_fn=lambda row: " ".join(part for part in [str(row.get("summary") or ""), str(row.get("content") or "")] if part),
+        )
+
+    # semantic_search can be CPU-heavy; release DB resources before ranking.
+    # We already materialized all rows needed for scoring above.
+    try:
+        session.close()
+    except Exception:
+        pass
+
+    if selected_search_engine == "hybrid":
+        search_result = semantic_search(
+            semantic_query_for_search,
+            topics_payload_for_search,
+            tasks_payload_for_search,
+            logs_payload_for_search,
+            topic_limit=effective_limit_topics,
+            task_limit=effective_limit_tasks,
+            log_limit=effective_limit_logs,
+        )
+    else:
+        search_result = _cheap_semantic_search(
+            semantic_query_for_search,
+            topics_payload,
+            tasks_payload,
+            log_payloads,
+            topic_limit=effective_limit_topics,
+            task_limit=effective_limit_tasks,
+            log_limit=effective_limit_logs,
+        )
 
     topic_base_score: dict[str, float] = {
         str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("topics", [])
@@ -10952,6 +11782,13 @@ def _search_impl(
                 "topics": int(effective_limit_topics),
                 "tasks": int(effective_limit_tasks),
                 "logs": int(effective_limit_logs),
+            },
+            "searchModeConfigured": str(SEARCH_MODE),
+            "searchEngine": str(selected_search_engine),
+            "candidateDocs": {
+                "topics": int(len(topics_payload_for_search)) if selected_search_engine == "hybrid" else int(len(topics_payload)),
+                "tasks": int(len(tasks_payload_for_search)) if selected_search_engine == "hybrid" else int(len(tasks_payload)),
+                "logs": int(len(logs_payload_for_search)) if selected_search_engine == "hybrid" else int(len(log_payloads)),
             },
             "queryTokenCount": int(len(query_tokens)),
             "singleTokenQuery": bool(single_token_query),
@@ -11566,6 +12403,8 @@ def search(
     """Hybrid semantic + lexical search across topics, tasks, and logs."""
     query = (q or "").strip()
     started_at = time.perf_counter()
+    query_tokens = _search_query_tokens(query.lower())
+    query_has_deep_signal = len(query_tokens) >= 2 and len(query) >= 6
     if len(query) < 1:
         return {
             "query": "",
@@ -11593,7 +12432,7 @@ def search(
     effective_limit_topics = int(limitTopics)
     effective_limit_tasks = int(limitTasks)
     effective_limit_logs = int(limitLogs)
-    allow_deep_content_scan = True
+    allow_deep_content_scan = bool(query_has_deep_signal)
     if degraded_busy_fallback:
         # If the deep-search gate is saturated, run a bounded degraded pass instead of
         # returning a hard 429. This preserves semantic ordering while avoiding UI fallback.
@@ -11613,6 +12452,44 @@ def search(
                 source_space_id=resolved_source_space_id,
                 allowed_space_ids_raw=allowedSpaceIds,
             )
+            revision = _graph_revision_token(session)
+            cache_key = _search_result_cache_key(
+                query=query,
+                revision=revision,
+                topic_id=topicId,
+                session_key=sessionKey,
+                include_pending=includePending,
+                limit_topics=effective_limit_topics,
+                limit_tasks=effective_limit_tasks,
+                limit_logs=effective_limit_logs,
+                allow_deep_content_scan=allow_deep_content_scan,
+                allowed_space_ids=allowed_space_ids,
+            )
+            cached_result = _search_result_cache_get(cache_key)
+            if cached_result is not None:
+                duration_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+                cached_meta = dict(cached_result.get("searchMeta") or {})
+                cached_meta.update(
+                    {
+                        "degraded": bool(degraded_busy_fallback),
+                        "gateAcquired": bool(acquired),
+                        "gateWaitMs": float(gate_wait_ms),
+                        "durationMs": float(duration_ms),
+                        "allowDeepContentScan": bool(allow_deep_content_scan),
+                        "effectiveLimits": {
+                            "topics": int(effective_limit_topics),
+                            "tasks": int(effective_limit_tasks),
+                            "logs": int(effective_limit_logs),
+                        },
+                        "cacheHit": True,
+                    }
+                )
+                cached_result["searchMeta"] = cached_meta
+                if degraded_busy_fallback:
+                    mode = str(cached_result.get("mode") or "")
+                    cached_result["mode"] = f"{mode}+busy-fallback" if mode else "busy-fallback"
+                    cached_result["degraded"] = True
+                return cached_result
             result = _search_impl(
                 session,
                 query,
@@ -11639,6 +12516,7 @@ def search(
                         "tasks": int(effective_limit_tasks),
                         "logs": int(effective_limit_logs),
                     },
+                    "cacheHit": False,
                 }
             )
             enriched = dict(result)
@@ -11648,6 +12526,7 @@ def search(
                 enriched["mode"] = f"{mode}+busy-fallback" if mode else "busy-fallback"
                 enriched["degraded"] = True
                 return enriched
+            _search_result_cache_set(cache_key, enriched)
             return enriched
     finally:
         if acquired:

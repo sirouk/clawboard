@@ -62,6 +62,12 @@ VECTOR_REQUIRE_QDRANT = str(os.getenv("CLAWBOARD_VECTOR_REQUIRE_QDRANT", "0") or
     "yes",
     "on",
 }
+SEARCH_ENABLE_DENSE = str(os.getenv("CLAWBOARD_SEARCH_ENABLE_DENSE", "1") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 _MODEL = None
 _MODEL_LOCK = threading.Lock()
@@ -548,6 +554,8 @@ def _ensure_model_loading_async() -> None:
 
 
 def _embed_query(text: str):
+    if not SEARCH_ENABLE_DENSE:
+        return None
     normalized = _normalize_text(text)
     if not normalized:
         return None
@@ -580,6 +588,8 @@ def _embed_query(text: str):
 
 
 def _embed_many(texts: list[str]) -> dict[str, "np.ndarray"]:
+    if not SEARCH_ENABLE_DENSE:
+        return {}
     model = _get_model()
     if model is None or np is None:
         return {}
@@ -1163,9 +1173,16 @@ def semantic_search(
     log_docs = _prepare_docs("log", filtered_logs, _log_text, chunk=False)
 
     query_vec = _embed_query(q)
-    topic_dense, topic_backend = _vector_topk(query_vec, kind_exact="topic", limit=max(topic_limit * 4, 80))
-    task_dense, task_backend = _vector_topk(query_vec, kind_prefix="task:", limit=max(task_limit * 4, 140))
-    log_dense, log_backend = _vector_topk(query_vec, kind_exact="log", limit=max(log_limit * 2, 220))
+    topic_dense: dict[str, float] = {}
+    task_dense: dict[str, float] = {}
+    log_dense: dict[str, float] = {}
+    topic_backend = "none"
+    task_backend = "none"
+    log_backend = "none"
+    if query_vec is not None:
+        topic_dense, topic_backend = _vector_topk(query_vec, kind_exact="topic", limit=max(topic_limit * 4, 80))
+        task_dense, task_backend = _vector_topk(query_vec, kind_prefix="task:", limit=max(task_limit * 4, 140))
+        log_dense, log_backend = _vector_topk(query_vec, kind_exact="log", limit=max(log_limit * 2, 220))
 
     topic_ranked, topic_chunks = _hybrid_rank(q, topic_docs, topic_dense, query_vec, topic_limit)
     task_ranked, task_chunks = _hybrid_rank(q, task_docs, task_dense, query_vec, task_limit)

@@ -549,6 +549,57 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             source = rows[0].source if isinstance(rows[0].source, dict) else {}
             self.assertEqual(source.get("channel"), "webchat")
 
+    def test_ing_020e2_history_ingest_preserves_assistant_reply_when_request_id_matches_user_row(self):
+        request_id = "occhat-request-020e2"
+        topic_id = "topic-ing-020e2"
+        board_session_key = f"clawboard:topic:{topic_id}"
+        with get_session() as session:
+            main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    content="user prompt 020e2",
+                    summary="user prompt 020e2",
+                    createdAt=now_iso(),
+                    agentId="user",
+                    agentLabel="User",
+                    source={
+                        "channel": "openclaw",
+                        "sessionKey": board_session_key,
+                        "requestId": request_id,
+                        "messageId": request_id,
+                    },
+                ),
+                idempotency_key=f"openclaw-chat:user:{request_id}",
+            )
+
+        history_messages = [
+            {
+                "timestamp": 1700000025000,
+                "role": "assistant",
+                "text": "[[reply_to_current]] assistant completion 020e2",
+                "requestId": request_id,
+            }
+        ]
+        ingested, _ = main_module._ingest_openclaw_history_messages(
+            session_key=board_session_key,
+            messages=history_messages,
+            since_ms=0,
+        )
+
+        self.assertEqual(ingested, 1)
+        with get_session() as session:
+            rows = session.exec(
+                select(LogEntry)
+                .where(LogEntry.type == "conversation")
+                .where(LogEntry.source["requestId"].as_string() == request_id)
+                .order_by(LogEntry.createdAt.asc())
+            ).all()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(str(rows[0].agentId or ""), "user")
+            self.assertEqual(str(rows[1].agentId or ""), "assistant")
+            self.assertEqual(str(rows[1].content or ""), "assistant completion 020e2")
+
     def test_ing_020f_assistant_uses_canonical_idempotency_key_by_base_request_id(self):
         request_id = "occhat-request-020f:retry-1"
         with get_session() as session:
@@ -570,10 +621,8 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 ),
                 idempotency_key="src:conversation:webchat:assistant:oc:assistant-020f",
             )
-            self.assertEqual(
-                str(row.idempotencyKey or ""),
-                "openclaw-assistant:occhat-request-020f",
-            )
+            idem = str(row.idempotencyKey or "")
+            self.assertTrue(idem.startswith("openclaw-assistant:occhat-request-020f:"))
 
     def test_ing_020g_assistant_dedupes_between_base_and_retry_suffix_request_ids(self):
         request_id_base = "occhat-request-020g"
@@ -671,6 +720,74 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 .where(LogEntry.content == "assistant response 020h")
             ).all()
             self.assertEqual(len(rows), 1)
+
+    def test_ing_020h2_history_ingest_keeps_distinct_assistant_completion_for_same_request(self):
+        request_id = "occhat-request-020h2"
+        topic_id = "topic-ing-020h2"
+        board_session_key = f"clawboard:topic:{topic_id}"
+        with get_session() as session:
+            main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    content="user prompt 020h2",
+                    summary="user prompt 020h2",
+                    createdAt=now_iso(),
+                    agentId="user",
+                    agentLabel="User",
+                    source={
+                        "channel": "openclaw",
+                        "sessionKey": board_session_key,
+                        "requestId": request_id,
+                        "messageId": request_id,
+                    },
+                ),
+                idempotency_key=f"openclaw-chat:user:{request_id}",
+            )
+            main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    content="dispatch ack 020h2",
+                    summary="dispatch ack 020h2",
+                    createdAt=now_iso(),
+                    agentId="assistant",
+                    agentLabel="OpenClaw",
+                    source={
+                        "channel": "webchat",
+                        "sessionKey": f"agent:main:{board_session_key}",
+                        "requestId": request_id,
+                        "messageId": "oc:assistant-020h2-dispatch",
+                    },
+                ),
+                idempotency_key="src:conversation:webchat:assistant:oc:assistant-020h2-dispatch",
+            )
+
+        ingested, _ = main_module._ingest_openclaw_history_messages(
+            session_key=f"agent:main:{board_session_key}",
+            messages=[
+                {
+                    "timestamp": int(time.time() * 1000) + 5000,
+                    "role": "assistant",
+                    "text": "[[reply_to_current]] final completion 020h2",
+                }
+            ],
+            since_ms=0,
+        )
+
+        self.assertEqual(ingested, 1)
+        with get_session() as session:
+            assistant_rows = session.exec(
+                select(LogEntry)
+                .where(LogEntry.type == "conversation")
+                .where(LogEntry.agentId == "assistant")
+                .where(LogEntry.source["requestId"].as_string() == request_id)
+                .order_by(LogEntry.createdAt.asc())
+            ).all()
+            self.assertEqual(len(assistant_rows), 2)
+            contents = [str(row.content or "") for row in assistant_rows]
+            self.assertIn("dispatch ack 020h2", contents)
+            self.assertIn("final completion 020h2", contents)
 
     def test_chat_020i_in_flight_probe_allows_multi_hour_windows(self):
         with patch.dict(

@@ -3787,8 +3787,8 @@ def classify_session(session_key: str):
     # Early terminal filters for obvious control-plane noise:
     # - cron-event rows
     # - control-plane conversations (heartbeat / subagent scaffolds)
-    # - unanchored tool traces
-    # Keep anchored tool traces for scope-aware handling later in this cycle.
+    # Tool trace actions are intentionally deferred until bundle scoping so in-request
+    # tool activity can be attached to the same topic/task.
     for e in ctx_logs:
         if (e.get("classificationStatus") or "pending") != "pending":
             continue
@@ -3804,11 +3804,15 @@ def classify_session(session_key: str):
                 "classificationError": "filtered_cron_event",
             }
         else:
-            patch_payload = _filtered_control_or_tool_patch(
-                e,
-                attempts=attempts,
-                allow_anchored_tool=False,
-            )
+            control_error = _control_plane_conversation_error(e)
+            if control_error:
+                patch_payload = {
+                    "topicId": None,
+                    "taskId": None,
+                    "classificationStatus": "failed",
+                    "classificationAttempts": attempts + 1,
+                    "classificationError": control_error,
+                }
 
         if not patch_payload:
             continue
@@ -3989,7 +3993,14 @@ def classify_session(session_key: str):
         # Task Chat: clawboard:task:<topicId>:<taskId> — messages MUST stay in this task only.
         # Never reallocate; no LLM, no candidate retrieval. Patch all scope_logs with this topic+task.
         for e in scope_logs:
-            if (e.get("classificationStatus") or "pending") != "pending":
+            entry_status = str(e.get("classificationStatus") or "pending")
+            should_backfill_tool_task = (
+                entry_status == "classified"
+                and _is_tool_trace_action(e)
+                and str(e.get("topicId") or "").strip() == str(forced_topic_id or "").strip()
+                and str(e.get("taskId") or "").strip() != str(forced_task_id or "").strip()
+            )
+            if entry_status != "pending" and not should_backfill_tool_task:
                 continue
             attempts = int(e.get("classificationAttempts") or 0)
             if _is_cron_event(e):
@@ -4005,14 +4016,42 @@ def classify_session(session_key: str):
                     },
                 )
                 continue
-            filtered_patch = _filtered_control_or_tool_patch(
-                e,
-                attempts=attempts,
-                scoped_topic_id=forced_topic_id,
-                scoped_task_id=forced_task_id,
-            )
-            if filtered_patch:
-                patch_log(e["id"], filtered_patch)
+            control_error = _control_plane_conversation_error(e)
+            if control_error:
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": None,
+                        "taskId": None,
+                        "classificationStatus": "failed",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": control_error,
+                    },
+                )
+                continue
+            if _is_memory_action(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": forced_topic_id,
+                        "taskId": forced_task_id,
+                        "classificationStatus": "classified",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_memory_action",
+                    },
+                )
+                continue
+            if _is_tool_trace_action(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": forced_topic_id,
+                        "taskId": forced_task_id,
+                        "classificationStatus": "classified",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_tool_activity",
+                    },
+                )
                 continue
             if attempts >= MAX_ATTEMPTS:
                 continue
@@ -4055,19 +4094,6 @@ def classify_session(session_key: str):
                     },
                 )
                 continue
-            if _is_memory_action(e):
-                patch_log(
-                    e["id"],
-                    {
-                        "topicId": forced_topic_id,
-                        "taskId": forced_task_id,
-                        "classificationStatus": "classified",
-                        "classificationAttempts": attempts + 1,
-                        "classificationError": "filtered_memory_action",
-                    },
-                )
-                continue
-
             patch_payload = {
                 "topicId": forced_topic_id,
                 "taskId": forced_task_id,
@@ -4948,8 +4974,6 @@ def classify_session(session_key: str):
 
     # Patch only logs in this bundle scope (conversation + interleaved actions), not the entire session.
     for e in scope_logs:
-        if (e.get("classificationStatus") or "pending") != "pending":
-            continue
         attempts = int(e.get("classificationAttempts") or 0)
         locked_topic_id, locked_task_id, locked_kind = _entry_locked_scope(e)
         target_topic_id = topic_id
@@ -4964,6 +4988,17 @@ def classify_session(session_key: str):
         has_locked_scope = locked_kind in {"topic", "task"}
         filtered_topic_id = target_topic_id if has_locked_scope else None
         filtered_task_id = target_task_id if has_locked_scope else None
+        entry_status = str(e.get("classificationStatus") or "pending")
+        should_backfill_tool_task = (
+            entry_status == "classified"
+            and _is_tool_trace_action(e)
+            and bool(target_topic_id)
+            and bool(target_task_id)
+            and str(e.get("topicId") or "").strip() == str(target_topic_id or "").strip()
+            and str(e.get("taskId") or "").strip() != str(target_task_id or "").strip()
+        )
+        if entry_status != "pending" and not should_backfill_tool_task:
+            continue
         if _is_cron_event(e):
             patch_log(
                 e["id"],
@@ -4976,14 +5011,42 @@ def classify_session(session_key: str):
                 },
             )
             continue
-        filtered_patch = _filtered_control_or_tool_patch(
-            e,
-            attempts=attempts,
-            scoped_topic_id=target_topic_id,
-            scoped_task_id=target_task_id,
-        )
-        if filtered_patch:
-            patch_log(e["id"], filtered_patch)
+        control_error = _control_plane_conversation_error(e)
+        if control_error:
+            patch_log(
+                e["id"],
+                {
+                    "topicId": None,
+                    "taskId": None,
+                    "classificationStatus": "failed",
+                    "classificationAttempts": attempts + 1,
+                    "classificationError": control_error,
+                },
+            )
+            continue
+        if _is_memory_action(e):
+            patch_log(
+                e["id"],
+                {
+                    "topicId": filtered_topic_id,
+                    "taskId": filtered_task_id,
+                    "classificationStatus": "classified",
+                    "classificationAttempts": attempts + 1,
+                    "classificationError": "filtered_memory_action",
+                },
+            )
+            continue
+        if _is_tool_trace_action(e):
+            patch_log(
+                e["id"],
+                {
+                    "topicId": target_topic_id,
+                    "taskId": target_task_id,
+                    "classificationStatus": "classified",
+                    "classificationAttempts": attempts + 1,
+                    "classificationError": "filtered_tool_activity",
+                },
+            )
             continue
         if attempts >= MAX_ATTEMPTS:
             continue
@@ -5022,18 +5085,6 @@ def classify_session(session_key: str):
                     "classificationStatus": "classified",
                     "classificationAttempts": attempts + 1,
                     "classificationError": "filtered_non_semantic",
-                },
-            )
-            continue
-        if _is_memory_action(e):
-            patch_log(
-                e["id"],
-                {
-                    "topicId": filtered_topic_id,
-                    "taskId": filtered_task_id,
-                    "classificationStatus": "classified",
-                    "classificationAttempts": attempts + 1,
-                    "classificationError": "filtered_memory_action",
                 },
             )
             continue
@@ -5153,14 +5204,19 @@ def main():
                     except Exception:
                         pass
                     continue
-                filtered_patch = _filtered_control_or_tool_patch(
-                    e,
-                    attempts=attempts0,
-                    allow_anchored_tool=False,
-                )
-                if filtered_patch:
+                control_error = _control_plane_conversation_error(e)
+                if control_error:
                     try:
-                        patch_log(e["id"], filtered_patch)
+                        patch_log(
+                            e["id"],
+                            {
+                                "topicId": None,
+                                "taskId": None,
+                                "classificationStatus": "failed",
+                                "classificationAttempts": attempts0 + 1,
+                                "classificationError": control_error,
+                            },
+                        )
                     except Exception:
                         pass
                     continue

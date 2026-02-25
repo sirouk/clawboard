@@ -747,10 +747,12 @@ export function LogList({
           {normalizedSearch && (
             <p className="text-xs text-[rgb(var(--claw-muted))]">
               {semanticSearch.loading
-                ? "Searching memory index…"
+                ? "Searching semantic index…"
                 : semanticForQuery
                   ? `Semantic search (${semanticForQuery.mode})`
-                  : semanticSearch.error
+                  : semanticSearch.error === "search_timeout"
+                    ? "Semantic search timed out, using local match fallback."
+                    : semanticSearch.error
                     ? "Semantic search unavailable, using local match fallback."
                     : "Searching…"}
             </p>
@@ -2016,20 +2018,53 @@ const LogRow = memo(function LogRow({
         </div>
       ) : (
         <>
-          <p className="mt-3 text-sm leading-relaxed text-[rgb(var(--claw-text))]">{summary}</p>
-          {entry.raw && (
-            <div className="mt-3">
-              {!showRawAll && (
-                <Button variant="ghost" size="sm" onClick={() => setExpanded((prev) => !prev)}>
-                  {expanded ? "Hide full message" : "Show full message"}
-                </Button>
+          {toolEvent ? (
+            <div className="mt-3 space-y-2">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-[rgb(var(--claw-muted))]">
+                <span className="uppercase tracking-[0.14em]">
+                  {toolEvent.kind === "call" ? "Tool call" : toolEvent.kind === "result" ? "Tool result" : "Tool error"}
+                </span>
+                <span className="font-mono text-[rgb(var(--claw-text))]">{toolEvent.toolName}</span>
+              </div>
+              {!toolRawLoaded && (
+                <div className="text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">Loading…</div>
               )}
-              {showFullMessage && (
-                <pre className="mt-2 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
-                  {entry.raw}
-                </pre>
+              {(toolRaw || entry.raw) && (
+                <div>
+                  {!showRawAll && (
+                    <Button variant="ghost" size="sm" onClick={() => setExpanded((prev) => !prev)}>
+                      {expanded ? "Hide tool details" : "Show tool details"}
+                    </Button>
+                  )}
+                  {showFullMessage && (
+                    <pre className="mt-2 max-h-[520px] overflow-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+                      {toolRaw ?? entry.raw}
+                    </pre>
+                  )}
+                </div>
               )}
+              {toolRawLoaded && !toolRaw && !entry.raw ? (
+                <p className="text-xs text-[rgb(var(--claw-muted))]">(No tool details)</p>
+              ) : null}
             </div>
+          ) : (
+            <>
+              <p className="mt-3 text-sm leading-relaxed text-[rgb(var(--claw-text))]">{summary}</p>
+              {entry.raw && (
+                <div className="mt-3">
+                  {!showRawAll && (
+                    <Button variant="ghost" size="sm" onClick={() => setExpanded((prev) => !prev)}>
+                      {expanded ? "Hide full message" : "Show full message"}
+                    </Button>
+                  )}
+                  {showFullMessage && (
+                    <pre className="mt-2 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+                      {entry.raw}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </>
       )}

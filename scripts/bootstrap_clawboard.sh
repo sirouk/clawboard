@@ -387,7 +387,12 @@ WEB_HOT_RELOAD_OVERRIDE=""
 ALLOWED_DEV_ORIGINS_OVERRIDE=""
 CONTEXT_MODE_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_MODE:-}"
 CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS:-}"
+CONTEXT_FETCH_RETRIES_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_FETCH_RETRIES:-}"
+CONTEXT_FALLBACK_MODES_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES:-}"
 CONTEXT_MAX_CHARS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS:-}"
+CONTEXT_CACHE_TTL_MS_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_CACHE_TTL_MS:-}"
+CONTEXT_CACHE_MAX_ENTRIES_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_CACHE_MAX_ENTRIES:-}"
+CONTEXT_USE_CACHE_ON_FAILURE_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE:-}"
 SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="${CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS:-}"
 VECTOR_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="${CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS:-}"
 SKILL_INSTALL_MODE="${CLAWBOARD_SKILL_INSTALL_MODE:-symlink}"
@@ -475,9 +480,29 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || log_error "--context-fetch-timeout-ms requires a value"
       CONTEXT_FETCH_TIMEOUT_MS_OVERRIDE="$2"; shift 2
       ;;
+    --context-fetch-retries)
+      [ $# -ge 2 ] || log_error "--context-fetch-retries requires a value"
+      CONTEXT_FETCH_RETRIES_OVERRIDE="$2"; shift 2
+      ;;
+    --context-fallback-modes)
+      [ $# -ge 2 ] || log_error "--context-fallback-modes requires a value"
+      CONTEXT_FALLBACK_MODES_OVERRIDE="$2"; shift 2
+      ;;
     --context-max-chars)
       [ $# -ge 2 ] || log_error "--context-max-chars requires a value"
       CONTEXT_MAX_CHARS_OVERRIDE="$2"; shift 2
+      ;;
+    --context-cache-ttl-ms)
+      [ $# -ge 2 ] || log_error "--context-cache-ttl-ms requires a value"
+      CONTEXT_CACHE_TTL_MS_OVERRIDE="$2"; shift 2
+      ;;
+    --context-cache-max-entries)
+      [ $# -ge 2 ] || log_error "--context-cache-max-entries requires a value"
+      CONTEXT_CACHE_MAX_ENTRIES_OVERRIDE="$2"; shift 2
+      ;;
+    --context-use-cache-on-failure)
+      [ $# -ge 2 ] || log_error "--context-use-cache-on-failure requires a value"
+      CONTEXT_USE_CACHE_ON_FAILURE_OVERRIDE="$2"; shift 2
       ;;
     --include-tool-call-logs) SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="1"; shift ;;
     --exclude-tool-call-logs) SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="0"; shift ;;
@@ -551,8 +576,18 @@ Environment overrides:
                        Context retrieval mode for the OpenClaw clawboard-logger plugin (writes CLAWBOARD_LOGGER_CONTEXT_MODE)
   --context-fetch-timeout-ms <ms>
                        Per-request timeout for /api/context calls made by the OpenClaw plugin (writes CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS)
+  --context-fetch-retries <n>
+                       Retries per mode when /api/context retrieval fails (writes CLAWBOARD_LOGGER_CONTEXT_FETCH_RETRIES)
+  --context-fallback-modes <csv>
+                       Ordered fallback context modes (e.g. full,auto,cheap) written to CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES
   --context-max-chars <n>
                        Hard cap for injected context block size (writes CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS)
+  --context-cache-ttl-ms <ms>
+                       Context cache TTL for transient failures (writes CLAWBOARD_LOGGER_CONTEXT_CACHE_TTL_MS)
+  --context-cache-max-entries <n>
+                       Max cached context blocks in plugin memory (writes CLAWBOARD_LOGGER_CONTEXT_CACHE_MAX_ENTRIES)
+  --context-use-cache-on-failure <0|1|true|false>
+                       Whether plugin should use cached context if live retrieval fails (writes CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE)
   --include-tool-call-logs
                        Include tool call/result/error action logs in semantic indexing + retrieval
                        (writes CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS=1)
@@ -2005,8 +2040,13 @@ fi
 log_info "Writing CLAWBOARD_LOGGER_CONTEXT_MODE=$CONTEXT_MODE_VALUE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_MODE" "$CONTEXT_MODE_VALUE"
 
-DEFAULT_CONTEXT_FETCH_TIMEOUT_MS="1200"
+DEFAULT_CONTEXT_FETCH_TIMEOUT_MS="3000"
+DEFAULT_CONTEXT_FETCH_RETRIES="1"
+DEFAULT_CONTEXT_FALLBACK_MODES="full,auto,cheap"
 DEFAULT_CONTEXT_MAX_CHARS="2200"
+DEFAULT_CONTEXT_CACHE_TTL_MS="45000"
+DEFAULT_CONTEXT_CACHE_MAX_ENTRIES="120"
+DEFAULT_CONTEXT_USE_CACHE_ON_FAILURE="1"
 DEFAULT_SEARCH_CONCURRENCY_LIMIT="2"
 DEFAULT_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS="900"
 DEFAULT_SEARCH_EMBED_QUERY_CACHE_SIZE="256"
@@ -2034,6 +2074,51 @@ CONTEXT_FETCH_TIMEOUT_MS_VALUE="$(clamp_int "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" 20
 log_info "Writing CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS=$CONTEXT_FETCH_TIMEOUT_MS_VALUE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE"
 
+CONTEXT_FETCH_RETRIES_VALUE=""
+if [ -n "$CONTEXT_FETCH_RETRIES_OVERRIDE" ]; then
+  CONTEXT_FETCH_RETRIES_VALUE="$CONTEXT_FETCH_RETRIES_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FETCH_RETRIES" >/dev/null 2>&1; then
+  CONTEXT_FETCH_RETRIES_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FETCH_RETRIES" || true)"
+else
+  CONTEXT_FETCH_RETRIES_VALUE="$DEFAULT_CONTEXT_FETCH_RETRIES"
+fi
+CONTEXT_FETCH_RETRIES_VALUE="$(clamp_int "$CONTEXT_FETCH_RETRIES_VALUE" 0 3 || echo "$DEFAULT_CONTEXT_FETCH_RETRIES")"
+log_info "Writing CLAWBOARD_LOGGER_CONTEXT_FETCH_RETRIES=$CONTEXT_FETCH_RETRIES_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FETCH_RETRIES" "$CONTEXT_FETCH_RETRIES_VALUE"
+
+CONTEXT_FALLBACK_MODES_VALUE=""
+if [ -n "$CONTEXT_FALLBACK_MODES_OVERRIDE" ]; then
+  CONTEXT_FALLBACK_MODES_VALUE="$CONTEXT_FALLBACK_MODES_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES" >/dev/null 2>&1; then
+  CONTEXT_FALLBACK_MODES_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES" || true)"
+else
+  CONTEXT_FALLBACK_MODES_VALUE="$DEFAULT_CONTEXT_FALLBACK_MODES"
+fi
+CONTEXT_FALLBACK_MODES_VALUE="$(printf "%s" "$CONTEXT_FALLBACK_MODES_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+CONTEXT_FALLBACK_MODES_VALUE="$(printf "%s" "$CONTEXT_FALLBACK_MODES_VALUE" | tr -d '[:space:]')"
+VALIDATED_CONTEXT_FALLBACK_MODES=""
+IFS=',' read -r -a _context_fallback_modes <<< "$CONTEXT_FALLBACK_MODES_VALUE"
+for _mode in "${_context_fallback_modes[@]}"; do
+  [ -n "$_mode" ] || continue
+  if ! is_valid_context_mode "$_mode"; then
+    log_warn "Ignoring invalid context fallback mode: $_mode"
+    continue
+  fi
+  case ",$VALIDATED_CONTEXT_FALLBACK_MODES," in
+    *",$_mode,"*) continue ;;
+  esac
+  if [ -z "$VALIDATED_CONTEXT_FALLBACK_MODES" ]; then
+    VALIDATED_CONTEXT_FALLBACK_MODES="$_mode"
+  else
+    VALIDATED_CONTEXT_FALLBACK_MODES="$VALIDATED_CONTEXT_FALLBACK_MODES,$_mode"
+  fi
+done
+if [ -z "$VALIDATED_CONTEXT_FALLBACK_MODES" ]; then
+  VALIDATED_CONTEXT_FALLBACK_MODES="$DEFAULT_CONTEXT_FALLBACK_MODES"
+fi
+log_info "Writing CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES=$VALIDATED_CONTEXT_FALLBACK_MODES in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES" "$VALIDATED_CONTEXT_FALLBACK_MODES"
+
 CONTEXT_MAX_CHARS_VALUE=""
 if [ -n "$CONTEXT_MAX_CHARS_OVERRIDE" ]; then
   CONTEXT_MAX_CHARS_VALUE="$CONTEXT_MAX_CHARS_OVERRIDE"
@@ -2045,6 +2130,82 @@ fi
 CONTEXT_MAX_CHARS_VALUE="$(clamp_int "$CONTEXT_MAX_CHARS_VALUE" 400 12000 || echo "$DEFAULT_CONTEXT_MAX_CHARS")"
 log_info "Writing CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS=$CONTEXT_MAX_CHARS_VALUE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS" "$CONTEXT_MAX_CHARS_VALUE"
+
+CONTEXT_CACHE_TTL_MS_VALUE=""
+if [ -n "$CONTEXT_CACHE_TTL_MS_OVERRIDE" ]; then
+  CONTEXT_CACHE_TTL_MS_VALUE="$CONTEXT_CACHE_TTL_MS_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_CACHE_TTL_MS" >/dev/null 2>&1; then
+  CONTEXT_CACHE_TTL_MS_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_CACHE_TTL_MS" || true)"
+else
+  CONTEXT_CACHE_TTL_MS_VALUE="$DEFAULT_CONTEXT_CACHE_TTL_MS"
+fi
+CONTEXT_CACHE_TTL_MS_VALUE="$(clamp_int "$CONTEXT_CACHE_TTL_MS_VALUE" 0 300000 || echo "$DEFAULT_CONTEXT_CACHE_TTL_MS")"
+log_info "Writing CLAWBOARD_LOGGER_CONTEXT_CACHE_TTL_MS=$CONTEXT_CACHE_TTL_MS_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_CACHE_TTL_MS" "$CONTEXT_CACHE_TTL_MS_VALUE"
+
+CONTEXT_CACHE_MAX_ENTRIES_VALUE=""
+if [ -n "$CONTEXT_CACHE_MAX_ENTRIES_OVERRIDE" ]; then
+  CONTEXT_CACHE_MAX_ENTRIES_VALUE="$CONTEXT_CACHE_MAX_ENTRIES_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_CACHE_MAX_ENTRIES" >/dev/null 2>&1; then
+  CONTEXT_CACHE_MAX_ENTRIES_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_CACHE_MAX_ENTRIES" || true)"
+else
+  CONTEXT_CACHE_MAX_ENTRIES_VALUE="$DEFAULT_CONTEXT_CACHE_MAX_ENTRIES"
+fi
+CONTEXT_CACHE_MAX_ENTRIES_VALUE="$(clamp_int "$CONTEXT_CACHE_MAX_ENTRIES_VALUE" 8 1000 || echo "$DEFAULT_CONTEXT_CACHE_MAX_ENTRIES")"
+log_info "Writing CLAWBOARD_LOGGER_CONTEXT_CACHE_MAX_ENTRIES=$CONTEXT_CACHE_MAX_ENTRIES_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_CACHE_MAX_ENTRIES" "$CONTEXT_CACHE_MAX_ENTRIES_VALUE"
+
+CONTEXT_USE_CACHE_ON_FAILURE_VALUE=""
+if [ -n "$CONTEXT_USE_CACHE_ON_FAILURE_OVERRIDE" ]; then
+  CONTEXT_USE_CACHE_ON_FAILURE_VALUE="$CONTEXT_USE_CACHE_ON_FAILURE_OVERRIDE"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE" >/dev/null 2>&1; then
+  CONTEXT_USE_CACHE_ON_FAILURE_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE" || true)"
+else
+  CONTEXT_USE_CACHE_ON_FAILURE_VALUE="$DEFAULT_CONTEXT_USE_CACHE_ON_FAILURE"
+fi
+CONTEXT_USE_CACHE_ON_FAILURE_VALUE="$(printf "%s" "$CONTEXT_USE_CACHE_ON_FAILURE_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+case "$CONTEXT_USE_CACHE_ON_FAILURE_VALUE" in
+  1|true|yes|on) CONTEXT_USE_CACHE_ON_FAILURE_VALUE="1" ;;
+  0|false|no|off) CONTEXT_USE_CACHE_ON_FAILURE_VALUE="0" ;;
+  *)
+    log_warn "Invalid CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE=$CONTEXT_USE_CACHE_ON_FAILURE_VALUE. Using default: $DEFAULT_CONTEXT_USE_CACHE_ON_FAILURE"
+    CONTEXT_USE_CACHE_ON_FAILURE_VALUE="$DEFAULT_CONTEXT_USE_CACHE_ON_FAILURE"
+    ;;
+esac
+log_info "Writing CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE=$CONTEXT_USE_CACHE_ON_FAILURE_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE" "$CONTEXT_USE_CACHE_ON_FAILURE_VALUE"
+
+# Controls whether OpenClaw memory_search/memory_get is allowed during normal turns.
+# Default is off (0): prefer Clawboard retrieval context.
+LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH" >/dev/null 2>&1; then
+  LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH" || true)"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_DISABLE_OPENCLAW_MEMORY_SEARCH" >/dev/null 2>&1; then
+  LEGACY_DISABLE_OPENCLAW_MEMORY_SEARCH_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_DISABLE_OPENCLAW_MEMORY_SEARCH" || true)"
+  LEGACY_DISABLE_OPENCLAW_MEMORY_SEARCH_VALUE="$(printf "%s" "$LEGACY_DISABLE_OPENCLAW_MEMORY_SEARCH_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+  case "$LEGACY_DISABLE_OPENCLAW_MEMORY_SEARCH_VALUE" in
+    1|true|yes|on) LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE="0" ;;
+    0|false|no|off) LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE="1" ;;
+    *)
+      log_warn "Invalid legacy CLAWBOARD_LOGGER_DISABLE_OPENCLAW_MEMORY_SEARCH=$LEGACY_DISABLE_OPENCLAW_MEMORY_SEARCH_VALUE. Using default enable=0"
+      LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE="0"
+      ;;
+  esac
+else
+  LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE="0"
+fi
+LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE="$(printf "%s" "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+case "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE" in
+  1|true|yes|on) LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE="1" ;;
+  0|false|no|off) LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE="0" ;;
+  *)
+    log_warn "Invalid CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH=$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE. Using default: 0"
+    LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE="0"
+    ;;
+esac
+log_info "Writing CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH=$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH" "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE"
+remove_env_key "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_DISABLE_OPENCLAW_MEMORY_SEARCH"
 
 # Long-running subagent board-scope persistence (hours). Plugin uses this when resolving scope from DB; 48h keeps day-long agents aligned.
 BOARD_SCOPE_SUBAGENT_TTL_HOURS_VALUE=""
@@ -2449,10 +2610,28 @@ PY
       openclaw plugins enable clawboard-logger
 
       log_info "Configuring logger plugin..."
+      LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON=false
+      if [ "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE" = "1" ]; then
+        LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON=true
+      fi
+      CONTEXT_USE_CACHE_ON_FAILURE_JSON=false
+      if [ "$CONTEXT_USE_CACHE_ON_FAILURE_VALUE" = "1" ]; then
+        CONTEXT_USE_CACHE_ON_FAILURE_JSON=true
+      fi
+      CONTEXT_FALLBACK_MODES_JSON="["
+      IFS=',' read -r -a _fallback_modes_for_json <<< "$VALIDATED_CONTEXT_FALLBACK_MODES"
+      for _mode in "${_fallback_modes_for_json[@]}"; do
+        [ -n "$_mode" ] || continue
+        if [ "$CONTEXT_FALLBACK_MODES_JSON" != "[" ]; then
+          CONTEXT_FALLBACK_MODES_JSON="$CONTEXT_FALLBACK_MODES_JSON,"
+        fi
+        CONTEXT_FALLBACK_MODES_JSON="$CONTEXT_FALLBACK_MODES_JSON\"$_mode\""
+      done
+      CONTEXT_FALLBACK_MODES_JSON="$CONTEXT_FALLBACK_MODES_JSON]"
       if [ -n "$TOKEN" ]; then
-        CONFIG_JSON=$(printf '{"baseUrl":"%s","token":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextMaxChars":%s}' "$API_URL" "$TOKEN" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_MAX_CHARS_VALUE")
+        CONFIG_JSON=$(printf '{"baseUrl":"%s","token":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextFetchRetries":%s,"contextFallbackModes":%s,"contextMaxChars":%s,"contextCacheTtlMs":%s,"contextCacheMaxEntries":%s,"contextUseCacheOnFailure":%s,"enableOpenClawMemorySearch":%s}' "$API_URL" "$TOKEN" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_FETCH_RETRIES_VALUE" "$CONTEXT_FALLBACK_MODES_JSON" "$CONTEXT_MAX_CHARS_VALUE" "$CONTEXT_CACHE_TTL_MS_VALUE" "$CONTEXT_CACHE_MAX_ENTRIES_VALUE" "$CONTEXT_USE_CACHE_ON_FAILURE_JSON" "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON")
       else
-        CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextMaxChars":%s}' "$API_URL" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_MAX_CHARS_VALUE")
+        CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextFetchRetries":%s,"contextFallbackModes":%s,"contextMaxChars":%s,"contextCacheTtlMs":%s,"contextCacheMaxEntries":%s,"contextUseCacheOnFailure":%s,"enableOpenClawMemorySearch":%s}' "$API_URL" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_FETCH_RETRIES_VALUE" "$CONTEXT_FALLBACK_MODES_JSON" "$CONTEXT_MAX_CHARS_VALUE" "$CONTEXT_CACHE_TTL_MS_VALUE" "$CONTEXT_CACHE_MAX_ENTRIES_VALUE" "$CONTEXT_USE_CACHE_ON_FAILURE_JSON" "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON")
       fi
       openclaw config set plugins.entries.clawboard-logger.config --json "$CONFIG_JSON" >/dev/null 2>&1 || true
       openclaw config set plugins.entries.clawboard-logger.enabled --json true >/dev/null 2>&1 || true

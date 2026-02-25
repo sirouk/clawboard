@@ -1001,6 +1001,16 @@ ensure_plugin() {
   local plugin_path="$ROOT_DIR/extensions/clawboard-logger"
   local token=""
   local api_base=""
+  local context_mode="auto"
+  local context_fetch_timeout_ms="3000"
+  local context_fetch_retries="1"
+  local context_fallback_modes_csv="full,auto,cheap"
+  local context_fallback_modes_json='["full","auto","cheap"]'
+  local context_max_chars="2200"
+  local context_cache_ttl_ms="45000"
+  local context_cache_max_entries="120"
+  local context_use_cache_on_failure_json="true"
+  local enable_openclaw_memory_search_json="false"
   if ! command -v openclaw >/dev/null 2>&1; then
     echo "error: openclaw CLI not found. Install OpenClaw first." >&2
     exit 1
@@ -1012,6 +1022,42 @@ ensure_plugin() {
 
   token="$(read_env_value "CLAWBOARD_TOKEN" || true)"
   api_base="$(read_env_value "CLAWBOARD_PUBLIC_API_BASE" || true)"
+  context_mode="$(read_env_value "CLAWBOARD_LOGGER_CONTEXT_MODE" || echo "auto")"
+  context_fetch_timeout_ms="$(read_env_value "CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS" || echo "3000")"
+  context_fetch_retries="$(read_env_value "CLAWBOARD_LOGGER_CONTEXT_FETCH_RETRIES" || echo "1")"
+  context_fallback_modes_csv="$(read_env_value "CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES" || echo "full,auto,cheap")"
+  context_max_chars="$(read_env_value "CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS" || echo "2200")"
+  context_cache_ttl_ms="$(read_env_value "CLAWBOARD_LOGGER_CONTEXT_CACHE_TTL_MS" || echo "45000")"
+  context_cache_max_entries="$(read_env_value "CLAWBOARD_LOGGER_CONTEXT_CACHE_MAX_ENTRIES" || echo "120")"
+
+  case "$(read_env_value "CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE" || echo "1")" in
+    0|false|FALSE|no|NO|off|OFF) context_use_cache_on_failure_json="false" ;;
+    *) context_use_cache_on_failure_json="true" ;;
+  esac
+  case "$(read_env_value "CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH" || echo "0")" in
+    1|true|TRUE|yes|YES|on|ON) enable_openclaw_memory_search_json="true" ;;
+    *) enable_openclaw_memory_search_json="false" ;;
+  esac
+
+  context_fallback_modes_json="["
+  IFS=',' read -r -a _fallback_modes <<< "$context_fallback_modes_csv"
+  for _mode in "${_fallback_modes[@]}"; do
+    _mode="$(printf "%s" "$_mode" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    [ -n "$_mode" ] || continue
+    case "$_mode" in
+      auto|cheap|full|patient) ;;
+      *) continue ;;
+    esac
+    if [ "$context_fallback_modes_json" != "[" ]; then
+      context_fallback_modes_json="$context_fallback_modes_json,"
+    fi
+    context_fallback_modes_json="$context_fallback_modes_json\"$_mode\""
+  done
+  context_fallback_modes_json="$context_fallback_modes_json]"
+  if [ "$context_fallback_modes_json" = "[]" ]; then
+    context_fallback_modes_json='["full","auto","cheap"]'
+  fi
+
   if [ -z "$api_base" ]; then
     api_base="http://localhost:8010"
   fi
@@ -1020,9 +1066,9 @@ ensure_plugin() {
   openclaw plugins enable clawboard-logger
 
   if [ -n "$token" ]; then
-    CONFIG_JSON=$(printf '{"baseUrl":"%s","token":"%s","enabled":true}' "$api_base" "$token")
+    CONFIG_JSON=$(printf '{"baseUrl":"%s","token":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextFetchRetries":%s,"contextFallbackModes":%s,"contextMaxChars":%s,"contextCacheTtlMs":%s,"contextCacheMaxEntries":%s,"contextUseCacheOnFailure":%s,"enableOpenClawMemorySearch":%s}' "$api_base" "$token" "$context_mode" "$context_fetch_timeout_ms" "$context_fetch_retries" "$context_fallback_modes_json" "$context_max_chars" "$context_cache_ttl_ms" "$context_cache_max_entries" "$context_use_cache_on_failure_json" "$enable_openclaw_memory_search_json")
   else
-    CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true}' "$api_base")
+    CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextFetchRetries":%s,"contextFallbackModes":%s,"contextMaxChars":%s,"contextCacheTtlMs":%s,"contextCacheMaxEntries":%s,"contextUseCacheOnFailure":%s,"enableOpenClawMemorySearch":%s}' "$api_base" "$context_mode" "$context_fetch_timeout_ms" "$context_fetch_retries" "$context_fallback_modes_json" "$context_max_chars" "$context_cache_ttl_ms" "$context_cache_max_entries" "$context_use_cache_on_failure_json" "$enable_openclaw_memory_search_json")
   fi
   openclaw config set plugins.entries.clawboard-logger.config --json "$CONFIG_JSON" >/dev/null 2>&1 || true
   openclaw config set plugins.entries.clawboard-logger.enabled true >/dev/null 2>&1 || true

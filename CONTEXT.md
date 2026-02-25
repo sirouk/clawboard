@@ -86,12 +86,22 @@ Important constraints:
 Configuration knobs (OpenClaw plugin config):
 - `contextMode`
 - `contextFetchTimeoutMs`
+- `contextFetchRetries`
+- `contextFallbackModes`
 - `contextMaxChars`
+- `contextCacheTtlMs`
+- `contextCacheMaxEntries`
+- `contextUseCacheOnFailure`
 
 If you installed via `scripts/bootstrap_openclaw.sh`, you can set these in Clawboard `.env` as:
 - `CLAWBOARD_LOGGER_CONTEXT_MODE`
 - `CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS`
+- `CLAWBOARD_LOGGER_CONTEXT_FETCH_RETRIES`
+- `CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES`
 - `CLAWBOARD_LOGGER_CONTEXT_MAX_CHARS`
+- `CLAWBOARD_LOGGER_CONTEXT_CACHE_TTL_MS`
+- `CLAWBOARD_LOGGER_CONTEXT_CACHE_MAX_ENTRIES`
+- `CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE`
 Then rerun bootstrap with `--skip-docker` to reconfigure the OpenClaw plugin.
 
 ---

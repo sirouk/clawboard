@@ -16,6 +16,7 @@ type SemanticSearchParams = {
   limitLogs?: number;
   enabled?: boolean;
   debounceMs?: number;
+  requestTimeoutMs?: number;
   minQueryLength?: number;
   refreshKey?: string | number | null;
 };
@@ -39,6 +40,7 @@ export function useSemanticSearch({
   limitLogs = 240,
   enabled = true,
   debounceMs = 380,
+  requestTimeoutMs = 15000,
   minQueryLength = 2,
   refreshKey = null,
 }: SemanticSearchParams): SemanticSearchState {
@@ -94,6 +96,12 @@ export function useSemanticSearch({
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
       setState((prev) => ({ ...prev, loading: true, error: null, query: trimmedQuery }));
+      let timedOut = false;
+      const timeoutMs = Math.max(1000, Math.floor(requestTimeoutMs));
+      const timeoutTimer = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
       try {
         let payload: SemanticSearchResponse | null = null;
         const maxAttempts = 2;
@@ -116,6 +124,7 @@ export function useSemanticSearch({
         if (!payload) {
           throw new Error("search_failed");
         }
+        window.clearTimeout(timeoutTimer);
         if (controller.signal.aborted) return;
         setState({
           data: payload,
@@ -124,6 +133,16 @@ export function useSemanticSearch({
           query: trimmedQuery,
         });
       } catch (error) {
+        window.clearTimeout(timeoutTimer);
+        if (controller.signal.aborted && timedOut) {
+          setState((prev) => ({
+            data: prev.query === trimmedQuery ? prev.data : null,
+            loading: false,
+            error: "search_timeout",
+            query: trimmedQuery,
+          }));
+          return;
+        }
         if (controller.signal.aborted) return;
         const message = error instanceof Error ? error.message : "search_failed";
         setState((prev) => ({
@@ -139,7 +158,7 @@ export function useSemanticSearch({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [debounceMs, requestUrl, trimmedQuery, refreshKey]);
+  }, [debounceMs, requestTimeoutMs, requestUrl, trimmedQuery, refreshKey]);
 
   return state;
 }
