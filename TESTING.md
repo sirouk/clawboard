@@ -8,6 +8,13 @@ This repo has tests across all major codepaths:
 - OpenClaw extension (Node): Node test runner (`extensions/clawboard-logger/*.test.mjs`)
 - Ops scripts (Bash): Node test runner executes scripts against a temp sandbox (`tests/scripts/*.test.mjs`)
 
+Agentic orchestration/runtime regressions are covered inside backend unit tests, including:
+- main-only direct completion,
+- single-subagent supervision convergence,
+- multi-subagent convergence gating,
+- duplicate spawn idempotency,
+- history-ingest context-wrapper suppression and cursor safety.
+
 ## Quick Commands
 
 ```bash

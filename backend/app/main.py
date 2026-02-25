@@ -1543,6 +1543,14 @@ _OPENCLAW_UNTRUSTED_METADATA_FENCED_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _OPENCLAW_UNTRUSTED_METADATA_JSON_DECODER = json.JSONDecoder()
+_CLAWBOARD_CONTEXT_BLOCK_RE = re.compile(
+    r"\[CLAWBOARD_CONTEXT_BEGIN\][\s\S]*?\[CLAWBOARD_CONTEXT_END\]\s*",
+    flags=re.IGNORECASE,
+)
+_CLAWBOARD_CONTEXT_HEURISTIC_RE = re.compile(
+    r"clawboard continuity hook is active for this turn\.[\s\S]*?clawboard context \(layered\)\s*:\s*",
+    flags=re.IGNORECASE,
+)
 
 
 def _extract_openclaw_untrusted_metadata_wrapper(value: str | None) -> tuple[dict[str, Any] | None, str]:
@@ -1579,11 +1587,29 @@ def _extract_openclaw_untrusted_metadata_wrapper(value: str | None) -> tuple[dic
     return (metadata, body)
 
 
+def _is_injected_clawboard_context_artifact(value: str | None) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    lower = raw.lower()
+    if "[clawboard_context_begin]" in lower and "[clawboard_context_end]" in lower:
+        return True
+    # Backward-compatible heuristic for legacy context wrappers that may not preserve tags.
+    if (
+        "clawboard continuity hook is active for this turn" in lower
+        and ("clawboard context (layered):" in lower or "use this clawboard retrieval context" in lower)
+    ):
+        return True
+    return False
+
+
 def _sanitize_log_text(value: str | None) -> str:
     if not value:
         return ""
     text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
     _, text = _extract_openclaw_untrusted_metadata_wrapper(text)
+    text = _CLAWBOARD_CONTEXT_BLOCK_RE.sub(" ", text)
+    text = _CLAWBOARD_CONTEXT_HEURISTIC_RE.sub(" ", text)
     text = re.sub(
         r"(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*",
         " ",
@@ -3910,16 +3936,22 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 if message_matches:
                     query = query.where(or_(*message_matches))
 
-            existing = session.exec(query).first()
-            if existing:
-                if (
-                    agent_id_lower == "assistant"
-                    and str(payload.type or "").strip().lower() == "conversation"
-                    and not _assistant_conversation_payload_matches_existing(existing, payload)
-                ):
-                    existing = None
-            if existing:
-                return existing
+            query = query.order_by(
+                LogEntry.createdAt.desc(),
+                (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
+            )
+            candidates = session.exec(query.limit(80)).all()
+            if candidates:
+                existing: LogEntry | None = None
+                if agent_id_lower == "assistant" and str(payload.type or "").strip().lower() == "conversation":
+                    for candidate in candidates:
+                        if _assistant_conversation_payload_matches_existing(candidate, payload):
+                            existing = candidate
+                            break
+                else:
+                    existing = candidates[0]
+                if existing:
+                    return existing
 
     space_id = _normalize_space_id(payload.spaceId)
     topic_id = payload.topicId
@@ -5470,7 +5502,8 @@ def _orchestration_sync_log(log_id: str) -> None:
                     if item_session and item_session == source_session:
                         matched_items.append(item)
             main_item = item_by_key.get("main.response")
-            if request_matches_run and main_item is not None and main_item not in matched_items:
+            source_is_subagent_session = bool(source_session and _is_subagent_session_key(source_session))
+            if request_matches_run and main_item is not None and main_item not in matched_items and not source_is_subagent_session:
                 matched_items.append(main_item)
             if not matched_items and source_session == run.baseSessionKey and main_item is not None:
                 matched_items.append(main_item)
@@ -5523,14 +5556,21 @@ def _orchestration_sync_log(log_id: str) -> None:
                             source_log_id=str(getattr(entry, "id", "") or ""),
                         )
                 elif main_item is not None and (request_matches_run or source_session == run.baseSessionKey):
-                    _orchestration_mark_item_status(
-                        session,
-                        run_id=run.runId,
-                        item=main_item,
-                        status="done",
-                        now_value=now_value,
-                        source_log_id=str(getattr(entry, "id", "") or ""),
+                    has_active_subagent_items = any(
+                        str(getattr(item, "kind", "") or "").strip().lower() == "subagent"
+                        and str(getattr(item, "status", "") or "").strip().lower()
+                        not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
+                        for item in item_by_key.values()
                     )
+                    if not has_active_subagent_items:
+                        _orchestration_mark_item_status(
+                            session,
+                            run_id=run.runId,
+                            item=main_item,
+                            status="done",
+                            now_value=now_value,
+                            source_log_id=str(getattr(entry, "id", "") or ""),
+                        )
 
             _orchestration_recompute_run_status(session, run=run, items=list(item_by_key.values()), now_value=now_value)
             session.commit()
@@ -7745,6 +7785,11 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 continue
 
             text_body = _openclaw_history_message_text(row)
+            if _is_injected_clawboard_context_artifact(text_body):
+                # Skip replay of injected context wrappers and still advance the cursor so
+                # history sync does not loop over non-user-visible control artifacts.
+                max_safe_ms = max(max_safe_ms, timestamp_ms)
+                continue
             normalized_text = _sanitize_log_text(text_body)
             if not normalized_text:
                 continue

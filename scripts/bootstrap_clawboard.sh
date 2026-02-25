@@ -1416,6 +1416,58 @@ maybe_deploy_contract_docs() {
   fi
 }
 
+# Verify that deployed main-agent docs/rails contain the expected supervision and execution-lane markers.
+# This is a non-fatal guardrail: bootstrap continues, but emits explicit warnings when alignment drifts.
+verify_agent_contract_alignment() {
+  local workspace_root=""
+  workspace_root="$(resolve_agent_workspace_path "main" 2>/dev/null || true)"
+  workspace_root="${workspace_root//$'\r'/}"
+  workspace_root="${workspace_root/#\~/$HOME}"
+  if [ ! -d "$workspace_root" ]; then
+    log_warn "Workspace root not found: $workspace_root (skipping contract alignment verification)."
+    return 0
+  fi
+
+  local agents_path="$workspace_root/AGENTS.md"
+  local soul_path="$workspace_root/SOUL.md"
+  local heartbeat_path="$workspace_root/HEARTBEAT.md"
+  local all_ok=true
+
+  verify_marker() {
+    local file_path="$1"
+    local pattern="$2"
+    local label="$3"
+    if [ ! -f "$file_path" ]; then
+      log_warn "Contract verification: missing $file_path ($label)."
+      all_ok=false
+      return 0
+    fi
+    if ! grep -Eiq "$pattern" "$file_path"; then
+      log_warn "Contract verification: marker '$label' not found in $file_path."
+      all_ok=false
+    fi
+  }
+
+  verify_marker "$agents_path" "main-only direct|trivial and faster than delegation|only execute directly" "main direct lane"
+  verify_marker "$agents_path" "single-specialist|single specialist" "single-specialist lane"
+  verify_marker "$agents_path" "multi-specialist|huddle|federated" "multi-specialist lane"
+  verify_marker "$agents_path" "(1m[[:space:]]*(->|=>|-|=)>?[[:space:]]*3m[[:space:]]*(->|=>|-|=)>?[[:space:]]*10m[[:space:]]*(->|=>|-|=)>?[[:space:]]*15m[[:space:]]*(->|=>|-|=)>?[[:space:]]*30m[[:space:]]*(->|=>|-|=)>?[[:space:]]*1h|\[[[:space:]]*1m[[:space:]]*,[[:space:]]*3m[[:space:]]*,[[:space:]]*10m[[:space:]]*,[[:space:]]*15m[[:space:]]*,[[:space:]]*30m[[:space:]]*,[[:space:]]*1h[[:space:]]*\])" "delegation ladder"
+  verify_marker "$soul_path" "sessions_spawn" "sessions_spawn contract"
+  verify_marker "$heartbeat_path" "(1m[[:space:]]*(->|=>|-|=)>?[[:space:]]*3m[[:space:]]*(->|=>|-|=)>?[[:space:]]*10m[[:space:]]*(->|=>|-|=)>?[[:space:]]*15m[[:space:]]*(->|=>|-|=)>?[[:space:]]*30m[[:space:]]*(->|=>|-|=)>?[[:space:]]*1h|\[[[:space:]]*1m[[:space:]]*,[[:space:]]*3m[[:space:]]*,[[:space:]]*10m[[:space:]]*,[[:space:]]*15m[[:space:]]*,[[:space:]]*30m[[:space:]]*,[[:space:]]*1h[[:space:]]*\])" "heartbeat ladder"
+
+  local doc=""
+  for doc in "${CLAWBOARD_CONTRACT_DOCS[@]}"; do
+    if [ ! -f "$workspace_root/$doc" ]; then
+      log_warn "Contract verification: missing deployed doc $workspace_root/$doc"
+      all_ok=false
+    fi
+  done
+
+  if [ "$all_ok" = true ]; then
+    log_success "Verified main-agent contract alignment (execution lanes, ladder, deployed docs)."
+  fi
+}
+
 # Provision specialist agent workspaces (workspace-coding, workspace-docs, workspace-web, workspace-social).
 # Runs scripts/setup_specialist_agents.sh when present. Idempotent.
 setup_specialist_agents() {
@@ -2647,6 +2699,7 @@ PY
 
     maybe_offer_agentic_team_setup
     maybe_apply_agent_directives
+    verify_agent_contract_alignment
 
     maybe_run_local_memory_setup
 

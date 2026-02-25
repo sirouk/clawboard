@@ -183,6 +183,7 @@ Two separate protections exist to keep injected context from poisoning logs, emb
      - the "Clawboard continuity hook is active..." preamble
      - other transport noise (Discord tags, local-time prefixes, message-id decorations)
    - This keeps the *agent's prompt augmentation* from being re-ingested as if it were the user/assistant's content.
+   - Backend ingest also strips these wrappers via `_sanitize_log_text(...)`, so replay paths and non-plugin emitters converge to the same clean payload.
 
 2. **Classifier noise filtering**
    - `classifier/classifier.py` detects injected context artifacts via `_is_injected_context_artifact(...)`
@@ -208,6 +209,7 @@ Two separate protections exist to keep injected context from poisoning logs, emb
      - anchored traces -> `classified` + `filtered_tool_activity`
      - unanchored traces -> `failed` + `filtered_unanchored_tool_activity` (detached)
    - classifier re-applies the same filters for historical/pending rows so old data converges to guardrails
+   - gateway history ingest skips raw injected context artifacts and still advances the cursor, preventing repeated replay of hidden wrapper rows
 
 Additional guardrail:
 - The plugin ignores internal classifier sessions by default via `DEFAULT_IGNORE_SESSION_PREFIXES = ["internal:clawboard-classifier:"]`

@@ -48,6 +48,24 @@ For user-visible conversation logs, the classifier must also maintain:
 - Classifier payload noise and context injection artifacts are detected and not treated as user intent.
 - Slash-command style logs (e.g. `/new`) are filtered out as non-semantic.
 
+## Agentic Runtime Coverage (Orchestration + Ingest)
+
+These scenarios are exercised in backend runtime tests and included automatically in `./tests.sh` via backend unit discovery:
+
+- Main-only direct completion closes run cleanly without subagent artifacts:
+  - `backend/tests/test_orchestration_runtime.py::test_orch_007_main_only_assistant_reply_closes_run_without_subagents`
+- Single-subagent supervision keeps `main.response` open until final main synthesis:
+  - `backend/tests/test_orchestration_runtime.py::test_orch_003_main_response_does_not_close_while_subagent_still_active`
+- Multi-subagent convergence requires all delegated items terminal before main completion:
+  - `backend/tests/test_orchestration_runtime.py::test_orch_008_multi_subagent_run_requires_all_children_and_main_final`
+- Duplicate spawn tool logs remain idempotent at orchestration item level:
+  - `backend/tests/test_orchestration_runtime.py::test_orch_009_duplicate_spawn_actions_do_not_duplicate_subagent_items`
+- Assistant replay dedupe across request-id collisions prefers payload match (prevents wrong cross-agent collapse):
+  - `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_ing_020h3_assistant_identifier_dedupe_prefers_content_match_over_first_candidate`
+- Gateway history ingest skips both tagged and legacy context wrapper artifacts and advances cursor:
+  - `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_ing_020h4_history_ingest_skips_injected_context_artifacts_and_advances_cursor`
+  - `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_ing_020h5_history_ingest_skips_legacy_context_wrapper_artifacts_and_advances_cursor`
+
 ## Scenario Coverage
 
 ### Unit Tests (fast, no docker)

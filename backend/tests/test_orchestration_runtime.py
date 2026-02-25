@@ -160,7 +160,7 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             self.assertTrue(subagent_status_logs, "Expected in-band subagent item_created status log.")
             self.assertTrue(any("delegated to coding" in str(row.summary or "").lower() for row in subagent_status_logs))
 
-    def test_orch_003_assistant_completion_closes_run_when_items_done(self):
+    def test_orch_003_main_response_does_not_close_while_subagent_still_active(self):
         session_key = "clawboard:topic:topic-orch-003"
         request_id = self._openclaw_chat(session_key=session_key, message="Do this with a subagent.")
         child_session = "agent:coding:subagent:orch-003-child"
@@ -192,6 +192,17 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             idem="orch-003-main-assistant",
         )
 
+        # The status update should not close main.response while a subagent item is still running.
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            statuses = {
+                row.itemKey: row.status
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(statuses.get("main.response"), "running")
+            self.assertEqual(statuses.get(f"subagent:{child_session}"), "running")
+
         self._append_log(
             LogAppend(
                 type="conversation",
@@ -203,6 +214,33 @@ class OrchestrationRuntimeTests(unittest.TestCase):
                 source={"sessionKey": child_session, "channel": "direct", "requestId": request_id},
             ),
             idem="orch-003-subagent-assistant",
+        )
+
+        main_module._orchestration_tick_once()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            statuses = {
+                row.itemKey: row.status
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(run.status, "running")
+            self.assertIsNone(run.completedAt)
+            self.assertEqual(statuses.get("main.response"), "running")
+            self.assertEqual(statuses.get(f"subagent:{child_session}"), "done")
+
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Here is the final integrated result.",
+                summary="Main final response",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003-main-final",
         )
 
         main_module._orchestration_tick_once()
@@ -337,6 +375,196 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             ).first()
             self.assertEqual(item.status, "stalled")
             self.assertEqual(run.status, "stalled")
+
+    def test_orch_007_main_only_assistant_reply_closes_run_without_subagents(self):
+        session_key = "clawboard:topic:topic-orch-007"
+        request_id = self._openclaw_chat(session_key=session_key, message="Simple question: what is 2 + 2?")
+
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="2 + 2 is 4.",
+                summary="Main direct answer",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-007-main-direct",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            self.assertEqual(run.status, "done")
+            items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            self.assertEqual(len(items), 1)
+            self.assertEqual(str(items[0].itemKey or ""), "main.response")
+            self.assertEqual(str(items[0].status or ""), "done")
+
+    def test_orch_008_multi_subagent_run_requires_all_children_and_main_final(self):
+        session_key = "clawboard:topic:topic-orch-008"
+        request_id = self._openclaw_chat(session_key=session_key, message="Coordinate coding + web research.")
+        child_a = "agent:coding:subagent:orch-008-a"
+        child_b = "agent:web:subagent:orch-008-b"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-008-a","linked":"agent:web:subagent:orch-008-b"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-008-spawn",
+        )
+
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Delegated to coding and web.",
+                summary="Main status update",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-008-main-status",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            statuses = {
+                row.itemKey: row.status
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(statuses.get("main.response"), "running")
+            self.assertEqual(statuses.get(f"subagent:{child_a}"), "running")
+            self.assertEqual(statuses.get(f"subagent:{child_b}"), "running")
+
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Coding side complete.",
+                summary="Coding complete",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="Coding",
+                source={"sessionKey": child_a, "channel": "direct", "requestId": request_id},
+            ),
+            idem="orch-008-child-a",
+        )
+        main_module._orchestration_tick_once()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            statuses = {
+                row.itemKey: row.status
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(run.status, "running")
+            self.assertEqual(statuses.get("main.response"), "running")
+            self.assertEqual(statuses.get(f"subagent:{child_a}"), "done")
+            self.assertEqual(statuses.get(f"subagent:{child_b}"), "running")
+
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Web side complete.",
+                summary="Web complete",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="Web",
+                source={"sessionKey": child_b, "channel": "direct", "requestId": request_id},
+            ),
+            idem="orch-008-child-b",
+        )
+        main_module._orchestration_tick_once()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            statuses = {
+                row.itemKey: row.status
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(run.status, "running")
+            self.assertEqual(statuses.get("main.response"), "running")
+            self.assertEqual(statuses.get(f"subagent:{child_a}"), "done")
+            self.assertEqual(statuses.get(f"subagent:{child_b}"), "done")
+
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Integrated result from coding + web complete.",
+                summary="Main final integrated response",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-008-main-final",
+        )
+        main_module._orchestration_tick_once()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            statuses = {
+                row.itemKey: row.status
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(run.status, "done")
+            self.assertEqual(statuses.get("main.response"), "done")
+            self.assertEqual(statuses.get(f"subagent:{child_a}"), "done")
+            self.assertEqual(statuses.get(f"subagent:{child_b}"), "done")
+
+    def test_orch_009_duplicate_spawn_actions_do_not_duplicate_subagent_items(self):
+        session_key = "clawboard:task:topic-orch-009:task-orch-009"
+        request_id = self._openclaw_chat(session_key=session_key, message="Delegate once despite duplicate spawn logs.")
+        child_session = "agent:coding:subagent:orch-009-child"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-009-child"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-009-spawn-a",
+        )
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn (duplicate replay)",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-009-child"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-009-spawn-b",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            subagent_items = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == f"subagent:{child_session}")
+            ).all()
+            self.assertEqual(len(subagent_items), 1)
 
 
 if __name__ == "__main__":

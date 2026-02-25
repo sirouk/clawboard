@@ -101,6 +101,7 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
   - source fallback (`messageId`/`requestId` + channel/actor/type context).
 - DB unique index on `LogEntry.idempotencyKey` is canonical dedupe mechanism.
 - Legacy identifier fallback handles senders that omit idempotency keys.
+- Assistant identifier fallback evaluates all candidate rows for the same request/message identifiers and only dedupes when normalized assistant payloads match (prevents replay collisions with unrelated subagent rows).
 
 ### 5.3 Immediate Filtering at Ingest
 
@@ -301,6 +302,8 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
 - Attachments are uploaded and validated before send.
 - API emits `openclaw.typing` lifecycle events.
 - Assistant-log watchdog emits system warning when gateway returns but plugin logs do not arrive.
+- History-sync ingest skips injected context wrapper artifacts while still advancing the per-session cursor.
+- Orchestration convergence does not mark `main.response` done while any delegated subagent item is still non-terminal.
 
 ## 9) Reliability and Degradation Semantics
 

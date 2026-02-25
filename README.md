@@ -88,6 +88,10 @@ Statuses are how the system tracks state:
 - Chat bridge is persist-first:
   - user row is stored before gateway dispatch.
   - durable dispatch queue + watchdog/history-sync recovery guard long-running requests.
+- Assistant replay dedupe is payload-safe:
+  - request/message identifier matches are only collapsed when normalized assistant content matches.
+- Orchestration convergence is strict:
+  - `main.response` stays running while any delegated subagent item is non-terminal.
 
 See `ANATOMY.md`, `CONTEXT.md`, and `CLASSIFICATION.md` for full contracts.
 
@@ -147,6 +151,7 @@ Bootstrap characteristics (current):
 - atomic per-file deployment of shipped docs/templates
 - deploys main-agent templates (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`) into the resolved OpenClaw main workspace
 - deploys Clawboard contract docs (`ANATOMY.md`, `CONTEXT.md`, `CLASSIFICATION.md`, etc.) into the same workspace
+- applies directive reconciliation so main-agent execution lanes (main-only direct, single-specialist, multi-specialist/huddle) remain aligned with repository contracts
 - migrates legacy `CLAWBOARD_LOGGER_DISABLE_OPENCLAW_MEMORY_SEARCH` to `CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH`
 
 If OpenClaw is not installed and you want Chutes first:
@@ -254,6 +259,8 @@ Formal full-system soak (docker + security + classifier e2e + backend + frontend
 ./tests.sh
 ./tests.sh --skip-e2e
 ```
+
+Agentic runtime regression scenarios (main-only, single-subagent, multi-subagent, ingest replay safety) are included in backend unit discovery, so they run automatically inside `./tests.sh`.
 
 Visual regression:
 

@@ -231,12 +231,14 @@ Flow:
    - `filtered_subagent_scaffold`
    - `filtered_tool_activity`
    - `filtered_unanchored_tool_activity`
+   - assistant identifier dedupe only collapses rows when normalized assistant payloads match across all identifier candidates (prevents subagent/main cross-match collisions).
 6. API emits `log.appended` SSE.
 7. Classifier later processes pending conversation rows.
 
 Reliability:
 - plugin retry window + durable local sqlite queue.
 - backend write retry for transient sqlite lock contention.
+- gateway history ingest skips injected context wrapper artifacts and still advances cursor, preventing replay loops of non-user-visible control text.
 
 ### 6.2 Board chat flow (Clawboard UI -> OpenClaw)
 
@@ -256,6 +258,7 @@ Flow:
 8. OpenClaw logger plugin returns assistant/tool rows through normal ingest path.
 9. Watchdog and history-sync backfill paths log warnings/recover when assistant output is delayed/missing.
 10. Stop/cancel path (`/api/openclaw/chat/cancel`) attempts gateway `chat.abort` and marks queue rows cancelled for the request chain.
+11. Orchestration convergence keeps `main.response` open while any subagent item is non-terminal; run closes only after final main assistant completion.
 
 Key invariant:
 - User prompt is persisted before gateway dispatch so thread history remains coherent.
@@ -384,6 +387,18 @@ Behavior:
 - If replay window missed, server emits `stream.reset`.
 - Client then reconciles via `/api/changes`.
 - Watchdog + fallback polling prevents stale UI under broken sockets.
+
+### 6.8 Main-Agent Supervisor Rails (Templates + Directives)
+
+Deployed via bootstrap (`agent-templates/main/*` + `directives/main/GENERAL_CONTRACTOR.md`):
+- **Main-only direct lane**: trivial asks that are faster than delegation.
+- **Single-specialist lane (default)**: one domain owner via `sessions_spawn`.
+- **Multi-specialist lane (huddle/federated)**: multiple delegated workstreams, then one synthesized final response.
+
+Operational guarantees:
+- Delegation ladder cadence remains fixed: `1m -> 3m -> 10m -> 15m -> 30m -> 1h`.
+- Progress updates are required once elapsed delegated runtime exceeds 5 minutes.
+- Bootstrap verifies lane/lifecycle markers after deployment so fresh installs get aligned rails.
 
 ## 7) Frontend User Journey (Board-Centric)
 

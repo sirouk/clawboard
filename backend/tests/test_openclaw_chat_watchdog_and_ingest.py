@@ -789,6 +789,127 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertIn("dispatch ack 020h2", contents)
             self.assertIn("final completion 020h2", contents)
 
+    def test_ing_020h3_assistant_identifier_dedupe_prefers_content_match_over_first_candidate(self):
+        request_id = "occhat-request-020h3"
+        topic_id = "topic-ing-020h3"
+        board_session_key = f"clawboard:topic:{topic_id}"
+        child_session_key = "agent:coding:subagent:ing-020h3-child"
+        gateway_session_key = f"agent:main:{board_session_key}"
+        with get_session() as session:
+            subagent_row = main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    content="subagent progress 020h3",
+                    summary="subagent progress 020h3",
+                    createdAt=now_iso(),
+                    agentId="assistant",
+                    agentLabel="Coding",
+                    source={
+                        "channel": "direct",
+                        "sessionKey": child_session_key,
+                        "requestId": request_id,
+                        "messageId": "oc:subagent-020h3",
+                    },
+                ),
+                idempotency_key="src:conversation:direct:assistant:oc:subagent-020h3",
+            )
+            main_row = main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    content="final completion 020h3",
+                    summary="final completion 020h3",
+                    createdAt=now_iso(),
+                    agentId="assistant",
+                    agentLabel="OpenClaw",
+                    source={
+                        "channel": "clawboard",
+                        "sessionKey": board_session_key,
+                        "requestId": request_id,
+                        "messageId": "oc:main-020h3",
+                    },
+                ),
+                idempotency_key="openclaw-chat:assistant:020h3-main",
+            )
+
+            replay_row = main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    content="final completion 020h3",
+                    summary="final completion 020h3",
+                    createdAt=now_iso(),
+                    agentId="assistant",
+                    agentLabel="Assistant",
+                    source={
+                        "channel": "webchat",
+                        "sessionKey": gateway_session_key,
+                        "requestId": request_id,
+                        "messageId": "oc:assistant-020h3-replay",
+                        "boardScopeTopicId": topic_id,
+                    },
+                ),
+                idempotency_key="src:conversation:webchat:assistant:oc:assistant-020h3-replay",
+            )
+
+            self.assertEqual(replay_row.id, main_row.id)
+            self.assertNotEqual(replay_row.id, subagent_row.id)
+            assistant_rows = session.exec(
+                select(LogEntry)
+                .where(LogEntry.type == "conversation")
+                .where(LogEntry.agentId == "assistant")
+                .where(LogEntry.source["requestId"].as_string() == request_id)
+            ).all()
+            self.assertEqual(len(assistant_rows), 2)
+
+    def test_ing_020h4_history_ingest_skips_injected_context_artifacts_and_advances_cursor(self):
+        session_key = "clawboard:topic:topic-ing-020h4"
+        artifact_ts = 1700000040000
+        ingested, max_seen = main_module._ingest_openclaw_history_messages(
+            session_key=session_key,
+            messages=[
+                {
+                    "timestamp": artifact_ts,
+                    "role": "assistant",
+                    "text": "[CLAWBOARD_CONTEXT_BEGIN]\\ncontext payload\\n[CLAWBOARD_CONTEXT_END]",
+                }
+            ],
+            since_ms=0,
+        )
+
+        self.assertEqual(ingested, 0)
+        self.assertEqual(max_seen, artifact_ts)
+        with get_session() as session:
+            rows = session.exec(select(LogEntry)).all()
+            self.assertEqual(rows, [])
+
+    def test_ing_020h5_history_ingest_skips_legacy_context_wrapper_artifacts_and_advances_cursor(self):
+        session_key = "clawboard:topic:topic-ing-020h5"
+        artifact_ts = 1700000045000
+        ingested, max_seen = main_module._ingest_openclaw_history_messages(
+            session_key=session_key,
+            messages=[
+                {
+                    "timestamp": artifact_ts,
+                    "role": "assistant",
+                    "text": (
+                        "Clawboard continuity hook is active for this turn.\n"
+                        "Use this Clawboard retrieval context to improve continuity.\n"
+                        "Clawboard Context (Layered):\n"
+                        "- synthetic context payload"
+                    ),
+                }
+            ],
+            since_ms=0,
+        )
+
+        self.assertEqual(ingested, 0)
+        self.assertEqual(max_seen, artifact_ts)
+        with get_session() as session:
+            rows = session.exec(select(LogEntry)).all()
+            self.assertEqual(rows, [])
+
     def test_chat_020i_in_flight_probe_allows_multi_hour_windows(self):
         with patch.dict(
             os.environ,

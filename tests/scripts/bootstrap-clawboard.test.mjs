@@ -226,3 +226,34 @@ test("delegation supervision cadence stays aligned across templates and setup sc
   assert.match(contextText, ladderPattern);
   assert.match(classificationText, ladderPattern);
 });
+
+test("main-agent execution lanes stay aligned across template, soul, and directive source", async () => {
+  const root = process.cwd();
+  const agentsPath = path.join(root, "agent-templates", "main", "AGENTS.md");
+  const soulPath = path.join(root, "agent-templates", "main", "SOUL.md");
+  const directivePath = path.join(root, "directives", "main", "GENERAL_CONTRACTOR.md");
+  const readmePath = path.join(root, "README.md");
+
+  const [agentsText, soulText, directiveText, readmeText] = await Promise.all([
+    readFile(agentsPath, "utf8"),
+    readFile(soulPath, "utf8"),
+    readFile(directivePath, "utf8"),
+    readFile(readmePath, "utf8"),
+  ]);
+
+  // Must preserve direct lane for trivially-answerable requests.
+  assert.match(directiveText, /only execute directly/i);
+  assert.match(agentsText, /main-only direct|trivial and faster than delegation/i);
+  assert.match(soulText, /direct lane|trivial/i);
+
+  // Must preserve single-specialist and multi-specialist/huddle lanes.
+  assert.match(agentsText, /single-specialist|single specialist/i);
+  assert.match(agentsText, /multi-specialist|huddle|federated/i);
+  assert.match(directiveText, /delegate by default/i);
+  assert.match(directiveText, /huddle|federated/i);
+
+  // Routing tool contract must remain explicit.
+  assert.match(agentsText, /sessions_spawn/i);
+  assert.match(soulText, /sessions_spawn/i);
+  assert.match(readmeText, /orchestration/i);
+});
