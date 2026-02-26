@@ -875,15 +875,26 @@ def _entry_locked_scope(entry: dict) -> tuple[str | None, str | None, str | None
 
     topic_id = str(source.get("boardScopeTopicId") or "").strip() or None
     task_id = str(source.get("boardScopeTaskId") or "").strip() or None
+    topic_only = _is_truthy(source.get("boardScopeTopicOnly"))
+    if topic_only and not topic_id:
+        parsed_topic_id, _parsed_task_id = _parse_board_session_key(_entry_session_key(entry))
+        topic_id = parsed_topic_id or None
     kind = str(source.get("boardScopeKind") or "").strip().lower()
-    if kind not in {"topic", "task"}:
-        kind = "task" if task_id else ("topic" if topic_id else "")
-    lock = _is_truthy(source.get("boardScopeLock")) or bool(task_id)
+    if kind not in {"topic", "task", "topic_only"}:
+        if task_id:
+            kind = "task"
+        elif topic_only and topic_id:
+            kind = "topic_only"
+        else:
+            kind = "topic" if topic_id else ""
+    lock = _is_truthy(source.get("boardScopeLock")) or topic_only or bool(task_id)
 
     if not lock:
         return (None, None, None)
     if task_id:
         return (topic_id, task_id, "task")
+    if kind == "topic_only" and topic_id:
+        return (topic_id, None, "topic_only")
     if topic_id:
         return (topic_id, None, "topic")
     return (None, None, None)
@@ -3989,6 +4000,16 @@ def classify_session(session_key: str):
         elif latest_topic_scope:
             forced_topic_id = latest_topic_scope
 
+    forced_topic_only = False
+    if forced_topic_id and not forced_task_id:
+        for item in scope_logs:
+            if not isinstance(item, dict):
+                continue
+            _locked_topic_id, _locked_task_id, locked_kind = _entry_locked_scope(item)
+            if locked_kind == "topic_only":
+                forced_topic_only = True
+                break
+
     if forced_topic_id and forced_task_id:
         # Task Chat: clawboard:task:<topicId>:<taskId> — messages MUST stay in this task only.
         # Never reallocate; no LLM, no candidate retrieval. Patch all scope_logs with this topic+task.
@@ -4386,8 +4407,8 @@ def classify_session(session_key: str):
     task_contexts: dict[str, list[dict]] = {}
 
     if forced_topic_id:
-        # Topic Chat: clawboard:topic:<topicId> — messages stay in this topic; task inference/creation
-        # only within this topic. Candidate retrieval is restricted to this topic (and its tasks).
+        # Topic Chat: clawboard:topic:<topicId> — messages stay in this topic. When
+        # forced_topic_only is set by board scope metadata, skip task inference/creation.
         forced_topic_name = None
         try:
             all_topics = list_topics()
@@ -4420,17 +4441,18 @@ def classify_session(session_key: str):
         except Exception:
             pass
 
-        task_cands = task_candidates(forced_topic_id, text)
-        for t in task_cands:
-            tid = t.get("id")
-            if not tid:
-                continue
-            try:
-                logs = list_logs_by_task(tid, limit=10, offset=0)
-                task_notes = build_notes_index(logs)
-                task_contexts[tid] = summarize_logs(logs, task_notes, limit=6)
-            except Exception:
-                continue
+        if not forced_topic_only:
+            task_cands = task_candidates(forced_topic_id, text)
+            for t in task_cands:
+                tid = t.get("id")
+                if not tid:
+                    continue
+                try:
+                    logs = list_logs_by_task(tid, limit=10, offset=0)
+                    task_notes = build_notes_index(logs)
+                    task_contexts[tid] = summarize_logs(logs, task_notes, limit=6)
+                except Exception:
+                    continue
     else:
         ensure_topic_index_seeded()
         topic_cands = topic_candidates(text)
@@ -4500,23 +4522,25 @@ def classify_session(session_key: str):
             prefer_continuity = not bundle_has_assistant
             if forced_topic_id:
                 task_id = None
-                task_title = _derive_task_title(llm_window)
-                task_intent = _window_has_task_intent(llm_window, text)
-                task_cands2 = task_candidates(forced_topic_id, text, k=8)
-                if task_intent and task_cands2 and float(task_cands2[0].get("score") or 0.0) >= 0.56:
-                    task_id = task_cands2[0]["id"]
-                elif task_intent and task_title:
-                    existing_tasks = list_tasks(forced_topic_id)
-                    match, score = _best_name_match(task_title, existing_tasks, "title")
-                    if match and score >= 0.78:
-                        task_id = match.get("id")
-                    elif _task_creation_allowed(llm_window, task_title, task_cands2):
-                        task = upsert_task(None, forced_topic_id, task_title)
-                        task_id = task["id"]
-                if task_intent and not task_id:
-                    continuity_task = _latest_classified_task_for_topic(ctx_logs, forced_topic_id)
-                    if continuity_task:
-                        task_id = continuity_task
+                task_title = None
+                if not forced_topic_only:
+                    task_title = _derive_task_title(llm_window)
+                    task_intent = _window_has_task_intent(llm_window, text)
+                    task_cands2 = task_candidates(forced_topic_id, text, k=8)
+                    if task_intent and task_cands2 and float(task_cands2[0].get("score") or 0.0) >= 0.56:
+                        task_id = task_cands2[0]["id"]
+                    elif task_intent and task_title:
+                        existing_tasks = list_tasks(forced_topic_id)
+                        match, score = _best_name_match(task_title, existing_tasks, "title")
+                        if match and score >= 0.78:
+                            task_id = match.get("id")
+                        elif _task_creation_allowed(llm_window, task_title, task_cands2):
+                            task = upsert_task(None, forced_topic_id, task_title)
+                            task_id = task["id"]
+                    if task_intent and not task_id:
+                        continuity_task = _latest_classified_task_for_topic(ctx_logs, forced_topic_id)
+                        if continuity_task:
+                            task_id = continuity_task
 
                 summaries = []
                 for entry in llm_window:
@@ -4635,7 +4659,8 @@ def classify_session(session_key: str):
             return
 
     if forced_topic_id:
-        # Board Topic Chat pins the topic scope; classifier may still infer/create a task within it.
+        # Board Topic Chat pins the topic scope. When forced_topic_only is set,
+        # downstream task inference/creation remains disabled.
         topic_id = forced_topic_id
     else:
         chosen_topic_id = (result.get("topic") or {}).get("id")
@@ -4762,26 +4787,28 @@ def classify_session(session_key: str):
     # Task selection/creation (within topic)
     task_id = None
     task_from_continuity = False
-    task_cands2 = task_candidates(topic_id, text)
-    task_result = result.get("task")
-    task_intent = _window_has_task_intent(llm_window, text)
+    task_cands2 = [] if forced_topic_only else task_candidates(topic_id, text)
+    task_result = None if forced_topic_only else result.get("task")
+    task_intent = False if forced_topic_only else _window_has_task_intent(llm_window, text)
     if forced_topic_id and isinstance(task_result, dict):
         # Board Topic Chat: trust the LLM when it explicitly proposes/selects a task.
         # This prevents false negatives when heuristic intent detection is too conservative.
         if bool(task_result.get("create")) or bool(task_result.get("id")):
             task_intent = True
     existing_tasks: list[dict] = []
-    try:
-        existing_tasks = list_tasks(topic_id)
-    except Exception:
-        existing_tasks = []
+    if not forced_topic_only:
+        try:
+            existing_tasks = list_tasks(topic_id)
+        except Exception:
+            existing_tasks = []
     valid_task_ids: set[str] = {str(t.get("id") or "").strip() for t in existing_tasks if t.get("id")}
 
     # Sticky task continuity for low-signal follow-ups in the same session.
     # This keeps "ok/yes/thanks" turns attached to the active task even when intent
     # detection is too conservative and retrieval text is minimal.
     if (
-        not task_id
+        not forced_topic_only
+        and not task_id
         and low_signal_followup
         and not has_new_intent
         and continuity_topic_id
@@ -4929,6 +4956,7 @@ def classify_session(session_key: str):
             "boardTopicId": board_topic_id,
             "boardTaskId": board_task_id,
             "forcedTopicId": forced_topic_id,
+            "forcedTopicOnly": bool(forced_topic_only),
             "forcedByContinuity": bool(forced_by_continuity),
             "lowSignalFollowup": bool(low_signal_followup),
             "continuitySuggested": (continuity_prompt.get("suggested") if isinstance(continuity_prompt, dict) else None),
@@ -4985,19 +5013,30 @@ def classify_session(session_key: str):
         elif locked_kind == "topic":
             # Per-entry topic lock: stay in this topic; task inference/creation only within it.
             target_topic_id = locked_topic_id or target_topic_id
-        has_locked_scope = locked_kind in {"topic", "task"}
+        elif locked_kind == "topic_only":
+            # Per-entry topic-only lock: stay in this topic and force topic chat (no task routing).
+            target_topic_id = locked_topic_id or target_topic_id
+            target_task_id = None
+        has_locked_scope = locked_kind in {"topic", "task", "topic_only"}
         filtered_topic_id = target_topic_id if has_locked_scope else None
         filtered_task_id = target_task_id if has_locked_scope else None
         entry_status = str(e.get("classificationStatus") or "pending")
-        should_backfill_tool_task = (
-            entry_status == "classified"
-            and _is_tool_trace_action(e)
+        current_topic_id = str(e.get("topicId") or "").strip()
+        current_task_id = str(e.get("taskId") or "").strip()
+        should_backfill_task_scope = (
+            entry_status in {"classified", "failed"}
             and bool(target_topic_id)
             and bool(target_task_id)
-            and str(e.get("topicId") or "").strip() == str(target_topic_id or "").strip()
-            and str(e.get("taskId") or "").strip() != str(target_task_id or "").strip()
+            and not current_task_id
+            and current_topic_id == str(target_topic_id or "").strip()
+            and locked_kind != "topic_only"
         )
-        if entry_status != "pending" and not should_backfill_tool_task:
+        if should_backfill_task_scope and not has_locked_scope:
+            # Scope promotion fallback: keep system/tool/control rows from the same
+            # bundle aligned with the promoted task even when source metadata wasn't locked.
+            filtered_topic_id = target_topic_id
+            filtered_task_id = target_task_id
+        if entry_status != "pending" and not should_backfill_task_scope:
             continue
         if _is_cron_event(e):
             patch_log(

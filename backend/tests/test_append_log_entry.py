@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone, timedelta
+from unittest.mock import patch
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -19,13 +20,15 @@ try:
     from sqlmodel import select
 
     from app.db import get_session, init_db  # noqa: E402
+    import app.main as main_module  # noqa: E402
     from app.main import app  # noqa: E402
-    from app.models import LogEntry, SessionRoutingMemory, Task, Topic  # noqa: E402
+    from app.models import LogEntry, OpenClawRequestRoute, SessionRoutingMemory, Task, Topic  # noqa: E402
 
     _API_TESTS_AVAILABLE = True
 except Exception:
     TestClient = None  # type: ignore[assignment]
     select = None  # type: ignore[assignment]
+    main_module = None  # type: ignore[assignment]
     _API_TESTS_AVAILABLE = False
 
 
@@ -42,6 +45,8 @@ class AppendLogEntryTests(unittest.TestCase):
 
     def setUp(self):
         with get_session() as session:
+            for row in session.exec(select(OpenClawRequestRoute)).all():
+                session.delete(row)
             for row in session.exec(select(SessionRoutingMemory)).all():
                 session.delete(row)
             for row in session.exec(select(LogEntry)).all():
@@ -649,6 +654,761 @@ class AppendLogEntryTests(unittest.TestCase):
         self.assertIsNone(payload.get("taskId"))
         self.assertEqual(payload.get("classificationStatus"), "classified")
         self.assertEqual(payload.get("classificationError"), "filtered_tool_activity")
+
+    def test_append_log_infers_task_scope_from_canonical_routing_memory_for_wrapped_board_topic_session(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+            session.add(
+                Task(
+                    id="task-a",
+                    topicId="topic-a",
+                    title="Task A",
+                    color="#4EA1FF",
+                    status="todo",
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.add(
+                SessionRoutingMemory(
+                    sessionKey="clawboard:topic:topic-a",
+                    items=[
+                        {
+                            "ts": ts,
+                            "anchor": "promoted",
+                            "topicId": "topic-a",
+                            "taskId": "task-a",
+                            "topicName": "Topic A",
+                            "taskTitle": "Task A",
+                        }
+                    ],
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "content": "Assistant follow-up from wrapped board session.",
+                "summary": "assistant follow-up",
+                "raw": "Assistant follow-up from wrapped board session.",
+                "createdAt": ts,
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {
+                    "channel": "webchat",
+                    "sessionKey": "agent:main:clawboard:topic:topic-a",
+                    "messageId": "oc:wrapped-memory-infer-1",
+                },
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json() or {}
+        self.assertEqual(payload.get("topicId"), "topic-a")
+        self.assertEqual(payload.get("taskId"), "task-a")
+        source = payload.get("source") or {}
+        self.assertEqual(source.get("boardScopeTopicId"), "topic-a")
+        self.assertEqual(source.get("boardScopeTaskId"), "task-a")
+
+    def test_patch_log_promotion_backfills_request_rows_across_wrapped_and_canonical_board_topic_sessions(self):
+        base_dt = datetime.now(timezone.utc)
+        user_ts = base_dt.isoformat()
+        assistant_ts = (base_dt + timedelta(seconds=1)).isoformat()
+
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=user_ts,
+                    updatedAt=user_ts,
+                )
+            )
+            session.commit()
+            session.add(
+                Task(
+                    id="task-a",
+                    topicId="topic-a",
+                    title="Task A",
+                    color="#4EA1FF",
+                    status="todo",
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=user_ts,
+                    updatedAt=user_ts,
+                )
+            )
+            session.commit()
+
+        user_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "topicId": "topic-a",
+                "content": "User request",
+                "summary": "User request",
+                "raw": "User request",
+                "createdAt": user_ts,
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {
+                    "channel": "openclaw",
+                    "sessionKey": "clawboard:topic:topic-a",
+                    "requestId": "occhat-promote-bridge-1",
+                    "messageId": "occhat-promote-bridge-1",
+                },
+            },
+        )
+        self.assertEqual(user_res.status_code, 200, user_res.text)
+        user_payload = user_res.json() or {}
+        user_id = str(user_payload.get("id") or "")
+        self.assertTrue(user_id)
+
+        assistant_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "topicId": "topic-a",
+                "content": "Assistant response",
+                "summary": "Assistant response",
+                "raw": "Assistant response",
+                "createdAt": assistant_ts,
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {
+                    "channel": "webchat",
+                    "sessionKey": "agent:main:clawboard:topic:topic-a",
+                    "requestId": "occhat-promote-bridge-1",
+                    "messageId": "oc:assistant-promote-bridge-1",
+                },
+                "classificationStatus": "pending",
+            },
+        )
+        self.assertEqual(assistant_res.status_code, 200, assistant_res.text)
+        assistant_payload = assistant_res.json() or {}
+        assistant_id = str(assistant_payload.get("id") or "")
+        self.assertTrue(assistant_id)
+
+        patch_res = self.client.patch(
+            f"/api/log/{assistant_id}",
+            headers=self.auth_headers,
+            json={
+                "topicId": "topic-a",
+                "taskId": "task-a",
+                "classificationStatus": "classified",
+                "classificationAttempts": 1,
+            },
+        )
+        self.assertEqual(patch_res.status_code, 200, patch_res.text)
+        patched_payload = patch_res.json() or {}
+        self.assertEqual(patched_payload.get("taskId"), "task-a")
+
+        with get_session() as session:
+            user_row = session.get(LogEntry, user_id)
+            self.assertIsNotNone(user_row)
+            assert user_row is not None
+            self.assertEqual(user_row.topicId, "topic-a")
+            self.assertEqual(user_row.taskId, "task-a")
+            source = user_row.source if isinstance(user_row.source, dict) else {}
+            self.assertEqual(source.get("boardScopeTaskId"), "task-a")
+            self.assertEqual(source.get("boardScopeKind"), "task")
+
+    def test_append_log_dedupes_user_request_across_wrapped_and_canonical_board_topic_sessions(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        first_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "topicId": "topic-a",
+                "content": "same request",
+                "summary": "same request",
+                "raw": "same request",
+                "createdAt": ts,
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {
+                    "channel": "openclaw",
+                    "sessionKey": "clawboard:topic:topic-a",
+                    "requestId": "occhat-dedupe-wrap-1",
+                    "messageId": "occhat-dedupe-wrap-1",
+                },
+            },
+        )
+        self.assertEqual(first_res.status_code, 200, first_res.text)
+        first_payload = first_res.json() or {}
+        first_id = str(first_payload.get("id") or "")
+        self.assertTrue(first_id)
+
+        second_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "topicId": "topic-a",
+                "content": "same request",
+                "summary": "same request",
+                "raw": "same request",
+                "createdAt": ts,
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {
+                    "channel": "webchat",
+                    "sessionKey": "agent:main:clawboard:topic:topic-a",
+                    "requestId": "occhat-dedupe-wrap-1",
+                    "messageId": "occhat-dedupe-wrap-1:replay",
+                },
+            },
+        )
+        self.assertEqual(second_res.status_code, 200, second_res.text)
+        second_payload = second_res.json() or {}
+        self.assertEqual(str(second_payload.get("id") or ""), first_id)
+
+        with get_session() as session:
+            rows = session.exec(select(LogEntry).where(LogEntry.id == first_id)).all()
+            self.assertEqual(len(rows), 1)
+
+    def test_append_log_creates_request_route_from_board_user_send(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "content": "route seed",
+                "summary": "route seed",
+                "raw": "route seed",
+                "createdAt": ts,
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {
+                    "channel": "openclaw",
+                    "sessionKey": "clawboard:topic:topic-a",
+                    "requestId": "occhat-route-seed-1",
+                    "messageId": "occhat-route-seed-1",
+                },
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+
+        with get_session() as session:
+            route = session.get(OpenClawRequestRoute, "occhat-route-seed-1")
+            self.assertIsNotNone(route)
+            assert route is not None
+            self.assertEqual(route.topicId, "topic-a")
+            self.assertIsNone(route.taskId)
+            self.assertEqual(route.routeKind, "topic")
+            self.assertFalse(route.routeLocked)
+
+    def test_append_log_creates_request_route_from_occhat_message_id_when_request_id_is_non_occhat(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "content": "route seed from message id",
+                "summary": "route seed from message id",
+                "raw": "route seed from message id",
+                "createdAt": ts,
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {
+                    "channel": "openclaw",
+                    "sessionKey": "clawboard:topic:topic-a",
+                    "requestId": "run-not-occhat-route-seed-1",
+                    "messageId": "occhat-route-seed-message-1",
+                },
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+
+        with get_session() as session:
+            route = session.get(OpenClawRequestRoute, "occhat-route-seed-message-1")
+            self.assertIsNotNone(route)
+            assert route is not None
+            self.assertEqual(route.topicId, "topic-a")
+            self.assertIsNone(route.taskId)
+            self.assertEqual(route.routeKind, "topic")
+
+    def test_append_log_request_route_overrides_mismatched_scope_for_same_request(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.add(
+                Topic(
+                    id="topic-b",
+                    name="Topic B",
+                    color="#4DA39E",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+            session.add(
+                Task(
+                    id="task-a",
+                    topicId="topic-a",
+                    title="Task A",
+                    color="#4EA1FF",
+                    status="todo",
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+            session.add(
+                OpenClawRequestRoute(
+                    requestId="occhat-route-lock-1",
+                    sessionKey="clawboard:task:topic-a:task-a",
+                    baseSessionKey="clawboard:task:topic-a:task-a",
+                    spaceId="space-default",
+                    topicId="topic-a",
+                    taskId="task-a",
+                    routeKind="task",
+                    routeLocked=True,
+                    sourceLogId=None,
+                    promotedAt=ts,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "topicId": "topic-b",
+                "content": "assistant follow-up",
+                "summary": "assistant follow-up",
+                "raw": "assistant follow-up",
+                "createdAt": ts,
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {
+                    "channel": "webchat",
+                    "sessionKey": "agent:main:clawboard:topic:topic-b",
+                    "requestId": "occhat-route-lock-1",
+                    "messageId": "oc:route-lock-1-assistant",
+                    "boardScopeTopicId": "topic-b",
+                },
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json() or {}
+        self.assertEqual(payload.get("topicId"), "topic-a")
+        self.assertEqual(payload.get("taskId"), "task-a")
+        source = payload.get("source") or {}
+        self.assertEqual(source.get("boardScopeTopicId"), "topic-a")
+        self.assertEqual(source.get("boardScopeTaskId"), "task-a")
+        self.assertEqual(source.get("boardScopeKind"), "task")
+
+    def test_append_log_request_route_uses_occhat_message_id_when_request_id_is_non_occhat(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.add(
+                Topic(
+                    id="topic-b",
+                    name="Topic B",
+                    color="#4DA39E",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+            session.add(
+                Task(
+                    id="task-a",
+                    topicId="topic-a",
+                    title="Task A",
+                    color="#4EA1FF",
+                    status="todo",
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+            session.add(
+                OpenClawRequestRoute(
+                    requestId="occhat-route-by-messageid-1",
+                    sessionKey="clawboard:task:topic-a:task-a",
+                    baseSessionKey="clawboard:task:topic-a:task-a",
+                    spaceId="space-default",
+                    topicId="topic-a",
+                    taskId="task-a",
+                    routeKind="task",
+                    routeLocked=True,
+                    sourceLogId=None,
+                    promotedAt=ts,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "action",
+                "topicId": "topic-b",
+                "content": "tool call",
+                "summary": "tool call",
+                "raw": "{}",
+                "createdAt": ts,
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {
+                    "channel": "openclaw",
+                    "sessionKey": "agent:main:clawboard:topic:topic-b",
+                    "requestId": "run-route-by-messageid-1",
+                    "messageId": "occhat-route-by-messageid-1",
+                    "boardScopeTopicId": "topic-b",
+                },
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json() or {}
+        self.assertEqual(payload.get("topicId"), "topic-a")
+        self.assertEqual(payload.get("taskId"), "task-a")
+        source = payload.get("source") or {}
+        self.assertEqual(source.get("boardScopeTopicId"), "topic-a")
+        self.assertEqual(source.get("boardScopeTaskId"), "task-a")
+        self.assertEqual(source.get("boardScopeKind"), "task")
+
+    def test_patch_log_promotion_updates_request_route_to_task(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+            session.add(
+                Task(
+                    id="task-a",
+                    topicId="topic-a",
+                    title="Task A",
+                    color="#4EA1FF",
+                    status="todo",
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        create_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "content": "promote this",
+                "summary": "promote this",
+                "raw": "promote this",
+                "createdAt": ts,
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {
+                    "channel": "openclaw",
+                    "sessionKey": "clawboard:topic:topic-a",
+                    "requestId": "occhat-promote-route-1",
+                    "messageId": "occhat-promote-route-1",
+                },
+            },
+        )
+        self.assertEqual(create_res.status_code, 200, create_res.text)
+        row_id = str((create_res.json() or {}).get("id") or "")
+        self.assertTrue(row_id)
+
+        patch_res = self.client.patch(
+            f"/api/log/{row_id}",
+            headers=self.auth_headers,
+            json={
+                "topicId": "topic-a",
+                "taskId": "task-a",
+                "classificationStatus": "classified",
+                "classificationAttempts": 1,
+            },
+        )
+        self.assertEqual(patch_res.status_code, 200, patch_res.text)
+
+        with get_session() as session:
+            route = session.get(OpenClawRequestRoute, "occhat-promote-route-1")
+            self.assertIsNotNone(route)
+            assert route is not None
+            self.assertEqual(route.topicId, "topic-a")
+            self.assertEqual(route.taskId, "task-a")
+            self.assertEqual(route.routeKind, "task")
+            self.assertTrue(route.routeLocked)
+            self.assertTrue(bool(str(route.promotedAt or "").strip()))
+
+    def test_append_log_route_promotion_retro_scopes_prior_topic_rows(self):
+        ts = now_iso()
+        request_id = "occhat-promote-append-route-1"
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+            session.add(
+                Task(
+                    id="task-a",
+                    topicId="topic-a",
+                    title="Task A",
+                    color="#4EA1FF",
+                    status="todo",
+                    pinned=False,
+                    priority="medium",
+                    dueDate=None,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        first_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "content": "Kick this off.",
+                "summary": "Kick this off.",
+                "raw": "Kick this off.",
+                "createdAt": ts,
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {
+                    "channel": "openclaw",
+                    "sessionKey": "clawboard:topic:topic-a",
+                    "requestId": request_id,
+                    "messageId": request_id,
+                },
+            },
+        )
+        self.assertEqual(first_res.status_code, 200, first_res.text)
+        first_payload = first_res.json() or {}
+        first_log_id = str(first_payload.get("id") or "")
+        self.assertTrue(first_log_id)
+        self.assertIsNone(first_payload.get("taskId"))
+
+        published: list[dict] = []
+        with patch.object(main_module.event_hub, "publish", side_effect=lambda event: published.append(event)):
+            promote_res = self.client.post(
+                "/api/log",
+                headers=self.auth_headers,
+                json={
+                    "type": "conversation",
+                    "topicId": "topic-a",
+                    "taskId": "task-a",
+                    "content": "Promote this request into task scope.",
+                    "summary": "Promote this request into task scope.",
+                    "raw": "Promote this request into task scope.",
+                    "createdAt": now_iso(),
+                    "agentId": "assistant",
+                    "agentLabel": "OpenClaw",
+                    "source": {
+                        "channel": "clawboard",
+                        "sessionKey": "clawboard:topic:topic-a",
+                        "requestId": request_id,
+                        "boardScopeTopicId": "topic-a",
+                        "boardScopeTaskId": "task-a",
+                        "boardScopeLock": True,
+                    },
+                },
+            )
+        self.assertEqual(promote_res.status_code, 200, promote_res.text)
+
+        with get_session() as session:
+            first_row = session.get(LogEntry, first_log_id)
+            self.assertIsNotNone(first_row)
+            assert first_row is not None
+            self.assertEqual(first_row.topicId, "topic-a")
+            self.assertEqual(first_row.taskId, "task-a")
+            first_source = first_row.source or {}
+            self.assertEqual(first_source.get("boardScopeTopicId"), "topic-a")
+            self.assertEqual(first_source.get("boardScopeTaskId"), "task-a")
+            self.assertEqual(first_source.get("boardScopeKind"), "task")
+            self.assertTrue(bool(first_source.get("boardScopeLock")))
+
+            route = session.get(OpenClawRequestRoute, request_id)
+            self.assertIsNotNone(route)
+            assert route is not None
+            self.assertEqual(route.topicId, "topic-a")
+            self.assertEqual(route.taskId, "task-a")
+            self.assertEqual(route.routeKind, "task")
+            self.assertTrue(route.routeLocked)
+
+        patched_events = [
+            event
+            for event in published
+            if isinstance(event, dict)
+            and str(event.get("type") or "").strip() == "log.patched"
+            and isinstance(event.get("data"), dict)
+            and str(event.get("data", {}).get("id") or "").strip() == first_log_id
+        ]
+        self.assertTrue(patched_events, "Expected log.patched event for retro-scoped topic row promotion.")
 
     def test_patch_log_classifier_aligns_stale_topic_to_task(self):
         ts = now_iso()

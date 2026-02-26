@@ -30,12 +30,23 @@ Net effect: the agent can "remember" what happened across Topics/Tasks/logs/note
 
 ---
 
+### OpenClaw delegation visibility requirements
+For the main agent to supervise delegated cross-agent work (`sessions_history` / `sessions_send` on child subagent sessions), OpenClaw config must include:
+- `tools.sessions.visibility = "all"`
+- `tools.agentToAgent.enabled = true`
+- `agents.defaults.sandbox.sessionToolsVisibility = "all"` (only needed when sandbox session-tool clamping is used)
+
+Without these, delegated child-session follow-up can fail with visibility-forbidden responses and the main agent may re-spawn/recover instead of reading existing child output.
+
+---
+
 ### Allocation guardrails for context eligibility (absolute)
 Aligned with `CLASSIFICATION.md` section 4.1 and `ANATOMY.md` section 4.1.
 
 - Only logs in direct user-request lineage are eligible for Topic/Task allocation and downstream continuity recall.
 - `clawboard:task:<topicId>:<taskId>` sessions are hard-locked to that topic+task.
 - `clawboard:topic:<topicId>` sessions are hard-locked to that topic; task promotion is allowed only inside that same topic.
+- Canonical OpenClaw request routing is persisted in `OpenClawRequestRoute` (keyed by canonical `occhat-*` id); same-request follow-ups must obey that route after promotion.
 - Subagent logs inherit board scope only when lineage is explicit:
   - explicit `source.boardScope*` on the row, or
   - explicit `sessions_spawn` child-session linkage captured by the logger.
@@ -260,6 +271,10 @@ The plugin computes an "effective session key" in `computeEffectiveSessionKey(..
 Important: to avoid double-logging Clawboard UI chat, the plugin explicitly skips logging `message_received` when the effective session key parses as a board session (`parseBoardSessionKey(...)`), because Clawboard's own backend persists those messages immediately via its board chat endpoint.
 
 During ingest, Clawboard normalizes source scope metadata (`boardScopeTopicId`, `boardScopeTaskId`, `boardScopeSpaceId`) so later context/search calls can infer the correct source space from session continuity.
+
+When a topic-session turn is promoted to a task:
+- patching aligns `source.boardScope*` to the promoted task scope and rebases same-request rows into that task where eligible
+- later non-user rows in that topic session can inherit promoted task scope from session routing memory (same-session continuity only)
 
 For subagents, board scope inheritance is explicit-link only:
 - parent board-scoped runs that call `sessions_spawn` can publish child session keys into the logger cache

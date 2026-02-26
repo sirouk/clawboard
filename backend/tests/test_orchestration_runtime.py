@@ -160,6 +160,70 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             self.assertTrue(subagent_status_logs, "Expected in-band subagent item_created status log.")
             self.assertTrue(any("delegated to coding" in str(row.summary or "").lower() for row in subagent_status_logs))
 
+    def test_orch_002b_sessions_spawn_error_result_does_not_create_subagent_item(self):
+        session_key = "clawboard:task:topic-orch-002b:task-orch-002b"
+        request_id = self._openclaw_chat(session_key=session_key, message="Delegate coding work.")
+        child_session = "agent:coding:subagent:orch-002b-child"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw=(
+                    '{"result":{"details":{"status":"error","error":"gateway timeout after 10000ms",'
+                    '"childSessionKey":"agent:coding:subagent:orch-002b-child"}}}'
+                ),
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-002b-spawn-error",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == f"subagent:{child_session}")
+            ).first()
+            self.assertIsNone(item)
+
+    def test_orch_002c_sessions_spawn_error_without_status_does_not_create_subagent_item(self):
+        session_key = "clawboard:task:topic-orch-002c:task-orch-002c"
+        request_id = self._openclaw_chat(session_key=session_key, message="Delegate coding work.")
+        child_session = "agent:coding:subagent:orch-002c-child"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw=(
+                    '{"isError":true,"result":{"error":"gateway timeout after 10000ms",'
+                    '"childSessionKey":"agent:coding:subagent:orch-002c-child"}}'
+                ),
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-002c-spawn-error",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == f"subagent:{child_session}")
+            ).first()
+            self.assertIsNone(item)
+
     def test_orch_003_main_response_does_not_close_while_subagent_still_active(self):
         session_key = "clawboard:topic:topic-orch-003"
         request_id = self._openclaw_chat(session_key=session_key, message="Do this with a subagent.")
@@ -375,6 +439,108 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             ).first()
             self.assertEqual(item.status, "stalled")
             self.assertEqual(run.status, "stalled")
+
+    def test_orch_006b_tick_stalls_items_when_last_activity_metadata_is_missing(self):
+        session_key = "clawboard:topic:topic-orch-006b"
+        request_id = self._openclaw_chat(session_key=session_key, message="Idle without explicit lastActivity metadata.")
+        old_dt = datetime.now(timezone.utc) - timedelta(hours=2)
+        old_iso = old_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == "main.response")
+            ).first()
+            self.assertIsNotNone(item)
+            item.status = "running"
+            item.startedAt = None
+            item.createdAt = old_iso
+            # Keep updatedAt fresh to simulate prior bookkeeping churn.
+            item.updatedAt = now_iso()
+            item.nextCheckAt = old_iso
+            item.meta = {"role": "primary_response"}
+            session.add(item)
+            run.updatedAt = old_iso
+            session.add(run)
+            session.commit()
+
+        stats = main_module._orchestration_tick_once(now_dt=datetime.now(timezone.utc))
+        self.assertGreaterEqual(int(stats.get("stalledItems") or 0), 1)
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == "main.response")
+            ).first()
+            self.assertEqual(item.status, "stalled")
+            self.assertEqual(run.status, "stalled")
+            last_activity = main_module._iso_to_timestamp(str((item.meta or {}).get("lastActivityAt") or ""))
+            self.assertIsNotNone(last_activity)
+            self.assertLess(abs(float(last_activity or 0.0) - old_dt.timestamp()), 2.0)
+
+    def test_orch_006c_tick_emits_periodic_main_check_in_events(self):
+        session_key = "clawboard:topic:topic-orch-006c"
+        request_id = self._openclaw_chat(session_key=session_key, message="Keep me posted while this runs.")
+        due_dt = datetime.now(timezone.utc) - timedelta(minutes=2)
+        due_iso = due_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        fresh_iso = now_iso()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == "main.response")
+            ).first()
+            self.assertIsNotNone(item)
+            item.status = "running"
+            item.attempts = 0
+            item.nextCheckAt = due_iso
+            meta = dict(item.meta or {})
+            meta["lastActivityAt"] = fresh_iso
+            item.meta = meta
+            session.add(item)
+            session.commit()
+
+        main_module._orchestration_tick_once(now_dt=datetime.now(timezone.utc))
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == "main.response")
+            ).first()
+            self.assertIsNotNone(item)
+            self.assertGreaterEqual(int(item.attempts or 0), 1)
+
+            logs = session.exec(
+                select(LogEntry)
+                .where(LogEntry.topicId == "topic-orch-006c")
+                .where(LogEntry.type == "system")
+                .order_by(LogEntry.createdAt.asc(), LogEntry.id.asc())
+            ).all()
+            checkins = [
+                row
+                for row in logs
+                if isinstance(getattr(row, "source", None), dict)
+                and bool((row.source or {}).get("orchestration"))
+                and str((row.source or {}).get("eventType") or "") == "item_check_in"
+            ]
+            self.assertTrue(checkins, "Expected in-band orchestration check-in events from main.response.")
+            latest = checkins[-1]
+            self.assertIn("check-in", str(latest.summary or "").lower())
+            payload = (latest.source or {}).get("eventPayload") if isinstance(latest.source, dict) else {}
+            payload = payload if isinstance(payload, dict) else {}
+            self.assertGreaterEqual(int(payload.get("attempt") or 0), 1)
+            self.assertGreaterEqual(int(payload.get("nextCheckInSeconds") or 0), 60)
 
     def test_orch_007_main_only_assistant_reply_closes_run_without_subagents(self):
         session_key = "clawboard:topic:topic-orch-007"

@@ -277,6 +277,27 @@ class SessionRoutingMemory(SQLModel, table=True):
     updatedAt: str = Field(description="ISO timestamp of last update.")
 
 
+class OpenClawRequestRoute(SQLModel, table=True):
+    """Authoritative per-request allocation route for OpenClaw board requests.
+
+    Keyed by canonical base request id (`occhat-...` without retry suffix) so all
+    rows in a single user turn can resolve to one deterministic topic/task route.
+    """
+
+    requestId: str = Field(primary_key=True, description="Canonical request id (`occhat-...`).")
+    sessionKey: str = Field(description="Original session key seen for this request.")
+    baseSessionKey: str = Field(description="Session key without thread suffix.")
+    spaceId: Optional[str] = Field(default=None, description="Resolved board space id when known.")
+    topicId: Optional[str] = Field(default=None, description="Resolved topic route when known.")
+    taskId: Optional[str] = Field(default=None, description="Resolved task route when promoted/known.")
+    routeKind: str = Field(default="detached", description="detached|topic|task")
+    routeLocked: bool = Field(default=False, description="Whether route is task-locked.")
+    sourceLogId: Optional[str] = Field(default=None, description="Latest log id that updated the route.")
+    promotedAt: Optional[str] = Field(default=None, description="Timestamp when route promoted topic->task.")
+    createdAt: str = Field(description="ISO timestamp when route was first recorded.")
+    updatedAt: str = Field(description="ISO timestamp of latest route update.")
+
+
 class IngestQueue(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     payload: Dict[str, Any] = Field(sa_column=Column(JSON))

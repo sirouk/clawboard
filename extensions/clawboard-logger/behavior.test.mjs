@@ -922,6 +922,83 @@ test("before_tool_call recovers requestId from board session logs when in-memory
   }
 });
 
+test("before_tool_call prefers canonical occhat requestId over non-occhat runId", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const calls = [];
+    globalThis.fetch = async (url, options = {}) => {
+      const call = { url: String(url), options };
+      calls.push(call);
+      if (String(url).includes("/api/log?")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return [
+              {
+                type: "conversation",
+                agentId: "user",
+                source: {
+                  requestId: "occhat-canonical-tool-req-1",
+                  messageId: "occhat-canonical-tool-req-1",
+                },
+              },
+            ];
+          },
+          async text() {
+            return '[{"type":"conversation","agentId":"user","source":{"requestId":"occhat-canonical-tool-req-1"}}]';
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {};
+        },
+        async text() {
+          return "{}";
+        },
+      };
+    };
+
+    const api = makeApi();
+    register(api);
+
+    const toolCall = api.__handlers.get("before_tool_call");
+    assert.equal(typeof toolCall, "function");
+
+    await toolCall(
+      {
+        toolName: "sessions_spawn",
+        params: { agentId: "coding" },
+        runId: "run-non-openclaw-req-1",
+      },
+      {
+        sessionKey: "agent:main:clawboard:topic:topic-canonical-tool-req-1",
+        channelId: "openclaw",
+        agentId: "main",
+      }
+    );
+
+    await waitFor(
+      () =>
+        calls.some(
+          (call) => String(call.options?.method || "").toUpperCase() === "POST" && String(call.url).includes("/api/log")
+        ),
+      2000
+    );
+    const postCalls = calls.filter(
+      (call) => String(call.options?.method || "").toUpperCase() === "POST" && String(call.url).includes("/api/log")
+    );
+    const payload = parseBody(postCalls[postCalls.length - 1]);
+    assert.equal(payload.type, "action");
+    assert.equal(payload.source.requestId, "occhat-canonical-tool-req-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("subagent tool logs inherit board scope from parent board session when ctx.agentId is absent", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -1280,8 +1357,15 @@ test("after_tool_call emits action log for result and error (ING-004)", async ()
       ctx
     );
 
-    await waitFor(() => meaningfulCalls(calls).length >= 2);
-    const relevant = meaningfulCalls(calls);
+    await waitFor(
+      () =>
+        meaningfulCalls(calls).filter(
+          (call) => String(call.options?.method || "").toUpperCase() === "POST" && String(call.url).includes("/api/log")
+        ).length >= 2
+    );
+    const relevant = meaningfulCalls(calls).filter(
+      (call) => String(call.options?.method || "").toUpperCase() === "POST" && String(call.url).includes("/api/log")
+    );
     const resultPayload = parseBody(relevant[0]);
     const errorPayload = parseBody(relevant[1]);
 
@@ -1338,8 +1422,15 @@ test("after_tool_call reuses before_tool_call scope when result event lacks sess
       }
     );
 
-    await waitFor(() => meaningfulCalls(calls).length >= 2);
-    const relevant = meaningfulCalls(calls);
+    await waitFor(
+      () =>
+        meaningfulCalls(calls).filter(
+          (call) => String(call.options?.method || "").toUpperCase() === "POST" && String(call.url).includes("/api/log")
+        ).length >= 2
+    );
+    const relevant = meaningfulCalls(calls).filter(
+      (call) => String(call.options?.method || "").toUpperCase() === "POST" && String(call.url).includes("/api/log")
+    );
     const resultPayload = parseBody(relevant[1]);
 
     assert.equal(resultPayload.content, "Tool result: sessions_spawn");

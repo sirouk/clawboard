@@ -156,6 +156,12 @@ def _ensure_runtime_indexes() -> None:
         'ON logentry("createdAt");',
         "CREATE INDEX IF NOT EXISTS ix_sessionroutingmemory_updated_at "
         'ON sessionroutingmemory("updatedAt");',
+        "CREATE INDEX IF NOT EXISTS ix_openclawrequestroute_session_updated "
+        'ON openclawrequestroute("baseSessionKey", "updatedAt");',
+        "CREATE INDEX IF NOT EXISTS ix_openclawrequestroute_topic_task_updated "
+        'ON openclawrequestroute("topicId", "taskId", "updatedAt");',
+        "CREATE INDEX IF NOT EXISTS ix_openclawrequestroute_updated_at "
+        'ON openclawrequestroute("updatedAt");',
         "CREATE INDEX IF NOT EXISTS ix_openclawgatewayhistorycursor_updated_at "
         'ON openclawgatewayhistorycursor("updatedAt");',
         "CREATE INDEX IF NOT EXISTS ix_openclawgatewayhistorysyncstate_updated_at "

@@ -11,6 +11,7 @@ const ChatRequestSchema = z.object({
   topicId: z.string().optional().nullable(),
   spaceId: z.string().optional(),
   agentId: z.string().optional(),
+  topicOnly: z.boolean().optional(),
   attachmentIds: z.array(z.string()).optional(),
 });
 

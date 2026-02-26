@@ -2143,55 +2143,75 @@ export default function register(api: OpenClawPluginApi) {
     sessionKey?: string;
     boardScope?: BoardScope;
   }) => {
-    if (params.requestId) return params.requestId;
+    const explicitRequestId = normalizeRequestId(params.requestId);
+    const explicitIsOpenclaw =
+      explicitRequestId?.toLowerCase().startsWith(OPENCLAW_REQUEST_ID_PREFIX) ?? false;
+    if (explicitIsOpenclaw) return explicitRequestId;
     const candidates = new Set<string>();
+    const sessionKey = normalizeId(params.sessionKey);
+    if (sessionKey) {
+      for (const key of requestSessionKeys(sessionKey)) candidates.add(key);
+    }
     const scopeSessionKey = normalizeId(params.boardScope?.sessionKey);
     if (scopeSessionKey) {
       for (const key of requestSessionKeys(scopeSessionKey)) candidates.add(key);
     }
-    const canonicalScopeSessionKey = canonicalBoardScopeSessionKey(params.boardScope);
+    const canonicalScopeSessionKey = canonicalBoardScopeSessionKey(params.boardScope ?? boardScopeFromSessionKey(sessionKey));
     if (canonicalScopeSessionKey) {
       for (const key of requestSessionKeys(canonicalScopeSessionKey)) candidates.add(key);
     }
     for (const candidate of candidates) {
-      const candidateRequestId = recentOpenclawRequestId(candidate);
+      const candidateRequestId = inferRequestIdFromMessageId(recentOpenclawRequestId(candidate));
       if (!candidateRequestId) continue;
       rememberOpenclawRequestId(params.sessionKey, candidateRequestId);
       return candidateRequestId;
     }
-    if (!canonicalScopeSessionKey) return params.requestId;
-    try {
-      const rows = await listLogs({
-        sessionKey: canonicalScopeSessionKey,
-        type: "conversation",
-        limit: 16,
-      });
-      for (const row of rows) {
-        if (!row || typeof row !== "object") continue;
-        const rowAgentId = normalizeId(
-          typeof (row as { agentId?: unknown }).agentId === "string"
-            ? ((row as { agentId?: string }).agentId ?? "")
-            : undefined,
-        );
-        if (rowAgentId && rowAgentId.toLowerCase() !== "user") continue;
-        const source =
-          (row as { source?: unknown }).source && typeof (row as { source?: unknown }).source === "object"
-            ? ((row as { source?: Record<string, unknown> }).source ?? undefined)
-            : undefined;
-        const candidateRequestId =
-          normalizeRequestId(source?.requestId) ??
-          inferRequestIdFromMessageId(source?.requestId) ??
-          normalizeRequestId(source?.messageId) ??
-          inferRequestIdFromMessageId(source?.messageId);
-        if (!candidateRequestId) continue;
-        rememberOpenclawRequestId(canonicalScopeSessionKey, candidateRequestId);
-        rememberOpenclawRequestId(params.sessionKey, candidateRequestId);
-        return candidateRequestId;
+    const lookupSessionKeys = new Set<string>();
+    if (canonicalScopeSessionKey) lookupSessionKeys.add(canonicalScopeSessionKey);
+    for (const candidate of candidates) {
+      const route = parseBoardSessionKey(candidate);
+      if (!route) continue;
+      if (route.kind === "task") {
+        lookupSessionKeys.add(`clawboard:task:${route.topicId}:${route.taskId}`);
+      } else {
+        lookupSessionKeys.add(`clawboard:topic:${route.topicId}`);
       }
-    } catch {
-      // Non-fatal fallback path when Clawboard API lookups fail transiently.
     }
-    return params.requestId;
+    if (lookupSessionKeys.size === 0) return explicitRequestId ?? params.requestId;
+    for (const lookupSessionKey of lookupSessionKeys) {
+      try {
+        const rows = await listLogs({
+          sessionKey: lookupSessionKey,
+          type: "conversation",
+          limit: 16,
+        });
+        for (const row of rows) {
+          if (!row || typeof row !== "object") continue;
+          const rowAgentId = normalizeId(
+            typeof (row as { agentId?: unknown }).agentId === "string"
+              ? ((row as { agentId?: string }).agentId ?? "")
+              : undefined,
+          );
+          if (rowAgentId && rowAgentId.toLowerCase() !== "user") continue;
+          const source =
+            (row as { source?: unknown }).source && typeof (row as { source?: unknown }).source === "object"
+              ? ((row as { source?: Record<string, unknown> }).source ?? undefined)
+              : undefined;
+          const candidateRequestId =
+            inferRequestIdFromMessageId(source?.requestId) ??
+            inferRequestIdFromMessageId(source?.messageId) ??
+            inferRequestIdFromMessageId((row as { requestId?: unknown }).requestId) ??
+            inferRequestIdFromMessageId((row as { messageId?: unknown }).messageId);
+          if (!candidateRequestId) continue;
+          rememberOpenclawRequestId(lookupSessionKey, candidateRequestId);
+          rememberOpenclawRequestId(params.sessionKey, candidateRequestId);
+          return candidateRequestId;
+        }
+      } catch {
+        // Non-fatal fallback path when Clawboard API lookups fail transiently.
+      }
+    }
+    return explicitRequestId ?? params.requestId;
   };
 
   const pruneToolScopeMap = (ts: number, forceTrim = false) => {

@@ -111,6 +111,7 @@ Core value:
 - `Task` = executable unit inside a topic.
 - `LogEntry` = conversations, actions, notes, system/import rows.
 - `SessionRoutingMemory` = short continuity memory keyed by `source.sessionKey`.
+- `OpenClawRequestRoute` = per-request route ledger keyed by canonical `occhat-*` request id.
 - `Space` = scope domain with explicit visibility graph.
 
 Everything interesting is a loop:
@@ -148,6 +149,7 @@ Primary tables:
 - `LogEntry`
 - `DeletedLog`
 - `SessionRoutingMemory`
+- `OpenClawRequestRoute`
 - `IngestQueue`
 - `Attachment`
 - `Draft`
@@ -159,6 +161,7 @@ Hard relationship rules enforced in runtime:
 - Conversation activity can unsnooze archived/snoozed topic/task.
 - Classifier patches only scope windows, not whole sessions.
 - Board task sessions are hard-locked to selected topic+task.
+- OpenClaw board request chains are converged through `OpenClawRequestRoute` so same-request rows cannot split across topic/task chats after promotion.
 
 ### 4.1 Absolute Allocation Guardrails (Normative)
 
@@ -239,6 +242,7 @@ Reliability:
 - plugin retry window + durable local sqlite queue.
 - backend write retry for transient sqlite lock contention.
 - gateway history ingest skips injected context wrapper artifacts and still advances cursor, preventing replay loops of non-user-visible control text.
+- history-sync fallback session seeding includes unresolved requests + `sessions_spawn` child-session lineage so delegated subagent transcripts are recoverable even when `sessions.list` is disabled/degraded.
 
 ### 6.2 Board chat flow (Clawboard UI -> OpenClaw)
 
@@ -254,11 +258,24 @@ Flow:
 4. API enqueues durable dispatch work in `OpenClawChatDispatchQueue` and worker threads execute gateway `chat.send`.
 5. API emits typing lifecycle events (`openclaw.typing` true/false).
 6. Worker retry/backoff, stale-processing recovery, and optional auto-quarantine keep queue forward-progress under failures/restarts.
-7. Optional in-flight probe logic (`OPENCLAW_CHAT_IN_FLIGHT_*`) can abort/retry long-stalled sends.
+7. Optional in-flight probe logic (`OPENCLAW_CHAT_IN_FLIGHT_*`) can abort/retry long-stalled sends; when global probe is `0`, board topic/task sessions can still use `OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS` fallback for fast stall recovery.
 8. OpenClaw logger plugin returns assistant/tool rows through normal ingest path.
 9. Watchdog and history-sync backfill paths log warnings/recover when assistant output is delayed/missing.
 10. Stop/cancel path (`/api/openclaw/chat/cancel`) attempts gateway `chat.abort` and marks queue rows cancelled for the request chain.
 11. Orchestration convergence keeps `main.response` open while any subagent item is non-terminal; run closes only after final main assistant completion.
+
+Unified composer routing contract (current UX):
+- Freeform with no selected target creates a new topic first, derives a concise name from the prompt text, then sends on `clawboard:topic:<topicId>`.
+- Freeform with a selected topic sends on `clawboard:topic:<topicId>`.
+- Freeform with a selected task sends on `clawboard:task:<topicId>:<taskId>`.
+- Topic/task direct composers always send on their pinned session keys.
+- UI immediately expands the relevant pane, focuses the correct composer, and reveals it near the bottom viewport position (`focus({ reveal: true })` behavior).
+- When classifier promotion adds `taskId` to a topic-scoped turn, UI auto-expands/focuses the promoted task chat, keeps typing indicators aliased, and on mobile opens the task chat fullscreen.
+
+Request-scope continuity guarantees:
+- First append or patch that assigns `taskId` to a board-scoped row normalizes `source.boardScope*` and retro-scopes same-request topic-session rows into that task scope.
+- Later non-user/system/action rows in the same topic session may inherit the promoted task scope from session-routing memory when explicit task scope is absent, preventing split turns across topic/task chats.
+- Ingest/patch writes also update `OpenClawRequestRoute` (canonical `occhat-*` key, topic/task lock semantics). Future rows for that request obey this ledger even when sender metadata is stale.
 
 Key invariant:
 - User prompt is persisted before gateway dispatch so thread history remains coherent.
@@ -426,6 +443,8 @@ Operational guarantees:
 - User sends via board composer.
 - Pending local message state appears immediately.
 - Backend persistence + SSE reconcile clears pending and shows canonical rows.
+- Topic/task composers refocus and reveal after send; selected chat panes keep active-bottom auto-scroll when new rows arrive.
+- Promotion from topic chat to task chat preserves turn continuity by moving the active/focused pane to the promoted task.
 
 ### 7.5 Search and recall
 
@@ -475,7 +494,7 @@ Operational guarantees:
 | Queue ingest row | plugin queue mode | `POST /api/ingest` | enqueue for async ingest drain | eventual append |
 | Patch log/classification | classifier/manual ops | `PATCH /api/log/{id}` | guarded patch + retry + sanitize | `log.upserted` SSE |
 | Delete one log | moderation/manual cleanup | `DELETE /api/log/{id}` | delete + note cleanup | `log.deleted` SSE |
-| Send board chat | composer in `src/components/unified-view.tsx` | `POST /api/openclaw/chat` | persist-first + gateway dispatch + typing events | queued response + SSE |
+| Send board chat | composer in `src/components/unified-view.tsx` | `POST /api/openclaw/chat` | persist-first + gateway dispatch + typing events + request-scope promotion backfill | queued response + SSE + focused active pane |
 | Discover OpenClaw skills | board/composer helper | `GET /api/openclaw/skills` | gateway capability passthrough | skill metadata |
 | Attachment validation | composer preflight | `GET /api/attachments/policy` | policy payload | client-side guardrails |
 | Upload files | composer attachments | `POST /api/attachments` | mime/size validation + storage + metadata | attachment IDs for chat |

@@ -555,9 +555,20 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const docsHref = mounted ? `${apiBase || ""}/docs` : "";
   const iconSize = collapsed ? 32 : 40;
 
-  const toggleCollapsed = () => {
+  const toggleCollapsed = useCallback(() => {
     setLocalStorageItem("clawboard.navCollapsed", collapsed ? "false" : "true");
-  };
+  }, [collapsed]);
+  const handleBrandToggleClick = useCallback(
+    (event: React.MouseEvent<HTMLAnchorElement>) => {
+      if (typeof window === "undefined") return;
+      // Desktop sidebar affordance: logo toggles expand/collapse.
+      // On mobile, preserve existing behavior (navigate to board route).
+      if (!window.matchMedia("(min-width: 1024px)").matches) return;
+      event.preventDefault();
+      toggleCollapsed();
+    },
+    [toggleCollapsed]
+  );
   const navToggleLabel = collapsed ? "Expand navigation" : "Collapse navigation";
 
   const toggleCompactHeader = () => {
@@ -1057,7 +1068,13 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 		            <div className="min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
 		              <div className="flex items-center justify-between gap-2.5 lg:block">
 		                <div className="flex min-w-0 items-center gap-2.5 lg:mx-auto lg:w-fit lg:justify-center">
-		                  <Link href={boardNavHref} className="flex items-center justify-center">
+		                  <Link
+                        href={boardNavHref}
+                        onClick={handleBrandToggleClick}
+                        aria-label={navToggleLabel}
+                        title={navToggleLabel}
+                        className="flex items-center justify-center"
+                      >
 				                    <div className={cn("relative transition-all", collapsed ? "h-8 w-8" : "h-8 w-8 lg:h-12 lg:w-12")}>
 				                      <Image
 				                        src="/clawboard-mark.png"

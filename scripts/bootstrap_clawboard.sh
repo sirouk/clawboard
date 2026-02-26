@@ -2512,6 +2512,46 @@ if [ "$SKIP_OPENCLAW" = false ]; then
       log_success "OpenResponses endpoint already enabled."
     fi
 
+    log_info "Ensuring OpenClaw cross-agent session visibility for delegated follow-ups..."
+    CURRENT_SESSIONS_VISIBILITY="$(openclaw config get tools.sessions.visibility 2>/dev/null || true)"
+    CURRENT_SESSIONS_VISIBILITY="$(printf "%s" "$CURRENT_SESSIONS_VISIBILITY" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    if [ "$CURRENT_SESSIONS_VISIBILITY" != "all" ]; then
+      if openclaw config set tools.sessions.visibility all >/dev/null 2>&1; then
+        OPENCLAW_GATEWAY_RESTART_NEEDED=true
+        log_success "Set tools.sessions.visibility=all."
+      else
+        log_warn "Failed to set tools.sessions.visibility=all."
+      fi
+    else
+      log_success "tools.sessions.visibility already set to all."
+    fi
+
+    CURRENT_SANDBOX_SESSION_VISIBILITY="$(openclaw config get agents.defaults.sandbox.sessionToolsVisibility 2>/dev/null || true)"
+    CURRENT_SANDBOX_SESSION_VISIBILITY="$(printf "%s" "$CURRENT_SANDBOX_SESSION_VISIBILITY" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    if [ "$CURRENT_SANDBOX_SESSION_VISIBILITY" != "all" ]; then
+      if openclaw config set agents.defaults.sandbox.sessionToolsVisibility all >/dev/null 2>&1; then
+        OPENCLAW_GATEWAY_RESTART_NEEDED=true
+        log_success "Set agents.defaults.sandbox.sessionToolsVisibility=all."
+      else
+        log_warn "Failed to set agents.defaults.sandbox.sessionToolsVisibility=all."
+      fi
+    else
+      log_success "agents.defaults.sandbox.sessionToolsVisibility already set to all."
+    fi
+
+    CURRENT_AGENT_TO_AGENT_ENABLED="$(openclaw config get tools.agentToAgent.enabled 2>/dev/null || true)"
+    CURRENT_AGENT_TO_AGENT_ENABLED="$(printf "%s" "$CURRENT_AGENT_TO_AGENT_ENABLED" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    if [ "$CURRENT_AGENT_TO_AGENT_ENABLED" != "true" ]; then
+      if openclaw config set tools.agentToAgent.enabled --json true >/dev/null 2>&1; then
+        OPENCLAW_GATEWAY_RESTART_NEEDED=true
+        log_success "Set tools.agentToAgent.enabled=true."
+      else
+        log_warn "Failed to set tools.agentToAgent.enabled=true."
+      fi
+    else
+      log_success "tools.agentToAgent.enabled already true."
+    fi
+
     if [ "$SKIP_SKILL" = false ]; then
       log_info "Installing Clawboard skill (mode: $SKILL_INSTALL_MODE)..."
       SKILL_REPO_SRC="$INSTALL_DIR/skills/clawboard"

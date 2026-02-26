@@ -1246,6 +1246,295 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(len(scheduled), 1)
         error_logger.assert_not_called()
 
+    def test_chat_004b1_topic_session_uses_board_probe_fallback_when_global_probe_disabled(self):
+        published: list[dict] = []
+        scheduled: list[dict] = []
+        calls: list[tuple[str, dict, dict]] = []
+
+        async def _fake_gateway_rpc(method: str, params: dict, **kwargs):
+            calls.append((method, params, kwargs))
+            idx = len(calls)
+            if idx == 1:
+                return {"status": "started", "runId": "run-004b1-1"}
+            if idx == 2:
+                return {"status": "in_flight", "runId": "run-004b1-1"}
+            if idx == 3:
+                return {"aborted": True}
+            if idx == 4:
+                return {"status": "started", "runId": "run-004b1-2"}
+            raise AssertionError(f"unexpected gateway call {idx}: {method}")
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_RETRY_GRACE_SECONDS": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_ABORT_RETRY": "1",
+            },
+            clear=False,
+        ), patch.object(main_module, "_openclaw_chat_request_has_non_user_activity", return_value=False), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ), patch.object(main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)), patch.object(
+            main_module, "_schedule_openclaw_assistant_log_check", side_effect=lambda **kwargs: scheduled.append(kwargs)
+        ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
+            main_module._run_openclaw_chat(
+                "request-chat-004b1",
+                base_url="http://127.0.0.1:18789",
+                token="test-token",
+                session_key="clawboard:topic:topic-chat-004b1",
+                agent_id="main",
+                sent_at=now_iso(),
+                message="trigger board fallback recovery",
+                attachments=None,
+            )
+
+        self.assertEqual([call[0] for call in calls], ["chat.send", "chat.send", "chat.abort", "chat.send"])
+        self.assertEqual(calls[0][1].get("idempotencyKey"), "request-chat-004b1")
+        self.assertEqual(calls[1][1].get("idempotencyKey"), "request-chat-004b1")
+        self.assertEqual(calls[3][1].get("idempotencyKey"), "request-chat-004b1:retry-1")
+        abort_params = calls[2][1]
+        self.assertEqual(abort_params.get("sessionKey"), "clawboard:topic:topic-chat-004b1")
+        self.assertEqual(abort_params.get("runId"), "run-004b1-1")
+        self.assertEqual(len(scheduled), 1)
+        error_logger.assert_not_called()
+
+    def test_chat_004b1a_topic_session_skips_abort_retry_by_default(self):
+        published: list[dict] = []
+        scheduled: list[dict] = []
+        calls: list[tuple[str, dict, dict]] = []
+
+        async def _fake_gateway_rpc(method: str, params: dict, **kwargs):
+            calls.append((method, params, kwargs))
+            if len(calls) > 1:
+                raise AssertionError(f"board default should not trigger probe abort+retry calls: {len(calls)}")
+            return {"status": "started", "runId": "run-004b1a-1"}
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_RETRY_GRACE_SECONDS": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_ABORT_RETRY": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_DIRECT_RETRY": "0",
+            },
+            clear=False,
+        ), patch.object(main_module, "_openclaw_chat_request_has_non_user_activity", return_value=False), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ), patch.object(main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)), patch.object(
+            main_module, "_schedule_openclaw_assistant_log_check", side_effect=lambda **kwargs: scheduled.append(kwargs)
+        ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
+            main_module._run_openclaw_chat(
+                "request-chat-004b1a",
+                base_url="http://127.0.0.1:18789",
+                token="test-token",
+                session_key="clawboard:topic:topic-chat-004b1a",
+                agent_id="main",
+                sent_at=now_iso(),
+                message="board default should avoid abort retry",
+                attachments=None,
+            )
+
+        self.assertEqual([call[0] for call in calls], ["chat.send"])
+        self.assertEqual(calls[0][1].get("idempotencyKey"), "request-chat-004b1a")
+        self.assertEqual(len(scheduled), 1)
+        error_logger.assert_not_called()
+
+    def test_chat_004b1aa_topic_session_direct_retries_without_abort_by_default(self):
+        published: list[dict] = []
+        scheduled: list[dict] = []
+        calls: list[tuple[str, dict, dict]] = []
+
+        async def _fake_gateway_rpc(method: str, params: dict, **kwargs):
+            calls.append((method, params, kwargs))
+            idx = len(calls)
+            if idx == 1:
+                return {"status": "started", "runId": "run-004b1aa-1"}
+            if idx == 2:
+                return {"status": "started", "runId": "run-004b1aa-2"}
+            raise AssertionError(f"unexpected gateway call {idx}: {method}")
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_RETRY_GRACE_SECONDS": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_ABORT_RETRY": "0",
+            },
+            clear=False,
+        ), patch.object(main_module, "_openclaw_chat_request_has_non_user_activity", return_value=False), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ), patch.object(main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)), patch.object(
+            main_module, "_schedule_openclaw_assistant_log_check", side_effect=lambda **kwargs: scheduled.append(kwargs)
+        ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
+            main_module._run_openclaw_chat(
+                "request-chat-004b1aa",
+                base_url="http://127.0.0.1:18789",
+                token="test-token",
+                session_key="clawboard:topic:topic-chat-004b1aa",
+                agent_id="main",
+                sent_at=now_iso(),
+                message="board default should try direct retry before watchdog-only recovery",
+                attachments=None,
+            )
+
+        self.assertEqual([call[0] for call in calls], ["chat.send", "chat.send"])
+        self.assertEqual(calls[0][1].get("idempotencyKey"), "request-chat-004b1aa")
+        self.assertEqual(calls[1][1].get("idempotencyKey"), "request-chat-004b1aa:probe-direct-retry-1")
+        self.assertEqual(len(scheduled), 1)
+        error_logger.assert_not_called()
+
+    def test_chat_004b1ab_topic_session_direct_retry_requires_progress_during_grace(self):
+        published: list[dict] = []
+        scheduled: list[dict] = []
+        calls: list[tuple[str, dict, dict]] = []
+
+        async def _fake_gateway_rpc(method: str, params: dict, **kwargs):
+            calls.append((method, params, kwargs))
+            idx = len(calls)
+            if idx == 1:
+                return {"status": "started", "runId": "run-004b1ab-1"}
+            if idx == 2:
+                return {"status": "started", "runId": "run-004b1ab-2"}
+            raise AssertionError(f"unexpected gateway call {idx}: {method}")
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_RETRY_GRACE_SECONDS": "1",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_RETRY_GRACE_SECONDS": "0.05",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_ABORT_RETRY": "0",
+            },
+            clear=False,
+        ), patch.object(main_module, "_openclaw_chat_request_has_non_user_activity", return_value=False), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ), patch.object(main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)), patch.object(
+            main_module, "_schedule_openclaw_assistant_log_check", side_effect=lambda **kwargs: scheduled.append(kwargs)
+        ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
+            ok = main_module._run_openclaw_chat(
+                "request-chat-004b1ab",
+                base_url="http://127.0.0.1:18789",
+                token="test-token",
+                session_key="clawboard:topic:topic-chat-004b1ab",
+                agent_id="main",
+                sent_at=now_iso(),
+                message="board direct retry should fail fast when no progress follows",
+                attachments=None,
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual([call[0] for call in calls], ["chat.send", "chat.send"])
+        self.assertEqual(calls[0][1].get("idempotencyKey"), "request-chat-004b1ab")
+        self.assertEqual(calls[1][1].get("idempotencyKey"), "request-chat-004b1ab:probe-direct-retry-1")
+        # Failure path should not schedule assistant watchdog checks.
+        self.assertEqual(len(scheduled), 0)
+        error_logger.assert_called_once()
+        _, kwargs = error_logger.call_args
+        self.assertIn("direct retry", str(kwargs.get("raw") or "").lower())
+
+    def test_chat_004b1b_dispatch_retry_attempt_uses_retry_scoped_idempotency(self):
+        published: list[dict] = []
+        scheduled: list[dict] = []
+        calls: list[tuple[str, dict, dict]] = []
+
+        async def _fake_gateway_rpc(method: str, params: dict, **kwargs):
+            calls.append((method, params, kwargs))
+            idx = len(calls)
+            if idx == 1:
+                return {"status": "started", "runId": "run-004b1b-1"}
+            if idx == 2:
+                return {"status": "in_flight", "runId": "run-004b1b-1"}
+            if idx == 3:
+                return {"aborted": True}
+            if idx == 4:
+                return {"status": "started", "runId": "run-004b1b-2"}
+            raise AssertionError(f"unexpected gateway call {idx}: {method}")
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_RETRY_GRACE_SECONDS": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_ABORT_RETRY": "1",
+            },
+            clear=False,
+        ), patch.object(main_module, "_openclaw_chat_request_has_non_user_activity", return_value=False), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ), patch.object(main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)), patch.object(
+            main_module, "_schedule_openclaw_assistant_log_check", side_effect=lambda **kwargs: scheduled.append(kwargs)
+        ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
+            main_module._run_openclaw_chat(
+                "request-chat-004b1b",
+                base_url="http://127.0.0.1:18789",
+                token="test-token",
+                session_key="clawboard:topic:topic-chat-004b1b",
+                agent_id="main",
+                sent_at=now_iso(),
+                message="trigger board fallback recovery with retry attempt",
+                attachments=None,
+                dispatch_attempt=3,
+            )
+
+        self.assertEqual([call[0] for call in calls], ["chat.send", "chat.send", "chat.abort", "chat.send"])
+        self.assertEqual(calls[0][1].get("idempotencyKey"), "request-chat-004b1b:retry-2")
+        self.assertEqual(calls[1][1].get("idempotencyKey"), "request-chat-004b1b:retry-2")
+        self.assertEqual(calls[3][1].get("idempotencyKey"), "request-chat-004b1b:retry-2-probe-retry-1")
+        abort_params = calls[2][1]
+        self.assertEqual(abort_params.get("sessionKey"), "clawboard:topic:topic-chat-004b1b")
+        self.assertEqual(abort_params.get("runId"), "run-004b1b-1")
+        self.assertEqual(len(scheduled), 1)
+        error_logger.assert_not_called()
+
+    def test_chat_004b2_non_board_session_skips_board_probe_fallback(self):
+        published: list[dict] = []
+        scheduled: list[dict] = []
+        calls: list[tuple[str, dict, dict]] = []
+
+        async def _fake_gateway_rpc(method: str, params: dict, **kwargs):
+            calls.append((method, params, kwargs))
+            if len(calls) > 1:
+                raise AssertionError(f"non-board fallback should not trigger extra calls: {len(calls)}")
+            return {"status": "started", "runId": "run-004b2-1"}
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
+            },
+            clear=False,
+        ), patch.object(main_module, "_openclaw_chat_request_has_non_user_activity", return_value=False), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ), patch.object(main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)), patch.object(
+            main_module, "_schedule_openclaw_assistant_log_check", side_effect=lambda **kwargs: scheduled.append(kwargs)
+        ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
+            main_module._run_openclaw_chat(
+                "request-chat-004b2",
+                base_url="http://127.0.0.1:18789",
+                token="test-token",
+                session_key="agent:main:main",
+                agent_id="main",
+                sent_at=now_iso(),
+                message="non-board session should skip board fallback",
+                attachments=None,
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1].get("idempotencyKey"), "request-chat-004b2")
+        self.assertEqual(len(scheduled), 1)
+        error_logger.assert_not_called()
+
     def test_chat_004c_in_flight_recovery_logs_error_when_retry_still_stuck(self):
         published: list[dict] = []
         calls: list[tuple[str, dict, dict]] = []
@@ -1400,6 +1689,34 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 request_id="request-chat-004d2",
                 sent_at=sent_at,
                 session_key="clawboard:topic:topic-chat-004d2|thread:main",
+            )
+        )
+
+    def test_chat_004d3_progress_check_matches_wrapped_board_task_session_without_request_id(self):
+        sent_at = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        with get_session() as session:
+            main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="action",
+                    content="wrapped task session tool progress",
+                    summary="wrapped task session tool progress",
+                    createdAt=now_iso(),
+                    agentId="toolresult",
+                    agentLabel="Toolresult",
+                    source={
+                        "channel": "clawboard",
+                        "sessionKey": "agent:main:clawboard:task:topic-chat-004d3:task-chat-004d3",
+                    },
+                ),
+                idempotency_key="chat-004d3-progress",
+            )
+
+        self.assertTrue(
+            main_module._openclaw_chat_request_has_non_user_activity(
+                request_id="request-chat-004d3",
+                sent_at=sent_at,
+                session_key="clawboard:task:topic-chat-004d3:task-chat-004d3",
             )
         )
 
@@ -2160,6 +2477,80 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 select(LogEntry).where(LogEntry.content == "recent log seed fallback message")
             ).all()
             self.assertEqual(len(rows), 1)
+
+    def test_chat_024b_gateway_history_sync_seeds_spawned_subagent_sessions_when_sessions_list_disabled(self):
+        parent_session = "clawboard:topic:topic-history-024b"
+        child_session = "agent:coding:subagent:history-024b"
+        with get_session() as session:
+            main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="action",
+                    content="Tool call: sessions_spawn",
+                    summary="sessions_spawn",
+                    raw=(
+                        '{"tool":"sessions_spawn","result":{"childSessionKey":"'
+                        + child_session
+                        + '","agentId":"coding"}}'
+                    ),
+                    createdAt=now_iso(),
+                    agentId="toolcall",
+                    agentLabel="Tool call",
+                    source={
+                        "channel": "clawboard",
+                        "sessionKey": parent_session,
+                    },
+                    classificationStatus="classified",
+                ),
+                idempotency_key="seed-history-024b-spawn",
+            )
+
+        seen_history_keys: list[str] = []
+
+        def _fake_sync_rpc(method: str, params: dict, *, scopes=None):
+            if method == "chat.history":
+                key = str(params.get("sessionKey") or "")
+                seen_history_keys.append(key)
+                if key == child_session:
+                    return {
+                        "messages": [
+                            {
+                                "timestamp": 1700000310000,
+                                "role": "assistant",
+                                "text": "subagent seed fallback message",
+                                "id": "hmsg-024b",
+                            }
+                        ]
+                    }
+                return {"messages": []}
+            raise AssertionError(f"Unexpected RPC method: {method}")
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_GATEWAY_TOKEN": "test-token",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_DISABLE": "0",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_SESSIONS_LIST_DISABLE": "1",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_CURSOR_SEED_LIMIT": "0",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_LOG_SEED_LIMIT": "0",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_UNRESOLVED_SEED_LIMIT": "0",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_SUBAGENT_SEED_LIMIT": "10",
+                "OPENCLAW_GATEWAY_HISTORY_SYNC_SUBAGENT_SEED_LOOKBACK_SECONDS": "3600",
+            },
+            clear=False,
+        ), patch.object(main_module, "_run_gateway_history_rpc_sync", side_effect=_fake_sync_rpc):
+            stats = main_module._sync_openclaw_gateway_history_once()
+
+        self.assertEqual(int(stats.get("ingested") or 0), 1)
+        self.assertEqual(int(stats.get("sessionsScanned") or 0), 1)
+        self.assertEqual(seen_history_keys, [child_session])
+        with get_session() as session:
+            rows = session.exec(
+                select(LogEntry).where(LogEntry.content == "subagent seed fallback message")
+            ).all()
+            self.assertEqual(len(rows), 1)
+            source = rows[0].source if isinstance(rows[0].source, dict) else {}
+            self.assertEqual(str(source.get("sessionKey") or ""), child_session)
 
     def test_chat_025_history_ingest_does_not_advance_cursor_past_write_failure(self):
         session_key = "agent:main:clawboard:topic:topic-history-025"

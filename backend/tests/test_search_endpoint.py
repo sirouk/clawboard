@@ -94,6 +94,60 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertEqual(kwargs["limit_logs"], main_module.SEARCH_BUSY_FALLBACK_LIMIT_LOGS)
         fake_gate.release.assert_not_called()
 
+    def test_search_passes_semantic_query_hint(self):
+        read_headers = {"Host": "localhost:8010"}
+        mocked_result = {
+            "query": "deploy issue",
+            "mode": "mock",
+            "topics": [],
+            "tasks": [],
+            "logs": [],
+            "notes": [],
+            "matchedTopicIds": [],
+            "matchedTaskIds": [],
+            "matchedLogIds": [],
+        }
+        semantic_hint = "customer reports deployment rollback after migration"
+        with patch("app.main._search_impl", return_value=mocked_result) as patched_impl:
+            res = self.client.get(
+                "/api/search",
+                params={"q": "deploy issue", "semanticQuery": semantic_hint},
+                headers=read_headers,
+            )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        kwargs = patched_impl.call_args.kwargs
+        self.assertEqual(kwargs.get("semantic_query"), semantic_hint)
+
+    def test_search_cache_key_includes_semantic_query(self):
+        read_headers = {"Host": "localhost:8010"}
+        mocked_result = {
+            "query": "status update",
+            "mode": "mock",
+            "topics": [],
+            "tasks": [],
+            "logs": [],
+            "notes": [],
+            "matchedTopicIds": [],
+            "matchedTaskIds": [],
+            "matchedLogIds": [],
+        }
+        with patch("app.main._search_impl", return_value=mocked_result) as patched_impl:
+            first = self.client.get(
+                "/api/search",
+                params={"q": "status update", "semanticQuery": "status update from platform alpha"},
+                headers=read_headers,
+            )
+            second = self.client.get(
+                "/api/search",
+                params={"q": "status update", "semanticQuery": "status update from platform beta"},
+                headers=read_headers,
+            )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(patched_impl.call_count, 2)
+
     def test_search_caps_log_propagation_for_topics(self):
         write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}

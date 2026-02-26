@@ -103,7 +103,8 @@ function inferMimeTypeFromName(fileName: string) {
 
 export type BoardChatComposerHandle = {
   addFiles: (files: File[] | FileList) => void;
-  focus: () => void;
+  focus: (options?: { reveal?: boolean; behavior?: ScrollBehavior; block?: ScrollLogicalPosition }) => void;
+  reveal: (options?: { behavior?: ScrollBehavior; block?: ScrollLogicalPosition }) => void;
 };
 
 export type BoardChatComposerSendEvent =
@@ -313,6 +314,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   const [slashCommandsLoadedAt, setSlashCommandsLoadedAt] = useState<number>(() => Date.now());
   const [selectedIndex, setSelectedIndex] = useState(0);
 
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const resizeTextarea = useCallback(() => {
@@ -329,6 +331,17 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     if (!autoFocus) return;
     if (sending) return;
     textareaRef.current?.focus();
+    if (typeof window !== "undefined") {
+      window.requestAnimationFrame(() => {
+        const node = rootRef.current ?? textareaRef.current;
+        if (!node) return;
+        try {
+          node.scrollIntoView({ behavior: "auto", block: "end", inline: "nearest" });
+        } catch {
+          node.scrollIntoView();
+        }
+      });
+    }
     onAutoFocusApplied?.();
   }, [autoFocus, onAutoFocusApplied, sending]);
 
@@ -452,13 +465,49 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     });
   }, [allowedMimeTypes, maxBytes, maxFiles]);
 
+  const revealComposer = useCallback((options?: { behavior?: ScrollBehavior; block?: ScrollLogicalPosition }) => {
+    const node = rootRef.current ?? textareaRef.current;
+    if (!node) return;
+    const behavior = options?.behavior ?? "auto";
+    const block = options?.block ?? "end";
+    try {
+      node.scrollIntoView({ behavior, block, inline: "nearest" });
+    } catch {
+      node.scrollIntoView();
+    }
+  }, []);
+
   useImperativeHandle(
     ref,
     () => ({
       addFiles: (files) => addFiles(files),
-      focus: () => textareaRef.current?.focus(),
+      focus: (options) => {
+        const reveal = Boolean(options?.reveal);
+        const behavior = options?.behavior ?? "auto";
+        const block = options?.block ?? "end";
+        const el = textareaRef.current;
+        if (el) {
+          if (reveal) {
+            el.focus();
+          } else {
+            try {
+              el.focus({ preventScroll: true });
+            } catch {
+              el.focus();
+            }
+          }
+        }
+        if (reveal) {
+          if (typeof window !== "undefined") {
+            window.requestAnimationFrame(() => revealComposer({ behavior, block }));
+          } else {
+            revealComposer({ behavior, block });
+          }
+        }
+      },
+      reveal: (options) => revealComposer(options),
     }),
-    [addFiles]
+    [addFiles, revealComposer]
   );
 
   const sendMessage = async () => {
@@ -566,6 +615,19 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
       sendingGuardRef.current = false;
       setSending(false);
       setPendingRequestId(null);
+      if (typeof window !== "undefined") {
+        window.requestAnimationFrame(() => {
+          const el = textareaRef.current;
+          if (el) {
+            try {
+              el.focus({ preventScroll: true });
+            } catch {
+              el.focus();
+            }
+          }
+          revealComposer({ behavior: "auto", block: "end" });
+        });
+      }
     }
   };
 
@@ -671,6 +733,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
 
   return (
     <div
+      ref={rootRef}
       data-testid={testId}
       className={cn(
         variant === "seamless"
@@ -725,8 +788,8 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
             className={cn(
               "resize-none",
               dense
-                ? "min-h-[58px] max-md:max-h-[172px] max-md:pb-11 max-md:pr-24 md:min-h-[70px]"
-                : "min-h-[78px] overflow-hidden"
+                ? "min-h-[48px] max-md:max-h-[156px] max-md:pb-11 max-md:pr-24 md:min-h-[60px]"
+                : "min-h-[62px] overflow-hidden"
             )}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}

@@ -55,6 +55,35 @@ function parseToolEvent(entry: LogEntry): ToolEvent | null {
   return { kind, toolName };
 }
 
+function toolEventKindLabel(kind: ToolEventKind) {
+  if (kind === "call") return "Tool call";
+  if (kind === "result") return "Tool result";
+  return "Tool error";
+}
+
+function collapseHintText(value: string, limit = 76) {
+  const clean = normalizeInlineText(value);
+  if (!clean) return "";
+  if (clean.length <= limit) return clean;
+  return `${clean.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
+function deriveInlineMetaHint(entry: LogEntry, toolEvent: ToolEvent | null) {
+  if (toolEvent) {
+    const raw = String(entry.summary ?? entry.content ?? "").trim();
+    const parsed = raw.match(TOOL_EVENT_RE);
+    const detail = parsed?.[2] ? collapseHintText(parsed[2]) : collapseHintText(toolEvent.toolName);
+    return detail || "Tool details";
+  }
+  if (entry.type === "system") {
+    return collapseHintText(entry.summary ?? entry.content ?? entry.raw ?? "") || "System event";
+  }
+  if (entry.type === "action") {
+    return collapseHintText(entry.summary ?? entry.content ?? entry.raw ?? "") || "Action event";
+  }
+  return collapseHintText(entry.summary ?? entry.content ?? entry.raw ?? "");
+}
+
 const logRawCache = new Map<string, string | null>();
 const logRawPromiseCache = new Map<string, Promise<string | null>>();
 
@@ -267,6 +296,9 @@ export function LogList({
   initialTopicFilter = "all",
   initialLaneFilter = "all",
   variant = "cards",
+  metaDefaultCollapsed = false,
+  metaExpandEpoch = 0,
+  metaCollapseEpoch = 0,
 }: {
   logs: LogEntry[];
   topics: Topic[];
@@ -291,6 +323,9 @@ export function LogList({
   initialTopicFilter?: string;
   initialLaneFilter?: LaneFilter;
   variant?: LogListVariant;
+  metaDefaultCollapsed?: boolean;
+  metaExpandEpoch?: number;
+  metaCollapseEpoch?: number;
 }) {
   const { token, tokenRequired } = useAppConfig();
   const { setLogs: setStoreLogs } = useDataStore();
@@ -410,7 +445,7 @@ export function LogList({
         setTasksLoading((prev) => ({ ...prev, [key]: false }));
       }
     },
-    [tasksFromOverride, tasksCache, tasksLoading, topicKey, token]
+    [tasksFromOverride, tasksCache, tasksLoading, topicKey]
   );
 
   const isTasksLoadingForTopic = useCallback(
@@ -853,7 +888,7 @@ export function LogList({
               {!collapsed &&
                 entries.map((entry) => (
                 <LogRow
-                  key={entry.id}
+                  key={`${entry.id}:${metaExpandEpoch}:${metaCollapseEpoch}:${metaDefaultCollapsed ? 1 : 0}`}
                   entry={entry}
                   topicLabel={topicsMap.get(entry.topicId ?? "") ?? "Off-topic"}
                   topics={topics}
@@ -874,6 +909,9 @@ export function LogList({
                   readOnly={readOnly}
                   enableNavigation={enableNavigation}
                   variant={variant}
+                  metaDefaultCollapsed={metaDefaultCollapsed}
+                  metaExpandEpoch={metaExpandEpoch}
+                  metaCollapseEpoch={metaCollapseEpoch}
                 />
                 ))}
             </div>
@@ -924,6 +962,9 @@ type LogRowProps = {
   readOnly: boolean;
   enableNavigation: boolean;
   variant: LogListVariant;
+  metaDefaultCollapsed: boolean;
+  metaExpandEpoch: number;
+  metaCollapseEpoch: number;
 };
 
 const LogRow = memo(function LogRow({
@@ -947,6 +988,9 @@ const LogRow = memo(function LogRow({
   readOnly,
   enableNavigation,
   variant,
+  metaDefaultCollapsed,
+  metaExpandEpoch,
+  metaCollapseEpoch,
 }: LogRowProps) {
   const router = useRouter();
   const [compactMessageVisible, setCompactMessageVisible] = useState(false);
@@ -1016,6 +1060,21 @@ const LogRow = memo(function LogRow({
   const typeLabel = TYPE_LABELS[entry.type] ?? entry.type;
   const isConversation = entry.type === "conversation";
   const toolEvent = parseToolEvent(entry);
+  const isInlineMetaMessage = !isConversation && variant === "chat" && (entry.type === "system" || entry.type === "action");
+  const inlineMetaDefaultExpanded = useMemo(() => {
+    if (!isInlineMetaMessage) return true;
+    if (metaExpandEpoch > metaCollapseEpoch) return true;
+    if (metaCollapseEpoch > metaExpandEpoch) return false;
+    return !metaDefaultCollapsed;
+  }, [isInlineMetaMessage, metaCollapseEpoch, metaDefaultCollapsed, metaExpandEpoch]);
+  const [inlineMetaExpanded, setInlineMetaExpanded] = useState(() => inlineMetaDefaultExpanded);
+  const inlineMetaHint = useMemo(() => deriveInlineMetaHint(entry, toolEvent), [entry, toolEvent]);
+  const inlineMetaPillLabel = useMemo(() => {
+    if (toolEvent) return toolEventKindLabel(toolEvent.kind);
+    if (entry.type === "system") return "System";
+    if (entry.type === "action") return "Action";
+    return typeLabel;
+  }, [entry.type, toolEvent, typeLabel]);
   const allowEdit = allowDelete;
   const agentLabel = entry.agentLabel || entry.agentId;
   const showAgentBadge = Boolean(agentLabel && agentLabel.trim().toLowerCase() !== typeLabel.trim().toLowerCase());
@@ -1554,12 +1613,28 @@ const LogRow = memo(function LogRow({
 	                isPending ? "opacity-90" : ""
 	              }`}
 	            >
-	              {toolEvent ? (
+	              {isInlineMetaMessage && !inlineMetaExpanded ? (
+	                <button
+	                  type="button"
+	                  className="inline-flex w-full items-center gap-2 rounded-full border border-[rgba(148,163,184,0.3)] bg-[rgba(10,12,16,0.48)] px-3 py-2 text-left transition hover:border-[rgba(255,90,45,0.35)] hover:bg-[rgba(16,20,26,0.62)]"
+	                  onClick={(event) => {
+	                    event.preventDefault();
+	                    event.stopPropagation();
+	                    setInlineMetaExpanded(true);
+	                  }}
+	                  aria-label={`Expand ${inlineMetaPillLabel}`}
+	                  title="Expand details"
+	                >
+	                  <span className="shrink-0 text-[11px] uppercase tracking-[0.14em] text-[rgb(var(--claw-accent))]">
+	                    {inlineMetaPillLabel}
+	                  </span>
+	                  <span className="min-w-0 flex-1 truncate text-[11px] text-[rgb(var(--claw-text))]">{inlineMetaHint || "Details available"}</span>
+	                  <span className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">Expand ▸</span>
+	                </button>
+	              ) : toolEvent ? (
 	                <>
 	                  <div className="flex flex-wrap items-center justify-start gap-x-2 gap-y-1">
-	                    <span className="uppercase tracking-[0.14em]">
-	                      {toolEvent.kind === "call" ? "Tool call" : toolEvent.kind === "result" ? "Tool result" : "Tool error"}
-	                    </span>
+	                    <span className="uppercase tracking-[0.14em]">{toolEventKindLabel(toolEvent.kind)}</span>
 	                    <span className="font-mono text-[rgb(var(--claw-text))]">{toolEvent.toolName}</span>
 	                  </div>
 	                  <div className="mt-2 text-left">
@@ -1586,6 +1661,21 @@ const LogRow = memo(function LogRow({
 	                  ) : null}
 	                </>
 	              )}
+	              {isInlineMetaMessage && inlineMetaExpanded ? (
+	                <div className="mt-2 flex justify-start">
+	                  <Button
+	                    variant="ghost"
+	                    size="sm"
+	                    onClick={(event) => {
+	                      event.preventDefault();
+	                      event.stopPropagation();
+	                      setInlineMetaExpanded(false);
+	                    }}
+	                  >
+	                    Collapse
+	                  </Button>
+	                </div>
+	              ) : null}
 	            </div>
 
             <div className="mt-2 flex flex-wrap items-center justify-start gap-2">
@@ -2399,6 +2489,9 @@ const LogRow = memo(function LogRow({
   if (prev.readOnly !== next.readOnly) return false;
   if (prev.enableNavigation !== next.enableNavigation) return false;
   if (prev.variant !== next.variant) return false;
+  if (prev.metaDefaultCollapsed !== next.metaDefaultCollapsed) return false;
+  if (prev.metaExpandEpoch !== next.metaExpandEpoch) return false;
+  if (prev.metaCollapseEpoch !== next.metaCollapseEpoch) return false;
   if (prev.onAddNote !== next.onAddNote) return false;
   if (prev.onDelete !== next.onDelete) return false;
   if (prev.onPatch !== next.onPatch) return false;

@@ -142,6 +142,9 @@ exit 0
     env,
   });
   assert.equal(firstRun.code, 0, `exit=${firstRun.code}\nstdout:\n${firstRun.stdout}\nstderr:\n${firstRun.stderr}`);
+  assert.match(firstRun.stdout, /tools\.sessions\.visibility=all/i);
+  assert.match(firstRun.stdout, /agents\.defaults\.sandbox\.sessionToolsVisibility=all/i);
+  assert.match(firstRun.stdout, /tools\.agentToAgent\.enabled=true/i);
 
   const secondRun = await run(bootstrapArgs, {
     cwd: repoRoot,

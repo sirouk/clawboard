@@ -270,6 +270,19 @@ class LogOutLite(ModelBase):
     )
 
 
+class LogChatCountsResponse(BaseModel):
+    topicChatCounts: Dict[str, int] = Field(
+        default_factory=dict,
+        description="Aggregate topic-chat entry counts keyed by topic id (taskId is null).",
+        examples=[{"topic-1": 12, "topic-2": 3}],
+    )
+    taskChatCounts: Dict[str, int] = Field(
+        default_factory=dict,
+        description="Aggregate task-chat entry counts keyed by task id.",
+        examples=[{"task-1": 28, "task-2": 4}],
+    )
+
+
 class TopicUpsert(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -557,6 +570,11 @@ class OpenClawChatRequest(BaseModel):
         default="main",
         description="OpenClaw agent id to route this request to.",
         examples=["main"],
+    )
+    topicOnly: Optional[bool] = Field(
+        default=None,
+        description="When true on a topic-scoped session, keep this send in topic chat only (no task routing).",
+        examples=[True],
     )
     attachmentIds: Optional[List[str]] = Field(
         default=None,

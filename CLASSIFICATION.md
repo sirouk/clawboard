@@ -41,7 +41,7 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 
 | Layer | Store | Durability Role |
 |---|---|---|
-| Canonical board state | SQLModel DB (`Space`, `Topic`, `Task`, `LogEntry`, `DeletedLog`, `SessionRoutingMemory`, `Attachment`, `Draft`, `IngestQueue`) | Source of truth |
+| Canonical board state | SQLModel DB (`Space`, `Topic`, `Task`, `LogEntry`, `DeletedLog`, `SessionRoutingMemory`, `OpenClawRequestRoute`, `Attachment`, `Draft`, `IngestQueue`) | Source of truth |
 | Plugin spill queue | `~/.openclaw/clawboard-queue.sqlite` | Survives API/network outage |
 | Classifier reindex queue | JSONL (`CLASSIFIER_REINDEX_QUEUE_PATH`) | Decouples embedding refresh from API writes |
 | Classifier embeddings | Qdrant (`QDRANT_URL`/collection config) | Candidate retrieval namespaces |
@@ -56,6 +56,9 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 - Task assignment is optional and must belong to the selected topic.
 - **Task Chat** (`clawboard:task:<topicId>:<taskId>`): messages **never** get allocated to another topic or task; classifier patches with fixed scope and does not reroute.
 - **Topic Chat** (`clawboard:topic:<topicId>`): messages stay in **this topic only**; task inference/creation only within this topic and only when there is a clear, concrete task.
+- When a topic-scoped request is promoted to a task, same-request rows are backfilled into that task scope so one user turn does not remain split across topic/task chats.
+- Canonical request routing is ledgered in `OpenClawRequestRoute` (keyed by canonical `occhat-*` id); same-request follow-ups obey this route even when incoming metadata carries non-`occhat` run ids.
+- Non-user follow-up rows (assistant/system/tool/action) in board sessions must prefer explicit board scope; when absent in topic sessions, task continuity can be inferred from session-routing memory (same session only).
 - Slash commands and classifier/context artifacts are non-semantic and must not create topics/tasks.
 - Cron delivery/control logs must never route into user topics/tasks.
 - Idempotent ingest must tolerate retries and queue replays without duplicate logical sends.
@@ -89,6 +92,7 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
   - explicit board session key
   - board scope metadata (`source.boardScope*`)
   - explicit subagent linkage cache keyed by exact child session key (`sessions_spawn` `childSessionKey`, memory + sqlite).
+- Gateway history-sync fallback seeding includes unresolved request sessions and delegated child session keys parsed from recent `sessions_spawn` lineage logs, so subagent transcripts can recover even with `sessions.list` degraded/disabled.
 - Cross-agent/global recency fallback is intentionally disallowed.
 - API canonicalizes scope metadata into `source.boardScope*` fields for downstream consistency.
 - Classifier board-session runs resolve allowed spaces from source scope and apply `allowedSpaceIds` on API reads/writes.
@@ -175,6 +179,7 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
 - **Topic Chat** (`clawboard:topic:<topicId>`):
   - Messages stay in **this topic only**. Topic is pinned; classifier candidate retrieval is restricted to this topic (and its tasks).
   - Task inference or creation is allowed **only within this topic**, and only when there is a **clear, concrete task** (gated by `_task_creation_allowed` and `call_creation_gate`).
+  - If promotion occurs, append/patch routing rebases in-scope request rows to the promoted task without changing topic ownership.
   - Never allocate to another topic.
 - Subagent sessions can be pinned only by explicit board scope lineage (`source.boardScope*`) or prior classified scope in that same subagent session; never by global/cross-session recency fallback.
 
@@ -252,7 +257,18 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
 - Used for ambiguous follow-ups without expanding context window.
 - GC worker removes expired rows by TTL (`CLAWBOARD_SESSION_ROUTING_TTL_DAYS`).
 
-### 6.11 Optional Digest Maintenance
+### 6.11 Request Route Ledger
+
+- Stored in `OpenClawRequestRoute`, keyed by canonical base request id (`occhat-*`).
+- Source canonicalization prefers `source.requestId` when it is canonical; otherwise falls back to canonical `source.messageId`.
+- Append and patch paths both upsert the ledger and emit `openclaw.request_route.updated` on route changes.
+- Promotion semantics:
+  - topic -> task is lockable and durable (`routeLocked=true`).
+  - same-topic promotions are allowed; downscope from task -> topic is rejected.
+  - conflicting cross-topic updates are ignored once route ownership is established.
+- GC worker removes stale route rows by TTL (`CLAWBOARD_OPENCLAW_REQUEST_ROUTE_TTL_DAYS`).
+
+### 6.12 Optional Digest Maintenance
 
 - If cycle budget remains, classifier may update topic/task digests.
 - Digest updates are bounded (`CLASSIFIER_DIGEST_MAX_PER_CYCLE`) and lower priority than routing.
@@ -304,6 +320,8 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
 - Assistant-log watchdog emits system warning when gateway returns but plugin logs do not arrive.
 - History-sync ingest skips injected context wrapper artifacts while still advancing the per-session cursor.
 - Orchestration convergence does not mark `main.response` done while any delegated subagent item is still non-terminal.
+- Unified board freeform send selects one deterministic board session key per turn (new topic, selected topic, or selected task), and UI focus follows that target.
+- Topic-session promotions to task scope update both row scope metadata and same-request allocations so subsequent rows converge into the promoted task chat.
 
 ## 9) Reliability and Degradation Semantics
 

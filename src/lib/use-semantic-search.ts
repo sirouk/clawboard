@@ -6,6 +6,7 @@ import type { SemanticSearchResponse } from "@/lib/types";
 
 type SemanticSearchParams = {
   query: string;
+  semanticQuery?: string;
   topicId?: string | null;
   sessionKey?: string | null;
   spaceId?: string | null;
@@ -30,6 +31,7 @@ type SemanticSearchState = {
 
 export function useSemanticSearch({
   query,
+  semanticQuery,
   topicId,
   sessionKey,
   spaceId,
@@ -45,6 +47,7 @@ export function useSemanticSearch({
   refreshKey = null,
 }: SemanticSearchParams): SemanticSearchState {
   const trimmedQuery = query.trim();
+  const trimmedSemanticQuery = String(semanticQuery ?? "").trim();
   const [state, setState] = useState<SemanticSearchState>({
     data: null,
     loading: false,
@@ -59,6 +62,9 @@ export function useSemanticSearch({
     const logsValue = Math.min(Math.max(10, limitLogs), 320);
     const params = new URLSearchParams();
     params.set("q", trimmedQuery);
+    if (trimmedSemanticQuery && trimmedSemanticQuery !== trimmedQuery) {
+      params.set("semanticQuery", trimmedSemanticQuery);
+    }
     params.set("includePending", includePending ? "true" : "false");
     params.set("limitTopics", String(topicsValue));
     params.set("limitTasks", String(tasksValue));
@@ -80,6 +86,7 @@ export function useSemanticSearch({
     minQueryLength,
     sessionKey,
     spaceId,
+    trimmedSemanticQuery,
     topicId,
     trimmedQuery,
   ]);

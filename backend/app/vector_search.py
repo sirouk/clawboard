@@ -1243,5 +1243,54 @@ def semantic_search(
     }
 
 
+def dense_candidate_ids(
+    query: str,
+    *,
+    topic_limit: int = 24,
+    task_limit: int = 48,
+    log_limit: int = 360,
+) -> dict[str, object]:
+    """Return global dense candidate ids for search expansion.
+
+    This is intentionally lightweight: it only embeds the query and hits the vector index.
+    Callers can decide whether/how to hydrate these ids from SQL payloads.
+    """
+    q = _normalize_text(query)
+    if len(q) < 1:
+        return {
+            "query": q,
+            "mode": "empty",
+            "topics": [],
+            "tasks": [],
+            "logs": [],
+        }
+
+    query_vec = _embed_query(q)
+    if query_vec is None:
+        return {
+            "query": q,
+            "mode": "dense-unavailable",
+            "topics": [],
+            "tasks": [],
+            "logs": [],
+        }
+
+    topic_dense, topic_backend = _vector_topk(query_vec, kind_exact="topic", limit=max(1, int(topic_limit)))
+    task_dense, task_backend = _vector_topk(query_vec, kind_prefix="task:", limit=max(1, int(task_limit)))
+    log_dense, log_backend = _vector_topk(query_vec, kind_exact="log", limit=max(1, int(log_limit)))
+
+    mode_parts = ["dense-candidates"]
+    if any(backend == "qdrant" for backend in [topic_backend, task_backend, log_backend]):
+        mode_parts.insert(0, "qdrant")
+
+    return {
+        "query": q,
+        "mode": "+".join(mode_parts),
+        "topics": list(topic_dense.keys()),
+        "tasks": list(task_dense.keys()),
+        "logs": list(log_dense.keys()),
+    }
+
+
 if VECTOR_PREWARM:
     _ensure_model_loading_async()

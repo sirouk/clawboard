@@ -1,0 +1,5 @@
+{
+  "timestamp": "2026-02-26T06:07:30.851Z",
+  "tests": [],
+  "error": "page.goto: Timeout 10000ms exceeded.\nCall log:\n  - navigating to \"http://localhost:3010/u\", waiting until \"domcontentloaded\"\n"
+}
