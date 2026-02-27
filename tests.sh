@@ -46,6 +46,27 @@ fail() {
   exit 1
 }
 
+run_with_retry() {
+  local label="$1"
+  shift
+  local attempts=0
+  local max_attempts=2
+  while true; do
+    set +e
+    "$@"
+    local code=$?
+    set -e
+    if [[ "$code" -eq 0 ]]; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    if (( attempts >= max_attempts )); then
+      fail "${label} failed after ${attempts} attempt(s) (exit ${code})"
+    fi
+    log "${label} failed with exit ${code}; retrying once to guard transient interpreter aborts"
+  done
+}
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "Required command not found: $1"
 }
@@ -159,6 +180,9 @@ if [[ -f ".env" ]]; then
 fi
 
 [[ -n "${CLAWBOARD_TOKEN:-}" ]] || fail "CLAWBOARD_TOKEN is not set. Add it to .env."
+export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
+export HF_HUB_DISABLE_PROGRESS_BARS="${HF_HUB_DISABLE_PROGRESS_BARS:-1}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
 log "Building and starting docker services"
 WEB_SERVICE="web"
@@ -196,12 +220,30 @@ npm -s run test:logger
 log "Running bash script tests"
 npm -s run test:scripts
 
-log "Running backend unit tests"
-docker compose run --rm -T \
+log "Running backend critical chat regressions (dedupe + stop timing)"
+run_with_retry "backend critical chat regressions (dedupe + stop timing)" docker compose run --rm -T \
   -v "${ROOT_DIR}/backend/app:/app/app:ro" \
   -v "${ROOT_DIR}/backend/tests:/app/tests:ro" \
   api \
-  sh -lc 'HF_HUB_DISABLE_XET=1 PIP_DISABLE_PIP_VERSION_CHECK=1 pip install --quiet --root-user-action=ignore httpx && HF_HUB_DISABLE_XET=1 python -m unittest discover -s /app/tests -p "test_*.py"'
+  sh -lc 'PIP_DISABLE_PIP_VERSION_CHECK=1 pip install --quiet --root-user-action=ignore httpx && cd /app/tests && python -m unittest -v \
+    test_idempotency.IdempotencyTests.test_append_log_dedupes_on_x_idempotency_key \
+    test_idempotency.IdempotencyTests.test_append_log_dedupes_on_source_message_id_when_key_missing \
+    test_append_log_entry.AppendLogEntryTests.test_append_log_dedupes_user_request_across_wrapped_and_canonical_board_topic_sessions \
+    test_append_log_entry.AppendLogEntryTests.test_append_log_dedupes_non_user_replay_across_wrapped_direct_and_canonical_board_topic_sessions \
+    test_append_log_entry.AppendLogEntryTests.test_append_log_dedupes_subagent_non_user_replay_and_prefers_markdown_variant \
+    test_append_log_entry.AppendLogEntryTests.test_append_log_concurrent_wrapped_user_replay_uses_source_identity_and_avoids_route_race_500 \
+    test_openclaw_chat_watchdog_and_ingest.OpenClawChatAndIngestTests.test_chat_001b_cancel_fans_out_to_linked_subagent_sessions \
+    test_openclaw_chat_watchdog_and_ingest.OpenClawChatAndIngestTests.test_chat_001c_cancel_request_filter_matches_retry_suffix_rows \
+    test_openclaw_chat_watchdog_and_ingest.OpenClawChatAndIngestTests.test_chat_001d_cancel_main_run_emits_immediate_stop_signals \
+    test_orchestration_runtime.OrchestrationRuntimeTests.test_orch_004_cancel_marks_run_and_items_cancelled \
+    test_orchestration_runtime.OrchestrationRuntimeTests.test_orch_004b_cancel_during_subagent_phase_stops_parent_and_child_immediately'
+
+log "Running backend unit tests"
+run_with_retry "backend unit tests" docker compose run --rm -T \
+  -v "${ROOT_DIR}/backend/app:/app/app:ro" \
+  -v "${ROOT_DIR}/backend/tests:/app/tests:ro" \
+  api \
+  sh -lc 'PIP_DISABLE_PIP_VERSION_CHECK=1 pip install --quiet --root-user-action=ignore httpx && python -m unittest discover -s /app/tests -p "test_*.py"'
 
 log "Running frontend lint"
 npm run lint

@@ -135,6 +135,8 @@ def _ensure_runtime_indexes() -> None:
     statements = [
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_logentry_idempotency_key "
         'ON logentry("idempotencyKey") WHERE "idempotencyKey" IS NOT NULL;',
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_logentry_source_identity_key "
+        'ON logentry("sourceIdentityKey") WHERE "sourceIdentityKey" IS NOT NULL;',
         source_session_key_index,
         source_request_id_index,
         source_message_id_index,
@@ -245,6 +247,8 @@ def init_db() -> None:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN updatedAt TEXT NOT NULL DEFAULT '';")
             if "idempotencyKey" not in existing:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN idempotencyKey TEXT;")
+            if "sourceIdentityKey" not in existing:
+                conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN sourceIdentityKey TEXT;")
             if "attachments" not in existing:
                 conn.exec_driver_sql("ALTER TABLE logentry ADD COLUMN attachments JSON;")
             if "spaceId" not in existing:
@@ -266,6 +270,10 @@ def init_db() -> None:
             conn.exec_driver_sql(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_logentry_idempotency_key "
                 'ON logentry("idempotencyKey") WHERE "idempotencyKey" IS NOT NULL;'
+            )
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_logentry_source_identity_key "
+                'ON logentry("sourceIdentityKey") WHERE "sourceIdentityKey" IS NOT NULL;'
             )
             # Speed up session-thread queries (UI thread view + classifier session bucketing).
             # Expression index so we don't need to denormalize `source.sessionKey` into a dedicated column.
@@ -538,6 +546,9 @@ def init_db() -> None:
         # Postgres hardening: ms-epoch cursors exceed INT32 range, so ensure BIGINT storage.
         with engine.connect() as conn:
             try:
+                conn.exec_driver_sql(
+                    'ALTER TABLE logentry ADD COLUMN IF NOT EXISTS "sourceIdentityKey" TEXT;'
+                )
                 row = conn.exec_driver_sql(
                     """
                     SELECT data_type

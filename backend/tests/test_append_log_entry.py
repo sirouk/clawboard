@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
@@ -23,6 +24,7 @@ try:
     import app.main as main_module  # noqa: E402
     from app.main import app  # noqa: E402
     from app.models import LogEntry, OpenClawRequestRoute, SessionRoutingMemory, Task, Topic  # noqa: E402
+    from app.schemas import LogAppend  # noqa: E402
 
     _API_TESTS_AVAILABLE = True
 except Exception:
@@ -403,6 +405,34 @@ class AppendLogEntryTests(unittest.TestCase):
         self.assertEqual(payload.get("classificationStatus"), "pending")
         self.assertIsNone(payload.get("classificationError"))
         self.assertEqual(payload.get("classificationAttempts"), 0)
+
+    def test_append_log_classifies_unanchored_channel_memory_tool_action_immediately(self):
+        ts = now_iso()
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "action",
+                "content": "Tool call: memory_search",
+                "summary": "Tool call: memory_search",
+                "raw": "Tool call: memory_search {\"query\":\"idempotency\"}",
+                "createdAt": ts,
+                "agentId": "assistant",
+                "agentLabel": "Assistant",
+                "source": {
+                    "channel": "openclaw",
+                    "sessionKey": "channel:openclaw:test-memory-action",
+                    "messageId": "oc:tool-memory-1",
+                },
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertIsNone(payload.get("topicId"))
+        self.assertIsNone(payload.get("taskId"))
+        self.assertEqual(payload.get("classificationStatus"), "classified")
+        self.assertEqual(payload.get("classificationError"), "filtered_memory_action")
+        self.assertEqual(payload.get("classificationAttempts"), 1)
 
     def test_append_log_recovers_subagent_scope_from_parent_handoff_action(self):
         base_dt = datetime.now(timezone.utc)
@@ -918,6 +948,226 @@ class AppendLogEntryTests(unittest.TestCase):
         with get_session() as session:
             rows = session.exec(select(LogEntry).where(LogEntry.id == first_id)).all()
             self.assertEqual(len(rows), 1)
+
+    def test_append_log_dedupes_non_user_replay_across_wrapped_direct_and_canonical_board_topic_sessions(self):
+        base_dt = datetime.now(timezone.utc)
+        first_ts = base_dt.isoformat()
+        replay_ts = first_ts
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=first_ts,
+                    updatedAt=first_ts,
+                )
+            )
+            session.commit()
+
+        first_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "topicId": "topic-a",
+                "content": "status update alpha beta",
+                "summary": "status update alpha beta",
+                "raw": "status update alpha beta",
+                "createdAt": first_ts,
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {
+                    "channel": "clawboard",
+                    "sessionKey": "clawboard:topic:topic-a",
+                },
+            },
+        )
+        self.assertEqual(first_res.status_code, 200, first_res.text)
+        first_payload = first_res.json() or {}
+        first_id = str(first_payload.get("id") or "")
+        self.assertTrue(first_id)
+
+        replay_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "topicId": "topic-a",
+                "content": "### Status update\n- alpha\n- beta",
+                "summary": "status update alpha beta",
+                "raw": "### Status update\n- alpha\n- beta",
+                "createdAt": replay_ts,
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {
+                    "channel": "direct",
+                    "sessionKey": "agent:main:clawboard:topic:topic-a",
+                    "messageId": "oc:assistant-wrap-vs-board-1",
+                },
+            },
+        )
+        self.assertEqual(replay_res.status_code, 200, replay_res.text)
+        replay_payload = replay_res.json() or {}
+        self.assertEqual(str(replay_payload.get("id") or ""), first_id)
+
+        with get_session() as session:
+            row = session.get(LogEntry, first_id)
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertIn("### Status update", str(row.content or ""))
+            self.assertTrue(str(row.sourceIdentityKey or "").startswith("srcid:conversation:assistant:openclaw:"))
+            source = row.source if isinstance(row.source, dict) else {}
+            self.assertEqual(str(source.get("messageId") or ""), "oc:assistant-wrap-vs-board-1")
+
+    def test_append_log_dedupes_subagent_non_user_replay_and_prefers_markdown_variant(self):
+        base_dt = datetime.now(timezone.utc)
+        first_ts = base_dt.isoformat()
+        replay_ts = first_ts
+        child_session_key = "agent:web:subagent:dedupe-md-1"
+
+        first_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "content": "investigating endpoint checked logs verified retry",
+                "summary": "investigating endpoint checked logs verified retry",
+                "raw": "investigating endpoint checked logs verified retry",
+                "createdAt": first_ts,
+                "agentId": "web",
+                "agentLabel": "Agent web",
+                "source": {
+                    "channel": "openclaw",
+                    "sessionKey": child_session_key,
+                },
+            },
+        )
+        self.assertEqual(first_res.status_code, 200, first_res.text)
+        first_payload = first_res.json() or {}
+        first_id = str(first_payload.get("id") or "")
+        self.assertTrue(first_id)
+
+        replay_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "content": "Investigating endpoint:\n- checked logs\n- verified retry",
+                "summary": "investigating endpoint checked logs verified retry",
+                "raw": "Investigating endpoint:\n- checked logs\n- verified retry",
+                "createdAt": replay_ts,
+                "agentId": "web",
+                "agentLabel": "Agent web",
+                "source": {
+                    "channel": "direct",
+                    "sessionKey": child_session_key,
+                    "messageId": "oc:subagent-dedupe-md-1",
+                },
+            },
+        )
+        self.assertEqual(replay_res.status_code, 200, replay_res.text)
+        replay_payload = replay_res.json() or {}
+        self.assertEqual(str(replay_payload.get("id") or ""), first_id)
+
+        with get_session() as session:
+            row = session.get(LogEntry, first_id)
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertIn("- checked logs", str(row.content or ""))
+            self.assertTrue(str(row.sourceIdentityKey or "").startswith("srcid:conversation:web:openclaw:"))
+            source = row.source if isinstance(row.source, dict) else {}
+            self.assertEqual(str(source.get("messageId") or ""), "oc:subagent-dedupe-md-1")
+
+    def test_append_log_concurrent_wrapped_user_replay_uses_source_identity_and_avoids_route_race_500(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-race-a",
+                    name="Topic Race A",
+                    color="#D7792B",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        payload_a = LogAppend(
+            type="conversation",
+            topicId="topic-race-a",
+            content="same request payload",
+            summary="same request payload",
+            raw="same request payload",
+            createdAt=ts,
+            agentId="user",
+            agentLabel="User",
+            source={
+                "channel": "openclaw",
+                "sessionKey": "clawboard:topic:topic-race-a",
+                "requestId": "occhat-race-append-1",
+                "messageId": "occhat-race-append-1",
+            },
+        )
+        payload_b = LogAppend(
+            type="conversation",
+            topicId="topic-race-a",
+            content="same request payload",
+            summary="same request payload",
+            raw="same request payload",
+            createdAt=ts,
+            agentId="user",
+            agentLabel="User",
+            source={
+                "channel": "webchat",
+                "sessionKey": "agent:main:clawboard:topic:topic-race-a",
+                "requestId": "occhat-race-append-1",
+                "messageId": "occhat-race-append-1:replay",
+            },
+        )
+
+        barrier = threading.Barrier(2)
+        row_ids: list[str] = []
+        errors: list[str] = []
+
+        def _run(payload: LogAppend) -> None:
+            try:
+                with get_session() as session:
+                    barrier.wait()
+                    idem = main_module._idempotency_key(payload, None)
+                    row = main_module.append_log_entry(session, payload, idem)
+                    row_ids.append(str(row.id or ""))
+            except Exception as exc:
+                errors.append(str(exc))
+
+        thread_a = threading.Thread(target=_run, args=(payload_a,))
+        thread_b = threading.Thread(target=_run, args=(payload_b,))
+        thread_a.start()
+        thread_b.start()
+        thread_a.join()
+        thread_b.join()
+
+        self.assertFalse(errors, f"unexpected concurrency errors: {errors}")
+        self.assertEqual(len(row_ids), 2)
+        self.assertEqual(len(set(row_ids)), 1)
+
+        with get_session() as session:
+            rows = session.exec(select(LogEntry)).all()
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(str(row.sourceIdentityKey or ""), "srcid:conversation:user:openclaw:clawboard:topic:topic-race-a:req:occhat-race-append-1")
 
     def test_append_log_creates_request_route_from_board_user_send(self):
         ts = now_iso()

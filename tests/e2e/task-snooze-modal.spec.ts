@@ -21,10 +21,7 @@ test("task snooze modal sets snoozedUntil and hides the task by default", async 
   expect(createTask.ok()).toBeTruthy();
 
   await page.goto("/u");
-  await page
-    .locator('input[placeholder="Search topics, tasks, or messages"]:visible')
-    .first()
-    .waitFor();
+  await page.getByTestId("unified-composer-textarea").first().waitFor();
 
   const topicCard = page.locator(`[data-topic-card-id="${topic.id}"]`).first();
   await expect(topicCard).toBeVisible();

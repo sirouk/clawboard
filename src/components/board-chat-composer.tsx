@@ -47,6 +47,11 @@ type AttachmentPolicy = { allowedMimeTypes: string[]; maxFiles: number; maxBytes
 let attachmentPolicyCache: AttachmentPolicy | null = null;
 let attachmentPolicyPromise: Promise<AttachmentPolicy | null> | null = null;
 
+function isStopSlashCommand(input: string) {
+  const normalized = String(input ?? "").trim().toLowerCase();
+  return normalized === "/stop" || normalized === "/abort";
+}
+
 async function fetchAttachmentPolicy(): Promise<AttachmentPolicy | null> {
   if (attachmentPolicyCache) return attachmentPolicyCache;
   if (!attachmentPolicyPromise) {
@@ -215,6 +220,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   const { token, tokenRequired } = useAppConfig();
   const readOnly = tokenRequired && token.trim().length === 0;
   const storedAgentId = useLocalStorageItem(LAST_AGENT_KEY);
+  // Kept for queue/orchestration metadata; chat execution is still session-key routed.
   const agentId = useMemo(() => (storedAgentId ?? "main").trim() || "main", [storedAgentId]);
 
   const [attachmentPolicy, setAttachmentPolicy] = useState<AttachmentPolicy | null>(attachmentPolicyCache);
@@ -224,6 +230,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   const [pendingRequestId, setPendingRequestId] = useState<string | null>(null);
   const sendingGuardRef = useRef(false);
   const [attachError, setAttachError] = useState<string | null>(null);
+  const [cancelNotice, setCancelNotice] = useState<{ text: string; tone: "info" | "error" } | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -510,12 +517,70 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     [addFiles, revealComposer]
   );
 
+  const clearAttachments = useCallback(() => {
+    setAttachments((prev) => {
+      for (const item of prev) {
+        if (!item.previewUrl) continue;
+        try {
+          URL.revokeObjectURL(item.previewUrl);
+        } catch {
+          // ignore
+        }
+      }
+      return [];
+    });
+  }, []);
+
+  const cancelCurrentRun = useCallback(
+    async ({ force = false, notice }: { force?: boolean; notice: string }) => {
+      if (!force && !sending && !waiting) return;
+      sendingGuardRef.current = false;
+      setSending(false);
+      const rid = pendingRequestId ?? waitingRequestId ?? undefined;
+      setPendingRequestId(null);
+      onCancel?.();
+      setAttachError(null);
+      try {
+        const res = await apiFetch(
+          "/api/openclaw/chat",
+          {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sessionKey, ...(rid ? { requestId: rid } : {}) }),
+          },
+          token
+        );
+        if (!res.ok) {
+          const detail = await res.json().catch(() => null);
+          const msg = typeof detail?.detail === "string" ? detail.detail : `Failed to cancel (${res.status}).`;
+          setCancelNotice({ text: msg, tone: "error" });
+          return;
+        }
+        setCancelNotice({ text: notice, tone: "info" });
+      } catch {
+        setCancelNotice({ text: "Failed to cancel the active run.", tone: "error" });
+      }
+    },
+    [onCancel, pendingRequestId, sending, sessionKey, token, waiting, waitingRequestId]
+  );
+
   const sendMessage = async () => {
-    if (sendingGuardRef.current) return;
-    const message = draft.trim();
+    // Read directly from the textarea to avoid stale state races when users click Send
+    // immediately after typing (notably for /stop and /abort).
+    const liveDraft = textareaRef.current?.value;
+    const message = (typeof liveDraft === "string" ? liveDraft : draft).trim();
     if (!message) return;
     if (readOnly) return;
+    if (isStopSlashCommand(message)) {
+      setDraft("");
+      clearAttachments();
+      setAttachError(null);
+      void cancelCurrentRun({ force: true, notice: "Cancellation requested." });
+      return;
+    }
+    if (sendingGuardRef.current) return;
     sendingGuardRef.current = true;
+    setCancelNotice(null);
 
     const localId = randomId();
     const createdAt = new Date().toISOString();
@@ -632,26 +697,8 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   };
 
   const stopSending = useCallback(async () => {
-    if (!sending && !waiting) return;
-    sendingGuardRef.current = false;
-    setSending(false);
-    const rid = pendingRequestId ?? waitingRequestId ?? undefined;
-    setPendingRequestId(null);
-    onCancel?.();
-    try {
-      await apiFetch(
-        "/api/openclaw/chat",
-        {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionKey, ...(rid ? { requestId: rid } : {}) }),
-        },
-        token
-      );
-    } catch {
-      // best-effort; UI state is already cleared
-    }
-  }, [sending, waiting, pendingRequestId, waitingRequestId, sessionKey, token, onCancel]);
+    await cancelCurrentRun({ notice: "Cancelled current run." });
+  }, [cancelCurrentRun]);
 
   const isInFlight = sending || waiting;
   // Keep the composer interactive while a prior response is in-flight so users can continue
@@ -792,8 +839,12 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
                 : "min-h-[62px] overflow-hidden"
             )}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setCancelNotice(null);
+            }}
             placeholder={placeholder ?? (readOnly ? "Add a token in Setup to send messages." : "Type a message…")}
+            enterKeyHint="send"
             disabled={hardDisabled}
             onPointerDown={handleDensePointerDown}
             onFocus={() => {
@@ -937,6 +988,16 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
           />
         ) : null}
         {attachError ? <div className="mt-2 text-xs text-[rgb(var(--claw-warning))]">{attachError}</div> : null}
+        {cancelNotice ? (
+          <div
+            className={cn(
+              "mt-2 text-xs",
+              cancelNotice.tone === "error" ? "text-[rgb(var(--claw-warning))]" : "text-[rgb(var(--claw-muted))]"
+            )}
+          >
+            {cancelNotice.text}
+          </div>
+        ) : null}
         {dense ? null : (
           <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[rgb(var(--claw-muted))]">
             <span>

@@ -2897,6 +2897,92 @@ def _find_by_idempotency(session, key: str):
     return session.exec(select(LogEntry).where(LogEntry.idempotencyKey == key)).first()
 
 
+def _find_by_source_identity(session, key: str):
+    return session.exec(select(LogEntry).where(LogEntry.sourceIdentityKey == key)).first()
+
+
+def _normalize_source_identity_channel(value: Any) -> str:
+    channel = str(value or "").strip().lower()
+    if channel in {"openclaw", "clawboard", "webchat", "direct"}:
+        return "openclaw"
+    return channel
+
+
+def _source_identity_session_key(source_meta: dict[str, Any] | None) -> str:
+    source = source_meta if isinstance(source_meta, dict) else {}
+    session_key = str(source.get("sessionKey") or "").strip()
+    board_key = _canonical_board_scope_session_key(source_meta=source, session_key=session_key)
+    if board_key:
+        return board_key.lower()
+    base_key = _base_session_key(session_key)
+    if base_key:
+        return base_key.lower()
+    return ""
+
+
+def _source_identity_timestamp_ms(created_at: str | None) -> str:
+    ts = _iso_to_timestamp(created_at)
+    if ts is None:
+        return ""
+    try:
+        return str(max(0, int(round(float(ts) * 1000.0))))
+    except Exception:
+        return ""
+
+
+def _source_identity_key(
+    *,
+    payload: LogAppend,
+    source_meta: dict[str, Any] | None,
+    created_at: str,
+) -> str | None:
+    source = source_meta if isinstance(source_meta, dict) else {}
+    if not source:
+        return None
+
+    entry_type = str(payload.type or "").strip().lower()
+    if entry_type != "conversation":
+        return None
+
+    actor = str(payload.agentId or payload.agentLabel or "").strip().lower()
+    if not actor:
+        return None
+
+    channel = _normalize_source_identity_channel(source.get("channel"))
+    session_key = _source_identity_session_key(source)
+    if not session_key:
+        return None
+
+    explicit_origin = ""
+    for key in ("sourceIdentityKey", "originId", "originEventId", "eventId", "event_id", "uuid"):
+        candidate = str(source.get(key) or "").strip()
+        if candidate:
+            explicit_origin = _clip(candidate, 240)
+            break
+    if explicit_origin:
+        return f"srcid:{entry_type}:{actor}:{channel or '-'}:{session_key}:event:{explicit_origin}"
+
+    request_id = _canonical_openclaw_request_id(str(source.get("requestId") or "").strip())
+    ts_ms = _source_identity_timestamp_ms(created_at)
+    if request_id and actor == "user":
+        return f"srcid:{entry_type}:{actor}:{channel or '-'}:{session_key}:req:{request_id}"
+    if request_id and channel == "openclaw" and ts_ms:
+        return f"srcid:{entry_type}:{actor}:{channel}:{session_key}:req:{request_id}:t:{ts_ms}"
+
+    if channel == "openclaw" and ts_ms:
+        return f"srcid:{entry_type}:{actor}:{channel}:{session_key}:t:{ts_ms}"
+
+    message_id = str(source.get("messageId") or "").strip()
+    if message_id:
+        normalized_message_id = (
+            _openclaw_request_id_base(message_id) if message_id.lower().startswith("occhat-") else message_id
+        )
+        return f"srcid:{entry_type}:{actor}:{channel or '-'}:{session_key}:msg:{_clip(normalized_message_id, 240)}"
+    if request_id and ts_ms:
+        return f"srcid:{entry_type}:{actor}:{channel or '-'}:{session_key}:req:{request_id}:t:{ts_ms}"
+    return None
+
+
 def _base_session_key(value: str | None) -> str:
     text_value = str(value or "").strip()
     if not text_value:
@@ -3127,7 +3213,17 @@ def _upsert_openclaw_request_route(
             createdAt=now_value,
             updatedAt=now_value,
         )
-        session.add(row)
+        try:
+            # Savepoint avoids aborting the outer transaction if another writer inserts the same
+            # request route between our read and write.
+            with session.begin_nested():
+                session.add(row)
+                session.flush()
+        except IntegrityError:
+            existing_race = session.get(OpenClawRequestRoute, canonical_request_id)
+            if existing_race is not None:
+                return (existing_race, None)
+            raise
         event_data = {
             "requestId": canonical_request_id,
             "sessionKey": row.sessionKey,
@@ -4009,6 +4105,22 @@ def _normalize_openclaw_assistant_dedupe_text(value: str | None) -> str:
     return cleaned
 
 
+def _normalize_openclaw_assistant_semantic_text(value: str | None) -> str:
+    cleaned = _sanitize_log_text(str(value or ""))
+    if not cleaned:
+        return ""
+    # Collapse common markdown wrappers so plain-text and markdown variants dedupe.
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+    cleaned = re.sub(r"`{1,3}", " ", cleaned)
+    cleaned = re.sub(r"^[>\-+*#\s]+", "", cleaned)
+    cleaned = re.sub(r"(?:(?<=\s)|^)[\-+*]\s+", " ", cleaned)
+    cleaned = cleaned.replace(":", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
+    cleaned = re.sub(r"[^\w\s/\.]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def _assistant_conversation_payload_matches_existing(existing: LogEntry, payload: LogAppend) -> bool:
     existing_text = _normalize_openclaw_assistant_dedupe_text(
         str(getattr(existing, "content", None) or getattr(existing, "summary", None) or getattr(existing, "raw", None) or "")
@@ -4017,9 +4129,211 @@ def _assistant_conversation_payload_matches_existing(existing: LogEntry, payload
         str(payload.content or payload.summary or payload.raw or "")
     )
     if existing_text and payload_text:
-        return existing_text == payload_text
+        if existing_text == payload_text:
+            return True
+        existing_semantic = _normalize_openclaw_assistant_semantic_text(
+            str(getattr(existing, "content", None) or getattr(existing, "summary", None) or getattr(existing, "raw", None) or "")
+        )
+        payload_semantic = _normalize_openclaw_assistant_semantic_text(
+            str(payload.content or payload.summary or payload.raw or "")
+        )
+        if existing_semantic and payload_semantic:
+            return existing_semantic == payload_semantic
+        return False
     # If either side lacks text, preserve legacy dedupe behavior.
     return True
+
+
+def _non_user_conversation_payload(payload: LogAppend) -> bool:
+    if str(payload.type or "").strip().lower() != "conversation":
+        return False
+    agent_id = str(payload.agentId or "").strip().lower()
+    return bool(agent_id) and agent_id not in {"user", "system"}
+
+
+def _source_has_message_or_request_id(source_meta: dict[str, Any] | None) -> bool:
+    source = source_meta if isinstance(source_meta, dict) else {}
+    return bool(str(source.get("messageId") or "").strip() or str(source.get("requestId") or "").strip())
+
+
+def _assistant_duplicate_markdown_score(value: str | None) -> int:
+    raw = str(value or "")
+    normalized = _sanitize_log_text(raw)
+    if not normalized:
+        return 0
+    score = len(normalized)
+    if "\n" in raw:
+        score += 32
+    if re.search(r"(^|\n)\s*[-*+]\s+\S", raw):
+        score += 24
+    if "```" in raw:
+        score += 24
+    if re.search(r"[`*_#>]", raw):
+        score += 16
+    return score
+
+
+def _maybe_upgrade_existing_duplicate_log(
+    session: Any,
+    *,
+    existing: LogEntry,
+    payload: LogAppend,
+    source_meta: dict[str, Any] | None,
+    updated_at: str,
+    idempotency_key: str | None,
+    source_identity_key: str | None,
+) -> LogEntry:
+    if not _non_user_conversation_payload(payload):
+        return existing
+
+    changed = False
+    incoming_content = str(payload.content or "")
+    existing_content = str(getattr(existing, "content", None) or "")
+    if _assistant_duplicate_markdown_score(incoming_content) > _assistant_duplicate_markdown_score(existing_content):
+        existing.content = payload.content
+        changed = True
+
+    incoming_summary = str(payload.summary or "")
+    existing_summary = str(getattr(existing, "summary", None) or "")
+    if len(_sanitize_log_text(incoming_summary)) > len(_sanitize_log_text(existing_summary)):
+        existing.summary = payload.summary
+        changed = True
+
+    incoming_raw = str(payload.raw or "")
+    existing_raw = str(getattr(existing, "raw", None) or "")
+    if _assistant_duplicate_markdown_score(incoming_raw) > _assistant_duplicate_markdown_score(existing_raw):
+        existing.raw = payload.raw
+        changed = True
+
+    current_source = existing.source.copy() if isinstance(existing.source, dict) else {}
+    incoming_source = source_meta if isinstance(source_meta, dict) else {}
+    merged_source = current_source.copy()
+    for key, value in incoming_source.items():
+        value_text = str(value or "").strip()
+        if not value_text:
+            continue
+        current_text = str(merged_source.get(key) or "").strip()
+        if current_text:
+            continue
+        merged_source[key] = value
+        changed = True
+
+    if changed and merged_source:
+        existing.source = merged_source
+    elif changed and not merged_source:
+        existing.source = None
+
+    if idempotency_key and not str(getattr(existing, "idempotencyKey", None) or "").strip():
+        existing.idempotencyKey = idempotency_key
+        changed = True
+    if source_identity_key and not str(getattr(existing, "sourceIdentityKey", None) or "").strip():
+        existing.sourceIdentityKey = source_identity_key
+        changed = True
+
+    if not changed:
+        return existing
+
+    existing.updatedAt = updated_at
+    session.add(existing)
+    session.commit()
+    session.refresh(existing)
+    event_hub.publish({"type": "log.patched", "data": existing.model_dump(exclude={"raw"}), "eventTs": existing.updatedAt})
+    _enqueue_log_reindex(existing)
+    return existing
+
+
+def _find_existing_openclaw_non_user_conversation_near_duplicate(
+    session: Any,
+    *,
+    payload: LogAppend,
+    source_meta: dict[str, Any] | None,
+    created_at: str,
+) -> LogEntry | None:
+    if not source_meta:
+        return None
+    if not _non_user_conversation_payload(payload):
+        return None
+
+    payload_semantic = _normalize_openclaw_assistant_semantic_text(
+        str(payload.content or payload.summary or payload.raw or "")
+    )
+    if not payload_semantic:
+        return None
+
+    session_key = str(source_meta.get("sessionKey") or "").strip()
+    base_key = _base_session_key(session_key)
+    board_scope_key = _canonical_board_scope_session_key(source_meta=source_meta, session_key=session_key)
+    candidate_session_keys = [key for key in [base_key, board_scope_key] if key]
+    candidate_session_keys = list(dict.fromkeys(candidate_session_keys))
+    if not candidate_session_keys:
+        return None
+
+    created_ts = _iso_to_timestamp(created_at)
+    if created_ts is None:
+        return None
+    window_seconds = 2 * 60.0
+    lower_bound = datetime.fromtimestamp(max(0.0, created_ts - window_seconds), tz=timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    upper_bound = datetime.fromtimestamp(created_ts + window_seconds, tz=timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+
+    query = (
+        select(LogEntry)
+        .where(LogEntry.type == "conversation")
+        .where(func.lower(func.coalesce(LogEntry.agentId, "")) == str(payload.agentId or "").strip().lower())
+        .where(LogEntry.createdAt >= lower_bound)
+        .where(LogEntry.createdAt <= upper_bound)
+    )
+
+    if DATABASE_URL.startswith("sqlite"):
+        session_parts: list[str] = []
+        session_params: dict[str, Any] = {}
+        for idx, key in enumerate(candidate_session_keys):
+            key_name = f"base_key_{idx}"
+            like_name = f"base_like_{idx}"
+            session_parts.append(
+                f"(json_extract(source, '$.sessionKey') = :{key_name} OR "
+                f"json_extract(source, '$.sessionKey') LIKE :{like_name})"
+            )
+            session_params[key_name] = key
+            session_params[like_name] = f"{key}|%"
+        if session_parts:
+            query = query.where(text("(" + " OR ".join(session_parts) + ")")).params(**session_params)
+        query = query.where(
+            text(
+                "lower(COALESCE(json_extract(source, '$.channel'), '')) "
+                "IN ('', 'openclaw', 'clawboard', 'webchat', 'direct')"
+            )
+        )
+    else:
+        source_session_expr = LogEntry.source["sessionKey"].as_string()
+        session_exprs = []
+        for key in candidate_session_keys:
+            session_exprs.append(source_session_expr == key)
+            session_exprs.append(source_session_expr.like(f"{key}|%"))
+        query = query.where(or_(*session_exprs))
+        source_channel_expr = func.lower(func.coalesce(LogEntry.source["channel"].as_string(), ""))
+        query = query.where(source_channel_expr.in_(["", "openclaw", "clawboard", "webchat", "direct"]))
+
+    incoming_channel = str(source_meta.get("channel") or "").strip().lower()
+    incoming_has_identifier = _source_has_message_or_request_id(source_meta)
+    candidates = session.exec(query.order_by(LogEntry.createdAt.desc()).limit(64)).all()
+    for candidate in candidates:
+        candidate_text = _normalize_openclaw_assistant_semantic_text(
+            str(getattr(candidate, "content", None) or getattr(candidate, "summary", None) or getattr(candidate, "raw", None) or "")
+        )
+        if not candidate_text or candidate_text != payload_semantic:
+            continue
+        candidate_source = candidate.source if isinstance(candidate.source, dict) else {}
+        candidate_channel = str(candidate_source.get("channel") or "").strip().lower()
+        candidate_has_identifier = _source_has_message_or_request_id(candidate_source)
+        if not (incoming_has_identifier or candidate_has_identifier or candidate_channel != incoming_channel):
+            continue
+        return candidate
+
+    return None
 
 
 def _canonical_board_scope_session_key(
@@ -4368,16 +4682,43 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     # identical/low-precision createdAt values.
     updated_at = now_iso()
 
-    if idempotency_key:
-        existing = _find_by_idempotency(session, idempotency_key)
-        if existing:
-            return existing
-
     source_meta = payload.source.copy() if isinstance(payload.source, dict) else None
     _maybe_attach_openclaw_request_id(session, payload=payload, source_meta=source_meta, created_at=created_at)
     canonical_source_request_id = _canonical_openclaw_request_id_from_source(source_meta)
     if source_meta is not None and canonical_source_request_id:
         source_meta["requestId"] = canonical_source_request_id
+    source_identity_key = _source_identity_key(
+        payload=payload,
+        source_meta=source_meta,
+        created_at=created_at,
+    )
+
+    if idempotency_key:
+        existing = _find_by_idempotency(session, idempotency_key)
+        if existing:
+            return _maybe_upgrade_existing_duplicate_log(
+                session,
+                existing=existing,
+                payload=payload,
+                source_meta=source_meta,
+                updated_at=updated_at,
+                idempotency_key=idempotency_key,
+                source_identity_key=source_identity_key,
+            )
+
+    if source_identity_key:
+        existing = _find_by_source_identity(session, source_identity_key)
+        if existing:
+            return _maybe_upgrade_existing_duplicate_log(
+                session,
+                existing=existing,
+                payload=payload,
+                source_meta=source_meta,
+                updated_at=updated_at,
+                idempotency_key=idempotency_key,
+                source_identity_key=source_identity_key,
+            )
+
     canonical_assistant_idem = _canonical_openclaw_assistant_idempotency_key(
         payload=payload,
         source_meta=source_meta,
@@ -4387,7 +4728,15 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         idempotency_key = canonical_assistant_idem
         existing = _find_by_idempotency(session, idempotency_key)
         if existing:
-            return existing
+            return _maybe_upgrade_existing_duplicate_log(
+                session,
+                existing=existing,
+                payload=payload,
+                source_meta=source_meta,
+                updated_at=updated_at,
+                idempotency_key=idempotency_key,
+                source_identity_key=source_identity_key,
+            )
 
     existing_by_request = _find_existing_openclaw_user_request_log(
         session,
@@ -4516,7 +4865,34 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 else:
                     existing = candidates[0]
                 if existing:
-                    return existing
+                    return _maybe_upgrade_existing_duplicate_log(
+                        session,
+                        existing=existing,
+                        payload=payload,
+                        source_meta=source_meta,
+                        updated_at=updated_at,
+                        idempotency_key=idempotency_key,
+                        source_identity_key=source_identity_key,
+                    )
+
+    existing_non_user_near_duplicate = None
+    if not source_identity_key:
+        existing_non_user_near_duplicate = _find_existing_openclaw_non_user_conversation_near_duplicate(
+            session,
+            payload=payload,
+            source_meta=source_meta,
+            created_at=created_at,
+        )
+    if existing_non_user_near_duplicate:
+        return _maybe_upgrade_existing_duplicate_log(
+            session,
+            existing=existing_non_user_near_duplicate,
+            payload=payload,
+            source_meta=source_meta,
+            updated_at=updated_at,
+            idempotency_key=idempotency_key,
+            source_identity_key=source_identity_key,
+        )
 
     space_id = _normalize_space_id(payload.spaceId)
     topic_id = payload.topicId
@@ -4772,9 +5148,14 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         classification_error = "filtered_non_semantic"
     elif is_tool_trace_action:
         classification_attempts = 1
-        if has_scope_anchor:
+        if is_memory_action:
+            # Memory tool traces are non-semantic control activity and should never
+            # wait on bundle scoping; classify immediately even when unanchored.
             classification_status = "classified"
-            classification_error = "filtered_memory_action" if is_memory_action else "filtered_tool_activity"
+            classification_error = "filtered_memory_action"
+        elif has_scope_anchor:
+            classification_status = "classified"
+            classification_error = "filtered_tool_activity"
         elif defer_unanchored_tool_classification:
             classification_status = "pending"
             classification_attempts = 0
@@ -4807,6 +5188,7 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         taskId=task_id,
         relatedLogId=payload.relatedLogId,
         idempotencyKey=idempotency_key,
+        sourceIdentityKey=source_identity_key,
         type=payload.type,
         content=payload.content,
         summary=payload.summary,
@@ -4861,6 +5243,18 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             existing = _find_by_idempotency(session, idempotency_key)
             if existing:
                 return existing
+        if source_identity_key:
+            existing = _find_by_source_identity(session, source_identity_key)
+            if existing:
+                return _maybe_upgrade_existing_duplicate_log(
+                    session,
+                    existing=existing,
+                    payload=payload,
+                    source_meta=source_meta,
+                    updated_at=updated_at,
+                    idempotency_key=idempotency_key,
+                    source_identity_key=source_identity_key,
+                )
         raise
     except OperationalError as exc:
         # SQLite can transiently fail with "database is locked" under concurrent writes
@@ -4885,6 +5279,18 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                     existing = _find_by_idempotency(session, idempotency_key)
                     if existing:
                         return existing
+                if source_identity_key:
+                    existing = _find_by_source_identity(session, source_identity_key)
+                    if existing:
+                        return _maybe_upgrade_existing_duplicate_log(
+                            session,
+                            existing=existing,
+                            payload=payload,
+                            source_meta=source_meta,
+                            updated_at=updated_at,
+                            idempotency_key=idempotency_key,
+                            source_identity_key=source_identity_key,
+                        )
                 raise
             except OperationalError as retry_exc:
                 if "database is locked" not in str(retry_exc).lower():
@@ -5082,6 +5488,77 @@ def _log_openclaw_chat_watchdog_warning(*, session_key: str, request_id: str, de
             )
     except Exception:
         pass
+
+
+def _openclaw_event_session_keys(session_keys: Iterable[str]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for value in session_keys:
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        base = _base_session_key(raw)
+        for candidate in [raw, base]:
+            key = str(candidate or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ordered.append(key)
+    return ordered
+
+
+def _publish_openclaw_thread_work_state(
+    *,
+    session_keys: Iterable[str],
+    active: bool,
+    request_id: str | None = None,
+    reason: str | None = None,
+    event_ts: str | None = None,
+) -> None:
+    rid = _openclaw_request_id_base(request_id)
+    stamp = str(event_ts or "").strip() or now_iso()
+    reason_text = str(reason or "").strip()
+    for session_key in _openclaw_event_session_keys(session_keys):
+        data: dict[str, Any] = {
+            "sessionKey": session_key,
+            "active": bool(active),
+        }
+        if rid:
+            data["requestId"] = rid
+        if reason_text:
+            data["reason"] = reason_text
+        event_hub.publish(
+            {
+                "type": "openclaw.thread_work",
+                "data": data,
+                "eventTs": stamp,
+            }
+        )
+
+
+def _publish_openclaw_typing_state(
+    *,
+    session_keys: Iterable[str],
+    typing: bool,
+    request_id: str | None = None,
+    event_ts: str | None = None,
+) -> None:
+    rid = _openclaw_request_id_base(request_id)
+    stamp = str(event_ts or "").strip() or now_iso()
+    for session_key in _openclaw_event_session_keys(session_keys):
+        data: dict[str, Any] = {
+            "sessionKey": session_key,
+            "typing": bool(typing),
+        }
+        if rid:
+            data["requestId"] = rid
+        event_hub.publish(
+            {
+                "type": "openclaw.typing",
+                "data": data,
+                "eventTs": stamp,
+            }
+        )
 
 
 BOARD_TOPIC_SESSION_PREFIX = "clawboard:topic:"
@@ -5665,6 +6142,7 @@ def _orchestration_append_in_band_log(
         run_space_id = DEFAULT_SPACE_ID
 
     created_value = normalize_iso(created_at) or now_iso()
+    run_status = str(getattr(run, "status", "") or "").strip().lower()
     source: dict[str, Any] = {
         "channel": "clawboard",
         "sessionKey": str(getattr(run, "sessionKey", "") or "").strip() or str(getattr(run, "baseSessionKey", "") or "").strip(),
@@ -5674,6 +6152,9 @@ def _orchestration_append_in_band_log(
         "runId": str(getattr(run, "runId", "") or "").strip(),
         "eventType": event_type,
     }
+    if run_status:
+        source["runStatus"] = run_status
+        source["runActive"] = run_status not in {"done", "failed", "cancelled"}
     board_space = _normalize_space_id(getattr(run, "spaceId", None))
     if board_space:
         source["boardScopeSpaceId"] = board_space
@@ -5703,16 +6184,12 @@ def _orchestration_append_in_band_log(
     board_task = board_task_scope
     if board_task:
         board_task_row = session.get(Task, board_task)
-        if board_task_row is None:
-            board_task = ""
-        else:
+        if board_task_row is not None:
             task_topic = str(getattr(board_task_row, "topicId", "") or "").strip()
             if task_topic:
                 board_topic = task_topic
     if board_topic:
         board_topic_row = session.get(Topic, board_topic)
-        if board_topic_row is None:
-            board_topic = ""
 
     session.add(
         LogEntry(
@@ -5836,6 +6313,7 @@ def _orchestration_sessions_spawn_result_status(entry: LogEntry) -> str | None:
     combined = _combined_log_text(
         _safe_log_attr_text(entry, "content"),
         _safe_log_attr_text(entry, "summary"),
+        _safe_log_attr_text(entry, "raw"),
     ).lower()
     if "sessions_spawn" not in combined:
         return None
@@ -6647,8 +7125,10 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
                     )
                     if fallback_activity:
                         last_activity = fallback_activity
-                        meta["lastActivityAt"] = fallback_activity
-                        item.meta = meta
+                        updated_meta = dict(meta)
+                        updated_meta["lastActivityAt"] = fallback_activity
+                        meta = updated_meta
+                        item.meta = updated_meta
                         session.add(item)
                 idle_seconds = 0.0
                 last_ts = _iso_to_timestamp(last_activity)
@@ -6825,12 +7305,10 @@ def _run_openclaw_chat(
         nonlocal typing_stopped
         if typing_stopped:
             return
-        event_hub.publish(
-            {
-                "type": "openclaw.typing",
-                "data": {"sessionKey": session_key, "requestId": request_id, "typing": False},
-                "eventTs": now_iso(),
-            }
+        _publish_openclaw_typing_state(
+            session_keys=[session_key],
+            typing=False,
+            request_id=request_id,
         )
         typing_stopped = True
 
@@ -6838,6 +7316,15 @@ def _run_openclaw_chat(
         # Failure path is terminal for this request from the UI perspective.
         try:
             _publish_typing_stop()
+        except Exception:
+            pass
+        try:
+            _publish_openclaw_thread_work_state(
+                session_keys=[session_key],
+                active=False,
+                request_id=request_id,
+                reason="dispatch_failed",
+            )
         except Exception:
             pass
         raw_text = str(raw or "").strip()
@@ -6856,12 +7343,16 @@ def _run_openclaw_chat(
         return False
 
     try:
-        event_hub.publish(
-            {
-                "type": "openclaw.typing",
-                "data": {"sessionKey": session_key, "requestId": request_id, "typing": True},
-                "eventTs": now_iso(),
-            }
+        _publish_openclaw_typing_state(
+            session_keys=[session_key],
+            typing=True,
+            request_id=request_id,
+        )
+        _publish_openclaw_thread_work_state(
+            session_keys=[session_key],
+            active=True,
+            request_id=request_id,
+            reason="dispatch_started",
         )
 
         ws_attachments: list[dict[str, Any]] = []
@@ -6909,10 +7400,12 @@ def _run_openclaw_chat(
         )
         status, run_id = _openclaw_chat_send_state(payload)
         probe_seconds = _openclaw_chat_in_flight_probe_seconds()
+        used_board_probe_fallback = False
         if probe_seconds <= 0:
             if is_board_session:
                 # Board topic/task sessions should not sit idle waiting for long-stall watchdog paths.
                 probe_seconds = _openclaw_chat_board_in_flight_probe_seconds()
+                used_board_probe_fallback = probe_seconds > 0
         if probe_seconds > 0 and status in {"started", "accepted", "in_flight"}:
             poll_seconds = _openclaw_chat_in_flight_probe_poll_seconds()
             deadline = time.monotonic() + probe_seconds
@@ -6931,7 +7424,7 @@ def _run_openclaw_chat(
                 time.sleep(min(poll_seconds, remaining))
 
             if not saw_progress:
-                board_abort_retry_enabled = (not is_board_session) or _openclaw_chat_board_in_flight_abort_retry_enabled()
+                board_abort_retry_enabled = (not used_board_probe_fallback) or _openclaw_chat_board_in_flight_abort_retry_enabled()
                 if board_abort_retry_enabled:
                     probe_payload = asyncio.run(
                         gateway_rpc(
@@ -9838,6 +10331,16 @@ def openclaw_chat(payload: OpenClawChatRequest, _background_tasks: BackgroundTas
         # Otherwise Clawboard can show assistant replies/tool traces without the user prompt that triggered them.
         raise HTTPException(status_code=503, detail="Failed to persist user message. Please retry.") from exc
 
+    try:
+        _publish_openclaw_thread_work_state(
+            session_keys=[session_key],
+            active=True,
+            request_id=request_id,
+            reason="queued",
+        )
+    except Exception:
+        pass
+
     return {"queued": True, "requestId": request_id}
 
 
@@ -9916,6 +10419,23 @@ def openclaw_chat_cancel(payload: OpenClawChatCancelRequest):
     abort_request_id = request_id_filter
     if not abort_request_id and len(cancel_request_ids) == 1:
         abort_request_id = cancel_request_ids[0]
+
+    try:
+        _publish_openclaw_typing_state(
+            session_keys=cancel_session_keys,
+            typing=False,
+            request_id=abort_request_id,
+            event_ts=now_val,
+        )
+        _publish_openclaw_thread_work_state(
+            session_keys=cancel_session_keys,
+            active=False,
+            request_id=abort_request_id,
+            reason="user_cancelled",
+            event_ts=now_val,
+        )
+    except Exception:
+        pass
 
     gateway_abort_count = 0
     for target_session_key in cancel_session_keys:

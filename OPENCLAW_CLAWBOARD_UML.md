@@ -33,6 +33,10 @@ classDiagram
       +get_api_context()
       +get_api_search()
       +post_openclaw_chat()
+      +delete_openclaw_chat()
+      +get_openclaw_chat_dispatch_status()
+      +post_openclaw_chat_dispatch_quarantine()
+      +get_openclaw_history_sync_status()
       +get_api_stream()
       +get_api_changes()
     }
@@ -194,7 +198,7 @@ sequenceDiagram
 
     UI->>API: POST /api/openclaw/chat (sessionKey, message, attachmentIds)
     API->>DB: persist user conversation log immediately
-    API->>EV: publish openclaw.typing true
+    API->>EV: publish openclaw.typing true + openclaw.thread_work active
     API-->>UI: queued=true, requestId
     API->>DQ: enqueue requestId/sessionKey/message
     DQ->>GW: chat.send(idempotencyKey=requestId)
@@ -203,8 +207,16 @@ sequenceDiagram
     OC->>PL: assistant conversation/tool hooks
     PL->>API: POST /api/log assistant/action rows
     API->>DB: persist rows and patch typing false on assistant logs
-    API->>EV: log.appended/log.patched/openclaw.typing false
+    API->>EV: log.appended/log.patched/openclaw.typing false/openclaw.thread_work inactive
     EV-->>UI: live updates
+
+    opt user cancels selected thread
+        UI->>API: DELETE /api/openclaw/chat (sessionKey, requestId?)
+        API->>EV: publish openclaw.typing false + openclaw.thread_work inactive
+        API->>DQ: mark matching queue rows failed(user_cancelled)
+        API->>GW: chat.abort on parent + linked child sessions (when lineage resolves)
+        API-->>UI: aborted/queueCancelled/sessionKeys
+    end
 
     API->>WD: schedule requestId/sessionKey watchdog
     loop poll interval while run is active

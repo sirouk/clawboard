@@ -79,6 +79,10 @@ Statuses are how the system tracks state:
 - Board-session scope is deterministic:
   - `clawboard:task:<topicId>:<taskId>` is hard-pinned to that topic/task.
   - `clawboard:topic:<topicId>` is topic-pinned; task promotion/inference can happen only inside that same topic.
+- Task chat routing is main-mediated:
+  - messages sent in topic/task chat sessions go through main orchestration, which may delegate to specialists/subagents.
+  - task session ownership is not direct subagent dispatch by default.
+- `agentId` on `POST /api/openclaw/chat` is advisory metadata for Clawboard dispatch bookkeeping (queue/orchestration context), not an authoritative direct-route override.
 - Only direct user-request lineage is allocatable into Topic/Task continuity.
 - Control-plane/background noise is filtered from conversational continuity:
   - heartbeat/control-plane, cron-event, subagent scaffold payloads, and unanchored tool traces are detached/terminal-filtered.
@@ -88,6 +92,10 @@ Statuses are how the system tracks state:
 - Chat bridge is persist-first:
   - user row is stored before gateway dispatch.
   - durable dispatch queue + watchdog/history-sync recovery guard long-running requests.
+- Thread activity + stop controls are thread-scoped:
+  - board responding state is driven by `openclaw.typing`, `openclaw.thread_work`, and orchestration run activity.
+  - topic/task composers expose Stop and `/stop`/`/abort`; unified top-composer Stop targets the selected thread.
+  - cancel requests call `DELETE /api/openclaw/chat` with `sessionKey` (+ `requestId` when available), and backend fans out linked child/subagent sessions when lineage is known.
 - Assistant replay dedupe is payload-safe:
   - request/message identifier matches are only collapsed when normalized assistant content matches.
 - Orchestration convergence is strict:

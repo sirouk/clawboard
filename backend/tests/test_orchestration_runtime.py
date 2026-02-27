@@ -377,6 +377,137 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             self.assertTrue(items)
             self.assertTrue(all(str(item.status or "") in {"cancelled", "done"} for item in items))
 
+    def test_orch_004b_cancel_during_subagent_phase_stops_parent_and_child_immediately(self):
+        session_key = "clawboard:task:topic-orch-004b:task-orch-004b"
+        request_id = self._openclaw_chat(session_key=session_key, message="Delegate and then cancel mid-flight.")
+        child_session = "agent:coding:subagent:orch-004b-child"
+        now_value = now_iso()
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-004b-child"}}',
+                createdAt=now_value,
+                agentId="main",
+                agentLabel="Main",
+                source={
+                    "sessionKey": session_key,
+                    "channel": "openclaw",
+                    "requestId": request_id,
+                    "boardScopeTopicId": "topic-orch-004b",
+                    "boardScopeTaskId": "task-orch-004b",
+                },
+            ),
+            idem="orch-004b-spawn",
+        )
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: exec_command",
+                summary="subagent progress",
+                raw='{"ok":true}',
+                createdAt=now_value,
+                agentId="coding",
+                agentLabel="Agent coding",
+                source={
+                    "channel": "direct",
+                    "sessionKey": child_session,
+                    "requestId": request_id,
+                    "boardScopeTopicId": "topic-orch-004b",
+                    "boardScopeTaskId": "task-orch-004b",
+                },
+            ),
+            idem="orch-004b-subagent-progress",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            main_item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == "main.response")
+            ).first()
+            self.assertIsNotNone(main_item)
+            main_item.status = "stalled"
+            main_item.updatedAt = now_value
+            main_item.nextCheckAt = now_value
+            session.add(main_item)
+            child_item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == f"subagent:{child_session}")
+            ).first()
+            if child_item is None:
+                child_item = OrchestrationItem(
+                    runId=run.runId,
+                    itemKey=f"subagent:{child_session}",
+                    parentItemKey="main.response",
+                    requestId=request_id,
+                    agentId="coding",
+                    kind="subagent",
+                    goal="execute delegated coding work",
+                    sessionKey=child_session,
+                    status="running",
+                    attempts=0,
+                    nextCheckAt=now_value,
+                    startedAt=now_value,
+                    completedAt=None,
+                    lastError=None,
+                    meta={"seededBy": "test_orch_004b"},
+                    createdAt=now_value,
+                    updatedAt=now_value,
+                )
+            self.assertEqual(str(child_item.status or ""), "running")
+            session.add(child_item)
+            session.commit()
+
+        published: list[dict] = []
+
+        def _collect_event(event: dict):
+            published.append(event)
+            return {**event, "eventId": str(len(published))}
+
+        with patch.object(main_module, "gateway_rpc", new=AsyncMock(return_value={"ok": True})), patch.object(
+            main_module.event_hub, "publish", side_effect=_collect_event
+        ):
+            result = main_module.openclaw_chat_cancel(
+                OpenClawChatCancelRequest(sessionKey=session_key, requestId=request_id)
+            )
+
+        self.assertTrue(bool(result.get("aborted")))
+        cancelled_sessions = set(result.get("sessionKeys") or [])
+        self.assertIn(session_key, cancelled_sessions)
+        self.assertIn(child_session, cancelled_sessions)
+
+        typing_stop_sessions = {
+            str((event.get("data") or {}).get("sessionKey") or "")
+            for event in published
+            if str(event.get("type") or "") == "openclaw.typing" and not bool((event.get("data") or {}).get("typing"))
+        }
+        self.assertIn(session_key, typing_stop_sessions)
+        self.assertIn(child_session, typing_stop_sessions)
+        thread_work_stop_sessions = {
+            str((event.get("data") or {}).get("sessionKey") or "")
+            for event in published
+            if str(event.get("type") or "") == "openclaw.thread_work"
+            and not bool((event.get("data") or {}).get("active"))
+        }
+        self.assertIn(session_key, thread_work_stop_sessions)
+        self.assertIn(child_session, thread_work_stop_sessions)
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            self.assertEqual(str(run.status or ""), "cancelled")
+            items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            self.assertTrue(items)
+            statuses = {str(item.itemKey or ""): str(item.status or "") for item in items}
+            self.assertIn(statuses.get("main.response"), {"cancelled", "done"})
+            self.assertIn(statuses.get(f"subagent:{child_session}"), {"cancelled", "done"})
+
     def test_orch_005_context_includes_orchestration_snapshot(self):
         session_key = "clawboard:topic:topic-orch-005"
         request_id = self._openclaw_chat(session_key=session_key, message="Track this with orchestration.")

@@ -195,6 +195,10 @@ class LogEntry(SQLModel, table=True):
         default=None,
         description="Optional idempotency key for exact-once ingestion.",
     )
+    sourceIdentityKey: Optional[str] = Field(
+        default=None,
+        description="Canonical source-origin identity key for cross-path replay dedupe.",
+    )
     type: str = Field(
         description="Log type (conversation | action | note | system | import).",
     )

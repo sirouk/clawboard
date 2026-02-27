@@ -7,7 +7,7 @@ test.describe("mobile topic expansion scroll behavior", () => {
 
   test("expanded topic keeps header visible while body scrolls", async ({ page }, testInfo) => {
     await page.goto("/u");
-    await page.getByPlaceholder("Search topics, tasks, or messages").first().waitFor();
+    await page.getByTestId("unified-composer-textarea").first().waitFor();
 
     await page.waitForSelector("[data-topic-card-id]", { timeout: 60_000 });
     const firstTopicCard = page.locator("[data-topic-card-id]").first();

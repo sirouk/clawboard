@@ -44,17 +44,26 @@ test("unified view expands topics and tasks", async ({ page }) => {
   await page.getByRole("button", { name: "Expand topic Clawboard", exact: true }).click();
   await expect(page.getByText("Ship onboarding wizard")).toBeVisible();
   await page.getByRole("button", { name: "Expand task Ship onboarding wizard", exact: true }).click();
+
+  const optionsToggle = page.getByRole("button", { name: /Board controls/i }).first();
+  const expanded = (await optionsToggle.getAttribute("aria-expanded")) === "true";
+  if (!expanded) await optionsToggle.click();
+  const toolCallsToggle = page.getByRole("button", { name: /Show tool calls|Hide tool calls/i }).first();
+  if ((await toolCallsToggle.textContent())?.toLowerCase().includes("show")) {
+    await toolCallsToggle.click();
+  }
+
   await expect(page.getByText("Scaffolded onboarding wizard layout", { exact: false })).toBeVisible();
 });
 
 test("unified board uses freeform composer and hides top-level new topic button", async ({ page }) => {
   await page.goto("/u");
-  const composer = page.getByPlaceholder("Write freeform notes or search… Enter adds newline · Ctrl+Enter sends as New Topic");
+  const composer = page.locator("[data-testid='unified-composer-textarea']:visible").first();
   await expect(composer).toBeVisible();
   await expect(page.getByRole("button", { name: /^\+ New topic$/i })).toHaveCount(0);
 
   await composer.fill("Composer drives search");
-  await expect(page.getByRole("button", { name: "Send" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Attach" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "New Topic" })).toBeVisible();
+  await expect(page.getByTestId("unified-composer-send")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Attach files" }).first()).toBeVisible();
+  await expect(page.getByTestId("unified-composer-new-topic")).toBeVisible();
 });

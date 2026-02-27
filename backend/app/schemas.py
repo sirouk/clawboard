@@ -568,7 +568,10 @@ class OpenClawChatRequest(BaseModel):
     )
     agentId: Optional[str] = Field(
         default="main",
-        description="OpenClaw agent id to route this request to.",
+        description=(
+            "Optional routing metadata for Clawboard queue/orchestration bookkeeping. "
+            "Board chat sends are sessionKey-scoped and handled by main orchestration; this field does not force direct subagent dispatch."
+        ),
         examples=["main"],
     )
     topicOnly: Optional[bool] = Field(

@@ -256,19 +256,24 @@ Flow:
 2. Optional upload through `/api/attachments`.
 3. `/api/openclaw/chat` persists user log first (fail-closed).
 4. API enqueues durable dispatch work in `OpenClawChatDispatchQueue` and worker threads execute gateway `chat.send`.
-5. API emits typing lifecycle events (`openclaw.typing` true/false).
+5. API emits per-thread activity lifecycle events:
+   - `openclaw.typing` (`typing=true/false`)
+   - `openclaw.thread_work` (`active=true/false`, optional `reason`, request-scoped where available)
 6. Worker retry/backoff, stale-processing recovery, and optional auto-quarantine keep queue forward-progress under failures/restarts.
 7. Optional in-flight probe logic (`OPENCLAW_CHAT_IN_FLIGHT_*`) can abort/retry long-stalled sends; when global probe is `0`, board topic/task sessions can still use `OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS` fallback for fast stall recovery.
 8. OpenClaw logger plugin returns assistant/tool rows through normal ingest path.
 9. Watchdog and history-sync backfill paths log warnings/recover when assistant output is delayed/missing.
-10. Stop/cancel path (`/api/openclaw/chat/cancel`) attempts gateway `chat.abort` and marks queue rows cancelled for the request chain.
-11. Orchestration convergence keeps `main.response` open while any subagent item is non-terminal; run closes only after final main assistant completion.
+10. Stop/cancel path (`DELETE /api/openclaw/chat`) immediately emits `openclaw.typing:false` and `openclaw.thread_work:false`, marks matching queue rows failed (`user_cancelled`), and cancels matching orchestration runs.
+11. Cancel scope fans out to linked child/subagent sessions discovered by request/session lineage, then attempts gateway `chat.abort` for each resolved session.
+12. Orchestration convergence keeps `main.response` open while any subagent item is non-terminal; run closes only after final main assistant completion.
 
 Unified composer routing contract (current UX):
 - Freeform with no selected target creates a new topic first, derives a concise name from the prompt text, then sends on `clawboard:topic:<topicId>`.
 - Freeform with a selected topic sends on `clawboard:topic:<topicId>`.
 - Freeform with a selected task sends on `clawboard:task:<topicId>:<taskId>`.
 - Topic/task direct composers always send on their pinned session keys.
+- Topic/task direct composers expose Stop while in-flight; typed `/stop` and `/abort` are aliases for the same thread-scoped cancel action.
+- Unified top composer Stop is scoped to the selected thread target and calls the same cancel endpoint.
 - UI immediately expands the relevant pane, focuses the correct composer, and reveals it near the bottom viewport position (`focus({ reveal: true })` behavior).
 - When classifier promotion adds `taskId` to a topic-scoped turn, UI auto-expands/focuses the promoted task chat, keeps typing indicators aliased, and on mobile opens the task chat fullscreen.
 
@@ -494,7 +499,8 @@ Operational guarantees:
 | Queue ingest row | plugin queue mode | `POST /api/ingest` | enqueue for async ingest drain | eventual append |
 | Patch log/classification | classifier/manual ops | `PATCH /api/log/{id}` | guarded patch + retry + sanitize | `log.upserted` SSE |
 | Delete one log | moderation/manual cleanup | `DELETE /api/log/{id}` | delete + note cleanup | `log.deleted` SSE |
-| Send board chat | composer in `src/components/unified-view.tsx` | `POST /api/openclaw/chat` | persist-first + gateway dispatch + typing events + request-scope promotion backfill | queued response + SSE + focused active pane |
+| Send board chat | `src/components/board-chat-composer.tsx` (mounted by `src/components/unified-view.tsx`) | `POST /api/openclaw/chat` | persist-first + gateway dispatch + typing/thread-work events + request-scope promotion backfill | queued response + SSE + focused active pane |
+| Cancel board chat | Stop button or `/stop`/`/abort` in board/unified composers | `DELETE /api/openclaw/chat` | immediate typing/thread-work stop signals + queue/orchestration cancel + linked-session `chat.abort` fan-out | thread-scoped stop with fast UI responding-state clear |
 | Discover OpenClaw skills | board/composer helper | `GET /api/openclaw/skills` | gateway capability passthrough | skill metadata |
 | Attachment validation | composer preflight | `GET /api/attachments/policy` | policy payload | client-side guardrails |
 | Upload files | composer attachments | `POST /api/attachments` | mime/size validation + storage + metadata | attachment IDs for chat |
@@ -641,6 +647,7 @@ If you are debugging a live issue:
 | CHAT-01 | Board send success | UI composer -> `/api/openclaw/chat` -> gateway -> ingest | durable user row then assistant/tool rows |
 | CHAT-02 | Gateway returns no assistant payload | watchdog path in backend/log stream | system warning row explains likely logger issue |
 | CHAT-03 | Attachment rejected | policy or upload validation path | send blocked with reason; no bad blob stored |
+| CHAT-04 | User presses Stop or sends `/stop`/`/abort` | composer -> `DELETE /api/openclaw/chat` -> queue/orchestration cancel + linked-session `chat.abort` | selected thread stops quickly; linked child sessions cancel when lineage is known |
 | VIS-01 | Viewer has explicit connectivity edge true | `_allowed_space_ids_for_source` | candidate space becomes visible |
 | VIS-02 | No explicit connectivity edge | same function | candidate space hidden by default |
 | VIS-03 | `defaultVisible` patched | patch endpoint + seed logic | affects seeding of new/missing edges only |
@@ -707,7 +714,11 @@ Routes currently implemented in `backend/app/main.py`:
   - `GET /api/attachments/{attachment_id}`
 - OpenClaw bridge:
   - `POST /api/openclaw/chat`
+  - `DELETE /api/openclaw/chat`
   - `GET /api/openclaw/skills`
+  - `GET /api/openclaw/chat-dispatch/status`
+  - `POST /api/openclaw/chat-dispatch/quarantine`
+  - `GET /api/openclaw/history-sync/status`
 - Realtime/config/admin:
   - `GET /api/stream`
   - `GET /api/config`

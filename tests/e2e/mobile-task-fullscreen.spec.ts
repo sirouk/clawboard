@@ -43,7 +43,7 @@ test.describe("mobile task fullscreen chat", () => {
     }
 
     await page.goto("/u");
-    await page.getByPlaceholder("Search topics, tasks, or messages").first().waitFor();
+    await page.getByTestId("unified-composer-textarea").first().waitFor();
 
     await page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true }).click();
     await page.getByRole("button", { name: `Expand task ${taskTitle}`, exact: true }).click();
@@ -178,7 +178,7 @@ test.describe("mobile task fullscreen chat", () => {
     expect(createTask.ok()).toBeTruthy();
 
     await page.goto("/u");
-    await page.getByPlaceholder("Search topics, tasks, or messages").first().waitFor();
+    await page.getByTestId("unified-composer-textarea").first().waitFor();
 
     await page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true }).click();
     await page.getByRole("button", { name: `Expand task ${taskTitle}`, exact: true }).click();
@@ -217,10 +217,7 @@ test.describe("mobile task fullscreen chat", () => {
     expect(createTask.ok()).toBeTruthy();
 
     await page.goto("/u?done=1");
-    await page
-      .locator('input[placeholder="Search topics, tasks, or messages"]:visible')
-      .first()
-      .waitFor();
+    await page.getByTestId("unified-composer-textarea").first().waitFor();
 
     await page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true }).click();
     await page.getByRole("button", { name: `Expand task ${taskTitle}`, exact: true }).click();

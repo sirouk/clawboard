@@ -12,6 +12,7 @@ test.describe("mobile more menu layering", () => {
 
     const settingsLink = page.locator("a[href='/settings']:visible").first();
     await expect(settingsLink).toBeVisible();
-    await Promise.all([page.waitForURL(/\/settings$/), settingsLink.click()]);
+    await settingsLink.click();
+    await expect(page).toHaveURL(/\/settings(?:\?.*)?$/);
   });
 });

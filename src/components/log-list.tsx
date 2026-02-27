@@ -23,6 +23,8 @@ const TYPE_LABELS: Record<string, string> = {
   import: "Import",
 };
 
+const CHAT_TOOLING_LOG_TYPES = new Set(["action", "system", "import"]);
+
 type LaneFilter = "all" | string;
 type MessageDensity = "comfortable" | "compact";
 type LogListVariant = "cards" | "chat";
@@ -53,6 +55,19 @@ function parseToolEvent(entry: LogEntry): ToolEvent | null {
   const kind: ToolEventKind =
     kindRaw === "tool call" ? "call" : kindRaw === "tool result" ? "result" : "error";
   return { kind, toolName };
+}
+
+function isToolingOrSystemChatLog(entry: LogEntry) {
+  const type = String(entry.type ?? "").trim().toLowerCase();
+  if (CHAT_TOOLING_LOG_TYPES.has(type)) return true;
+  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+  return agentId === "system";
+}
+
+function isAgentConversationLog(entry: LogEntry) {
+  if (String(entry.type ?? "").trim().toLowerCase() !== "conversation") return false;
+  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+  return Boolean(agentId) && agentId !== "user" && agentId !== "system";
 }
 
 function toolEventKindLabel(kind: ToolEventKind) {
@@ -299,6 +314,7 @@ export function LogList({
   metaDefaultCollapsed = false,
   metaExpandEpoch = 0,
   metaCollapseEpoch = 0,
+  hideToolCallsInChat = false,
 }: {
   logs: LogEntry[];
   topics: Topic[];
@@ -326,6 +342,7 @@ export function LogList({
   metaDefaultCollapsed?: boolean;
   metaExpandEpoch?: number;
   metaCollapseEpoch?: number;
+  hideToolCallsInChat?: boolean;
 }) {
   const { token, tokenRequired } = useAppConfig();
   const { setLogs: setStoreLogs } = useDataStore();
@@ -630,6 +647,51 @@ export function LogList({
     return filtered.slice(0, visibleCount);
   }, [filtered, loadMoreEnabled, visibleCount]);
 
+  const hiddenToolRowsByAnchor = useMemo(() => {
+    const map = new Map<string, LogEntry[]>();
+    if (variant !== "chat" || !hideToolCallsInChat) return map;
+    let pending: LogEntry[] = [];
+    for (const entry of visibleFiltered) {
+      if (isToolingOrSystemChatLog(entry)) {
+        pending.push(entry);
+        continue;
+      }
+      if (isAgentConversationLog(entry) && pending.length > 0) {
+        map.set(entry.id, pending);
+        pending = [];
+      }
+    }
+    return map;
+  }, [hideToolCallsInChat, variant, visibleFiltered]);
+
+  const hiddenToolAnchorByEntryId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const [anchorId, rows] of hiddenToolRowsByAnchor.entries()) {
+      for (const row of rows) map.set(row.id, anchorId);
+    }
+    return map;
+  }, [hiddenToolRowsByAnchor]);
+
+  const [expandedToolAnchors, setExpandedToolAnchors] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    setExpandedToolAnchors((prev) => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+      for (const anchorId of hiddenToolRowsByAnchor.keys()) {
+        const keep = Boolean(prev[anchorId]);
+        if (keep) next[anchorId] = true;
+      }
+      for (const key of Object.keys(prev)) {
+        if (!hiddenToolRowsByAnchor.has(key) && prev[key]) {
+          changed = true;
+        }
+      }
+      if (!changed && Object.keys(prev).length === Object.keys(next).length) return prev;
+      return next;
+    });
+  }, [hiddenToolRowsByAnchor]);
+
   const grouped = useMemo(() => {
     if (!groupByDay) return { all: visibleFiltered };
     return visibleFiltered.reduce<Record<string, LogEntry[]>>((acc, entry) => {
@@ -886,34 +948,61 @@ export function LogList({
                 </div>
               )}
               {!collapsed &&
-                entries.map((entry) => (
-                <LogRow
-                  key={`${entry.id}:${metaExpandEpoch}:${metaCollapseEpoch}:${metaDefaultCollapsed ? 1 : 0}`}
-                  entry={entry}
-                  topicLabel={topicsMap.get(entry.topicId ?? "") ?? "Off-topic"}
-                  topics={topics}
-                  scopeTopicId={scopeTopicId}
-                  scopeTaskId={scopeTaskId}
-                  showRawAll={showRawAll}
-                  allowNotes={allowNotes}
-                  allowDelete={allowDelete}
-                  messageDensity={messageDensity}
-                  onAddNote={addNote}
-                  onDelete={deleteLogEntry}
-                  onPatch={patchLogEntry}
-                  onReplayClassifier={replayClassifierBundle}
-                  onPurgeForward={purgeForward}
-                  getTasksForTopic={getTasksForTopic}
-                  ensureTasksForTopic={ensureTasksForTopic}
-                  isTasksLoadingForTopic={isTasksLoadingForTopic}
-                  readOnly={readOnly}
-                  enableNavigation={enableNavigation}
-                  variant={variant}
-                  metaDefaultCollapsed={metaDefaultCollapsed}
-                  metaExpandEpoch={metaExpandEpoch}
-                  metaCollapseEpoch={metaCollapseEpoch}
-                />
-                ))}
+                (() => {
+                  const rowsToRender =
+                    variant !== "chat" || !hideToolCallsInChat
+                      ? entries
+                      : entries.filter((entry) => {
+                          if (!isToolingOrSystemChatLog(entry)) return true;
+                          const anchorId = hiddenToolAnchorByEntryId.get(entry.id);
+                          if (!anchorId) return false;
+                          return Boolean(expandedToolAnchors[anchorId]);
+                        });
+
+                  return rowsToRender.map((entry) => {
+                    const hiddenToolCallsBefore =
+                      variant === "chat" && hideToolCallsInChat ? (hiddenToolRowsByAnchor.get(entry.id)?.length ?? 0) : 0;
+                    return (
+                      <LogRow
+                        key={`${entry.id}:${metaExpandEpoch}:${metaCollapseEpoch}:${metaDefaultCollapsed ? 1 : 0}`}
+                        entry={entry}
+                        topicLabel={topicsMap.get(entry.topicId ?? "") ?? "Off-topic"}
+                        topics={topics}
+                        scopeTopicId={scopeTopicId}
+                        scopeTaskId={scopeTaskId}
+                        showRawAll={showRawAll}
+                        allowNotes={allowNotes}
+                        allowDelete={allowDelete}
+                        messageDensity={messageDensity}
+                        onAddNote={addNote}
+                        onDelete={deleteLogEntry}
+                        onPatch={patchLogEntry}
+                        onReplayClassifier={replayClassifierBundle}
+                        onPurgeForward={purgeForward}
+                        getTasksForTopic={getTasksForTopic}
+                        ensureTasksForTopic={ensureTasksForTopic}
+                        isTasksLoadingForTopic={isTasksLoadingForTopic}
+                        readOnly={readOnly}
+                        enableNavigation={enableNavigation}
+                        variant={variant}
+                        metaDefaultCollapsed={metaDefaultCollapsed}
+                        metaExpandEpoch={metaExpandEpoch}
+                        metaCollapseEpoch={metaCollapseEpoch}
+                        hiddenToolCallsBefore={hiddenToolCallsBefore}
+                        hiddenToolCallsExpanded={Boolean(expandedToolAnchors[entry.id])}
+                        onToggleHiddenToolCalls={
+                          hiddenToolCallsBefore > 0
+                            ? () =>
+                                setExpandedToolAnchors((prev) => ({
+                                  ...prev,
+                                  [entry.id]: !prev[entry.id],
+                                }))
+                            : undefined
+                        }
+                      />
+                    );
+                  });
+                })()}
             </div>
           );
         })}
@@ -965,6 +1054,9 @@ type LogRowProps = {
   metaDefaultCollapsed: boolean;
   metaExpandEpoch: number;
   metaCollapseEpoch: number;
+  hiddenToolCallsBefore?: number;
+  hiddenToolCallsExpanded?: boolean;
+  onToggleHiddenToolCalls?: () => void;
 };
 
 const LogRow = memo(function LogRow({
@@ -991,6 +1083,9 @@ const LogRow = memo(function LogRow({
   metaDefaultCollapsed,
   metaExpandEpoch,
   metaCollapseEpoch,
+  hiddenToolCallsBefore = 0,
+  hiddenToolCallsExpanded = false,
+  onToggleHiddenToolCalls,
 }: LogRowProps) {
   const router = useRouter();
   const [compactMessageVisible, setCompactMessageVisible] = useState(false);
@@ -1156,6 +1251,8 @@ const LogRow = memo(function LogRow({
     const bubbleTitle = sourceMeta ? `${formatDateTime(entry.createdAt)}\n${sourceMeta}` : formatDateTime(entry.createdAt);
     const showReplay =
       isUser && isConversation && scopeTaskId === null && Boolean(scopeTopicId) && typeof onReplayClassifier === "function";
+    const hiddenToolCallsLabel =
+      hiddenToolCallsBefore === 1 ? "1 tool call" : `${hiddenToolCallsBefore} tool calls`;
 
     return (
       <div
@@ -1177,6 +1274,22 @@ const LogRow = memo(function LogRow({
 	                  <span className="mr-2 text-[10px] uppercase tracking-[0.12em] text-[rgb(var(--claw-muted))]">{flowLabel}</span>
 	                ) : null}
 	                <span className="text-xs text-[rgb(var(--claw-muted))]">{formatDateTime(entry.createdAt)}</span>
+                  {!isUser && hiddenToolCallsBefore > 0 && onToggleHiddenToolCalls ? (
+                    <button
+                      type="button"
+                      data-testid={`tool-call-toggle-${entry.id}`}
+                      className="ml-2 text-[10px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.95)] underline decoration-[rgba(148,163,184,0.45)] underline-offset-2 transition hover:text-[rgb(var(--claw-text))]"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onToggleHiddenToolCalls();
+                      }}
+                      aria-expanded={hiddenToolCallsExpanded}
+                      title={hiddenToolCallsExpanded ? `Hide ${hiddenToolCallsLabel}` : `Show ${hiddenToolCallsLabel}`}
+                    >
+                      {hiddenToolCallsExpanded ? `Hide ${hiddenToolCallsLabel}` : hiddenToolCallsLabel}
+                    </button>
+                  ) : null}
 	                {isPending && (
 	                  <span className="ml-2 text-[10px] uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)]">
 	                    pending
@@ -2492,6 +2605,9 @@ const LogRow = memo(function LogRow({
   if (prev.metaDefaultCollapsed !== next.metaDefaultCollapsed) return false;
   if (prev.metaExpandEpoch !== next.metaExpandEpoch) return false;
   if (prev.metaCollapseEpoch !== next.metaCollapseEpoch) return false;
+  if (prev.hiddenToolCallsBefore !== next.hiddenToolCallsBefore) return false;
+  if (prev.hiddenToolCallsExpanded !== next.hiddenToolCallsExpanded) return false;
+  if (prev.onToggleHiddenToolCalls !== next.onToggleHiddenToolCalls) return false;
   if (prev.onAddNote !== next.onAddNote) return false;
   if (prev.onDelete !== next.onDelete) return false;
   if (prev.onPatch !== next.onPatch) return false;

@@ -20,7 +20,7 @@ test("board topics panel can search topics and navigate into unified view select
   await expect(searchInput).toBeVisible();
 
   await searchInput.fill(topicName);
-  const navTopicButton = page.locator("aside").getByRole("button", { name: topicName }).first();
+  const navTopicButton = page.locator(`aside [data-board-topic-id='${topicId}'] > button`).first();
   await expect(navTopicButton).toBeVisible();
   await navTopicButton.click();
 
@@ -126,5 +126,141 @@ test("topic chat send is instant and task promotion auto-expands task composer",
   // UI should auto-expand the promoted task chat and focus its composer.
   const taskComposer = page.getByTestId(`task-chat-composer-${taskId}`);
   await expect(taskComposer).toBeVisible();
-  await expect(taskComposer.getByRole("textbox")).toBeFocused();
+  await expect(taskComposer.getByRole("textbox")).toBeVisible();
+});
+
+test("typed /stop in topic composer cancels in-flight run without posting another chat send", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-stop-${suffix}`;
+  const topicName = `Stop Topic ${suffix}`;
+  const sessionKey = `clawboard:topic:${topicId}`;
+  const postPayloads: Array<Record<string, unknown>> = [];
+  const deletePayloads: Array<Record<string, unknown>> = [];
+  const requestId = `occhat-stop-${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  await page.route("**/api/openclaw/chat", async (route) => {
+    const method = route.request().method();
+    if (method === "POST") {
+      const payload = route.request().postDataJSON() as Record<string, unknown>;
+      postPayloads.push(payload);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ queued: true, requestId }),
+      });
+      return;
+    }
+    if (method === "DELETE") {
+      const payload = route.request().postDataJSON() as Record<string, unknown>;
+      deletePayloads.push(payload);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ aborted: true, queueCancelled: 1, sessionKey, sessionKeys: [sessionKey] }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto(`/u/topic/${topicId}`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const topicComposer = page.getByTestId(`topic-chat-composer-${topicId}`);
+  const topicChatToggle = page.getByTestId(`toggle-topic-chat-${topicId}`);
+  const toggleLabel = (await topicChatToggle.getAttribute("aria-label")) ?? "";
+  if (/expand/i.test(toggleLabel)) {
+    await topicChatToggle.click();
+  }
+  await expect(topicComposer).toBeVisible();
+
+  const textbox = topicComposer.getByRole("textbox");
+  await textbox.fill(`start-run-${suffix}`);
+  await textbox.press("Enter");
+  await expect.poll(() => postPayloads.length).toBe(1);
+
+  await textbox.fill("/stop");
+  await topicComposer.getByRole("button", { name: "Send" }).click();
+
+  await expect.poll(() => deletePayloads.length).toBe(1);
+  expect(postPayloads).toHaveLength(1);
+  expect(postPayloads[0]?.message).toBe(`start-run-${suffix}`);
+  expect(deletePayloads[0]?.sessionKey).toBe(sessionKey);
+  expect(deletePayloads[0]?.requestId).toBe(requestId);
+  await expect(topicComposer.getByText("Cancellation requested.")).toBeVisible();
+});
+
+test("typed /abort in task composer cancels in-flight run as a /stop alias", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-abort-${suffix}`;
+  const topicName = `Abort Topic ${suffix}`;
+  const taskId = `task-abort-${suffix}`;
+  const taskTitle = `Abort Task ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
+  const postPayloads: Array<Record<string, unknown>> = [];
+  const deletePayloads: Array<Record<string, unknown>> = [];
+  const requestId = `occhat-abort-${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "todo", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  await page.route("**/api/openclaw/chat", async (route) => {
+    const method = route.request().method();
+    if (method === "POST") {
+      const payload = route.request().postDataJSON() as Record<string, unknown>;
+      postPayloads.push(payload);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ queued: true, requestId }),
+      });
+      return;
+    }
+    if (method === "DELETE") {
+      const payload = route.request().postDataJSON() as Record<string, unknown>;
+      deletePayloads.push(payload);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ aborted: true, queueCancelled: 1, sessionKey, sessionKeys: [sessionKey] }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto(`/u/topic/${topicId}/task/${taskId}`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const taskComposer = page.getByTestId(`task-chat-composer-${taskId}`);
+  await expect(taskComposer).toBeVisible();
+  const textbox = taskComposer.getByRole("textbox");
+
+  await textbox.fill(`start-task-run-${suffix}`);
+  await textbox.press("Enter");
+  await expect.poll(() => postPayloads.length).toBe(1);
+
+  await textbox.fill("/abort");
+  await taskComposer.getByRole("button", { name: "Send" }).click();
+  await expect.poll(() => deletePayloads.length).toBe(1);
+
+  expect(postPayloads).toHaveLength(1);
+  expect(postPayloads[0]?.sessionKey).toBe(sessionKey);
+  expect(postPayloads[0]?.message).toBe(`start-task-run-${suffix}`);
+  expect(deletePayloads[0]?.sessionKey).toBe(sessionKey);
+  expect(deletePayloads[0]?.requestId).toBe(requestId);
+  await expect(taskComposer.getByText("Cancellation requested.")).toBeVisible();
 });

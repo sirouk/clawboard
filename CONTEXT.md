@@ -30,6 +30,15 @@ Net effect: the agent can "remember" what happened across Topics/Tasks/logs/note
 
 ---
 
+### Board chat routing contract (UI -> OpenClaw)
+- Topic/task chat sends from Clawboard go through `POST /api/openclaw/chat` with a board session key (`clawboard:topic:*` or `clawboard:task:*`).
+- Task sessions are still main-mediated orchestration lanes: main receives the turn, then delegates as needed.
+- `agentId` on board chat requests is advisory metadata for dispatch bookkeeping; it does not force direct subagent ownership of a task chat.
+- Thread-scoped cancel uses `DELETE /api/openclaw/chat` (`sessionKey`, optional `requestId`) and can fan out to linked child sessions when lineage is resolvable.
+- UI responding state is driven by `openclaw.typing` + `openclaw.thread_work` events (plus orchestration activity fallbacks) per board session.
+
+---
+
 ### OpenClaw delegation visibility requirements
 For the main agent to supervise delegated cross-agent work (`sessions_history` / `sessions_send` on child subagent sessions), OpenClaw config must include:
 - `tools.sessions.visibility = "all"`

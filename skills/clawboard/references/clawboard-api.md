@@ -43,6 +43,33 @@
 - `POST /api/log`
 - Body: `{ topicId?, taskId?, relatedLogId?, type?, content, summary?, raw?, agentId?, agentLabel?, source? }`
 
+### OpenClaw bridge (board chat)
+
+- `POST /api/openclaw/chat`
+- Body: `{ sessionKey, message, topicId?, spaceId?, agentId?, attachmentIds? }`
+- Response: `{ queued: true, requestId }`
+
+- `DELETE /api/openclaw/chat`
+- Body: `{ sessionKey, requestId? }`
+- Response: `{ aborted, queueCancelled, sessionKey, sessionKeys, gatewayAbortCount }`
+
+- `GET /api/openclaw/skills?agentId=main`
+- Response: `{ agentId, workspaceDir?, skills[] }`
+
+- `GET /api/openclaw/chat-dispatch/status`
+- Response: dispatch worker/config + queue counts (`pending|retry|processing|sent|failed`)
+
+- `POST /api/openclaw/chat-dispatch/quarantine`
+- Body: quarantine filter payload for stale/problematic queue rows (ops endpoint)
+- Response: matched/quarantined counts + sample rows
+
+- `GET /api/openclaw/history-sync/status`
+- Response: history-sync config/runtime state snapshot
+
+Related SSE event types on `/api/stream`:
+- `openclaw.typing` (`{ sessionKey, typing, requestId? }`)
+- `openclaw.thread_work` (`{ sessionKey, active, requestId?, reason? }`)
+
 ### Search (hybrid semantic + lexical)
 
 - `GET /api/search?q=...&sessionKey=...&includePending=1&limitTopics=24&limitTasks=48&limitLogs=360`

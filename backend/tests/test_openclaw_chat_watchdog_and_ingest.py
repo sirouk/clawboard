@@ -1024,12 +1024,15 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             )
 
         rpc_calls: list[tuple[str, dict]] = []
+        published: list[dict] = []
 
         async def _fake_gateway_rpc(method: str, params: dict, **kwargs):
             rpc_calls.append((method, params))
             return {"ok": True}
 
-        with patch.object(main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)):
+        with patch.object(main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ):
             response = main_module.openclaw_chat_cancel(
                 OpenClawChatCancelRequest(sessionKey=parent_session, requestId=request_id)
             )
@@ -1046,6 +1049,26 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertTrue(
             all(str(params.get("requestId") or "") == request_id for method, params in rpc_calls if method == "chat.abort")
         )
+        typing_stops = [
+            event
+            for event in published
+            if str(event.get("type") or "") == "openclaw.typing"
+            and not bool((event.get("data") or {}).get("typing"))
+        ]
+        self.assertTrue(typing_stops)
+        typing_stop_sessions = {str((event.get("data") or {}).get("sessionKey") or "") for event in typing_stops}
+        self.assertIn(parent_session, typing_stop_sessions)
+        self.assertIn(subagent_session, typing_stop_sessions)
+        thread_work_stops = [
+            event
+            for event in published
+            if str(event.get("type") or "") == "openclaw.thread_work"
+            and not bool((event.get("data") or {}).get("active"))
+        ]
+        self.assertTrue(thread_work_stops)
+        thread_work_stop_sessions = {str((event.get("data") or {}).get("sessionKey") or "") for event in thread_work_stops}
+        self.assertIn(parent_session, thread_work_stop_sessions)
+        self.assertIn(subagent_session, thread_work_stop_sessions)
 
         with get_session() as session:
             rows = session.exec(
@@ -1098,6 +1121,79 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertEqual(str(row.status or ""), "failed")
             self.assertEqual(str(row.lastError or ""), "user_cancelled")
+
+    def test_chat_001d_cancel_main_run_emits_immediate_stop_signals(self):
+        request_id = "occhat-cancel-001d"
+        session_key = "clawboard:topic:topic-cancel-001d"
+        created = now_iso()
+        with get_session() as session:
+            session.add(
+                OpenClawChatDispatchQueue(
+                    requestId=request_id,
+                    sessionKey=session_key,
+                    agentId="main",
+                    sentAt=created,
+                    message="main is still thinking",
+                    attachmentIds=[],
+                    status="processing",
+                    attempts=1,
+                    nextAttemptAt=created,
+                    claimedAt=created,
+                    completedAt=None,
+                    lastError=None,
+                    createdAt=created,
+                    updatedAt=created,
+                )
+            )
+            session.commit()
+
+        published: list[dict] = []
+        rpc_calls: list[tuple[str, dict]] = []
+
+        async def _fake_gateway_rpc(method: str, params: dict, **kwargs):
+            rpc_calls.append((method, params))
+            return {"ok": True}
+
+        with patch.object(main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ):
+            response = main_module.openclaw_chat_cancel(
+                OpenClawChatCancelRequest(sessionKey=session_key, requestId=request_id)
+            )
+
+        self.assertTrue(bool(response.get("aborted")))
+        self.assertEqual(int(response.get("queueCancelled") or 0), 1)
+        chat_abort_calls = [(method, params) for method, params in rpc_calls if method == "chat.abort"]
+        self.assertEqual(len(chat_abort_calls), 1)
+        self.assertEqual(str(chat_abort_calls[0][1].get("sessionKey") or ""), session_key)
+        self.assertEqual(str(chat_abort_calls[0][1].get("requestId") or ""), request_id)
+
+        typing_stop = [
+            event
+            for event in published
+            if str(event.get("type") or "") == "openclaw.typing"
+            and not bool((event.get("data") or {}).get("typing"))
+            and str((event.get("data") or {}).get("sessionKey") or "") == session_key
+        ]
+        self.assertTrue(typing_stop, "Expected immediate typing:false emission for cancelled thread.")
+        thread_work_stop = [
+            event
+            for event in published
+            if str(event.get("type") or "") == "openclaw.thread_work"
+            and not bool((event.get("data") or {}).get("active"))
+            and str((event.get("data") or {}).get("sessionKey") or "") == session_key
+        ]
+        self.assertTrue(thread_work_stop, "Expected immediate thread_work active:false for cancelled thread.")
+
+        with get_session() as session:
+            row = session.exec(
+                select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == request_id)
+            ).first()
+            self.assertIsNotNone(row)
+            self.assertEqual(str(row.status or ""), "failed")
+            self.assertEqual(str(row.lastError or ""), "user_cancelled")
+            self.assertIsNone(row.claimedAt)
+            self.assertTrue(bool(str(row.completedAt or "").strip()))
 
     def test_chat_002_attachment_payload_is_bound_into_gateway_call(self):
         root = Path(TMP_DIR) / "attachments-chat-002"

@@ -91,6 +91,14 @@ export type LogEntry = {
     speakerLabel?: string;
     audienceId?: string;
     audienceLabel?: string;
+    orchestration?: boolean;
+    runId?: string;
+    itemKey?: string;
+    eventType?: string;
+    runStatus?: "running" | "stalled" | "done" | "failed" | "cancelled";
+    runActive?: boolean;
+    watchdogMissingAssistant?: boolean;
+    requestTerminal?: boolean;
   };
 };
 

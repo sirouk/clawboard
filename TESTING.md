@@ -13,7 +13,13 @@ Agentic orchestration/runtime regressions are covered inside backend unit tests,
 - single-subagent supervision convergence,
 - multi-subagent convergence gating,
 - duplicate spawn idempotency,
-- history-ingest context-wrapper suppression and cursor safety.
+- history-ingest context-wrapper suppression and cursor safety,
+- thread-scoped cancellation across main-thinking, delegated-subagent, and subagent-active phases.
+
+UI stop controls are covered in Playwright:
+- topic/task composer typed `/stop` + `/abort` cancellation,
+- unified composer typed `/stop`,
+- unified selected-target Stop button request scoping.
 
 ## Quick Commands
 

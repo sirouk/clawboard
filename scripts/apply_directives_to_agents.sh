@@ -952,6 +952,7 @@ lines.append("This section is maintained by `scripts/apply_directives_to_agents.
 lines.append("Main agent guidance:")
 lines.append("- Treat this roster as your delegation map and accountability list for subagent work.")
 lines.append("- When tasks are delegated, assign intentionally, monitor follow-through, and avoid dropped work.")
+lines.append("- Before execution delegation, confirm intent confidence (high/medium/low); clarify or run intent-poll huddles when needed.")
 lines.append("- Check in frequently at first, then moderately, then periodically as work stabilizes.")
 lines.append("- Keep the user up to speed with concise updates on what each subagent is doing, progress made, risks, and blockers.")
 if normalize_bool(updated_main_directives.get("forbidMainDoingSubagentJobs"), False):

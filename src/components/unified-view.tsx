@@ -147,6 +147,50 @@ function CloseIcon({ className }: { className?: string }) {
   );
 }
 
+function StopIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={cn("h-3.5 w-3.5", className)}
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden
+    >
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+    </svg>
+  );
+}
+
+function isStopSlashCommand(input: string) {
+  const normalized = String(input ?? "").trim().toLowerCase();
+  return normalized === "/stop" || normalized === "/abort";
+}
+
+function inferMimeTypeFromName(fileName: string) {
+  const lower = (fileName ?? "").trim().toLowerCase();
+  const ext = lower.includes(".") ? lower.split(".").pop() ?? "" : "";
+  const mapping: Record<string, string> = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    pdf: "application/pdf",
+    txt: "text/plain",
+    md: "text/markdown",
+    markdown: "text/markdown",
+    json: "application/json",
+    csv: "text/csv",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    m4a: "audio/mp4",
+    mp4: "audio/mp4",
+    webm: "audio/webm",
+    ogg: "audio/ogg",
+  };
+  return mapping[ext] ?? "";
+}
+
 const TASK_TIMELINE_LIMIT = 2;
 const TOPIC_TIMELINE_LIMIT = 4;
 type MessageDensity = "comfortable" | "compact";
@@ -247,6 +291,7 @@ const UNIFIED_COMPOSER_MAX_HEIGHT_PX = 560;
 type UnifiedComposerTarget =
   | { kind: "topic"; topicId: string }
   | { kind: "task"; topicId: string; taskId: string };
+type UnifiedComposerAttachment = AttachmentLike & { file: File };
 const UNIFIED_TOPICS_PAGE_SIZE = (() => {
   const raw = String(process.env.NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE ?? "").trim();
   const parsed = Number(raw);
@@ -293,6 +338,20 @@ const OPENCLAW_TYPING_ALIAS_INACTIVE_RETENTION_MS =
     30 * 60,
     60,
     30 * 24 * 60 * 60
+  ) * 1000;
+const OPENCLAW_THREAD_WORK_ACTIVE_TTL_MS =
+  parseEnvSeconds(
+    process.env.NEXT_PUBLIC_OPENCLAW_THREAD_WORK_ACTIVE_TTL_SECONDS,
+    20 * 60,
+    30,
+    12 * 60 * 60
+  ) * 1000;
+const OPENCLAW_THREAD_WORK_INACTIVE_OVERRIDE_TTL_MS =
+  parseEnvSeconds(
+    process.env.NEXT_PUBLIC_OPENCLAW_THREAD_WORK_INACTIVE_OVERRIDE_TTL_SECONDS,
+    2 * 60,
+    10,
+    30 * 60
   ) * 1000;
 
 const SEARCH_QUERY_STOPWORDS = new Set([
@@ -494,6 +553,44 @@ function isFalseFlag(value: unknown) {
   return value === false || value === "false" || value === 0 || value === "0";
 }
 
+const ORCHESTRATION_TERMINAL_RUN_STATUSES = new Set(["done", "failed", "cancelled"]);
+const ORCHESTRATION_KNOWN_RUN_STATUSES = new Set(["running", "stalled", "done", "failed", "cancelled"]);
+
+type SessionOrchestrationWork = {
+  active: boolean;
+  requestId?: string;
+  updatedAt: string;
+};
+
+type SessionThreadWorkSignal = {
+  active: boolean;
+  requestId?: string;
+  reason?: string;
+  updatedAt: string;
+};
+
+function parseIsoMs(value: unknown) {
+  const text = String(value ?? "").trim();
+  if (!text) return Number.NaN;
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function resolveThreadWorkSignal(
+  signal: SessionThreadWorkSignal | undefined,
+  params: { latestOtherSignalMs: number; nowMs: number }
+): boolean | undefined {
+  if (!signal) return undefined;
+  const { latestOtherSignalMs, nowMs } = params;
+  const signalMs = parseIsoMs(signal.updatedAt);
+  if (!Number.isFinite(signalMs)) return undefined;
+  const ageMs = nowMs - signalMs;
+  const ttlMs = signal.active ? OPENCLAW_THREAD_WORK_ACTIVE_TTL_MS : OPENCLAW_THREAD_WORK_INACTIVE_OVERRIDE_TTL_MS;
+  if (ageMs < 0 || ageMs > ttlMs) return undefined;
+  if (!signal.active && Number.isFinite(latestOtherSignalMs) && latestOtherSignalMs > signalMs) return undefined;
+  return signal.active;
+}
+
 function isTerminalSystemRequestEvent(entry: LogEntry) {
   const agentId = String(entry.agentId ?? "").trim().toLowerCase();
   if (agentId !== "system") return false;
@@ -532,6 +629,131 @@ function requestIdForLogEntry(entry: LogEntry) {
   const requestId = normalizeOpenClawRequestId(source.requestId);
   if (requestId) return requestId;
   return normalizeOpenClawRequestId(source.messageId);
+}
+
+function normalizeOrchestrationRunStatus(value: unknown) {
+  const status = String(value ?? "").trim().toLowerCase();
+  if (!status) return "";
+  return ORCHESTRATION_KNOWN_RUN_STATUSES.has(status) ? status : "";
+}
+
+function inferOrchestrationRunStatus(entry: LogEntry, source: Record<string, unknown>, previousStatus: string) {
+  const direct = normalizeOrchestrationRunStatus(source.runStatus);
+  if (direct) return direct;
+
+  const eventType = String(source.eventType ?? "").trim().toLowerCase();
+  if (eventType === "run_created") return "running";
+  if (eventType !== "run_status_changed") return previousStatus || "running";
+
+  const haystack = `${String(entry.summary ?? "")} ${String(entry.content ?? "")}`.toLowerCase();
+  if (haystack.includes("cancelled")) return "cancelled";
+  if (haystack.includes("failed")) return "failed";
+  if (haystack.includes("stalled")) return "stalled";
+  if (haystack.includes("done")) return "done";
+  return previousStatus || "running";
+}
+
+function buildOrchestrationThreadWorkIndex(logs: LogEntry[]): Record<string, SessionOrchestrationWork> {
+  const byRun = new Map<
+    string,
+    {
+      status: string;
+      requestId?: string;
+      updatedAt: string;
+      updatedAtMs: number;
+      sessionKeys: Set<string>;
+    }
+  >();
+  const ascending = [...logs].sort(compareLogCreatedAtAsc);
+
+  for (const entry of ascending) {
+    const source = (entry.source && typeof entry.source === "object" ? entry.source : {}) as Record<string, unknown>;
+    if (!isTruthyFlag(source.orchestration)) continue;
+    const runId = String(source.runId ?? "").trim();
+    if (!runId) continue;
+
+    const next = byRun.get(runId) ?? {
+      status: "running",
+      requestId: undefined,
+      updatedAt: "",
+      updatedAtMs: Number.NEGATIVE_INFINITY,
+      sessionKeys: new Set<string>(),
+    };
+
+    const sourceSessionKey = normalizeBoardSessionKey(String(source.sessionKey ?? ""));
+    if (sourceSessionKey) next.sessionKeys.add(sourceSessionKey);
+
+    const boardTopicId = String(source.boardScopeTopicId ?? entry.topicId ?? "").trim();
+    const boardTaskId = String(source.boardScopeTaskId ?? entry.taskId ?? "").trim();
+    if (boardTopicId && boardTaskId) {
+      next.sessionKeys.add(taskSessionKey(boardTopicId, boardTaskId));
+    }
+    if (boardTopicId) {
+      next.sessionKeys.add(topicSessionKey(boardTopicId));
+    }
+
+    const requestId = normalizeOpenClawRequestId(source.requestId ?? source.messageId);
+    if (requestId) next.requestId = requestId;
+
+    next.status = inferOrchestrationRunStatus(entry, source, next.status);
+    const stamp = String(entry.updatedAt ?? entry.createdAt ?? "").trim();
+    const stampMs = Date.parse(stamp);
+    const normalizedStampMs = Number.isFinite(stampMs) ? stampMs : Number.NEGATIVE_INFINITY;
+    if (!next.updatedAt || normalizedStampMs >= next.updatedAtMs) {
+      next.updatedAt = stamp;
+      next.updatedAtMs = normalizedStampMs;
+    }
+
+    byRun.set(runId, next);
+  }
+
+  type SessionAgg = {
+    active: boolean;
+    latestAnyAt: string;
+    latestAnyMs: number;
+    latestAnyRequestId?: string;
+    latestActiveMs: number;
+    latestActiveRequestId?: string;
+  };
+
+  const bySession = new Map<string, SessionAgg>();
+  for (const runState of byRun.values()) {
+    const active = !ORCHESTRATION_TERMINAL_RUN_STATUSES.has(runState.status);
+    for (const sessionKey of runState.sessionKeys) {
+      const key = normalizeBoardSessionKey(sessionKey);
+      if (!key) continue;
+      const agg = bySession.get(key) ?? {
+        active: false,
+        latestAnyAt: "",
+        latestAnyMs: Number.NEGATIVE_INFINITY,
+        latestAnyRequestId: undefined,
+        latestActiveMs: Number.NEGATIVE_INFINITY,
+        latestActiveRequestId: undefined,
+      };
+
+      agg.active = agg.active || active;
+      if (runState.updatedAtMs >= agg.latestAnyMs) {
+        agg.latestAnyMs = runState.updatedAtMs;
+        agg.latestAnyAt = runState.updatedAt;
+        agg.latestAnyRequestId = runState.requestId || agg.latestAnyRequestId;
+      }
+      if (active && runState.updatedAtMs >= agg.latestActiveMs) {
+        agg.latestActiveMs = runState.updatedAtMs;
+        agg.latestActiveRequestId = runState.requestId || agg.latestActiveRequestId;
+      }
+      bySession.set(key, agg);
+    }
+  }
+
+  const out: Record<string, SessionOrchestrationWork> = {};
+  for (const [sessionKey, agg] of bySession.entries()) {
+    out[sessionKey] = {
+      active: agg.active,
+      requestId: agg.latestActiveRequestId || agg.latestAnyRequestId,
+      updatedAt: agg.latestAnyAt,
+    };
+  }
+  return out;
 }
 
 function normalizeTagValue(value: string) {
@@ -797,6 +1019,55 @@ function isCronEventLog(entry: LogEntry) {
     .trim()
     .toLowerCase();
   return CRON_EVENT_SOURCE_CHANNELS.has(channel);
+}
+
+const CHAT_TOOLING_LOG_TYPES = new Set(["action", "system", "import"]);
+
+function isToolingOrSystemChatLog(entry: LogEntry) {
+  const type = String(entry.type ?? "").trim().toLowerCase();
+  if (CHAT_TOOLING_LOG_TYPES.has(type)) return true;
+  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+  return agentId === "system";
+}
+
+function isAgentConversationChatLog(entry: LogEntry) {
+  if (String(entry.type ?? "").trim().toLowerCase() !== "conversation") return false;
+  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+  return Boolean(agentId) && agentId !== "user" && agentId !== "system";
+}
+
+function countVisibleChatLogEntries(entries: LogEntry[], showToolCalls: boolean) {
+  if (showToolCalls) return entries.length;
+  let count = 0;
+  for (const entry of entries) {
+    if (!isToolingOrSystemChatLog(entry)) count += 1;
+  }
+  return count;
+}
+
+function countTrailingHiddenToolCallsAwaitingAgent(entries: LogEntry[]) {
+  let seenUserMessage = false;
+  let agentResponded = false;
+  let hiddenToolCount = 0;
+
+  for (const entry of entries) {
+    const type = String(entry.type ?? "").trim().toLowerCase();
+    const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+    if (type === "conversation" && agentId === "user") {
+      seenUserMessage = true;
+      agentResponded = false;
+      hiddenToolCount = 0;
+      continue;
+    }
+    if (!seenUserMessage || agentResponded) continue;
+    if (isAgentConversationChatLog(entry)) {
+      agentResponded = true;
+      continue;
+    }
+    if (isToolingOrSystemChatLog(entry)) hiddenToolCount += 1;
+  }
+
+  return seenUserMessage && !agentResponded ? hiddenToolCount : 0;
 }
 
 function normalizeInlineText(value: string | undefined | null) {
@@ -1594,6 +1865,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     logs: storeLogs,
     drafts,
     openclawTyping,
+    openclawThreadWork,
     hydrated,
     setTopics,
     setTasks,
@@ -1634,6 +1906,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const showTwoColumns = twoColumn && mdUp;
   const [showRaw, setShowRaw] = useState(initialUrlState.raw);
   const [messageDensity, setMessageDensity] = useState<MessageDensity>(initialUrlState.density);
+  const [showToolCalls, setShowToolCalls] = useState(initialUrlState.showToolCalls);
   const [search, setSearch] = useState(initialUrlState.search);
   const [showDone, setShowDone] = useState(initialUrlState.done);
   const [revealSelection, setRevealSelection] = useState(initialUrlState.reveal);
@@ -1954,11 +2227,60 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const { value: unifiedComposerDraft, setValue: setUnifiedComposerDraft } = usePersistentDraft("draft:unified:composer", {
     fallback: "",
   });
-  const [unifiedComposerAttachments, setUnifiedComposerAttachments] = useState<File[]>([]);
+  const [unifiedComposerAttachments, setUnifiedComposerAttachments] = useState<UnifiedComposerAttachment[]>([]);
   const [unifiedComposerBusy, setUnifiedComposerBusy] = useState(false);
+  const [unifiedComposerError, setUnifiedComposerError] = useState<string | null>(null);
+  const [unifiedCancelNotice, setUnifiedCancelNotice] = useState<string | null>(null);
   const [composerTarget, setComposerTarget] = useState<UnifiedComposerTarget | null>(null);
   const unifiedComposerFileRef = useRef<HTMLInputElement | null>(null);
   const unifiedComposerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const unifiedComposerAttachmentsRef = useRef<UnifiedComposerAttachment[]>([]);
+  const revokeUnifiedPreviewUrls = useCallback((attachments: UnifiedComposerAttachment[]) => {
+    for (const attachment of attachments) {
+      if (!attachment.previewUrl) continue;
+      try {
+        URL.revokeObjectURL(attachment.previewUrl);
+      } catch {
+        // ignore
+      }
+    }
+  }, []);
+  const clearUnifiedComposerAttachments = useCallback(() => {
+    setUnifiedComposerAttachments((prev) => {
+      revokeUnifiedPreviewUrls(prev);
+      return [];
+    });
+  }, [revokeUnifiedPreviewUrls]);
+  const addUnifiedComposerFiles = useCallback((incoming: File[] | FileList) => {
+    const files = Array.from(incoming ?? []);
+    if (files.length === 0) return;
+    setUnifiedComposerAttachments((prev) => {
+      const next = [...prev];
+      const seen = new Set(next.map((attachment) => `${attachment.fileName}:${attachment.sizeBytes}:${attachment.mimeType}`));
+      for (const file of files) {
+        const fileName = (file.name || "attachment").trim() || "attachment";
+        const inferredMimeType = inferMimeTypeFromName(fileName);
+        const mimeType = (file.type || inferredMimeType || "application/octet-stream").toLowerCase();
+        const sizeBytes = file.size ?? 0;
+        const key = `${fileName}:${sizeBytes}:${mimeType}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const previewUrl =
+          mimeType.startsWith("image/") && typeof window !== "undefined" ? URL.createObjectURL(file) : undefined;
+        next.push({ file, fileName, mimeType, sizeBytes, previewUrl });
+      }
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    unifiedComposerAttachmentsRef.current = unifiedComposerAttachments;
+  }, [unifiedComposerAttachments]);
+  useEffect(() => {
+    return () => {
+      revokeUnifiedPreviewUrls(unifiedComposerAttachmentsRef.current);
+      unifiedComposerAttachmentsRef.current = [];
+    };
+  }, [revokeUnifiedPreviewUrls]);
   useLayoutEffect(() => {
     const el = unifiedComposerTextareaRef.current;
     if (!el) return;
@@ -2295,20 +2617,58 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return merged;
   }, [awaitingAssistant, derivedAwaitingAssistant]);
 
+  const orchestrationThreadWorkBySession = useMemo(
+    () => buildOrchestrationThreadWorkIndex(logs),
+    [logs]
+  );
+
   const isSessionResponding = useCallback(
     (sessionKey: string) => {
       const key = normalizeBoardSessionKey(sessionKey);
       if (!key) return false;
+      const nowMs = Date.now();
       const typing = openclawTyping[key];
+      const awaiting = effectiveAwaitingAssistant[key];
+      const orchestrationWork = orchestrationThreadWorkBySession[key];
+      const latestOtherSignalMs = Math.max(
+        parseIsoMs(typing?.updatedAt),
+        parseIsoMs(awaiting?.sentAt),
+        parseIsoMs(orchestrationWork?.updatedAt)
+      );
+      const directThreadSignal = resolveThreadWorkSignal(openclawThreadWork[key], {
+        latestOtherSignalMs,
+        nowMs,
+      });
+      if (directThreadSignal === false) return false;
+      if (directThreadSignal === true) return true;
       if (typing?.typing) return true;
       if (Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, key)) return true;
+      if (orchestrationWork?.active) return true;
 
       const alias = typingAliasRef.current.get(key);
       if (!alias) return false;
       const sourceKey = alias.sourceSessionKey;
       const sourceTyping = openclawTyping[sourceKey];
+      const sourceThreadWork = orchestrationThreadWorkBySession[sourceKey];
+      const sourceAwaiting = effectiveAwaitingAssistant[sourceKey];
+      const sourceLatestOtherSignalMs = Math.max(
+        parseIsoMs(sourceTyping?.updatedAt),
+        parseIsoMs(sourceAwaiting?.sentAt),
+        parseIsoMs(sourceThreadWork?.updatedAt)
+      );
+      const sourceDirectThreadSignal = resolveThreadWorkSignal(
+        openclawThreadWork[sourceKey],
+        {
+          latestOtherSignalMs: sourceLatestOtherSignalMs,
+          nowMs,
+        }
+      );
+      if (sourceDirectThreadSignal === false) return false;
       const sourceResponding =
-        Boolean(sourceTyping?.typing) || Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, sourceKey);
+        sourceDirectThreadSignal === true ||
+        Boolean(sourceTyping?.typing) ||
+        Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, sourceKey) ||
+        Boolean(sourceThreadWork?.active);
       if (sourceResponding) return true;
 
       // Cleanup only after inactivity. Do not age out while the source session is still responding.
@@ -2317,7 +2677,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       }
       return false;
     },
-    [effectiveAwaitingAssistant, openclawTyping]
+    [effectiveAwaitingAssistant, openclawTyping, openclawThreadWork, orchestrationThreadWorkBySession]
   );
 
   const prevExpandedTaskIdsRef = useRef<Set<string>>(new Set());
@@ -3373,26 +3733,55 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const taskChatLogsByTask = useMemo(() => {
     const byTask = new Map<string, LogEntry[]>();
     for (const task of tasks) {
-      byTask.set(task.id, logsByTaskAll.get(task.id) ?? []);
+      const rows = logsByTaskAll.get(task.id) ?? [];
+      byTask.set(task.id, normalizedSearch ? rows.filter(matchesLogSearchChat) : rows);
     }
-
-    if (!normalizedSearch) return byTask;
-
-    const filtered = new Map<string, LogEntry[]>();
-    for (const [taskId, rows] of byTask.entries()) {
-      filtered.set(taskId, rows.filter(matchesLogSearchChat));
-    }
-    return filtered;
+    return byTask;
   }, [logsByTaskAll, matchesLogSearchChat, normalizedSearch, tasks]);
 
   const topicChatLogsByTopic = useMemo(() => {
-    if (!normalizedSearch) return topicRootLogsByTopic;
     const map = new Map<string, LogEntry[]>();
     for (const [topicId, rows] of topicRootLogsByTopic.entries()) {
-      map.set(topicId, rows.filter(matchesLogSearchChat));
+      map.set(topicId, normalizedSearch ? rows.filter(matchesLogSearchChat) : rows);
     }
     return map;
   }, [matchesLogSearchChat, normalizedSearch, topicRootLogsByTopic]);
+
+  const hiddenToolCallCountBySession = useMemo(() => {
+    const map = new Map<string, number>();
+    if (showToolCalls) return map;
+
+    for (const [taskId, rows] of logsByTaskAll.entries()) {
+      const topicId = taskTopicById.get(taskId) ?? "";
+      if (!topicId || topicId === "unassigned") continue;
+      const count = countTrailingHiddenToolCallsAwaitingAgent(rows);
+      if (count < 1) continue;
+      map.set(taskSessionKey(topicId, taskId), count);
+    }
+
+    for (const [topicId, rows] of topicRootLogsByTopic.entries()) {
+      if (!topicId || topicId === "unassigned") continue;
+      const count = countTrailingHiddenToolCallsAwaitingAgent(rows);
+      if (count < 1) continue;
+      map.set(topicSessionKey(topicId), count);
+    }
+
+    return map;
+  }, [logsByTaskAll, showToolCalls, taskTopicById, topicRootLogsByTopic]);
+
+  const hiddenToolCallCountForSession = useCallback(
+    (sessionKey: string) => {
+      if (showToolCalls) return 0;
+      const key = normalizeBoardSessionKey(sessionKey);
+      if (!key) return 0;
+      const direct = hiddenToolCallCountBySession.get(key);
+      if (typeof direct === "number") return direct;
+      const alias = typingAliasRef.current.get(key);
+      if (!alias) return 0;
+      return hiddenToolCallCountBySession.get(alias.sourceSessionKey) ?? 0;
+    },
+    [hiddenToolCallCountBySession, showToolCalls]
+  );
 
   const matchesTaskSearch = useCallback((task: Task) => {
     if (revealSelection && revealedTaskIds.includes(task.id)) return true;
@@ -4767,10 +5156,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     pushUrl({ raw: next ? "1" : "0" });
   };
 
-  const toggleMessageDensity = () => {
-    const next: MessageDensity = messageDensity === "compact" ? "comfortable" : "compact";
-    setMessageDensity(next);
-    pushUrl({ density: next });
+  const toggleToolCallsVisibility = () => {
+    const next = !showToolCalls;
+    setShowToolCalls(next);
+    pushUrl({ tools: next ? "1" : "0" });
   };
 
   const updateStatusFilter = (nextValue: string) => {
@@ -4865,6 +5254,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     committedSearch.current = parsedState.search;
     setShowRaw(parsedState.raw);
     setMessageDensity(parsedState.density);
+    setShowToolCalls(parsedState.showToolCalls);
     setStatusFilter(nextStatus);
     setShowDone(parsedState.done || nextStatus === "done");
     setRevealSelection(nextRevealSelection);
@@ -5009,6 +5399,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const pushUrl = useCallback(
     (
       overrides: Partial<Record<"q" | "raw" | "done" | "status" | "page" | "density", string>> & {
+        tools?: string;
         topics?: string[];
         tasks?: string[];
         reveal?: string;
@@ -5019,6 +5410,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const nextSearch = overrides.q ?? search;
       const nextRaw = overrides.raw ?? (showRaw ? "1" : "0");
       const nextDensity = overrides.density ?? messageDensity;
+      const nextTools = overrides.tools ?? (showToolCalls ? "1" : "0");
       const nextDone = overrides.done ?? (showDone ? "1" : "0");
       const nextStatus = overrides.status ?? statusFilter;
       const nextPage = overrides.page ?? String(safePage);
@@ -5031,6 +5423,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (nextRaw === "1") params.set("raw", "1");
       // Compact is the default; only persist when the user explicitly chooses comfortable.
       if (nextDensity === "comfortable") params.set("density", "comfortable");
+      if (nextTools === "1") params.set("tools", "1");
       if (nextDone === "1") params.set("done", "1");
       if (nextStatus !== "all") params.set("status", nextStatus);
       if (nextPage && nextPage !== "1") params.set("page", nextPage);
@@ -5070,6 +5463,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       safePage,
       search,
       messageDensity,
+      showToolCalls,
       revealSelection,
       showDone,
       showRaw,
@@ -5106,11 +5500,186 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const unifiedComposerHasContent = unifiedComposerHasText || unifiedComposerAttachments.length > 0;
   const unifiedComposerSendsToNewTopic = !selectedComposerTarget;
   const unifiedComposerSubmitLabel = unifiedComposerSendsToNewTopic ? "New Topic" : "Send";
+  const selectedComposerSessionKey = useMemo(() => {
+    if (selectedComposerTarget?.kind === "task") {
+      const topicId = String(selectedComposerTarget.task.topicId ?? "").trim();
+      const taskId = String(selectedComposerTarget.task.id ?? "").trim();
+      if (!topicId || !taskId) return "";
+      return taskSessionKey(topicId, taskId);
+    }
+    if (selectedComposerTarget?.kind === "topic") {
+      const topicId = String(selectedComposerTarget.topic.id ?? "").trim();
+      if (!topicId) return "";
+      return topicSessionKey(topicId);
+    }
+    return "";
+  }, [selectedComposerTarget]);
+  const activeComposerSessionKey = useMemo(() => {
+    if (!activeComposer) return "";
+    if (activeComposer.kind === "topic") {
+      const topicId = String(activeComposer.topicId ?? "").trim();
+      if (!topicId) return "";
+      return topicSessionKey(topicId);
+    }
+    const topicId = String(activeComposer.topicId ?? "").trim();
+    const taskId = String(activeComposer.taskId ?? "").trim();
+    if (!topicId || !taskId) return "";
+    return taskSessionKey(topicId, taskId);
+  }, [activeComposer]);
+  const requestIdForSession = useCallback(
+    (sessionKey: string) => {
+      const key = normalizeBoardSessionKey(sessionKey);
+      if (!key) return undefined;
+
+      const direct =
+        normalizeOpenClawRequestId(effectiveAwaitingAssistant[key]?.requestId) ||
+        normalizeOpenClawRequestId(openclawTyping[key]?.requestId) ||
+        normalizeOpenClawRequestId(openclawThreadWork[key]?.requestId) ||
+        normalizeOpenClawRequestId(orchestrationThreadWorkBySession[key]?.requestId);
+      if (direct) return direct;
+
+      const alias = typingAliasRef.current.get(key);
+      if (!alias) return undefined;
+      const sourceKey = normalizeBoardSessionKey(alias.sourceSessionKey);
+      if (!sourceKey) return undefined;
+      return (
+        normalizeOpenClawRequestId(effectiveAwaitingAssistant[sourceKey]?.requestId) ||
+        normalizeOpenClawRequestId(openclawTyping[sourceKey]?.requestId) ||
+        normalizeOpenClawRequestId(openclawThreadWork[sourceKey]?.requestId) ||
+        normalizeOpenClawRequestId(orchestrationThreadWorkBySession[sourceKey]?.requestId) ||
+        undefined
+      );
+    },
+    [effectiveAwaitingAssistant, openclawTyping, openclawThreadWork, orchestrationThreadWorkBySession]
+  );
+  const inFlightBoardSessionKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const key of Object.keys(effectiveAwaitingAssistant)) {
+      const normalized = normalizeBoardSessionKey(key);
+      if (!normalized || !isSessionResponding(normalized)) continue;
+      keys.add(normalized);
+    }
+    for (const [key, typing] of Object.entries(openclawTyping)) {
+      if (!typing?.typing) continue;
+      const normalized = normalizeBoardSessionKey(key);
+      if (!normalized || !isSessionResponding(normalized)) continue;
+      keys.add(normalized);
+    }
+    for (const [key, signal] of Object.entries(openclawThreadWork)) {
+      if (!signal?.active) continue;
+      const normalized = normalizeBoardSessionKey(key);
+      if (!normalized || !isSessionResponding(normalized)) continue;
+      keys.add(normalized);
+    }
+    for (const [key, work] of Object.entries(orchestrationThreadWorkBySession)) {
+      if (!work?.active) continue;
+      const normalized = normalizeBoardSessionKey(key);
+      if (!normalized || !isSessionResponding(normalized)) continue;
+      keys.add(normalized);
+    }
+    return Array.from(keys).sort();
+  }, [
+    effectiveAwaitingAssistant,
+    isSessionResponding,
+    openclawTyping,
+    openclawThreadWork,
+    orchestrationThreadWorkBySession,
+  ]);
+  const selectedComposerTargetResponding = useMemo(() => {
+    if (!selectedComposerSessionKey) return false;
+    return isSessionResponding(selectedComposerSessionKey);
+  }, [isSessionResponding, selectedComposerSessionKey]);
+
+  const clearUnifiedComposerFields = useCallback(() => {
+    setUnifiedComposerDraft("");
+    setSearch("");
+    setPage(1);
+    clearUnifiedComposerAttachments();
+    committedSearch.current = "";
+    pushUrl({ q: "", page: "1" }, "replace");
+  }, [clearUnifiedComposerAttachments, pushUrl, setPage, setSearch, setUnifiedComposerDraft]);
+
+  const resolveUnifiedCancelTargetSession = useCallback(() => {
+    const selectedKey = normalizeBoardSessionKey(selectedComposerSessionKey);
+    if (selectedKey) return { sessionKey: selectedKey, reason: "selected" as const };
+
+    const activeKey = normalizeBoardSessionKey(activeComposerSessionKey);
+    if (activeKey) return { sessionKey: activeKey, reason: "active" as const };
+
+    if (inFlightBoardSessionKeys.length === 1) {
+      return { sessionKey: inFlightBoardSessionKeys[0], reason: "single" as const };
+    }
+    return null;
+  }, [activeComposerSessionKey, inFlightBoardSessionKeys, selectedComposerSessionKey]);
+
+  const cancelUnifiedComposerRun = useCallback(
+    async ({ clearComposer }: { clearComposer: boolean }) => {
+      const target = resolveUnifiedCancelTargetSession();
+      if (!target) {
+        setUnifiedCancelNotice("Select a topic/task target to stop.");
+        return false;
+      }
+
+      setUnifiedComposerError(null);
+      const requestId = requestIdForSession(target.sessionKey);
+      try {
+        const res = await apiFetch(
+          "/api/openclaw/chat",
+          {
+            method: "DELETE",
+            headers: writeHeaders,
+            body: JSON.stringify({
+              sessionKey: target.sessionKey,
+              ...(requestId ? { requestId } : {}),
+            }),
+          },
+          token
+        );
+        if (!res.ok) {
+          const detail = await res.json().catch(() => null);
+          const msg = typeof detail?.detail === "string" ? detail.detail : `Failed to cancel (${res.status}).`;
+          setUnifiedComposerError(msg);
+          return false;
+        }
+
+        if (clearComposer) clearUnifiedComposerFields();
+        setAwaitingAssistant((prev) => {
+          if (!Object.prototype.hasOwnProperty.call(prev, target.sessionKey)) return prev;
+          const next = { ...prev };
+          delete next[target.sessionKey];
+          return next;
+        });
+        setUnifiedCancelNotice(
+          target.reason === "selected"
+            ? "Cancelled selected target run."
+            : target.reason === "active"
+              ? "Cancelled active chat run."
+              : "Cancelled the only active board run."
+        );
+        return true;
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : "Failed to cancel active run.";
+        setUnifiedComposerError(msg);
+        return false;
+      }
+    },
+    [clearUnifiedComposerFields, requestIdForSession, resolveUnifiedCancelTargetSession, token, writeHeaders]
+  );
 
   const sendUnifiedComposer = useCallback(async (forceNewTopic: boolean) => {
-    if (readOnly || unifiedComposerBusy) return;
+    if (readOnly) return;
     const message = unifiedComposerDraft.trim();
     if (!message) return;
+    if (isStopSlashCommand(message)) {
+      setUnifiedCancelNotice(null);
+      clearUnifiedComposerFields();
+      void cancelUnifiedComposerRun({ clearComposer: false });
+      return;
+    }
+    if (unifiedComposerBusy) return;
+
+    setUnifiedComposerError(null);
+    setUnifiedCancelNotice(null);
 
     const selectedTask = selectedComposerTarget?.kind === "task" ? selectedComposerTarget.task : null;
     const selectedTopic = selectedComposerTarget?.kind === "topic"
@@ -5197,41 +5766,51 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       markRecentBoardSend(sessionKey);
 
       const attachmentIds: string[] = [];
-      for (const file of unifiedComposerAttachments) {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        let binary = "";
-        for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
-        const contentBase64 = btoa(binary);
-        const up = await apiFetch('/api/attachments', {
-          method: 'POST',
-          headers: writeHeaders,
-          body: JSON.stringify({ fileName: file.name, mimeType: file.type || 'application/octet-stream', contentBase64 }),
-        }, token);
-        if (!up.ok) throw new Error('attachment_upload_failed');
-        const row = await up.json().catch(() => null) as { id?: string } | null;
-        if (row?.id) attachmentIds.push(String(row.id));
+      for (const attachment of unifiedComposerAttachments) {
+        const form = new FormData();
+        form.append("files", attachment.file, attachment.fileName);
+        const up = await apiFetch(
+          "/api/attachments",
+          {
+            method: "POST",
+            body: form,
+          },
+          token
+        );
+        if (!up.ok) {
+          const detail = await up.json().catch(() => null);
+          const msg = typeof detail?.detail === "string" ? detail.detail : `Failed to upload (${up.status}).`;
+          throw new Error(msg);
+        }
+        const rows = (await up.json().catch(() => null)) as Array<{ id?: string }> | null;
+        const uploadedId = Array.isArray(rows) ? String(rows[0]?.id ?? "").trim() : "";
+        if (!uploadedId) throw new Error("Failed to persist attachment upload.");
+        attachmentIds.push(uploadedId);
       }
 
-      const sendRes = await apiFetch('/api/openclaw/chat', {
-        method: 'POST',
-        headers: writeHeaders,
-        body: JSON.stringify({
-          sessionKey,
-          message,
-          spaceId: routedSpaceId,
-          // Keep unified messages promotable into task scope when classifier/orchestration decides.
-          topicOnly: false,
-          attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined,
-        }),
-      }, token);
-      if (!sendRes.ok) throw new Error('send_failed');
+      const sendRes = await apiFetch(
+        "/api/openclaw/chat",
+        {
+          method: "POST",
+          headers: writeHeaders,
+          body: JSON.stringify({
+            sessionKey,
+            message,
+            spaceId: routedSpaceId,
+            // Keep unified messages promotable into task scope when classifier/orchestration decides.
+            topicOnly: false,
+            attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined,
+          }),
+        },
+        token
+      );
+      if (!sendRes.ok) {
+        const detail = await sendRes.json().catch(() => null);
+        const msg = typeof detail?.detail === "string" ? detail.detail : `Failed to send (${sendRes.status}).`;
+        throw new Error(msg);
+      }
 
-      setUnifiedComposerDraft('');
-      setUnifiedComposerAttachments([]);
-      setSearch('');
-      setPage(1);
-      committedSearch.current = '';
-      pushUrl({ q: '', page: '1' }, 'replace');
+      clearUnifiedComposerFields();
 
       if (asNewTopic && createdTopicId) {
         setComposerTarget({ kind: "topic", topicId: createdTopicId });
@@ -5264,10 +5843,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         pushUrl({ topics: nextTopics, reveal: '1' }, 'replace');
         if (!mdUp) openMobileTopicChat(topicId);
       }
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : "Failed to send message.";
+      setUnifiedComposerError(messageText);
     } finally {
       setUnifiedComposerBusy(false);
     }
   }, [
+    cancelUnifiedComposerRun,
+    clearUnifiedComposerFields,
     expandedTasksSafe,
     expandedTopicsSafe,
     markRecentBoardSend,
@@ -5281,10 +5865,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setExpandedTasks,
     setExpandedTopicChats,
     setExpandedTopics,
-    setPage,
-    setSearch,
     setTopics,
-    setUnifiedComposerDraft,
     spaces,
     storeTopics,
     token,
@@ -5446,11 +6027,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     size="sm"
                     className={cn(
                       "w-full justify-center",
-                      messageDensity === "compact" ? "border-[rgba(255,90,45,0.5)]" : "opacity-85"
+                      showToolCalls ? "border-[rgba(255,90,45,0.5)]" : "opacity-85"
                     )}
-                    onClick={toggleMessageDensity}
+                    onClick={toggleToolCallsVisibility}
                   >
-                    {messageDensity === "compact" ? "Comfortable" : "Compact"}
+                    {showToolCalls ? "Hide tool calls" : "Show tool calls"}
                   </Button>
                   <Button
                     variant="secondary"
@@ -5485,15 +6066,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 </div>
               </div>
               <div className="hidden flex-wrap items-center gap-2 md:flex">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className={cn(twoColumn ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                  onClick={toggleTwoColumn}
-                  title={twoColumn ? "Switch to single column" : "Switch to two columns"}
-                >
-                  {twoColumn ? "1 column" : "2 column"}
-                </Button>
                 <Select
                   value={topicView}
                   onChange={(event) => {
@@ -5531,7 +6103,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     setLocalStorageItem(SHOW_SNOOZED_TASKS_KEY, showSnoozedTasks ? "false" : "true");
                   }}
                 >
-                  {showSnoozedTasks ? "Hide snoozed tasks" : "Show snoozed tasks"}
+                  {showSnoozedTasks ? "Hide snoozed" : "Show snoozed"}
                 </Button>
                 <Button
                   variant="secondary"
@@ -5544,10 +6116,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 <Button
                   variant="secondary"
                   size="sm"
-                  className={cn(messageDensity === "compact" ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                  onClick={toggleMessageDensity}
+                  className={cn(showToolCalls ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+                  onClick={toggleToolCallsVisibility}
                 >
-                  {messageDensity === "compact" ? "Comfortable view" : "Compact view"}
+                  {showToolCalls ? "Hide tool calls" : "Show tool calls"}
                 </Button>
                 <Button
                   variant="secondary"
@@ -5558,6 +6130,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   onClick={toggleExpandAll}
                 >
                   {isEverythingExpanded ? "Collapse all" : "Expand all"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className={cn("ml-auto", twoColumn ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+                  onClick={toggleTwoColumn}
+                  title={twoColumn ? "Switch to single column" : "Switch to two columns"}
+                >
+                  {twoColumn ? "1 column" : "2 column"}
                 </Button>
               </div>
             </div>
@@ -5572,14 +6153,36 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               onChange={(event) => {
                 const value = event.target.value;
                 setUnifiedComposerDraft(value);
+                setUnifiedComposerError(null);
+                setUnifiedCancelNotice(null);
                 setSearch(value);
                 setPage(1);
                 pushUrl({ q: value, page: "1" }, "replace");
               }}
+              enterKeyHint={mdUp ? undefined : "send"}
+              onPaste={(event) => {
+                const items = event.clipboardData?.items;
+                if (!items) return;
+                const files: File[] = [];
+                for (const item of Array.from(items)) {
+                  if (item.kind !== "file") continue;
+                  const file = item.getAsFile();
+                  if (file) files.push(file);
+                }
+                if (files.length === 0) return;
+                event.preventDefault();
+                addUnifiedComposerFiles(files);
+              }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && event.ctrlKey) {
                   event.preventDefault();
-                  void sendUnifiedComposer(true);
+                  void sendUnifiedComposer(unifiedComposerSendsToNewTopic);
+                  return;
+                }
+                // On mobile the keyboard "Send" key fires plain Enter — treat it as send.
+                if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !mdUp) {
+                  event.preventDefault();
+                  void sendUnifiedComposer(unifiedComposerSendsToNewTopic);
                 }
               }}
               placeholder="Chat about a Topic"
@@ -5601,7 +6204,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     type="button"
                     data-testid="unified-composer-target-clear"
                     className="rounded border border-transparent px-1 text-[rgb(var(--claw-muted))] transition hover:border-[rgb(var(--claw-border))] hover:text-[rgb(var(--claw-text))]"
-                    onClick={() => setComposerTarget(null)}
+                    onClick={() => {
+                      setComposerTarget(null);
+                      setUnifiedCancelNotice(null);
+                    }}
                     aria-label="Clear selected send target"
                     title="Clear selected send target"
                   >
@@ -5620,7 +6226,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     setUnifiedComposerDraft('');
                     setSearch('');
                     setPage(1);
-                    setUnifiedComposerAttachments([]);
+                    clearUnifiedComposerAttachments();
+                    setUnifiedComposerError(null);
+                    setUnifiedCancelNotice(null);
                     committedSearch.current = '';
                     pushUrl({ q: '', page: '1' }, 'replace');
                   }}
@@ -5631,11 +6239,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   <CloseIcon />
                 </button>
               ) : null}
-              <input ref={unifiedComposerFileRef} type="file" multiple className="hidden" onChange={(event) => {
-                const files = Array.from(event.target.files ?? []);
-                if (files.length > 0) setUnifiedComposerAttachments((prev) => [...prev, ...files]);
-                event.currentTarget.value = '';
-              }} />
+              <input
+                ref={unifiedComposerFileRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(event) => {
+                  addUnifiedComposerFiles(event.target.files ?? []);
+                  event.currentTarget.value = '';
+                }}
+              />
               <button
                 type="button"
                 onClick={() => unifiedComposerFileRef.current?.click()}
@@ -5649,6 +6262,25 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               >
                 <PaperclipIcon />
               </button>
+              {selectedComposerTargetResponding ? (
+                <button
+                  type="button"
+                  data-testid="unified-composer-stop"
+                  onClick={() => {
+                    setUnifiedCancelNotice(null);
+                    void cancelUnifiedComposerRun({ clearComposer: false });
+                  }}
+                  aria-label="Stop selected run"
+                  title="Stop selected run"
+                  className={cn(
+                    "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
+                    "border-[rgba(220,38,38,0.7)] bg-[rgba(220,38,38,0.25)] backdrop-blur",
+                    "hover:bg-[rgba(220,38,38,0.4)]"
+                  )}
+                >
+                  <StopIcon />
+                </button>
+              ) : null}
               {unifiedComposerHasText ? (
                 <Button
                   data-testid={unifiedComposerSendsToNewTopic ? "unified-composer-new-topic" : "unified-composer-send"}
@@ -5664,11 +6296,30 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           <div className="flex flex-wrap items-start gap-3">
             {unifiedComposerAttachments.length > 0 ? (
               <AttachmentStrip
-                attachments={unifiedComposerAttachments.map((file, idx) => ({ id: `u:${idx}:${file.name}`, fileName: file.name, mimeType: file.type || 'application/octet-stream', sizeBytes: file.size }))}
+                attachments={unifiedComposerAttachments}
+                onRemove={(idx) => {
+                  setUnifiedComposerAttachments((prev) => {
+                    const target = prev[idx];
+                    if (target?.previewUrl) {
+                      try {
+                        URL.revokeObjectURL(target.previewUrl);
+                      } catch {
+                        // ignore
+                      }
+                    }
+                    return prev.filter((_, i) => i !== idx);
+                  });
+                }}
                 className="ml-auto"
               />
             ) : null}
           </div>
+          {unifiedComposerError ? (
+            <div className="text-xs text-[rgb(var(--claw-warning))]">{unifiedComposerError}</div>
+          ) : null}
+          {unifiedCancelNotice ? (
+            <div className="text-xs text-[rgb(var(--claw-muted))]">{unifiedCancelNotice}</div>
+          ) : null}
         </div>
         {readOnly && (
           <span className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add token to move tasks.</span>
@@ -5701,12 +6352,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const doingCount = taskList.filter((task) => task.status === "doing").length;
 	          const blockedCount = taskList.filter((task) => task.status === "blocked").length;
 	          const lastActivity = logsByTopic.get(topicId)?.[0]?.createdAt ?? topic.updatedAt;
-	          const hasUnsnoozedBadge = Object.prototype.hasOwnProperty.call(unsnoozedTopicBadges, topicId);
-	          const topicChatAllLogs = topicChatLogsByTopic.get(topicId) ?? [];
+          const hasUnsnoozedBadge = Object.prototype.hasOwnProperty.call(unsnoozedTopicBadges, topicId);
+          const topicChatAllLogs = topicChatLogsByTopic.get(topicId) ?? [];
+          const topicChatVisibleCount = countVisibleChatLogEntries(topicChatAllLogs, showToolCalls);
           const topicChatEntryCountLabel = formatChatEntryCountLabel(
-            topicChatCountById[topicId],
-            topicChatAllLogs.length,
-            chatCountsHydrated
+            showToolCalls ? topicChatCountById[topicId] : undefined,
+            showToolCalls ? topicChatAllLogs.length : topicChatVisibleCount,
+            showToolCalls ? chatCountsHydrated : true
           );
 	          const topicMatchesSearch =
 	            normalizedSearch.length > 0 &&
@@ -5715,6 +6367,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	          const showTasks = true;
 	          const isExpanded = expandedTopicsSafe.has(topicId);
 	          const topicChatKey = chatKeyForTopic(topicId);
+          const topicChatSessionKey = topicSessionKey(topicId);
+          const topicHiddenToolCallCount = hiddenToolCallCountForSession(topicChatSessionKey);
 	          const topicChatFullscreen =
 	            !mdUp &&
 	            mobileLayer === "chat" &&
@@ -6405,13 +7059,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         </>
                       );
                       const taskChatAllLogs = taskChatLogsByTask.get(task.id) ?? [];
+                      const taskChatVisibleCount = countVisibleChatLogEntries(taskChatAllLogs, showToolCalls);
                       const taskChatEntryCountLabel = formatChatEntryCountLabel(
-                        taskChatCountById[task.id],
-                        taskChatAllLogs.length,
-                        chatCountsHydrated
+                        showToolCalls ? taskChatCountById[task.id] : undefined,
+                        showToolCalls ? taskChatAllLogs.length : taskChatVisibleCount,
+                        showToolCalls ? chatCountsHydrated : true
                       );
                       const taskChatBlurb = deriveChatHeaderBlurb(taskChatAllLogs);
 	                      const taskChatKey = chatKeyForTask(task.id);
+                      const taskChatSessionKey = taskSessionKey(topicId, task.id);
+                      const taskHiddenToolCallCount = hiddenToolCallCountForSession(taskChatSessionKey);
                       const taskSelectedForSend = selectedTaskIdForSend === task.id;
                       const start = normalizedSearch
                         ? 0
@@ -7203,6 +7860,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       metaExpandEpoch={chatMetaExpandEpoch}
                                       metaCollapseEpoch={chatMetaCollapseEpoch}
 	                                      variant="chat"
+                                      hideToolCallsInChat={!showToolCalls}
 	                                      enableNavigation={false}
 	                                    />
                                       {!isUnassigned
@@ -7259,11 +7917,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                               </div>
                                             ))
                                         : null}
-                                      {!isUnassigned && isSessionResponding(taskSessionKey(topicId, task.id)) ? (
+                                      {!isUnassigned && isSessionResponding(taskChatSessionKey) ? (
                                         <div className="py-1">
                                           <div className="flex justify-start">
                                             <div className="w-full max-w-[78%] px-4 py-2" title="OpenClaw responding">
                                               <TypingDots />
+                                              {taskHiddenToolCallCount > 0 ? (
+                                                <span
+                                                  data-testid={`task-chat-hidden-tool-count-${task.id}`}
+                                                  className="ml-2 text-[11px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.9)]"
+                                                >
+                                                  {taskHiddenToolCallCount} hidden tool{taskHiddenToolCallCount === 1 ? " call" : " calls"}
+                                                </span>
+                                              ) : null}
                                             </div>
                                           </div>
                                         </div>
@@ -7317,7 +7983,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                  }
 			                                  onSendUpdate={handleComposerSendUpdate}
 			                                  waiting={isSessionResponding(taskSessionKey(topicId, task.id))}
-			                                  waitingRequestId={effectiveAwaitingAssistant[taskSessionKey(topicId, task.id)]?.requestId}
+			                                  waitingRequestId={requestIdForSession(taskSessionKey(topicId, task.id))}
 			                                  onCancel={() => {
 			                                    const sk = taskSessionKey(topicId, task.id);
 			                                    setAwaitingAssistant((prev) => {
@@ -7594,11 +8260,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                                showDensityToggle={false}
 		                                showRawAll={showRaw}
 			                                messageDensity={messageDensity}
-			                                allowNotes
-			                                metaDefaultCollapsed={true}
-			                                metaExpandEpoch={chatMetaExpandEpoch}
-			                                metaCollapseEpoch={chatMetaCollapseEpoch}
+		                                allowNotes
+		                                metaDefaultCollapsed={true}
+		                                metaExpandEpoch={chatMetaExpandEpoch}
+		                                metaCollapseEpoch={chatMetaCollapseEpoch}
 			                                variant="chat"
+                                hideToolCallsInChat={!showToolCalls}
 			                                enableNavigation={false}
 			                              />
                                       {pendingMessages
@@ -7653,11 +8320,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                             </div>
                                           </div>
                                         ))}
-                                      {isSessionResponding(topicSessionKey(topicId)) ? (
+                                      {isSessionResponding(topicChatSessionKey) ? (
                                         <div className="py-1">
                                           <div className="flex justify-start">
                                             <div className="w-full max-w-[78%] px-4 py-2" title="OpenClaw responding">
                                               <TypingDots />
+                                              {topicHiddenToolCallCount > 0 ? (
+                                                <span
+                                                  data-testid={`topic-chat-hidden-tool-count-${topicId}`}
+                                                  className="ml-2 text-[11px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.9)]"
+                                                >
+                                                  {topicHiddenToolCallCount} hidden tool{topicHiddenToolCallCount === 1 ? " call" : " calls"}
+                                                </span>
+                                              ) : null}
                                             </div>
                                           </div>
                                         </div>
@@ -7703,7 +8378,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                            }
 		                            onSendUpdate={handleComposerSendUpdate}
 		                            waiting={isSessionResponding(topicSessionKey(topicId))}
-		                            waitingRequestId={effectiveAwaitingAssistant[topicSessionKey(topicId)]?.requestId}
+		                            waitingRequestId={requestIdForSession(topicSessionKey(topicId))}
 		                            onCancel={() => {
 		                              const sk = topicSessionKey(topicId);
 		                              setAwaitingAssistant((prev) => {

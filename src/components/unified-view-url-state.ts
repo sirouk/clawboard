@@ -8,6 +8,7 @@ export type UnifiedUrlState = {
   search: string;
   raw: boolean;
   density: UnifiedUrlDensity;
+  showToolCalls: boolean;
   done: boolean;
   status: string;
   reveal: boolean;
@@ -31,6 +32,7 @@ const DEFAULT_STATE: UnifiedUrlState = {
   search: "",
   raw: true,
   density: "compact",
+  showToolCalls: false,
   done: false,
   status: "all",
   reveal: false,
@@ -117,6 +119,7 @@ export function parseUnifiedUrlState(url: URL, options: ParseUnifiedUrlStateOpti
     search: params.get("q") ?? "",
     raw: parseRawParam(params, rawParseMode, rawDefaultWhenMissing),
     density,
+    showToolCalls: params.get("tools") === "1",
     done: params.get("done") === "1",
     status: params.get("status") ?? "all",
     reveal: params.get("reveal") === "1",

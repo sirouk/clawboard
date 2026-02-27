@@ -43,6 +43,7 @@ type DataContextValue = {
   unreadMessageCount: number;
   drafts: Record<string, Draft>;
   openclawTyping: Record<string, { typing: boolean; requestId?: string; updatedAt: string }>;
+  openclawThreadWork: Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }>;
   hydrated: boolean;
   setSpaces: React.Dispatch<React.SetStateAction<Space[]>>;
   setTopics: React.Dispatch<React.SetStateAction<Topic[]>>;
@@ -134,6 +135,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [openclawTyping, setOpenclawTyping] = useState<
     Record<string, { typing: boolean; requestId?: string; updatedAt: string }>
+  >({});
+  const [openclawThreadWork, setOpenclawThreadWork] = useState<
+    Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }>
   >({});
   const [hydrated, setHydrated] = useState(false);
   const unsnoozedTopicsRaw = useLocalStorageItem(UNSNOOZED_TOPICS_KEY) ?? "{}";
@@ -405,6 +409,26 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         setOpenclawTyping((prev) => ({
           ...prev,
           [normalizedSessionKey]: { typing, requestId: requestId || undefined, updatedAt },
+        }));
+        return;
+      }
+      if (event.type === "openclaw.thread_work" && event.data && typeof event.data === "object") {
+        const payload = event.data as { sessionKey?: unknown; active?: unknown; requestId?: unknown; reason?: unknown };
+        const sessionKey = String(payload.sessionKey ?? "").trim();
+        const normalizedSessionKey = normalizeBoardSessionKey(sessionKey);
+        if (!normalizedSessionKey) return;
+        const active = Boolean(payload.active);
+        const requestId = String(payload.requestId ?? "").trim();
+        const reason = String(payload.reason ?? "").trim();
+        const updatedAt = new Date().toISOString();
+        setOpenclawThreadWork((prev) => ({
+          ...prev,
+          [normalizedSessionKey]: {
+            active,
+            requestId: requestId || undefined,
+            reason: reason || undefined,
+            updatedAt,
+          },
         }));
         return;
       }
@@ -703,6 +727,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       unreadMessageCount,
       drafts,
       openclawTyping,
+      openclawThreadWork,
       hydrated,
       setSpaces,
       setTopics,
@@ -730,6 +755,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       unreadMessageCount,
       drafts,
       openclawTyping,
+      openclawThreadWork,
       hydrated,
       markChatSeen,
       dismissUnsnoozedTopicBadge,
