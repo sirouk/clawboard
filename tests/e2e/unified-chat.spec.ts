@@ -187,6 +187,7 @@ test("agent message exposes in-between tool call count and can reveal hidden row
   const actionText = `tool-inline-action-${suffix}`;
   const systemText = `tool-inline-system-${suffix}`;
   const assistantText = `assistant-inline-${suffix}`;
+  const priorActionText = `tool-inline-prior-${suffix}`;
 
   const createTopic = await request.post(`${apiBase}/api/topics`, {
     data: { id: topicId, name: topicName, pinned: false },
@@ -197,6 +198,37 @@ test("agent message exposes in-between tool call count and can reveal hidden row
     data: { id: taskId, topicId, title: taskTitle, status: "todo", pinned: false },
   });
   expect(createTask.ok()).toBeTruthy();
+
+  const previousUserLog = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      taskId,
+      type: "conversation",
+      content: `previous-user-inline-${suffix}`,
+      summary: "Previous user prompt",
+      classificationStatus: "classified",
+      agentId: "user",
+      agentLabel: "User",
+      source: { sessionKey, requestId: `req-inline-previous-${suffix}` },
+    },
+  });
+  expect(previousUserLog.ok()).toBeTruthy();
+
+  const priorActionLog = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      taskId,
+      type: "action",
+      content: priorActionText,
+      summary: `Tool call: inline-prior-${suffix}`,
+      classificationStatus: "classified",
+      agentId: "assistant",
+      agentLabel: "OpenClaw",
+      source: { sessionKey },
+    },
+  });
+  expect(priorActionLog.ok()).toBeTruthy();
+  const priorActionLogEntry = await priorActionLog.json();
 
   const userLog = await request.post(`${apiBase}/api/log`, {
     data: {
@@ -266,8 +298,10 @@ test("agent message exposes in-between tool call count and can reveal hidden row
 
   const actionRow = page.locator(`[data-log-id="${actionLogEntry.id}"]`);
   const systemRow = page.locator(`[data-log-id="${systemLogEntry.id}"]`);
+  const priorActionRow = page.locator(`[data-log-id="${priorActionLogEntry.id}"]`);
   await expect(actionRow).toHaveCount(0);
   await expect(systemRow).toHaveCount(0);
+  await expect(priorActionRow).toHaveCount(0);
 
   const inlineToggle = page.getByTestId(`tool-call-toggle-${assistantLog.id}`);
   await expect(inlineToggle).toBeVisible();
@@ -276,10 +310,110 @@ test("agent message exposes in-between tool call count and can reveal hidden row
   await inlineToggle.click();
   await expect(actionRow).toBeVisible();
   await expect(systemRow).toBeVisible();
+  await expect(priorActionRow).toHaveCount(0);
 
   await inlineToggle.click();
   await expect(actionRow).toHaveCount(0);
   await expect(systemRow).toHaveCount(0);
+});
+
+test("topic and task labels include scoped tool/system call totals", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-call-totals-${suffix}`;
+  const topicName = `Call Totals ${suffix}`;
+  const taskAId = `task-call-totals-a-${suffix}`;
+  const taskATitle = `Call Totals A ${suffix}`;
+  const taskBId = `task-call-totals-b-${suffix}`;
+  const taskBTitle = `Call Totals B ${suffix}`;
+  const taskASessionKey = `clawboard:task:${topicId}:${taskAId}`;
+  const taskBSessionKey = `clawboard:task:${topicId}:${taskBId}`;
+  const topicSessionKey = `clawboard:topic:${topicId}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const createTaskA = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskAId, topicId, title: taskATitle, status: "todo", pinned: false },
+  });
+  expect(createTaskA.ok()).toBeTruthy();
+
+  const createTaskB = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskBId, topicId, title: taskBTitle, status: "todo", pinned: false },
+  });
+  expect(createTaskB.ok()).toBeTruthy();
+
+  const topicAction = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      type: "action",
+      content: `topic-tool-${suffix}`,
+      summary: "Tool call: topic-tool",
+      classificationStatus: "classified",
+      agentId: "assistant",
+      agentLabel: "OpenClaw",
+      source: { sessionKey: topicSessionKey },
+    },
+  });
+  expect(topicAction.ok()).toBeTruthy();
+
+  const taskAAction = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      taskId: taskAId,
+      type: "action",
+      content: `task-a-tool-${suffix}`,
+      summary: "Tool call: task-a-tool",
+      classificationStatus: "classified",
+      agentId: "assistant",
+      agentLabel: "OpenClaw",
+      source: { sessionKey: taskASessionKey },
+    },
+  });
+  expect(taskAAction.ok()).toBeTruthy();
+
+  const taskASystem = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      taskId: taskAId,
+      type: "system",
+      content: `task-a-system-${suffix}`,
+      summary: "System event",
+      classificationStatus: "classified",
+      agentId: "system",
+      agentLabel: "OpenClaw",
+      source: { sessionKey: taskASessionKey },
+    },
+  });
+  expect(taskASystem.ok()).toBeTruthy();
+
+  const taskBAction = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      taskId: taskBId,
+      type: "action",
+      content: `task-b-tool-${suffix}`,
+      summary: "Tool call: task-b-tool",
+      classificationStatus: "classified",
+      agentId: "assistant",
+      agentLabel: "OpenClaw",
+      source: { sessionKey: taskBSessionKey },
+    },
+  });
+  expect(taskBAction.ok()).toBeTruthy();
+
+  await page.goto(`/u/topic/${topicId}/task/${taskAId}`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const topicCard = page.locator(`[data-topic-card-id="${topicId}"]`).first();
+  const taskACard = page.locator(`[data-task-card-id="${taskAId}"]`).first();
+  const taskBCard = page.locator(`[data-task-card-id="${taskBId}"]`).first();
+
+  await expect(topicCard.getByText(/4 tool\/system calls/i).first()).toBeVisible();
+  await expect(taskACard.getByText(/2 tool\/system calls/i).first()).toBeVisible();
+  await expect(taskBCard.getByText(/1 tool\/system call/i).first()).toBeVisible();
 });
 
 test("typing indicator shows live hidden tool call count while awaiting agent response", async ({ page, request }) => {

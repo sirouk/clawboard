@@ -1045,6 +1045,19 @@ function countVisibleChatLogEntries(entries: LogEntry[], showToolCalls: boolean)
   return count;
 }
 
+function countToolingOrSystemChatLogEntries(entries: LogEntry[]) {
+  let count = 0;
+  for (const entry of entries) {
+    if (isToolingOrSystemChatLog(entry)) count += 1;
+  }
+  return count;
+}
+
+function formatToolingOrSystemCallCountLabel(count: number) {
+  const total = Math.max(0, Math.floor(Number(count) || 0));
+  return `${total} tool/system${total === 1 ? " call" : " calls"}`;
+}
+
 function countTrailingHiddenToolCallsAwaitingAgent(entries: LogEntry[]) {
   let seenUserMessage = false;
   let agentResponded = false;
@@ -6360,6 +6373,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             showToolCalls ? topicChatAllLogs.length : topicChatVisibleCount,
             showToolCalls ? chatCountsHydrated : true
           );
+          const topicToolingOrSystemCallCount =
+            countToolingOrSystemChatLogEntries(topicChatAllLogs) +
+            taskList.reduce(
+              (sum, task) => sum + countToolingOrSystemChatLogEntries(taskChatLogsByTask.get(task.id) ?? []),
+              0
+            );
+          const topicToolingOrSystemCallCountLabel = formatToolingOrSystemCallCountLabel(topicToolingOrSystemCallCount);
+          const topicChatMetricsLabel = `${topicChatEntryCountLabel} · ${topicToolingOrSystemCallCountLabel}`;
 	          const topicMatchesSearch =
 	            normalizedSearch.length > 0 &&
 	            matchesSearchText(`${topic.name} ${topic.description ?? ""}`, searchPlan);
@@ -6873,7 +6894,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                    <span>{openCount} open</span>
 	                    {isExpanded && <span>{doingCount} doing</span>}
 	                    {isExpanded && <span>{blockedCount} blocked</span>}
-                      <span>{topicChatEntryCountLabel}</span>
+                      <span>{topicChatMetricsLabel}</span>
 	                    {hasUnsnoozedBadge ? (
 	                      <button
 	                        type="button"
@@ -7065,6 +7086,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         showToolCalls ? taskChatAllLogs.length : taskChatVisibleCount,
                         showToolCalls ? chatCountsHydrated : true
                       );
+                      const taskToolingOrSystemCallCount = countToolingOrSystemChatLogEntries(taskChatAllLogs);
+                      const taskToolingOrSystemCallCountLabel = formatToolingOrSystemCallCountLabel(taskToolingOrSystemCallCount);
+                      const taskChatMetricsLabel = `${taskChatEntryCountLabel} · ${taskToolingOrSystemCallCountLabel}`;
                       const taskChatBlurb = deriveChatHeaderBlurb(taskChatAllLogs);
 	                      const taskChatKey = chatKeyForTask(task.id);
                       const taskChatSessionKey = taskSessionKey(topicId, task.id);
@@ -7464,7 +7488,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                              <div className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`task:${task.id}`]}</div>
 	                            )}
                             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[rgb(var(--claw-muted))]">
-                              <span>{taskChatEntryCountLabel}</span>
+                              <span>{taskChatMetricsLabel}</span>
 	                              {hasUnsnoozedTaskBadge ? (
 	                                <button
 	                                  type="button"
@@ -7752,7 +7776,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                               data-testid={`task-chat-entries-${task.id}`}
                                               className="shrink-0 whitespace-nowrap text-xs text-[rgb(var(--claw-muted))]"
                                             >
-                                              {taskChatEntryCountLabel}
+                                              {taskChatMetricsLabel}
                                             </span>
                                             {truncated ? (
                                               <Button
@@ -8048,7 +8072,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                              </>
 			                            ) : null}
 			                          </div>
-			                          <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topicChatEntryCountLabel}</div>
+			                          <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topicChatMetricsLabel}</div>
 			                        </div>
 				                        <button
 				                          type="button"
@@ -8156,7 +8180,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                           data-testid={`topic-chat-entries-${topicId}`}
                                           className="shrink-0 whitespace-nowrap text-xs text-[rgb(var(--claw-muted))]"
                                         >
-                                          {topicChatEntryCountLabel}
+                                          {topicChatMetricsLabel}
                                         </span>
                                         {topicChatTruncated ? (
                                           <Button

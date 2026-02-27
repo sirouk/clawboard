@@ -656,9 +656,18 @@ export function LogList({
         pending.push(entry);
         continue;
       }
-      if (isAgentConversationLog(entry) && pending.length > 0) {
-        map.set(entry.id, pending);
-        pending = [];
+      if (entry.type === "conversation") {
+        const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+        if (agentId === "user") {
+          // User turns start a new segment; don't carry hidden tool rows
+          // from a prior turn into the next assistant message count.
+          pending = [];
+          continue;
+        }
+        if (isAgentConversationLog(entry) && pending.length > 0) {
+          map.set(entry.id, pending);
+          pending = [];
+        }
       }
     }
     return map;
