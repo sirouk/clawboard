@@ -42,6 +42,7 @@ from .models import (
     DeletedLog,
     SessionRoutingMemory,
     OpenClawRequestRoute,
+    IngestReceipt,
     IngestQueue,
     OpenClawChatDispatchQueue,
     Attachment,
@@ -2901,6 +2902,113 @@ def _find_by_source_identity(session, key: str):
     return session.exec(select(LogEntry).where(LogEntry.sourceIdentityKey == key)).first()
 
 
+def _find_ingest_receipt(session: Any, event_id: str | None) -> IngestReceipt | None:
+    key = str(event_id or "").strip()
+    if not key:
+        return None
+    return session.get(IngestReceipt, key)
+
+
+def _openclaw_source_uses_dual_ingest_paths(source_meta: dict[str, Any] | None) -> bool:
+    source = source_meta if isinstance(source_meta, dict) else {}
+    if not source:
+        return False
+    channel = _normalize_source_identity_channel(source.get("channel"))
+    if channel == "openclaw":
+        return True
+    session_key = str(source.get("sessionKey") or "").strip().lower()
+    if not session_key:
+        return False
+    if "clawboard:" in session_key:
+        return True
+    if session_key.startswith("agent:"):
+        return True
+    if session_key.startswith("channel:webchat"):
+        return True
+    return False
+
+
+def _immutable_openclaw_ingest_event_id(
+    *,
+    payload: LogAppend,
+    source_meta: dict[str, Any] | None,
+) -> str | None:
+    source = source_meta if isinstance(source_meta, dict) else {}
+    if not source:
+        return None
+    if not _openclaw_source_uses_dual_ingest_paths(source):
+        return None
+    entry_type = str(payload.type or "").strip().lower()
+    if entry_type != "conversation":
+        return None
+    actor = str(payload.agentId or payload.agentLabel or "").strip().lower()
+    if not actor or actor == "user":
+        return None
+
+    request_id = _canonical_openclaw_request_id_from_source(source)
+    session_key = str(source.get("sessionKey") or "").strip()
+    board_scope_key = _canonical_board_scope_session_key(source_meta=source, session_key=session_key)
+    base_scope_key = board_scope_key or _base_session_key(session_key)
+    scope_key = str(base_scope_key or "").strip().lower() or "-"
+
+    # Board-scoped assistant replies can surface through both wrapped direct/webchat
+    # and canonical clawboard replay paths. Anchor these to requestId + semantic body
+    # so format-only differences collapse while distinct completions remain separate.
+    if request_id and board_scope_key:
+        semantic_text = _normalize_openclaw_assistant_semantic_text(
+            str(payload.content or payload.summary or payload.raw or "")
+        )
+        if semantic_text:
+            semantic_digest = hashlib.sha1(semantic_text.encode("utf-8")).hexdigest()[:16]
+            return f"ingest:openclaw:{entry_type}:{actor}:{scope_key}:req:{request_id}:c:{semantic_digest}"
+        return f"ingest:openclaw:{entry_type}:{actor}:{scope_key}:req:{request_id}"
+
+    for key in ("eventId", "event_id", "originEventId", "originId", "messageId", "id", "uuid"):
+        candidate = str(source.get(key) or "").strip()
+        if candidate:
+            return f"ingest:openclaw:{entry_type}:{actor}:{scope_key}:event:{_clip(candidate, 240)}"
+
+    if request_id:
+        return f"ingest:openclaw:{entry_type}:{actor}:{scope_key}:req:{request_id}"
+    return None
+
+
+def _upsert_ingest_receipt(
+    session: Any,
+    *,
+    event_id: str,
+    log_id: str | None,
+    source_path: str,
+    stamp: str,
+) -> IngestReceipt:
+    key = str(event_id or "").strip()
+    if not key:
+        raise ValueError("event_id is required")
+    normalized_path = str(source_path or "live").strip().lower()
+    if normalized_path not in {"live", "history"}:
+        normalized_path = "live"
+
+    receipt = session.get(IngestReceipt, key)
+    if receipt is None:
+        receipt = IngestReceipt(
+            eventId=key,
+            logId=str(log_id or "").strip() or None,
+            sourcePath=normalized_path,
+            createdAt=stamp,
+            updatedAt=stamp,
+        )
+        session.add(receipt)
+        return receipt
+
+    if log_id and (not str(receipt.logId or "").strip()):
+        receipt.logId = str(log_id).strip()
+    if normalized_path == "live" and str(receipt.sourcePath or "").strip().lower() != "live":
+        receipt.sourcePath = "live"
+    receipt.updatedAt = stamp
+    session.add(receipt)
+    return receipt
+
+
 def _normalize_source_identity_channel(value: Any) -> str:
     channel = str(value or "").strip().lower()
     if channel in {"openclaw", "clawboard", "webchat", "direct"}:
@@ -2966,6 +3074,13 @@ def _source_identity_key(
     ts_ms = _source_identity_timestamp_ms(created_at)
     if request_id and actor == "user":
         return f"srcid:{entry_type}:{actor}:{channel or '-'}:{session_key}:req:{request_id}"
+    if request_id and actor != "user":
+        semantic_text = _normalize_openclaw_assistant_semantic_text(
+            str(payload.content or payload.summary or payload.raw or "")
+        )
+        if semantic_text:
+            semantic_digest = hashlib.sha1(semantic_text.encode("utf-8")).hexdigest()[:16]
+            return f"srcid:{entry_type}:{actor}:{channel or '-'}:{session_key}:req:{request_id}:c:{semantic_digest}"
     if request_id and channel == "openclaw" and ts_ms:
         return f"srcid:{entry_type}:{actor}:{channel}:{session_key}:req:{request_id}:t:{ts_ms}"
 
@@ -4073,10 +4188,14 @@ def _canonical_openclaw_assistant_idempotency_key(
     base_request_id = _openclaw_request_id_base_from_source(source_meta)
     if not base_request_id or not base_request_id.lower().startswith("occhat-"):
         return None
-    message_id = str(source_meta.get("messageId") or "").strip()
-    if message_id and not _openclaw_request_ids_equivalent(message_id, base_request_id):
-        message_digest = hashlib.sha1(message_id.encode("utf-8")).hexdigest()[:16]
-        return f"openclaw-assistant:{base_request_id}:m:{message_digest}"
+    # Prefer semantic content identity so markdown/plain variants from different
+    # ingestion paths converge on a single assistant idempotency key.
+    normalized_content = _normalize_openclaw_assistant_semantic_text(
+        str(payload.content or payload.summary or payload.raw or "")
+    )
+    if normalized_content:
+        content_digest = hashlib.sha1(normalized_content.encode("utf-8")).hexdigest()[:16]
+        return f"openclaw-assistant:{base_request_id}:c:{content_digest}"
 
     normalized_content = _normalize_openclaw_assistant_dedupe_text(
         str(payload.content or payload.summary or payload.raw or "")
@@ -4084,6 +4203,11 @@ def _canonical_openclaw_assistant_idempotency_key(
     if normalized_content:
         content_digest = hashlib.sha1(normalized_content.encode("utf-8")).hexdigest()[:16]
         return f"openclaw-assistant:{base_request_id}:c:{content_digest}"
+
+    message_id = str(source_meta.get("messageId") or "").strip()
+    if message_id and not _openclaw_request_ids_equivalent(message_id, base_request_id):
+        message_digest = hashlib.sha1(message_id.encode("utf-8")).hexdigest()[:16]
+        return f"openclaw-assistant:{base_request_id}:m:{message_digest}"
 
     created_ts = _iso_to_timestamp(created_at) if created_at else None
     if created_ts is not None:
@@ -4117,6 +4241,10 @@ def _normalize_openclaw_assistant_semantic_text(value: str | None) -> str:
     cleaned = cleaned.replace(":", " ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
     cleaned = re.sub(r"[^\w\s/\.]", " ", cleaned)
+    # Normalize markdown-induced spacing around retained punctuation so
+    # `source.` and `source .` collapse to the same semantic token stream.
+    cleaned = re.sub(r"\s+([/.])", r"\1", cleaned)
+    cleaned = re.sub(r"([/.])(?=\w)", r"\1 ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
@@ -4687,15 +4815,39 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     updated_at = now_iso()
 
     source_meta = payload.source.copy() if isinstance(payload.source, dict) else None
+    ingest_path = "live"
+    if isinstance(source_meta, dict):
+        raw_ingest_path = str(source_meta.pop("_ingestPath", "live") or "live").strip().lower()
+        if raw_ingest_path in {"live", "history"}:
+            ingest_path = raw_ingest_path
     _maybe_attach_openclaw_request_id(session, payload=payload, source_meta=source_meta, created_at=created_at)
     canonical_source_request_id = _canonical_openclaw_request_id_from_source(source_meta)
     if source_meta is not None and canonical_source_request_id:
         source_meta["requestId"] = canonical_source_request_id
+    ingest_event_id = _immutable_openclaw_ingest_event_id(payload=payload, source_meta=source_meta)
+    if source_meta is not None and ingest_event_id:
+        source_meta["eventId"] = ingest_event_id
+
     source_identity_key = _source_identity_key(
         payload=payload,
         source_meta=source_meta,
         created_at=created_at,
     )
+
+    if ingest_event_id:
+        receipt = _find_ingest_receipt(session, ingest_event_id)
+        if receipt and str(receipt.logId or "").strip():
+            existing = session.get(LogEntry, str(receipt.logId).strip())
+            if existing:
+                return _maybe_upgrade_existing_duplicate_log(
+                    session,
+                    existing=existing,
+                    payload=payload,
+                    source_meta=source_meta,
+                    updated_at=updated_at,
+                    idempotency_key=idempotency_key,
+                    source_identity_key=source_identity_key,
+                )
 
     if idempotency_key:
         existing = _find_by_idempotency(session, idempotency_key)
@@ -5239,11 +5391,33 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 )
             except Exception:
                 board_route_retro_scoped_rows = []
+    if ingest_event_id:
+        _upsert_ingest_receipt(
+            session,
+            event_id=ingest_event_id,
+            log_id=str(entry.id or "").strip() or None,
+            source_path=ingest_path,
+            stamp=updated_at,
+        )
     session.add(entry)
     try:
         session.commit()
     except IntegrityError:
         session.rollback()
+        if ingest_event_id:
+            receipt = _find_ingest_receipt(session, ingest_event_id)
+            if receipt and str(receipt.logId or "").strip():
+                existing = session.get(LogEntry, str(receipt.logId).strip())
+                if existing:
+                    return _maybe_upgrade_existing_duplicate_log(
+                        session,
+                        existing=existing,
+                        payload=payload,
+                        source_meta=source_meta,
+                        updated_at=updated_at,
+                        idempotency_key=idempotency_key,
+                        source_identity_key=source_identity_key,
+                    )
         if idempotency_key:
             existing = _find_by_idempotency(session, idempotency_key)
             if existing:
@@ -5280,6 +5454,20 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 session.rollback()
                 # Another writer may have committed the same idempotency key while we were
                 # backing off from a SQLite lock; treat as idempotent.
+                if ingest_event_id:
+                    receipt = _find_ingest_receipt(session, ingest_event_id)
+                    if receipt and str(receipt.logId or "").strip():
+                        existing = session.get(LogEntry, str(receipt.logId).strip())
+                        if existing:
+                            return _maybe_upgrade_existing_duplicate_log(
+                                session,
+                                existing=existing,
+                                payload=payload,
+                                source_meta=source_meta,
+                                updated_at=updated_at,
+                                idempotency_key=idempotency_key,
+                                source_identity_key=source_identity_key,
+                            )
                 if idempotency_key:
                     existing = _find_by_idempotency(session, idempotency_key)
                     if existing:
@@ -9637,6 +9825,13 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 source=source,
                 classificationStatus="classified" if entry_type in {"action", "system"} else "pending",
             )
+            replay_event_id = _immutable_openclaw_ingest_event_id(payload=payload, source_meta=source)
+            if replay_event_id:
+                source["eventId"] = replay_event_id
+                if _find_ingest_receipt(session, replay_event_id):
+                    max_safe_ms = max(max_safe_ms, timestamp_ms)
+                    continue
+            source["_ingestPath"] = "history"
             try:
                 append_log_entry(session, payload, idempotency_key=idempotency_key)
                 ingested += 1

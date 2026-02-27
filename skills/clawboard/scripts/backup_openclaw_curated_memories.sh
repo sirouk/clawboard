@@ -1558,6 +1558,30 @@ if [[ "${CLAWBOARD_STATE_EXPORT_OK:-0}" -eq 1 ]] \
     "$ORPHAN_ATTACHMENT_SWEEP_MODE"
 fi
 
+# Keep Clawboard logs backup lightweight for GitHub limits:
+# - store only a compressed tail snapshot for quick forensic context
+# - never track the full growing logs.jsonl file
+LOGS_PATH="$BACKUP_DIR/clawboard/export/logs.jsonl"
+LOGS_TAIL_GZ_PATH="$BACKUP_DIR/clawboard/export/logs.tail.jsonl.gz"
+LOGS_TAIL_LINES="${CLAWBOARD_BACKUP_LOG_TAIL_LINES:-20000}"
+
+if [[ "$LOGS_TAIL_LINES" =~ ^[0-9]+$ ]] && [[ -f "$LOGS_PATH" ]]; then
+  mkdir -p "$(dirname "$LOGS_TAIL_GZ_PATH")"
+  tail -n "$LOGS_TAIL_LINES" "$LOGS_PATH" | gzip -9 > "$LOGS_TAIL_GZ_PATH"
+fi
+
+# Ensure oversized raw log file stays out of version control.
+if ! grep -q '^clawboard/export/logs.jsonl$' .gitignore 2>/dev/null; then
+  printf "
+clawboard/export/logs.jsonl
+" >> .gitignore
+fi
+
+if git ls-files --error-unmatch clawboard/export/logs.jsonl >/dev/null 2>&1; then
+  git rm --cached --quiet --ignore-unmatch clawboard/export/logs.jsonl || true
+fi
+rm -f "$LOGS_PATH"
+
 if [[ -z "$(git status --porcelain)" ]]; then
   # Silent success: cron should not notify when there is nothing new.
   exit 0

@@ -64,6 +64,26 @@ function parseContextModes(value, fallback = []) {
     }
     return deduped;
 }
+function parseHookNameList(value) {
+    const input = typeof value === "string" ? value : "";
+    if (!input.trim())
+        return [];
+    const seen = new Set();
+    const hooks = [];
+    for (const item of input.split(",")) {
+        const name = item.trim();
+        if (!name)
+            continue;
+        if (!/^[a-z0-9_]+$/i.test(name))
+            continue;
+        const lowered = name.toLowerCase();
+        if (seen.has(lowered))
+            continue;
+        seen.add(lowered);
+        hooks.push(lowered);
+    }
+    return hooks;
+}
 const OPENCLAW_REQUEST_ID_TTL_MS = envInt("OPENCLAW_REQUEST_ID_TTL_SECONDS", 7 * OPENCLAW_DAY_SECONDS, 5 * 60, 90 * OPENCLAW_DAY_SECONDS) * 1000;
 const OPENCLAW_REQUEST_ID_MAX_ENTRIES = envInt("OPENCLAW_REQUEST_ID_MAX_ENTRIES", 5000, 200, 50000);
 function normalizeBaseUrl(url) {
@@ -447,6 +467,9 @@ export default function register(api) {
     const contextFallbackModes = Array.isArray(rawConfig.contextFallbackModes)
         ? parseContextModes(rawConfig.contextFallbackModes.join(","))
         : parseContextModes(process.env.CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES, []);
+    const configuredExtraHooks = Array.isArray(rawConfig.extraHooks)
+        ? parseHookNameList(rawConfig.extraHooks.join(","))
+        : parseHookNameList(process.env.CLAWBOARD_LOGGER_EXTRA_HOOKS);
     const enableOpenClawMemorySearch = (() => {
         if (typeof rawConfig.enableOpenClawMemorySearch === "boolean") {
             return rawConfig.enableOpenClawMemorySearch;
@@ -877,6 +900,175 @@ export default function register(api) {
             audienceLabel: "User",
         };
     }
+    const SOURCE_META_RESERVED_KEYS = new Set([
+        "channel",
+        "sessionKey",
+        "messageId",
+        "requestId",
+        "boardScopeTopicId",
+        "boardScopeKind",
+        "boardScopeSessionKey",
+        "boardScopeInherited",
+        "boardScopeLock",
+        "boardScopeTaskId",
+        "speakerId",
+        "speakerLabel",
+        "audienceId",
+        "audienceLabel",
+    ]);
+    const SOURCE_EXTRA_KEY_BLOCK_RE = /(token|secret|password|authorization|cookie|api[_-]?key)/i;
+    const SOURCE_EXTRA_CANDIDATE_KEY_RE = /(id|_id|session|channel|provider|role|type|status|phase|kind|call|run|attempt|retry|synthetic)$/i;
+    function asRecord(value) {
+        if (!value || typeof value !== "object")
+            return undefined;
+        return value;
+    }
+    function normalizeSourceExtraKey(rawKey) {
+        const key = rawKey.trim();
+        if (!key)
+            return "";
+        const normalized = key.replace(/[^a-zA-Z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+        if (!normalized || normalized.length > 64)
+            return "";
+        return normalized;
+    }
+    function sourceScalarValue(value) {
+        if (typeof value === "string") {
+            const trimmed = value.trim();
+            if (!trimmed)
+                return undefined;
+            return clip(trimmed, 200);
+        }
+        if (typeof value === "number" && Number.isFinite(value))
+            return value;
+        if (typeof value === "boolean")
+            return value;
+        return undefined;
+    }
+    function mergeSourceExtras(target, extra) {
+        if (!extra)
+            return;
+        for (const [rawKey, rawValue] of Object.entries(extra)) {
+            const key = normalizeSourceExtraKey(rawKey);
+            if (!key)
+                continue;
+            if (SOURCE_META_RESERVED_KEYS.has(key))
+                continue;
+            if (Object.prototype.hasOwnProperty.call(target, key))
+                continue;
+            if (SOURCE_EXTRA_KEY_BLOCK_RE.test(key))
+                continue;
+            const scalar = sourceScalarValue(rawValue);
+            if (scalar === undefined)
+                continue;
+            target[key] = scalar;
+        }
+    }
+    function pickStringFromRecords(records, keys) {
+        for (const record of records) {
+            if (!record)
+                continue;
+            for (const key of keys) {
+                const value = record[key];
+                const normalized = normalizeId(typeof value === "string" ? value : undefined);
+                if (normalized)
+                    return normalized;
+            }
+        }
+        return undefined;
+    }
+    function extractTextForHook(value, depth = 0) {
+        if (!value || depth > 4)
+            return undefined;
+        if (typeof value === "string")
+            return value;
+        if (Array.isArray(value)) {
+            const parts = value
+                .map((part) => extractTextForHook(part, depth + 1))
+                .filter((part) => Boolean(part));
+            return parts.length ? parts.join("\n") : undefined;
+        }
+        if (typeof value === "object") {
+            const obj = value;
+            const keys = ["text", "content", "value", "message", "output_text", "input_text"];
+            const parts = [];
+            for (const key of keys) {
+                const extracted = extractTextForHook(obj[key], depth + 1);
+                if (extracted)
+                    parts.push(extracted);
+            }
+            return parts.length ? parts.join("\n") : undefined;
+        }
+        return undefined;
+    }
+    function hookSourceHints(params) {
+        const eventRecord = asRecord(params.event);
+        const metaRecord = asRecord(params.meta);
+        const messageRecord = asRecord(params.message);
+        const ctxRecord = asRecord(params.ctx);
+        const records = [eventRecord, metaRecord, messageRecord, ctxRecord];
+        const messageId = pickStringFromRecords(records, ["messageId", "message_id", "id"]);
+        const requestId = pickStringFromRecords(records, ["requestId", "request_id", "runId", "run_id"]);
+        const runId = pickStringFromRecords(records, ["runId", "run_id"]);
+        const toolCallId = pickStringFromRecords(records, ["toolCallId", "tool_call_id", "callId", "call_id"]);
+        const toolName = pickStringFromRecords(records, ["toolName", "tool_name"]);
+        const parentId = pickStringFromRecords(records, ["parentId", "parent_id"]);
+        const messageRole = normalizeId(typeof messageRecord?.role === "string" ? messageRecord.role : undefined);
+        const messageType = pickStringFromRecords(records, ["messageType", "message_type", "type"]);
+        const extra = {
+            hook: params.hookName,
+        };
+        if (runId)
+            extra.runId = runId;
+        if (toolCallId)
+            extra.toolCallId = toolCallId;
+        if (toolName)
+            extra.toolName = toolName;
+        if (parentId)
+            extra.parentId = parentId;
+        if (messageRole)
+            extra.messageRole = messageRole.toLowerCase();
+        if (messageType)
+            extra.messageType = messageType;
+        if (typeof eventRecord?.isSynthetic === "boolean") {
+            extra.isSynthetic = eventRecord.isSynthetic;
+        }
+        const dynamicRecords = [eventRecord, metaRecord, messageRecord];
+        for (const record of dynamicRecords) {
+            if (!record)
+                continue;
+            for (const [rawKey, rawValue] of Object.entries(record)) {
+                const normalizedKey = normalizeSourceExtraKey(rawKey);
+                if (!normalizedKey)
+                    continue;
+                if (Object.prototype.hasOwnProperty.call(extra, normalizedKey))
+                    continue;
+                if (SOURCE_META_RESERVED_KEYS.has(normalizedKey))
+                    continue;
+                if (SOURCE_EXTRA_KEY_BLOCK_RE.test(normalizedKey))
+                    continue;
+                if (!SOURCE_EXTRA_CANDIDATE_KEY_RE.test(normalizedKey))
+                    continue;
+                const scalar = sourceScalarValue(rawValue);
+                if (scalar === undefined)
+                    continue;
+                extra[normalizedKey] = scalar;
+                if (Object.keys(extra).length >= 24)
+                    break;
+            }
+            if (Object.keys(extra).length >= 24)
+                break;
+        }
+        return {
+            messageId,
+            requestId: normalizeRequestId(requestId),
+            runId,
+            toolCallId,
+            toolName,
+            messageRole: messageRole?.toLowerCase(),
+            extra,
+        };
+    }
     function buildSourceMeta(params) {
         const source = {};
         if (params.channel !== undefined)
@@ -912,6 +1104,7 @@ export default function register(api) {
             if (flow.audienceLabel)
                 source.audienceLabel = flow.audienceLabel;
         }
+        mergeSourceExtras(source, params.extra);
         return source;
     }
     function hasSpecificSessionAnchor(effectiveSessionKey, ctx2) {
@@ -2660,6 +2853,54 @@ export default function register(api) {
         }
         setTimeout(() => recentIncoming.delete(key), ttlMs)?.unref?.();
     };
+    const recentTranscriptWrites = new Set();
+    const rememberTranscriptWrite = (key, ttlMs = 60_000) => {
+        recentTranscriptWrites.add(key);
+        if (recentTranscriptWrites.size > 400) {
+            const first = recentTranscriptWrites.values().next().value;
+            if (first)
+                recentTranscriptWrites.delete(first);
+        }
+        setTimeout(() => recentTranscriptWrites.delete(key), ttlMs)?.unref?.();
+    };
+    const transcriptWriteDedupeKey = (params) => {
+        if (params.messageId) {
+            return `before-write:${params.channelId ?? "nochannel"}:${params.sessionKey ?? ""}:${params.messageId}`;
+        }
+        const seed = [
+            params.channelId ?? "nochannel",
+            params.sessionKey ?? "",
+            params.role ?? "",
+            params.toolCallId ?? "",
+            dedupeFingerprint(params.contentSeed ?? ""),
+        ].join("|");
+        return `before-write:fp:${seed}`;
+    };
+    const recentToolResultPersist = new Set();
+    const rememberToolResultPersist = (key, ttlMs = 90_000) => {
+        recentToolResultPersist.add(key);
+        if (recentToolResultPersist.size > 500) {
+            const first = recentToolResultPersist.values().next().value;
+            if (first)
+                recentToolResultPersist.delete(first);
+        }
+        setTimeout(() => recentToolResultPersist.delete(key), ttlMs)?.unref?.();
+    };
+    const toolResultPersistDedupeKey = (params) => {
+        if (params.toolCallId) {
+            return `tool-persist:${params.channelId ?? "nochannel"}:${params.sessionKey ?? ""}:${params.toolCallId}`;
+        }
+        if (params.messageId) {
+            return `tool-persist:${params.channelId ?? "nochannel"}:${params.sessionKey ?? ""}:${params.messageId}`;
+        }
+        const seed = [
+            params.channelId ?? "nochannel",
+            params.sessionKey ?? "",
+            params.toolName ?? "",
+            dedupeFingerprint(params.contentSeed ?? ""),
+        ].join("|");
+        return `tool-persist:fp:${seed}`;
+    };
     api.on("message_sending", async (event, ctx) => {
         const createdAt = new Date().toISOString();
         const sendEvent = event;
@@ -2744,6 +2985,161 @@ export default function register(api) {
         const dedupeKey = outgoingFingerprintDedupeKey(ctx.channelId, effectiveSessionKey, raw);
         if (recentOutgoing.has(dedupeKey))
             return;
+    });
+    api.on("before_message_write", async (event, ctx) => {
+        const createdAt = new Date().toISOString();
+        const eventRecord = asRecord(event);
+        const messageRecord = asRecord(event.message);
+        if (!messageRecord)
+            return;
+        const meta = normalizeEventMeta(asRecord(event.metadata), event.sessionKey);
+        const effectiveSessionKey = resolveSessionKey(meta, ctx);
+        if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
+            return;
+        const hints = hookSourceHints({
+            hookName: "before_message_write",
+            event: eventRecord,
+            meta,
+            message: messageRecord,
+            ctx,
+        });
+        let requestId = resolveOpenclawRequestId({
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            explicitRequestId: hints.requestId,
+            messageId: hints.messageId,
+        });
+        // Conversation rows are already captured by message_received/message_sending.
+        const messageRole = hints.messageRole ?? "";
+        if (messageRole === "assistant" || messageRole === "user")
+            return;
+        const contentText = sanitizeMessageContent(extractTextForHook(messageRecord.content) ?? "");
+        const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
+        requestId = await resolveOpenclawRequestIdForBoardScope({
+            requestId,
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            boardScope: routing.boardScope,
+        });
+        if (!hasSpecificSessionAnchor(effectiveSessionKey, ctx) && !hasToolRoutingAnchor(routing))
+            return;
+        const toolName = hints.toolName;
+        const dedupeKey = transcriptWriteDedupeKey({
+            channelId: ctx.channelId,
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            messageId: hints.messageId,
+            role: messageRole,
+            toolCallId: hints.toolCallId,
+            contentSeed: contentText || JSON.stringify(redact(messageRecord)),
+        });
+        if (recentTranscriptWrites.has(dedupeKey))
+            return;
+        rememberTranscriptWrite(dedupeKey);
+        const isToolRole = messageRole === "tool";
+        const isSystemRole = messageRole === "system";
+        const content = isToolRole
+            ? `Tool transcript write${toolName ? `: ${toolName}` : ""}`
+            : isSystemRole
+                ? "System transcript write"
+                : `Transcript write${messageRole ? `: ${messageRole}` : ""}`;
+        const raw = truncateRaw(contentText || JSON.stringify(redact(messageRecord), null, 2));
+        sendAsync({
+            topicId: routing.topicId,
+            taskId: routing.taskId,
+            type: "action",
+            content,
+            summary: content,
+            raw,
+            createdAt,
+            agentId: ctx.agentId ?? (isToolRole ? "tool" : "system"),
+            agentLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey),
+            source: buildSourceMeta({
+                channel: ctx.channelId,
+                sessionKey: effectiveSessionKey,
+                messageId: hints.messageId,
+                requestId,
+                boardScope: routing.boardScope,
+                extra: hints.extra,
+            }),
+        });
+    });
+    api.on("tool_result_persist", async (event, ctx) => {
+        const createdAt = new Date().toISOString();
+        const eventRecord = asRecord(event);
+        const messageRecord = asRecord(event.message);
+        const meta = normalizeEventMeta(asRecord(event.metadata), event.sessionKey);
+        const effectiveSessionKey = resolveSessionKey(meta, ctx);
+        if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
+            return;
+        const hints = hookSourceHints({
+            hookName: "tool_result_persist",
+            event: eventRecord,
+            meta,
+            message: messageRecord,
+            ctx,
+        });
+        let requestId = resolveOpenclawRequestId({
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            explicitRequestId: hints.requestId,
+            messageId: hints.messageId,
+        });
+        const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
+        requestId = await resolveOpenclawRequestIdForBoardScope({
+            requestId,
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            boardScope: routing.boardScope,
+        });
+        if (!hasSpecificSessionAnchor(effectiveSessionKey, ctx) && !hasToolRoutingAnchor(routing))
+            return;
+        rememberToolScopeForRun(hints.runId, {
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            requestId,
+            routing,
+        });
+        rememberToolScopeForName(hints.toolName, {
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            requestId,
+            routing,
+        });
+        const contentText = sanitizeMessageContent(extractTextForHook(messageRecord?.content) ?? "");
+        const dedupeKey = toolResultPersistDedupeKey({
+            channelId: ctx.channelId,
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            toolCallId: hints.toolCallId,
+            messageId: hints.messageId,
+            toolName: hints.toolName,
+            contentSeed: contentText || JSON.stringify(redact(messageRecord ?? eventRecord)),
+        });
+        if (recentToolResultPersist.has(dedupeKey))
+            return;
+        rememberToolResultPersist(dedupeKey);
+        const isSynthetic = typeof event.isSynthetic === "boolean" ? event.isSynthetic : false;
+        const baseLabel = isSynthetic ? "Synthetic tool result persisted" : "Tool result persisted";
+        const content = hints.toolName ? `${baseLabel}: ${hints.toolName}` : baseLabel;
+        const payload = {
+            toolCallId: hints.toolCallId,
+            runId: hints.runId,
+            toolName: hints.toolName,
+            isSynthetic: typeof event.isSynthetic === "boolean" ? event.isSynthetic : undefined,
+            message: redact(messageRecord),
+        };
+        sendAsync({
+            topicId: routing.topicId,
+            taskId: routing.taskId,
+            type: "action",
+            content,
+            summary: content,
+            raw: truncateRaw(contentText || JSON.stringify(payload, null, 2)),
+            createdAt,
+            agentId: ctx.agentId ?? "assistant",
+            agentLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey),
+            source: buildSourceMeta({
+                channel: ctx.channelId,
+                sessionKey: effectiveSessionKey,
+                messageId: hints.messageId,
+                requestId,
+                boardScope: routing.boardScope,
+                extra: hints.extra,
+            }),
+        });
     });
     api.on("before_tool_call", async (event, ctx) => {
         const createdAt = new Date().toISOString();
@@ -3160,6 +3556,85 @@ export default function register(api) {
             });
         }
     });
+    if (configuredExtraHooks.length > 0) {
+        const knownHooks = new Set([
+            "before_agent_start",
+            "message_received",
+            "message_sending",
+            "message_sent",
+            "before_message_write",
+            "before_tool_call",
+            "after_tool_call",
+            "tool_result_persist",
+            "agent_end",
+        ]);
+        const genericHookApi = api;
+        for (const hookName of configuredExtraHooks) {
+            if (!hookName || knownHooks.has(hookName))
+                continue;
+            genericHookApi.on(hookName, async (event, ctx) => {
+                const createdAt = new Date().toISOString();
+                const eventRecord = asRecord(event);
+                const messageRecord = asRecord(eventRecord?.message);
+                const meta = normalizeEventMeta(asRecord(eventRecord?.metadata), eventRecord?.sessionKey);
+                const effectiveSessionKey = resolveSessionKey(meta, ctx);
+                if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
+                    return;
+                const hints = hookSourceHints({
+                    hookName,
+                    event: eventRecord,
+                    meta,
+                    message: messageRecord,
+                    ctx,
+                });
+                let requestId = resolveOpenclawRequestId({
+                    sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+                    explicitRequestId: hints.requestId,
+                    messageId: hints.messageId,
+                });
+                const routing = await resolveRoutingScope(effectiveSessionKey, ctx, meta);
+                requestId = await resolveOpenclawRequestIdForBoardScope({
+                    requestId,
+                    sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+                    boardScope: routing.boardScope,
+                });
+                if (!hasSpecificSessionAnchor(effectiveSessionKey, ctx) && !hasToolRoutingAnchor(routing))
+                    return;
+                const rawEvent = truncateRaw(JSON.stringify(redact(eventRecord), null, 2));
+                const dedupeKey = transcriptWriteDedupeKey({
+                    channelId: ctx.channelId,
+                    sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+                    messageId: hints.messageId,
+                    role: hookName,
+                    toolCallId: hints.toolCallId,
+                    contentSeed: rawEvent,
+                });
+                if (recentTranscriptWrites.has(dedupeKey))
+                    return;
+                rememberTranscriptWrite(dedupeKey, 30_000);
+                const content = `Hook event: ${hookName}`;
+                sendAsync({
+                    topicId: routing.topicId,
+                    taskId: routing.taskId,
+                    type: "action",
+                    content,
+                    summary: content,
+                    raw: rawEvent,
+                    createdAt,
+                    agentId: ctx.agentId ?? "system",
+                    agentLabel: resolveAgentLabel(ctx.agentId, effectiveSessionKey ?? ctx.sessionKey),
+                    source: buildSourceMeta({
+                        channel: ctx.channelId,
+                        sessionKey: effectiveSessionKey,
+                        messageId: hints.messageId,
+                        requestId,
+                        boardScope: routing.boardScope,
+                        extra: hints.extra,
+                    }),
+                });
+            });
+        }
+    }
 }
 // Export utility functions for testing
 export { normalizeBaseUrl, sanitizeMessageContent, summarize, dedupeFingerprint, truncateRaw, clip, normalizeWhitespace, tokenSet, lexicalSimilarity };

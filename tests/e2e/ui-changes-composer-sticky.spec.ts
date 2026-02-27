@@ -108,8 +108,11 @@ test.describe("sticky headers desktop (single vs two column)", () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async function ensureSingleColumn(page: any) {
     const boardControls = page.getByRole("button", { name: /Board controls/i }).first();
-    await boardControls.click();
-    await page.waitForTimeout(400);
+    const hasToggle = await boardControls.isVisible().catch(() => false);
+    if (hasToggle) {
+      await boardControls.click();
+      await page.waitForTimeout(400);
+    }
 
     // If we see "1 column" button, we're currently in 2-col → click to switch to single
     const oneColBtn = page.getByRole("button", { name: /^1 column$/i }).first();
@@ -118,15 +121,20 @@ test.describe("sticky headers desktop (single vs two column)", () => {
       await oneColBtn.click();
       await page.waitForTimeout(400);
     }
-    await boardControls.click();
-    await page.waitForTimeout(300);
+    if (hasToggle) {
+      await boardControls.click();
+      await page.waitForTimeout(300);
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async function ensureTwoColumn(page: any) {
     const boardControls = page.getByRole("button", { name: /Board controls/i }).first();
-    await boardControls.click();
-    await page.waitForTimeout(400);
+    const hasToggle = await boardControls.isVisible().catch(() => false);
+    if (hasToggle) {
+      await boardControls.click();
+      await page.waitForTimeout(400);
+    }
 
     // If we see "2 column" button, we're currently in single-col → click to switch to two-col
     const twoColBtn = page.getByRole("button", { name: /^2 column$/i }).first();
@@ -135,8 +143,10 @@ test.describe("sticky headers desktop (single vs two column)", () => {
       await twoColBtn.click();
       await page.waitForTimeout(400);
     }
-    await boardControls.click();
-    await page.waitForTimeout(300);
+    if (hasToggle) {
+      await boardControls.click();
+      await page.waitForTimeout(300);
+    }
   }
 
   test("topic header IS sticky in single-column desktop mode", async ({ page }) => {

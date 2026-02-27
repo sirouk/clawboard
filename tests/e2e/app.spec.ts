@@ -3,9 +3,6 @@ import { test, expect } from "@playwright/test";
 test("home loads unified view", async ({ page }) => {
   await page.goto("/u");
   await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
-  const optionsToggle = page.getByRole("button", { name: /Board controls/i }).first();
-  await expect(optionsToggle).toBeVisible();
-  await optionsToggle.click();
   await expect(page.getByRole("button", { name: /Show full messages|Hide full messages/i })).toBeVisible();
 });
 
@@ -45,10 +42,8 @@ test("unified view expands topics and tasks", async ({ page }) => {
   await expect(page.getByText("Ship onboarding wizard")).toBeVisible();
   await page.getByRole("button", { name: "Expand task Ship onboarding wizard", exact: true }).click();
 
-  const optionsToggle = page.getByRole("button", { name: /Board controls/i }).first();
-  const expanded = (await optionsToggle.getAttribute("aria-expanded")) === "true";
-  if (!expanded) await optionsToggle.click();
   const toolCallsToggle = page.getByRole("button", { name: /Show tool calls|Hide tool calls/i }).first();
+  await expect(toolCallsToggle).toBeVisible();
   if ((await toolCallsToggle.textContent())?.toLowerCase().includes("show")) {
     await toolCallsToggle.click();
   }

@@ -38,6 +38,7 @@ try:
     from app.models import (
         Attachment,
         IngestQueue,
+        IngestReceipt,
         LogEntry,
         OpenClawChatDispatchQueue,
         OpenClawGatewayHistoryCursor,
@@ -92,6 +93,8 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             for row in session.exec(select(Attachment)).all():
                 session.delete(row)
             for row in session.exec(select(IngestQueue)).all():
+                session.delete(row)
+            for row in session.exec(select(IngestReceipt)).all():
                 session.delete(row)
             for row in session.exec(select(OpenClawChatDispatchQueue)).all():
                 session.delete(row)
@@ -557,6 +560,66 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             source = rows[0].source if isinstance(rows[0].source, dict) else {}
             self.assertEqual(source.get("channel"), "webchat")
+
+    def test_ing_020e3_history_replay_skips_when_live_receipt_exists_and_preserves_markdown(self):
+        request_id = "occhat-request-020e3"
+        topic_id = "topic-ing-020e3"
+        task_id = "task-ing-020e3"
+        board_session_key = f"clawboard:task:{topic_id}:{task_id}"
+        gateway_session_key = f"agent:main:{board_session_key}"
+        with get_session() as session:
+            live_row = main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    content="### assistant response 020e3\n- preserved markdown",
+                    summary="assistant response 020e3",
+                    createdAt=now_iso(),
+                    agentId="assistant",
+                    agentLabel="Assistant",
+                    source={
+                        "channel": "webchat",
+                        "sessionKey": gateway_session_key,
+                        "requestId": request_id,
+                        "messageId": "oc:assistant-020e3",
+                        "boardScopeTopicId": topic_id,
+                        "boardScopeTaskId": task_id,
+                    },
+                ),
+                idempotency_key="src:conversation:webchat:assistant:oc:assistant-020e3",
+            )
+            source = live_row.source if isinstance(live_row.source, dict) else {}
+            event_id = str(source.get("eventId") or "")
+            self.assertTrue(event_id)
+            receipt = session.get(IngestReceipt, event_id)
+            self.assertIsNotNone(receipt)
+            assert receipt is not None
+            self.assertEqual(str(receipt.logId or ""), str(live_row.id or ""))
+
+        history_messages = [
+            {
+                "timestamp": 1700000027000,
+                "role": "assistant",
+                "text": "assistant response 020e3 plain fallback",
+                "requestId": request_id,
+            }
+        ]
+        ingested, _ = main_module._ingest_openclaw_history_messages(
+            session_key=board_session_key,
+            messages=history_messages,
+            since_ms=0,
+        )
+
+        self.assertEqual(ingested, 0)
+        with get_session() as session:
+            rows = session.exec(
+                select(LogEntry)
+                .where(LogEntry.type == "conversation")
+                .where(LogEntry.agentId == "assistant")
+                .where(LogEntry.source["requestId"].as_string() == request_id)
+            ).all()
+            self.assertEqual(len(rows), 1)
+            self.assertIn("### assistant response 020e3", str(rows[0].content or ""))
 
     def test_ing_020e2_history_ingest_preserves_assistant_reply_when_request_id_matches_user_row(self):
         request_id = "occhat-request-020e2"

@@ -18,12 +18,12 @@ os.environ["CLAWBOARD_TOKEN"] = "test-token"
 
 try:
     from fastapi.testclient import TestClient
-    from sqlmodel import select
+    from sqlmodel import func, select
 
     from app.db import get_session, init_db  # noqa: E402
     import app.main as main_module  # noqa: E402
     from app.main import app  # noqa: E402
-    from app.models import LogEntry, OpenClawRequestRoute, SessionRoutingMemory, Task, Topic  # noqa: E402
+    from app.models import IngestReceipt, LogEntry, OpenClawRequestRoute, SessionRoutingMemory, Task, Topic  # noqa: E402
     from app.schemas import LogAppend  # noqa: E402
 
     _API_TESTS_AVAILABLE = True
@@ -47,6 +47,8 @@ class AppendLogEntryTests(unittest.TestCase):
 
     def setUp(self):
         with get_session() as session:
+            for row in session.exec(select(IngestReceipt)).all():
+                session.delete(row)
             for row in session.exec(select(OpenClawRequestRoute)).all():
                 session.delete(row)
             for row in session.exec(select(SessionRoutingMemory)).all():
@@ -1025,6 +1027,96 @@ class AppendLogEntryTests(unittest.TestCase):
             self.assertTrue(str(row.sourceIdentityKey or "").startswith("srcid:conversation:assistant:openclaw:"))
             source = row.source if isinstance(row.source, dict) else {}
             self.assertEqual(str(source.get("messageId") or ""), "oc:assistant-wrap-vs-board-1")
+
+    def test_append_log_dedupes_assistant_replay_when_request_matches_but_message_id_differs(self):
+        base_dt = datetime.now(timezone.utc)
+        first_ts = base_dt.isoformat()
+        replay_ts = (base_dt + timedelta(seconds=7)).isoformat()
+        request_id = "occhat-dedupe-request-and-message-1"
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=first_ts,
+                    updatedAt=first_ts,
+                )
+            )
+            session.commit()
+
+        first_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "topicId": "topic-a",
+                "content": "Quick update: I re-verified the source. It looks legitimate.",
+                "summary": "re-verified source",
+                "raw": "Quick update: I re-verified the source. It looks legitimate.",
+                "createdAt": first_ts,
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {
+                    "channel": "clawboard",
+                    "sessionKey": "clawboard:topic:topic-a",
+                    "requestId": request_id,
+                },
+            },
+        )
+        self.assertEqual(first_res.status_code, 200, first_res.text)
+        first_payload = first_res.json() or {}
+        first_id = str(first_payload.get("id") or "")
+        self.assertTrue(first_id)
+
+        replay_res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "conversation",
+                "topicId": "topic-a",
+                "content": "### Quick update\nI re-verified **the source**. It looks **legitimate**.",
+                "summary": "re-verified source",
+                "raw": "### Quick update\nI re-verified **the source**. It looks **legitimate**.",
+                "createdAt": replay_ts,
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {
+                    "channel": "direct",
+                    "sessionKey": "agent:main:clawboard:topic:topic-a",
+                    "requestId": request_id,
+                    "messageId": "oc:assistant-wrap-vs-board-request-message-1",
+                },
+            },
+        )
+        self.assertEqual(replay_res.status_code, 200, replay_res.text)
+        replay_payload = replay_res.json() or {}
+        self.assertEqual(str(replay_payload.get("id") or ""), first_id)
+
+        with get_session() as session:
+            rows = session.exec(
+                select(LogEntry)
+                .where(LogEntry.type == "conversation")
+                .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "assistant")
+                .where(LogEntry.source["requestId"].as_string() == request_id)
+            ).all()
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            source = row.source if isinstance(row.source, dict) else {}
+            self.assertEqual(str(source.get("messageId") or ""), "oc:assistant-wrap-vs-board-request-message-1")
+            event_id = str(source.get("eventId") or "")
+            self.assertTrue(event_id)
+            receipt = session.get(IngestReceipt, event_id)
+            self.assertIsNotNone(receipt)
+            assert receipt is not None
+            self.assertEqual(str(receipt.logId or ""), str(row.id or ""))
+            self.assertIn("### Quick update", str(row.content or ""))
 
     def test_append_log_dedupes_subagent_non_user_replay_and_prefers_markdown_variant(self):
         base_dt = datetime.now(timezone.utc)

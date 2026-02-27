@@ -302,6 +302,20 @@ class OpenClawRequestRoute(SQLModel, table=True):
     updatedAt: str = Field(description="ISO timestamp of latest route update.")
 
 
+class IngestReceipt(SQLModel, table=True):
+    """Exactly-once ingest ledger keyed by immutable source event id."""
+
+    eventId: str = Field(primary_key=True, description="Immutable event identifier.")
+    logId: Optional[str] = Field(
+        default=None,
+        foreign_key="logentry.id",
+        description="Persisted log id for this event once written.",
+    )
+    sourcePath: str = Field(default="live", description="Origin path: live|history.")
+    createdAt: str = Field(description="ISO timestamp when the receipt was created.")
+    updatedAt: str = Field(description="ISO timestamp of the latest receipt update.")
+
+
 class IngestQueue(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     payload: Dict[str, Any] = Field(sa_column=Column(JSON))

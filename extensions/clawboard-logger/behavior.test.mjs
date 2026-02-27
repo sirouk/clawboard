@@ -1006,6 +1006,189 @@ test("before_agent_start injects context for subagent scaffold prompts using gen
   }
 });
 
+test("before_message_write logs non-conversation transcript writes with hook metadata", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("before_message_write");
+    assert.equal(typeof handler, "function");
+
+    await handler(
+      {
+        sessionKey: "agent:main:clawboard:task:topic-hook-write-1:task-hook-write-1",
+        requestId: "occhat-hook-write-1",
+        message: {
+          id: "line-tool-1",
+          parentId: "line-parent-1",
+          role: "tool",
+          type: "tool_result",
+          toolName: "web.search",
+          toolCallId: "tool-call-1",
+          content: [{ text: "tool result content" }],
+        },
+      },
+      {
+        sessionKey: "agent:main:clawboard:task:topic-hook-write-1:task-hook-write-1",
+        channelId: "openclaw",
+        agentId: "main",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 1);
+    const payload = parseBody(meaningfulCalls(calls)[0]);
+    assert.equal(payload.type, "action");
+    assert.equal(payload.content, "Tool transcript write: web.search");
+    assert.equal(payload.topicId, "topic-hook-write-1");
+    assert.equal(payload.taskId, "task-hook-write-1");
+    assert.equal(payload.source.messageId, "line-tool-1");
+    assert.equal(payload.source.requestId, "occhat-hook-write-1");
+    assert.equal(payload.source.hook, "before_message_write");
+    assert.equal(payload.source.toolCallId, "tool-call-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("before_message_write skips assistant/user transcript rows to avoid duplicate conversations", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("before_message_write");
+    assert.equal(typeof handler, "function");
+
+    await handler(
+      {
+        sessionKey: "channel:skip-before-write",
+        message: {
+          id: "line-assistant-1",
+          role: "assistant",
+          content: "assistant conversation row",
+        },
+      },
+      {
+        sessionKey: "channel:skip-before-write",
+        channelId: "discord",
+      }
+    );
+
+    await handler(
+      {
+        sessionKey: "channel:skip-before-write",
+        message: {
+          id: "line-user-1",
+          role: "user",
+          content: "user conversation row",
+        },
+      },
+      {
+        sessionKey: "channel:skip-before-write",
+        channelId: "discord",
+      }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(meaningfulCalls(calls).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("tool_result_persist logs once per immutable tool call id", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const handler = api.__handlers.get("tool_result_persist");
+    assert.equal(typeof handler, "function");
+
+    const event = {
+      sessionKey: "agent:main:clawboard:task:topic-tool-persist-1:task-tool-persist-1",
+      requestId: "occhat-tool-persist-1",
+      toolName: "web.search",
+      toolCallId: "tool-call-persist-1",
+      message: {
+        id: "line-tool-persist-1",
+        role: "tool",
+        content: "persisted tool output",
+      },
+    };
+    const ctx = {
+      sessionKey: "agent:main:clawboard:task:topic-tool-persist-1:task-tool-persist-1",
+      channelId: "openclaw",
+      agentId: "main",
+    };
+
+    await handler(event, ctx);
+    await handler(event, ctx);
+
+    await waitFor(() => meaningfulCalls(calls).length >= 1);
+    const matches = meaningfulCalls(calls)
+      .map((call) => parseBody(call))
+      .filter((payload) => payload?.content === "Tool result persisted: web.search");
+
+    assert.equal(matches.length, 1);
+    const payload = matches[0];
+    assert.equal(payload.topicId, "topic-tool-persist-1");
+    assert.equal(payload.taskId, "task-tool-persist-1");
+    assert.equal(payload.source.hook, "tool_result_persist");
+    assert.equal(payload.source.toolCallId, "tool-call-persist-1");
+    assert.equal(payload.source.messageId, "line-tool-persist-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("configured extraHooks register generic action capture handlers", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi({ extraHooks: ["future_hook"] });
+    register(api);
+
+    const handler = api.__handlers.get("future_hook");
+    assert.equal(typeof handler, "function");
+
+    await handler(
+      {
+        sessionKey: "channel:future-hook",
+        traceId: "trace-hook-1",
+        phase: "capture",
+      },
+      {
+        sessionKey: "channel:future-hook",
+        channelId: "openclaw",
+        agentId: "main",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 1);
+    const payload = parseBody(meaningfulCalls(calls)[0]);
+    assert.equal(payload.type, "action");
+    assert.equal(payload.content, "Hook event: future_hook");
+    assert.equal(payload.source.hook, "future_hook");
+    assert.equal(payload.source.traceId, "trace-hook-1");
+    assert.equal(payload.source.phase, "capture");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("before_tool_call emits action log with tool call summary (ING-003)", async () => {
   const originalFetch = globalThis.fetch;
   try {

@@ -77,9 +77,6 @@ test("unified chat renders natural bubbles and topic-only chat entries", async (
   await expect(assistantBubble).toHaveAttribute("data-agent-side", "left");
   await expect(userBubble).toHaveAttribute("data-agent-side", "right");
 
-  const optionsToggle = page.getByRole("button", { name: /Board controls/i }).first();
-  await expect(optionsToggle).toBeVisible();
-  await optionsToggle.click();
   const fullMessagesToggle = page.getByRole("button", { name: /Show full messages|Hide full messages/i });
   await expect(fullMessagesToggle).toBeVisible();
   const fullMessagesLabel = ((await fullMessagesToggle.textContent()) || "").toLowerCase();
@@ -154,11 +151,6 @@ test("board controls can show hidden tool/system chat rows", async ({ page, requ
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
-
-  const optionsToggle = page.getByRole("button", { name: /Board controls/i }).first();
-  await expect(optionsToggle).toBeVisible();
-  const expanded = (await optionsToggle.getAttribute("aria-expanded")) === "true";
-  if (!expanded) await optionsToggle.click();
 
   const toolCallsToggle = page.getByRole("button", { name: /Show tool calls|Hide tool calls/i }).first();
   await expect(toolCallsToggle).toBeVisible();
