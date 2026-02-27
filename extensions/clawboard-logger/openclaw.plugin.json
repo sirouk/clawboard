@@ -8,6 +8,10 @@
     "additionalProperties": false,
     "properties": {
       "baseUrl": { "type": "string" },
+      "baseUrlFallbacks": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
       "token": { "type": "string" },
       "enabled": { "type": "boolean" },
       "queuePath": { "type": "string" },
@@ -32,6 +36,10 @@
   },
   "uiHints": {
     "baseUrl": { "label": "Clawboard Base URL", "placeholder": "http://clawboard:8010" },
+    "baseUrlFallbacks": {
+      "label": "Fallback Base URLs",
+      "placeholder": "[\"http://127.0.0.1:8010\",\"http://localhost:8010\"]"
+    },
     "token": { "label": "Clawboard Token", "sensitive": true },
     "queuePath": { "label": "Queue file path" },
     "enabled": { "label": "Enabled" },

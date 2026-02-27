@@ -922,7 +922,7 @@ export function SettingsLive() {
             <div className="flex-1">
               <h3 className="text-sm font-semibold">Unread Badge Count</h3>
               <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
-                Show unseen chat messages plus unsnoozed activity on the app icon badge.
+                Show unread Topic/Task chat replies plus unsnoozed topics and tasks on the app icon badge.
               </p>
             </div>
             <div className="flex flex-none items-center">

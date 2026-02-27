@@ -104,6 +104,28 @@ const INITIAL_CHANGES_LIMIT_LOGS = parseIntegerEnv(
   20000
 );
 
+function parseIsoMs(value: unknown) {
+  const text = String(value ?? "").trim();
+  if (!text) return Number.NaN;
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function resolveLiveEventTimestamp(event: LiveEvent) {
+  const maybeEvent = event as LiveEvent & { eventTs?: unknown };
+  const candidate = String(maybeEvent.eventTs ?? "").trim();
+  if (Number.isFinite(parseIsoMs(candidate))) return candidate;
+  return new Date().toISOString();
+}
+
+function isIncomingSignalNewer(previousUpdatedAt: string | undefined, incomingUpdatedAt: string) {
+  const previousMs = parseIsoMs(previousUpdatedAt);
+  const incomingMs = parseIsoMs(incomingUpdatedAt);
+  if (!Number.isFinite(incomingMs)) return true;
+  if (!Number.isFinite(previousMs)) return true;
+  return incomingMs >= previousMs;
+}
+
 function unsnoozedTopicTag(topicId: string) {
   return `${UNSNOOZE_TOPIC_TAG_PREFIX}${topicId}`;
 }
@@ -149,6 +171,22 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const unsnoozedTaskBadges = useMemo(() => parseNumberMap(unsnoozedTasksRaw), [unsnoozedTasksRaw]);
   const chatSeenByKey = useMemo(() => parseStringMap(chatSeenRaw), [chatSeenRaw]);
   const notificationsEnabled = useMemo(() => notificationsEnabledRaw !== "false", [notificationsEnabledRaw]);
+  const activeUnsnoozedTopicCount = useMemo(() => {
+    const validTopicIds = new Set(topics.map((topic) => topic.id));
+    let count = 0;
+    for (const topicId of Object.keys(unsnoozedTopicBadges)) {
+      if (validTopicIds.has(topicId)) count += 1;
+    }
+    return count;
+  }, [topics, unsnoozedTopicBadges]);
+  const activeUnsnoozedTaskCount = useMemo(() => {
+    const validTaskIds = new Set(tasks.map((task) => task.id));
+    let count = 0;
+    for (const taskId of Object.keys(unsnoozedTaskBadges)) {
+      if (validTaskIds.has(taskId)) count += 1;
+    }
+    return count;
+  }, [tasks, unsnoozedTaskBadges]);
 
   const unreadMessageCount = useMemo(() => {
     const seenAtMs = new Map<string, number>();
@@ -171,9 +209,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     return count;
   }, [chatSeenByKey, logs]);
 
+  // Keep PWA badge scope strict: unread Topic/Task chat replies and unsnoozed items only.
   const pwaAttentionCount = useMemo(
-    () => Object.keys(unsnoozedTopicBadges).length + Object.keys(unsnoozedTaskBadges).length + unreadMessageCount,
-    [unsnoozedTaskBadges, unsnoozedTopicBadges, unreadMessageCount]
+    () => activeUnsnoozedTopicCount + activeUnsnoozedTaskCount + unreadMessageCount,
+    [activeUnsnoozedTaskCount, activeUnsnoozedTopicCount, unreadMessageCount]
   );
 
   const upsertSpace = (space: Space) => setSpaces((prev) => upsertById(prev, space));
@@ -405,11 +444,15 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         if (!normalizedSessionKey) return;
         const typing = Boolean(payload.typing);
         const requestId = String(payload.requestId ?? "").trim();
-        const updatedAt = new Date().toISOString();
-        setOpenclawTyping((prev) => ({
-          ...prev,
-          [normalizedSessionKey]: { typing, requestId: requestId || undefined, updatedAt },
-        }));
+        const updatedAt = resolveLiveEventTimestamp(event);
+        setOpenclawTyping((prev) => {
+          const current = prev[normalizedSessionKey];
+          if (!isIncomingSignalNewer(current?.updatedAt, updatedAt)) return prev;
+          return {
+            ...prev,
+            [normalizedSessionKey]: { typing, requestId: requestId || undefined, updatedAt },
+          };
+        });
         return;
       }
       if (event.type === "openclaw.thread_work" && event.data && typeof event.data === "object") {
@@ -420,16 +463,20 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         const active = Boolean(payload.active);
         const requestId = String(payload.requestId ?? "").trim();
         const reason = String(payload.reason ?? "").trim();
-        const updatedAt = new Date().toISOString();
-        setOpenclawThreadWork((prev) => ({
-          ...prev,
-          [normalizedSessionKey]: {
-            active,
-            requestId: requestId || undefined,
-            reason: reason || undefined,
-            updatedAt,
-          },
-        }));
+        const updatedAt = resolveLiveEventTimestamp(event);
+        setOpenclawThreadWork((prev) => {
+          const current = prev[normalizedSessionKey];
+          if (!isIncomingSignalNewer(current?.updatedAt, updatedAt)) return prev;
+          return {
+            ...prev,
+            [normalizedSessionKey]: {
+              active,
+              requestId: requestId || undefined,
+              reason: reason || undefined,
+              updatedAt,
+            },
+          };
+        });
         return;
       }
       if (event.type === "draft.upserted" && event.data && typeof event.data === "object") {
@@ -476,6 +523,36 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     void setPwaBadge(pwaAttentionCount);
   }, [pwaAttentionCount]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const validTopicIds = new Set(topics.map((topic) => topic.id));
+    const staleTopicIds = Object.keys(unsnoozedTopicBadges).filter((topicId) => !validTopicIds.has(topicId));
+    if (staleTopicIds.length === 0) return;
+    const updated: Record<string, number> = { ...unsnoozedTopicBadges };
+    for (const topicId of staleTopicIds) {
+      delete updated[topicId];
+    }
+    setLocalStorageItem(UNSNOOZED_TOPICS_KEY, JSON.stringify(updated));
+    const tags = staleTopicIds.map((topicId) => unsnoozedTopicTag(topicId));
+    if (Object.keys(updated).length === 0) tags.push(UNSNOOZE_TOPICS_SUMMARY_TAG);
+    void closePwaNotificationsByTag(tags);
+  }, [hydrated, topics, unsnoozedTopicBadges]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const validTaskIds = new Set(tasks.map((task) => task.id));
+    const staleTaskIds = Object.keys(unsnoozedTaskBadges).filter((taskId) => !validTaskIds.has(taskId));
+    if (staleTaskIds.length === 0) return;
+    const updated: Record<string, number> = { ...unsnoozedTaskBadges };
+    for (const taskId of staleTaskIds) {
+      delete updated[taskId];
+    }
+    setLocalStorageItem(UNSNOOZED_TASKS_KEY, JSON.stringify(updated));
+    const tags = staleTaskIds.map((taskId) => unsnoozedTaskTag(taskId));
+    if (Object.keys(updated).length === 0) tags.push(UNSNOOZE_TASKS_SUMMARY_TAG);
+    void closePwaNotificationsByTag(tags);
+  }, [hydrated, tasks, unsnoozedTaskBadges]);
 
   useEffect(() => {
     if (Object.keys(unsnoozedTopicBadges).length > 0) return;

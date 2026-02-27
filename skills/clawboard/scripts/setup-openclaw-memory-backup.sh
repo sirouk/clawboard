@@ -12,7 +12,7 @@ set -euo pipefail
 #   - Saves key path in ~/.openclaw/credentials/clawboard-memory-backup.env
 # - Writes config to ~/.openclaw/credentials/clawboard-memory-backup.json (0600)
 # - Optionally includes full Clawboard state export + attachment files in each backup run
-# - Optionally installs an OpenClaw cron job (agentTurn) to run backup every 15m
+# - Optionally installs an OpenClaw cron job (agentTurn) to run backup hourly
 #
 # Non-interactive mode:
 # - Pass --non-interactive (or CLAWBOARD_MEMORY_BACKUP_NON_INTERACTIVE=1)
@@ -787,14 +787,14 @@ case "$(lc "${RUN_BACKUP_NOW:-}")" in
 esac
 
 say ""
-say "Optional: install an OpenClaw cron job to run every 15 minutes."
+say "Optional: install an OpenClaw cron job to run every hour."
 say "If you say yes, we will create a Gateway cron job (isolated agent turn) that runs the backup script."
 
 INSTALL_CRON="$INSTALL_CRON_PRESET"
 if [[ -z "$INSTALL_CRON" && "$NON_INTERACTIVE" = true ]]; then
   INSTALL_CRON="N"
 fi
-prompt INSTALL_CRON "Install OpenClaw cron (every 15m)? [Y/n]: "
+prompt INSTALL_CRON "Install OpenClaw cron (every 1h)? [Y/n]: "
 # default: yes
 INSTALL_CRON="${INSTALL_CRON:-Y}"
 case "$(lc "${INSTALL_CRON:-}")" in
@@ -804,9 +804,9 @@ case "$(lc "${INSTALL_CRON:-}")" in
     say "Creating cron job via OpenClaw CLI..."
 
     JOB_NAME="Clawboard: backup continuity + state"
-    JOB_EVERY="15m"
+    JOB_EVERY="1h"
     JOB_SESSION="isolated"
-    JOB_MESSAGE="Run the continuity + Clawboard state backup now (automated 15-minute backup). Execute: $HOME/.openclaw/skills/clawboard/scripts/backup_openclaw_curated_memories.sh . IMPORTANT: Only notify me if (a) there were changes pushed, or (b) the backup failed. If there were no changes and the script exited 0 without output, respond with NO_REPLY."
+    JOB_MESSAGE="Run the continuity + Clawboard state backup now (automated hourly backup). Execute: $HOME/.openclaw/skills/clawboard/scripts/backup_openclaw_curated_memories.sh . IMPORTANT: Only notify me if (a) there were changes pushed, or (b) the backup failed. If there were no changes and the script exited 0 without output, respond with NO_REPLY."
 
     # Retry cron install when gateway is flaky (e.g. gateway closed 1006). Re-attempt after doctor --fix.
     CRON_MAX_ATTEMPTS=3

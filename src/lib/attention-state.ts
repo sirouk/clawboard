@@ -88,5 +88,8 @@ export function isUnreadConversationCandidate(entry: LogEntry) {
   const chatKey = chatKeyFromLogEntry(entry);
   if (!chatKey) return false;
   const agentId = String(entry.agentId ?? "").trim().toLowerCase();
-  return agentId !== "user";
+  if (agentId) return agentId !== "user" && agentId !== "system";
+  const speakerId = String(entry.source?.speakerId ?? "").trim().toLowerCase();
+  if (speakerId) return speakerId !== "user" && speakerId !== "system";
+  return false;
 }

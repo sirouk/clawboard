@@ -353,6 +353,13 @@ const OPENCLAW_THREAD_WORK_INACTIVE_OVERRIDE_TTL_MS =
     10,
     30 * 60
   ) * 1000;
+const OPENCLAW_NON_USER_ACTIVITY_TTL_MS =
+  parseEnvSeconds(
+    process.env.NEXT_PUBLIC_OPENCLAW_NON_USER_ACTIVITY_TTL_SECONDS,
+    2 * 60,
+    10,
+    30 * 60
+  ) * 1000;
 
 const SEARCH_QUERY_STOPWORDS = new Set([
   "a",
@@ -569,6 +576,11 @@ type SessionThreadWorkSignal = {
   updatedAt: string;
 };
 
+type SessionNonUserActivity = {
+  updatedAt: string;
+  requestId?: string;
+};
+
 function parseIsoMs(value: unknown) {
   const text = String(value ?? "").trim();
   if (!text) return Number.NaN;
@@ -629,6 +641,43 @@ function requestIdForLogEntry(entry: LogEntry) {
   const requestId = normalizeOpenClawRequestId(source.requestId);
   if (requestId) return requestId;
   return normalizeOpenClawRequestId(source.messageId);
+}
+
+function isNonUserActivityChatLog(entry: LogEntry) {
+  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+  if (!agentId || agentId === "user" || agentId === "assistant") return false;
+  if (isTerminalSystemRequestEvent(entry)) return false;
+  const type = String(entry.type ?? "").trim().toLowerCase();
+  if (CHAT_TOOLING_LOG_TYPES.has(type)) return true;
+  return type === "conversation";
+}
+
+function buildRecentNonUserActivityIndex(logs: LogEntry[]): Record<string, SessionNonUserActivity> {
+  const out: Record<string, SessionNonUserActivity> = {};
+  for (const entry of logs) {
+    if (!isNonUserActivityChatLog(entry)) continue;
+    const sessionKey = normalizeBoardSessionKey(entry.source?.sessionKey);
+    if (!sessionKey) continue;
+    const stamp = String(entry.updatedAt ?? entry.createdAt ?? "").trim();
+    if (!stamp) continue;
+    const stampMs = parseIsoMs(stamp);
+    const current = out[sessionKey];
+    const currentMs = parseIsoMs(current?.updatedAt);
+    if (
+      Number.isFinite(currentMs) &&
+      Number.isFinite(stampMs) &&
+      stampMs < currentMs
+    ) {
+      continue;
+    }
+    if (Number.isFinite(currentMs) && !Number.isFinite(stampMs)) continue;
+    const requestId = requestIdForLogEntry(entry);
+    out[sessionKey] = {
+      updatedAt: stamp,
+      requestId: requestId || current?.requestId || undefined,
+    };
+  }
+  return out;
 }
 
 function normalizeOrchestrationRunStatus(value: unknown) {
@@ -2634,6 +2683,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     () => buildOrchestrationThreadWorkIndex(logs),
     [logs]
   );
+  const recentNonUserActivityBySession = useMemo(
+    () => buildRecentNonUserActivityIndex(logs),
+    [logs]
+  );
 
   const isSessionResponding = useCallback(
     (sessionKey: string) => {
@@ -2643,20 +2696,46 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const typing = openclawTyping[key];
       const awaiting = effectiveAwaitingAssistant[key];
       const orchestrationWork = orchestrationThreadWorkBySession[key];
+      const recentNonUserActivity = recentNonUserActivityBySession[key];
+      const recentNonUserActivityMs = parseIsoMs(recentNonUserActivity?.updatedAt);
+      const hasRecentNonUserActivity =
+        Number.isFinite(recentNonUserActivityMs) &&
+        nowMs - recentNonUserActivityMs >= 0 &&
+        nowMs - recentNonUserActivityMs <= OPENCLAW_NON_USER_ACTIVITY_TTL_MS;
+      const threadWorkSignal = openclawThreadWork[key];
+      const threadWorkSignalMs = parseIsoMs(threadWorkSignal?.updatedAt);
       const latestOtherSignalMs = Math.max(
         parseIsoMs(typing?.updatedAt),
         parseIsoMs(awaiting?.sentAt),
-        parseIsoMs(orchestrationWork?.updatedAt)
+        parseIsoMs(orchestrationWork?.updatedAt),
+        recentNonUserActivityMs
       );
-      const directThreadSignal = resolveThreadWorkSignal(openclawThreadWork[key], {
+      const directThreadSignal = resolveThreadWorkSignal(threadWorkSignal, {
         latestOtherSignalMs,
         nowMs,
       });
-      if (directThreadSignal === false) return false;
+      const newerActivityAfterStopSignal =
+        hasRecentNonUserActivity &&
+        Number.isFinite(threadWorkSignalMs) &&
+        Number.isFinite(recentNonUserActivityMs) &&
+        recentNonUserActivityMs > threadWorkSignalMs;
+      if (directThreadSignal === false) {
+        const stopRequestId = normalizeOpenClawRequestId(threadWorkSignal?.requestId);
+        const activeRequestId =
+          normalizeOpenClawRequestId(awaiting?.requestId) ||
+          normalizeOpenClawRequestId(typing?.requestId) ||
+          normalizeOpenClawRequestId(orchestrationWork?.requestId) ||
+          normalizeOpenClawRequestId(recentNonUserActivity?.requestId);
+        if (
+          (!stopRequestId || !activeRequestId || stopRequestId === activeRequestId) &&
+          !newerActivityAfterStopSignal
+        ) return false;
+      }
       if (directThreadSignal === true) return true;
       if (typing?.typing) return true;
       if (Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, key)) return true;
       if (orchestrationWork?.active) return true;
+      if (hasRecentNonUserActivity) return true;
 
       const alias = typingAliasRef.current.get(key);
       if (!alias) return false;
@@ -2664,24 +2743,52 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const sourceTyping = openclawTyping[sourceKey];
       const sourceThreadWork = orchestrationThreadWorkBySession[sourceKey];
       const sourceAwaiting = effectiveAwaitingAssistant[sourceKey];
+      const sourceRecentNonUserActivity = recentNonUserActivityBySession[sourceKey];
+      const sourceRecentNonUserActivityMs = parseIsoMs(sourceRecentNonUserActivity?.updatedAt);
+      const sourceHasRecentNonUserActivity =
+        Number.isFinite(sourceRecentNonUserActivityMs) &&
+        nowMs - sourceRecentNonUserActivityMs >= 0 &&
+        nowMs - sourceRecentNonUserActivityMs <= OPENCLAW_NON_USER_ACTIVITY_TTL_MS;
+      const sourceThreadWorkSignal = openclawThreadWork[sourceKey];
+      const sourceThreadWorkSignalMs = parseIsoMs(sourceThreadWorkSignal?.updatedAt);
       const sourceLatestOtherSignalMs = Math.max(
         parseIsoMs(sourceTyping?.updatedAt),
         parseIsoMs(sourceAwaiting?.sentAt),
-        parseIsoMs(sourceThreadWork?.updatedAt)
+        parseIsoMs(sourceThreadWork?.updatedAt),
+        sourceRecentNonUserActivityMs
       );
       const sourceDirectThreadSignal = resolveThreadWorkSignal(
-        openclawThreadWork[sourceKey],
+        sourceThreadWorkSignal,
         {
           latestOtherSignalMs: sourceLatestOtherSignalMs,
           nowMs,
         }
       );
-      if (sourceDirectThreadSignal === false) return false;
+      const sourceNewerActivityAfterStopSignal =
+        sourceHasRecentNonUserActivity &&
+        Number.isFinite(sourceThreadWorkSignalMs) &&
+        Number.isFinite(sourceRecentNonUserActivityMs) &&
+        sourceRecentNonUserActivityMs > sourceThreadWorkSignalMs;
+      if (sourceDirectThreadSignal === false) {
+        const sourceStopRequestId = normalizeOpenClawRequestId(sourceThreadWorkSignal?.requestId);
+        const sourceActiveRequestId =
+          normalizeOpenClawRequestId(sourceAwaiting?.requestId) ||
+          normalizeOpenClawRequestId(sourceTyping?.requestId) ||
+          normalizeOpenClawRequestId(sourceThreadWork?.requestId) ||
+          normalizeOpenClawRequestId(sourceRecentNonUserActivity?.requestId);
+        if (
+          (!sourceStopRequestId ||
+            !sourceActiveRequestId ||
+            sourceStopRequestId === sourceActiveRequestId) &&
+          !sourceNewerActivityAfterStopSignal
+        ) return false;
+      }
       const sourceResponding =
         sourceDirectThreadSignal === true ||
         Boolean(sourceTyping?.typing) ||
         Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, sourceKey) ||
-        Boolean(sourceThreadWork?.active);
+        Boolean(sourceThreadWork?.active) ||
+        sourceHasRecentNonUserActivity;
       if (sourceResponding) return true;
 
       // Cleanup only after inactivity. Do not age out while the source session is still responding.
@@ -2690,7 +2797,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       }
       return false;
     },
-    [effectiveAwaitingAssistant, openclawTyping, openclawThreadWork, orchestrationThreadWorkBySession]
+    [
+      effectiveAwaitingAssistant,
+      openclawTyping,
+      openclawThreadWork,
+      orchestrationThreadWorkBySession,
+      recentNonUserActivityBySession,
+    ]
   );
 
   const prevExpandedTaskIdsRef = useRef<Set<string>>(new Set());
@@ -5976,7 +6089,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             onClick={toggleFiltersDrawer}
             aria-expanded={filtersDrawerOpen}
             className={cn(
-              "flex w-full items-center justify-between gap-3 rounded-[var(--radius-sm)] border px-3 py-2 text-left transition",
+              "flex w-full items-center justify-between gap-3 rounded-[var(--radius-sm)] border px-3 py-2 text-left transition md:hidden",
               filtersDrawerOpen
                 ? "border-[rgba(255,90,45,0.35)] bg-[rgba(255,90,45,0.08)]"
                 : "border-[rgb(var(--claw-border))] bg-[rgba(8,10,14,0.28)]"
@@ -5988,7 +6101,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               <span className="text-[10px]">{filtersDrawerOpen ? "▴" : "▾"}</span>
             </span>
           </button>
-          {filtersDrawerOpen ? (
+          {mdUp || filtersDrawerOpen ? (
             <div className="mt-2">
               <div className="space-y-2 md:hidden">
                 <div className="grid grid-cols-2 gap-2">

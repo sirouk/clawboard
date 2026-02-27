@@ -952,7 +952,7 @@ class AppendLogEntryTests(unittest.TestCase):
     def test_append_log_dedupes_non_user_replay_across_wrapped_direct_and_canonical_board_topic_sessions(self):
         base_dt = datetime.now(timezone.utc)
         first_ts = base_dt.isoformat()
-        replay_ts = first_ts
+        replay_ts = (base_dt + timedelta(seconds=7)).isoformat()
         with get_session() as session:
             session.add(
                 Topic(

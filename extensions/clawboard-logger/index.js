@@ -69,6 +69,100 @@ const OPENCLAW_REQUEST_ID_MAX_ENTRIES = envInt("OPENCLAW_REQUEST_ID_MAX_ENTRIES"
 function normalizeBaseUrl(url) {
     return url.replace(/\/$/, "");
 }
+function normalizeBaseUrlCandidate(value) {
+    const raw = String(value ?? "").trim();
+    if (!raw)
+        return "";
+    try {
+        const parsed = new URL(raw);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+            return "";
+        parsed.search = "";
+        parsed.hash = "";
+        return normalizeBaseUrl(parsed.toString());
+    }
+    catch {
+        return "";
+    }
+}
+function parseBaseUrlList(value) {
+    const raw = String(value ?? "").trim();
+    if (!raw)
+        return [];
+    const parts = raw.split(",").map((item) => normalizeBaseUrlCandidate(item)).filter(Boolean);
+    const seen = new Set();
+    const deduped = [];
+    for (const part of parts) {
+        if (seen.has(part))
+            continue;
+        seen.add(part);
+        deduped.push(part);
+    }
+    return deduped;
+}
+function isLoopbackHost(hostname) {
+    const host = String(hostname ?? "").trim().toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+function defaultLoopbackFallbacks(baseUrl) {
+    try {
+        const parsed = new URL(baseUrl);
+        if (isLoopbackHost(parsed.hostname))
+            return [];
+        const protocol = parsed.protocol;
+        const port = parsed.port ? `:${parsed.port}` : "";
+        const pathname = parsed.pathname && parsed.pathname !== "/" ? parsed.pathname.replace(/\/$/, "") : "";
+        return [
+            `${protocol}//127.0.0.1${port}${pathname}`,
+            `${protocol}//localhost${port}${pathname}`,
+        ].map((item) => normalizeBaseUrlCandidate(item)).filter(Boolean);
+    }
+    catch {
+        return [];
+    }
+}
+function buildBaseUrlCandidates(primaryBaseUrl, explicitFallbacks) {
+    const primary = normalizeBaseUrlCandidate(primaryBaseUrl);
+    if (!primary)
+        return [];
+    const candidates = [primary, ...explicitFallbacks, ...defaultLoopbackFallbacks(primary)];
+    const seen = new Set();
+    const deduped = [];
+    for (const candidate of candidates) {
+        const normalized = normalizeBaseUrlCandidate(candidate);
+        if (!normalized || seen.has(normalized))
+            continue;
+        seen.add(normalized);
+        deduped.push(normalized);
+    }
+    return deduped;
+}
+function isRetryableFetchError(err) {
+    if (!(err instanceof Error))
+        return false;
+    const message = String(err.message || "").toLowerCase();
+    const cause = err.cause;
+    let code = "";
+    if (cause && typeof cause === "object") {
+        const maybe = cause.code;
+        if (typeof maybe === "string")
+            code = maybe.toUpperCase();
+    }
+    if (code === "ECONNREFUSED" ||
+        code === "ECONNRESET" ||
+        code === "ETIMEDOUT" ||
+        code === "ENOTFOUND" ||
+        code === "EHOSTUNREACH" ||
+        code === "UND_ERR_CONNECT_TIMEOUT" ||
+        code === "UND_ERR_SOCKET") {
+        return true;
+    }
+    return (message.includes("fetch failed") ||
+        message.includes("econnrefused") ||
+        message.includes("econnreset") ||
+        message.includes("etimedout") ||
+        message.includes("enotfound"));
+}
 function sanitizeMessageContent(content) {
     let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
     text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\][\s\S]*?\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
@@ -304,6 +398,10 @@ export default function register(api) {
     const enabled = rawConfig.enabled !== false;
     const debug = rawConfig.debug === true;
     const baseUrl = rawConfig.baseUrl ? normalizeBaseUrl(rawConfig.baseUrl) : "";
+    const configuredFallbacks = Array.isArray(rawConfig.baseUrlFallbacks)
+        ? rawConfig.baseUrlFallbacks.map((value) => normalizeBaseUrlCandidate(value)).filter(Boolean)
+        : parseBaseUrlList(process.env.CLAWBOARD_LOGGER_BASE_URL_FALLBACKS);
+    const baseUrlCandidates = buildBaseUrlCandidates(baseUrl, configuredFallbacks);
     const token = rawConfig.token;
     const queuePath = rawConfig.queuePath ?? DEFAULT_QUEUE;
     const useQueue = rawConfig.queue === true;
@@ -371,7 +469,7 @@ export default function register(api) {
         api.logger.warn("[clawboard-logger] disabled by config");
         return;
     }
-    if (!baseUrl) {
+    if (!baseUrl || baseUrlCandidates.length === 0) {
         api.logger.warn("[clawboard-logger] baseUrl missing; plugin disabled");
         return;
     }
@@ -565,16 +663,19 @@ export default function register(api) {
     }
     async function upsertTopic(topicId, name) {
         try {
-            const res = await fetch(`${baseUrl}/api/topics`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    ...(token ? { "X-Clawboard-Token": token } : {}),
-                },
-                body: JSON.stringify({
-                    id: topicId,
-                    name,
-                    tags: ["openclaw"],
+            const res = await fetchWithBaseUrlFallback({
+                pathname: "/api/topics",
+                initFactory: () => ({
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        ...(token ? { "X-Clawboard-Token": token } : {}),
+                    },
+                    body: JSON.stringify({
+                        id: topicId,
+                        name,
+                        tags: ["openclaw"],
+                    }),
                 }),
             });
             return res.ok;
@@ -1044,27 +1145,89 @@ export default function register(api) {
         lastSendWarnSig = sig;
         suppressedSendWarns = 0;
     }
+    const BASE_URL_FALLBACK_WARN_INTERVAL_MS = 30_000;
+    let lastBaseFallbackWarnAt = 0;
+    let lastBaseFallbackWarnSig = "";
+    let suppressedBaseFallbackWarns = 0;
+    function warnBaseUrlFallback(fromBaseUrl, toBaseUrl, err) {
+        const now = nowMs();
+        const reason = formatSendError(err);
+        const sig = `${fromBaseUrl}->${toBaseUrl}:${reason}`;
+        suppressedBaseFallbackWarns += 1;
+        const shouldLog = lastBaseFallbackWarnAt === 0 ||
+            sig !== lastBaseFallbackWarnSig ||
+            now - lastBaseFallbackWarnAt >= BASE_URL_FALLBACK_WARN_INTERVAL_MS;
+        if (!shouldLog)
+            return;
+        const suppressed = Math.max(0, suppressedBaseFallbackWarns - 1);
+        const suffix = suppressed > 0 ? ` (suppressed ${suppressed} similar event(s))` : "";
+        api.logger.warn(`[clawboard-logger] clawboard API fallback: ${fromBaseUrl} -> ${toBaseUrl} (reason: ${reason})${suffix}`);
+        lastBaseFallbackWarnAt = now;
+        lastBaseFallbackWarnSig = sig;
+        suppressedBaseFallbackWarns = 0;
+    }
+    function buildCandidateUrl(base, pathname, query) {
+        const url = new URL(`${base}${pathname}`);
+        if (query) {
+            for (const [key, value] of Object.entries(query)) {
+                if (value === undefined || value === null || value === "")
+                    continue;
+                url.searchParams.set(key, String(value));
+            }
+        }
+        return url.toString();
+    }
+    async function fetchWithBaseUrlFallback(opts) {
+        const targets = baseUrlCandidates.length > 0 ? baseUrlCandidates : [baseUrl];
+        let lastError = undefined;
+        for (let idx = 0; idx < targets.length; idx += 1) {
+            const candidate = targets[idx];
+            if (!candidate)
+                continue;
+            const url = buildCandidateUrl(candidate, opts.pathname, opts.query);
+            try {
+                return await fetch(url, opts.initFactory());
+            }
+            catch (err) {
+                lastError = err;
+                const next = targets[idx + 1];
+                if (next && isRetryableFetchError(err)) {
+                    warnBaseUrlFallback(candidate, next, err);
+                    continue;
+                }
+                throw err;
+            }
+        }
+        if (lastError instanceof Error)
+            throw lastError;
+        throw new Error("fetch failed");
+    }
     async function postLog(payload) {
         const idempotencyKey = ensureIdempotencyKey(payload);
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 8000);
         try {
-            const controller = new AbortController();
-            const t = setTimeout(() => controller.abort(), 8000);
-            const res = await fetch(`${baseUrl}${ingestPath}`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    ...(token ? { "X-Clawboard-Token": token } : {}),
-                    "X-Idempotency-Key": idempotencyKey,
-                },
-                signal: controller.signal,
-                body: JSON.stringify(payload),
+            const res = await fetchWithBaseUrlFallback({
+                pathname: ingestPath,
+                initFactory: () => ({
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        ...(token ? { "X-Clawboard-Token": token } : {}),
+                        "X-Idempotency-Key": idempotencyKey,
+                    },
+                    signal: controller.signal,
+                    body: JSON.stringify(payload),
+                }),
             });
-            clearTimeout(t);
             return res.ok;
         }
         catch (err) {
             warnSendFailure(err);
             return false;
+        }
+        finally {
+            clearTimeout(t);
         }
     }
     async function postLogWithRetry(payload) {
@@ -1166,25 +1329,23 @@ export default function register(api) {
         ...(token ? { "X-Clawboard-Token": token } : {}),
     };
     async function getJson(pathname, params) {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), contextFetchTimeoutMs);
         try {
-            const url = new URL(`${baseUrl}${pathname}`);
-            if (params) {
-                for (const [key, value] of Object.entries(params)) {
-                    if (value === undefined || value === null || value === "")
-                        continue;
-                    url.searchParams.set(key, String(value));
-                }
-            }
-            const controller = new AbortController();
-            const t = setTimeout(() => controller.abort(), contextFetchTimeoutMs);
-            const res = await fetch(url.toString(), { headers: apiHeaders, signal: controller.signal });
-            clearTimeout(t);
+            const res = await fetchWithBaseUrlFallback({
+                pathname,
+                query: params,
+                initFactory: () => ({ headers: apiHeaders, signal: controller.signal }),
+            });
             if (!res.ok)
                 return null;
             return await res.json();
         }
         catch {
             return null;
+        }
+        finally {
+            clearTimeout(t);
         }
     }
     function coerceLogs(data) {
@@ -1203,24 +1364,19 @@ export default function register(api) {
     async function toolFetchJson(params) {
         const method = (params.method || "GET").toUpperCase();
         const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : 8000;
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), timeoutMs);
         try {
-            const url = new URL(`${baseUrl}${params.pathname}`);
-            if (params.query) {
-                for (const [key, value] of Object.entries(params.query)) {
-                    if (value === undefined || value === null || value === "")
-                        continue;
-                    url.searchParams.set(key, String(value));
-                }
-            }
-            const controller = new AbortController();
-            const t = setTimeout(() => controller.abort(), timeoutMs);
-            const res = await fetch(url.toString(), {
-                method,
-                headers: apiHeaders,
-                signal: controller.signal,
-                ...(method === "GET" || method === "HEAD" ? {} : { body: JSON.stringify(params.body ?? {}) }),
+            const res = await fetchWithBaseUrlFallback({
+                pathname: params.pathname,
+                query: params.query,
+                initFactory: () => ({
+                    method,
+                    headers: apiHeaders,
+                    signal: controller.signal,
+                    ...(method === "GET" || method === "HEAD" ? {} : { body: JSON.stringify(params.body ?? {}) }),
+                }),
             });
-            clearTimeout(t);
             const text = await res.text();
             let data = null;
             try {
@@ -1234,6 +1390,44 @@ export default function register(api) {
         catch (err) {
             return { ok: false, status: 0, data: { error: String(err) } };
         }
+        finally {
+            clearTimeout(t);
+        }
+    }
+    function toolErrorText(result) {
+        const data = result?.data;
+        if (!data || typeof data !== "object")
+            return "";
+        const value = data.error;
+        return typeof value === "string" ? value.trim() : "";
+    }
+    function isToolTransientFailure(result) {
+        if (result.ok)
+            return false;
+        if (result.status === 429 || result.status === 502 || result.status === 503 || result.status === 504)
+            return true;
+        if (result.status !== 0)
+            return false;
+        const text = toolErrorText(result).toLowerCase();
+        if (!text)
+            return true;
+        return (text.includes("aborted") ||
+            text.includes("aborterror") ||
+            text.includes("fetch failed") ||
+            text.includes("timeout") ||
+            text.includes("timed out") ||
+            text.includes("econnrefused") ||
+            text.includes("econnreset") ||
+            text.includes("etimedout") ||
+            text.includes("und_err"));
+    }
+    function toolDataRecord(value) {
+        if (!value || typeof value !== "object" || Array.isArray(value))
+            return undefined;
+        return value;
+    }
+    function toolDataArray(value) {
+        return Array.isArray(value) ? value : [];
     }
     function coerceBool(value, fallback = false) {
         if (typeof value === "boolean")
@@ -1299,19 +1493,117 @@ export default function register(api) {
                     const limitTopics = coerceInt(params.limitTopics, 24, 1, 2000);
                     const limitTasks = coerceInt(params.limitTasks, 48, 1, 5000);
                     const limitLogs = coerceInt(params.limitLogs, 360, 10, 5000);
+                    const lowerQuery = q.toLowerCase();
+                    // Heartbeat watchdog primarily asks clawboard_search("delegating") to recover
+                    // in-flight delegations. Keep this path lightweight and independent of heavy
+                    // semantic search so watchdog continuity remains reliable under load.
+                    if (lowerQuery === "delegating") {
+                        const startedFast = nowMs();
+                        const taskRes = await toolFetchJson({
+                            pathname: "/api/tasks",
+                            query: {
+                                sessionKey: sk,
+                                topicId: topicId || undefined,
+                            },
+                            timeoutMs: 12000,
+                        });
+                        if (taskRes.ok) {
+                            const tasks = toolDataArray(taskRes.data)
+                                .filter((item) => item && typeof item === "object")
+                                .map((item) => item)
+                                .filter((task) => {
+                                const status = String(task.status ?? "").trim().toLowerCase();
+                                if (status === "done")
+                                    return false;
+                                const tags = Array.isArray(task.tags) ? task.tags : [];
+                                return tags.some((tag) => String(tag ?? "").trim().toLowerCase() === "delegating");
+                            })
+                                .slice(0, Math.max(1, limitTasks));
+                            const matchedTopicIds = new Set();
+                            const matchedTaskIds = [];
+                            for (const task of tasks) {
+                                const topicIdValue = String(task.topicId ?? "").trim();
+                                if (topicIdValue)
+                                    matchedTopicIds.add(topicIdValue);
+                                const taskIdValue = String(task.id ?? "").trim();
+                                if (taskIdValue)
+                                    matchedTaskIds.push(taskIdValue);
+                            }
+                            return toolJsonResult({
+                                ok: true,
+                                status: 200,
+                                data: {
+                                    query: q,
+                                    mode: "delegating-fast-path",
+                                    topics: [],
+                                    tasks,
+                                    logs: [],
+                                    notes: [],
+                                    matchedTopicIds: Array.from(matchedTopicIds),
+                                    matchedTaskIds,
+                                    matchedLogIds: [],
+                                    degraded: true,
+                                    searchMeta: {
+                                        fastPath: "tasks-tag-filter",
+                                        durationMs: Math.max(0, nowMs() - startedFast),
+                                        effectiveLimits: {
+                                            topics: 0,
+                                            tasks: Math.max(1, limitTasks),
+                                            logs: 0,
+                                        },
+                                    },
+                                },
+                            });
+                        }
+                        if (!isToolTransientFailure(taskRes)) {
+                            return toolJsonResult(taskRes);
+                        }
+                    }
+                    const baseQuery = {
+                        q,
+                        sessionKey: sk,
+                        topicId: topicId || undefined,
+                        includePending,
+                        limitTopics,
+                        limitTasks,
+                        limitLogs,
+                    };
                     const res = await toolFetchJson({
                         pathname: "/api/search",
-                        query: {
-                            q,
-                            sessionKey: sk,
-                            topicId: topicId || undefined,
-                            includePending,
-                            limitTopics,
-                            limitTasks,
-                            limitLogs,
-                        },
+                        query: baseQuery,
+                        timeoutMs: 12000,
                     });
-                    return toolJsonResult(res);
+                    if (!isToolTransientFailure(res))
+                        return toolJsonResult(res);
+                    const retryLimitTopics = Math.max(1, Math.min(limitTopics, 12));
+                    const retryLimitTasks = Math.max(1, Math.min(limitTasks, 24));
+                    const retryLimitLogs = Math.max(10, Math.min(limitLogs, 120));
+                    const retry = await toolFetchJson({
+                        pathname: "/api/search",
+                        query: {
+                            ...baseQuery,
+                            limitTopics: retryLimitTopics,
+                            limitTasks: retryLimitTasks,
+                            limitLogs: retryLimitLogs,
+                        },
+                        timeoutMs: 20000,
+                    });
+                    if (!retry.ok)
+                        return toolJsonResult(retry);
+                    const retryData = toolDataRecord(retry.data);
+                    if (retryData) {
+                        retryData.degraded = true;
+                        const meta = toolDataRecord(retryData.searchMeta) ?? {};
+                        meta.toolRetry = true;
+                        meta.retryReason = toolErrorText(res) || `status:${res.status}`;
+                        meta.retryLimits = {
+                            topics: retryLimitTopics,
+                            tasks: retryLimitTasks,
+                            logs: retryLimitLogs,
+                        };
+                        retryData.searchMeta = meta;
+                    }
+                    return toolJsonResult(retry);
                 },
             });
             tools.push({
@@ -1601,17 +1893,20 @@ export default function register(api) {
         const controller = new AbortController();
         const t = setTimeout(() => controller.abort(), contextFetchTimeoutMs);
         try {
-            const url = new URL(`${baseUrl}/api/context`);
-            url.searchParams.set("q", query);
-            if (sessionKey)
-                url.searchParams.set("sessionKey", sessionKey);
-            url.searchParams.set("mode", mode);
-            url.searchParams.set("includePending", "1");
-            url.searchParams.set("maxChars", String(contextMaxChars));
-            // Working set should be a bit larger than semantic shortlist.
-            url.searchParams.set("workingSetLimit", String(Math.max(6, contextTaskLimit)));
-            url.searchParams.set("timelineLimit", String(contextLogLimit));
-            const res = await fetch(url.toString(), { headers: apiHeaders, signal: controller.signal });
+            const res = await fetchWithBaseUrlFallback({
+                pathname: "/api/context",
+                query: {
+                    q: query,
+                    sessionKey: sessionKey || undefined,
+                    mode,
+                    includePending: "1",
+                    maxChars: String(contextMaxChars),
+                    // Working set should be a bit larger than semantic shortlist.
+                    workingSetLimit: String(Math.max(6, contextTaskLimit)),
+                    timelineLimit: String(contextLogLimit),
+                },
+                initFactory: () => ({ headers: apiHeaders, signal: controller.signal }),
+            });
             if (!res.ok) {
                 return {
                     status: res.status,

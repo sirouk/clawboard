@@ -7,6 +7,7 @@ import register from "./index.js";
 
 function makeApi(config = {}) {
   const handlers = new Map();
+  const registeredTools = [];
   const api = {
     pluginConfig: {
       baseUrl: "http://clawboard.test",
@@ -24,8 +25,11 @@ function makeApi(config = {}) {
     on(event, handler) {
       handlers.set(event, handler);
     },
-    registerTool() {},
+    registerTool(toolFactory, opts) {
+      registeredTools.push({ toolFactory, opts });
+    },
     __handlers: handlers,
+    __registeredTools: registeredTools,
   };
   return api;
 }
@@ -82,6 +86,17 @@ function meaningfulCalls(calls) {
   return calls.filter((call) => !isStartupAction(call));
 }
 
+function getRegisteredTool(api, name, ctx = {}) {
+  const entry = api.__registeredTools.find((item) => Array.isArray(item?.opts?.names) && item.opts.names.includes(name));
+  assert.ok(entry, `expected registerTool entry for ${name}`);
+  const tools = entry.toolFactory(ctx);
+  assert.ok(Array.isArray(tools), "expected registerTool factory to return tool list");
+  const tool = tools.find((item) => item?.name === name);
+  assert.ok(tool, `expected tool ${name}`);
+  assert.equal(typeof tool.execute, "function");
+  return tool;
+}
+
 test("message_received logs user conversation with dedupe metadata (ING-001)", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -119,6 +134,237 @@ test("message_received logs user conversation with dedupe metadata (ING-001)", a
     assert.equal(payload.source.sessionKey, "channel:discord-123");
     assert.equal(payload.source.messageId, "discord-msg-1");
     assert.ok(String(call.options?.headers?.["X-Idempotency-Key"] || "").includes("discord-msg-1"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("message_received falls back to loopback base URL when primary base URL is unreachable", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock((_idx, url) => {
+      const target = String(url);
+      if (target.startsWith("http://100.91.119.30:8010/")) {
+        const err = new TypeError("fetch failed");
+        err.cause = {
+          code: "ECONNREFUSED",
+          message: "connect ECONNREFUSED 100.91.119.30:8010",
+        };
+        throw err;
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {};
+        },
+        async text() {
+          return "{}";
+        },
+      };
+    });
+    globalThis.fetch = fn;
+
+    const api = makeApi({ baseUrl: "http://100.91.119.30:8010" });
+    register(api);
+
+    const handler = api.__handlers.get("message_received");
+    assert.equal(typeof handler, "function");
+
+    await handler(
+      {
+        content: "Fallback path message",
+        metadata: {
+          sessionKey: "channel:fallback-path",
+          messageId: "fallback-msg-1",
+        },
+      },
+      {
+        channelId: "discord",
+        conversationId: "channel:fallback-path",
+      }
+    );
+
+    await waitFor(() =>
+      meaningfulCalls(calls).some((call) => {
+        try {
+          return parseBody(call).content === "Fallback path message";
+        } catch {
+          return false;
+        }
+      })
+    );
+
+    const relevant = meaningfulCalls(calls).filter((call) => {
+      try {
+        return parseBody(call).content === "Fallback path message";
+      } catch {
+        return false;
+      }
+    });
+    assert.ok(
+      relevant.some((call) => String(call.url).startsWith("http://100.91.119.30:8010/api/log")),
+      "expected an initial attempt against configured baseUrl",
+    );
+    assert.ok(
+      relevant.some((call) => String(call.url).startsWith("http://127.0.0.1:8010/api/log")),
+      "expected fallback attempt against loopback baseUrl",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("clawboard_search uses delegating fast path without calling /api/search", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const calls = [];
+    globalThis.fetch = async (url, _options = {}) => {
+      const target = String(url);
+      calls.push(target);
+      if (target.includes("/api/tasks")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return [
+              { id: "task-a", topicId: "topic-a", status: "doing", tags: ["delegating", "agent:coding"] },
+              { id: "task-b", topicId: "topic-a", status: "done", tags: ["delegating"] },
+              { id: "task-c", topicId: "topic-b", status: "doing", tags: ["other"] },
+            ];
+          },
+          async text() {
+            return JSON.stringify([
+              { id: "task-a", topicId: "topic-a", status: "doing", tags: ["delegating", "agent:coding"] },
+              { id: "task-b", topicId: "topic-a", status: "done", tags: ["delegating"] },
+              { id: "task-c", topicId: "topic-b", status: "doing", tags: ["other"] },
+            ]);
+          },
+        };
+      }
+      if (target.includes("/api/search")) {
+        throw new Error("unexpected /api/search call for delegating fast path");
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {};
+        },
+        async text() {
+          return "{}";
+        },
+      };
+    };
+
+    const api = makeApi();
+    register(api);
+    const tool = getRegisteredTool(api, "clawboard_search", {
+      sessionKey: "agent:main:main",
+      agentId: "main",
+    });
+    const result = await tool.execute("tool-call-1", { q: "delegating" });
+    const details = result?.details;
+    assert.equal(details?.ok, true);
+    assert.equal(details?.status, 200);
+    assert.equal(details?.data?.mode, "delegating-fast-path");
+    assert.equal(Array.isArray(details?.data?.tasks), true);
+    assert.equal(details.data.tasks.length, 1);
+    assert.equal(details.data.tasks[0].id, "task-a");
+    assert.equal(calls.some((value) => value.includes("/api/tasks")), true);
+    assert.equal(calls.some((value) => value.includes("/api/search")), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("clawboard_search retries transient /api/search failures with degraded limits", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const calls = [];
+    let searchCalls = 0;
+    globalThis.fetch = async (url, _options = {}) => {
+      const target = String(url);
+      calls.push(target);
+      if (target.includes("/api/search")) {
+        searchCalls += 1;
+        if (searchCalls === 1) {
+          const err = new Error("This operation was aborted");
+          err.name = "AbortError";
+          throw err;
+        }
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              query: "status review",
+              mode: "hybrid",
+              topics: [],
+              tasks: [],
+              logs: [],
+              notes: [],
+              matchedTopicIds: [],
+              matchedTaskIds: [],
+              matchedLogIds: [],
+              searchMeta: { durationMs: 13.5 },
+            };
+          },
+          async text() {
+            return JSON.stringify({
+              query: "status review",
+              mode: "hybrid",
+              topics: [],
+              tasks: [],
+              logs: [],
+              notes: [],
+              matchedTopicIds: [],
+              matchedTaskIds: [],
+              matchedLogIds: [],
+              searchMeta: { durationMs: 13.5 },
+            });
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {};
+        },
+        async text() {
+          return "{}";
+        },
+      };
+    };
+
+    const api = makeApi();
+    register(api);
+    const tool = getRegisteredTool(api, "clawboard_search", {
+      sessionKey: "agent:main:main",
+      agentId: "main",
+    });
+    const result = await tool.execute("tool-call-2", {
+      q: "status review",
+      limitTopics: 60,
+      limitTasks: 120,
+      limitLogs: 320,
+    });
+    const details = result?.details;
+    assert.equal(searchCalls, 2);
+    const searchUrls = calls.filter((value) => value.includes("/api/search"));
+    assert.equal(searchUrls.length, 2);
+    const first = new URL(searchUrls[0]);
+    const second = new URL(searchUrls[1]);
+    assert.equal(first.searchParams.get("limitTopics"), "60");
+    assert.equal(first.searchParams.get("limitTasks"), "120");
+    assert.equal(first.searchParams.get("limitLogs"), "320");
+    assert.equal(second.searchParams.get("limitTopics"), "12");
+    assert.equal(second.searchParams.get("limitTasks"), "24");
+    assert.equal(second.searchParams.get("limitLogs"), "120");
+    assert.equal(details?.ok, true);
+    assert.equal(details?.data?.degraded, true);
+    assert.equal(details?.data?.searchMeta?.toolRetry, true);
   } finally {
     globalThis.fetch = originalFetch;
   }

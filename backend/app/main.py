@@ -4329,6 +4329,10 @@ def _find_existing_openclaw_non_user_conversation_near_duplicate(
         candidate_source = candidate.source if isinstance(candidate.source, dict) else {}
         candidate_channel = str(candidate_source.get("channel") or "").strip().lower()
         candidate_has_identifier = _source_has_message_or_request_id(candidate_source)
+        # If both rows already carry explicit identifiers on the same channel,
+        # keep them distinct here and rely on identifier/source-id dedupe above.
+        if candidate_channel == incoming_channel and incoming_has_identifier and candidate_has_identifier:
+            continue
         if not (incoming_has_identifier or candidate_has_identifier or candidate_channel != incoming_channel):
             continue
         return candidate
@@ -4875,14 +4879,15 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                         source_identity_key=source_identity_key,
                     )
 
-    existing_non_user_near_duplicate = None
-    if not source_identity_key:
-        existing_non_user_near_duplicate = _find_existing_openclaw_non_user_conversation_near_duplicate(
-            session,
-            payload=payload,
-            source_meta=source_meta,
-            created_at=created_at,
-        )
+    # Always run semantic replay dedupe for non-user openclaw conversation rows.
+    # Source identity keys can legitimately differ across ingestion paths (for
+    # example timestamp drift), so this fallback must still run when present.
+    existing_non_user_near_duplicate = _find_existing_openclaw_non_user_conversation_near_duplicate(
+        session,
+        payload=payload,
+        source_meta=source_meta,
+        created_at=created_at,
+    )
     if existing_non_user_near_duplicate:
         return _maybe_upgrade_existing_duplicate_log(
             session,
@@ -5413,6 +5418,16 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 },
                 "eventTs": entry.updatedAt
             })
+            event_hub.publish({
+                "type": "openclaw.thread_work",
+                "data": {
+                    "sessionKey": session_key,
+                    "active": False,
+                    "requestId": entry.source.get("requestId") if isinstance(entry.source, dict) else None,
+                    "reason": "assistant_response",
+                },
+                "eventTs": entry.updatedAt,
+            })
     scoped_seen_ids: set[str] = set()
     for scoped in retro_scoped_rows:
         scoped_id = str(getattr(scoped, "id", "") or "").strip()
@@ -5858,7 +5873,9 @@ def _orchestration_enqueue_follow_up_dispatch(
     run_id = str(getattr(run, "runId", "") or "").strip()
     idem_key = f"orchestration:follow-up:{run_id}:{idempotency_suffix}"
     import hashlib
-    request_id = "ocfup-" + hashlib.sha256(idem_key.encode()).hexdigest()[:32]
+    # Use an occhat-prefixed synthetic request id so request attribution/dedupe paths
+    # treat follow-up dispatches like normal chat turns.
+    request_id = "occhat-fup-" + hashlib.sha256(idem_key.encode()).hexdigest()[:32]
     try:
         _enqueue_openclaw_chat_dispatch(
             request_id=request_id,
@@ -7576,7 +7593,8 @@ def _run_openclaw_chat(
             cause=exc,
         )
     finally:
-        # Success path relies on assistant append -> openclaw.typing:false.
+        # Success path relies on assistant append -> openclaw.typing:false and
+        # openclaw.thread_work active:false terminal signals.
         # We intentionally do not force typing:false here so long-running accepted/in-flight
         # requests stay visible until a true terminal signal appears.
         lock.release()
@@ -7746,11 +7764,24 @@ def _openclaw_chat_board_in_flight_probe_seconds() -> float:
     """Fallback no-progress probe for board sessions when global probe is disabled."""
     raw = str(os.getenv("OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS") or "").strip()
     if not raw:
-        raw = str(os.getenv("OPENCLAW_CHAT_TASK_IN_FLIGHT_PROBE_SECONDS") or "30").strip()
+        raw = str(os.getenv("OPENCLAW_CHAT_TASK_IN_FLIGHT_PROBE_SECONDS") or "").strip()
+    if not raw:
+        # Respect an explicit global disable (OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS<=0)
+        # instead of forcing board fallback retries.
+        global_raw = str(os.getenv("OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS") or "").strip()
+        if global_raw:
+            try:
+                if float(global_raw) <= 0:
+                    return 0.0
+            except Exception:
+                pass
+        raw = "30"
     try:
         value = float(raw)
     except Exception:
         value = 30.0
+    if value <= 0:
+        return 0.0
     return max(5.0, min(3600.0, value))
 
 
@@ -10443,13 +10474,13 @@ def openclaw_chat_cancel(payload: OpenClawChatCancelRequest):
         if not key:
             continue
         try:
-            abort_params: dict[str, Any] = {"sessionKey": key}
-            if abort_request_id:
-                abort_params["requestId"] = abort_request_id
+            # Gateway chat.abort accepts session-scoped cancellation.
+            # Keep requestId filtering in our durable queue/orchestration layers, but
+            # send only sessionKey here for cross-version gateway compatibility.
             asyncio.run(
                 gateway_rpc(
                     "chat.abort",
-                    abort_params,
+                    {"sessionKey": key},
                     scopes=["operator.write"],
                     timeout_seconds=8.0,
                 )

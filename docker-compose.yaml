@@ -23,6 +23,7 @@ services:
     depends_on:
       - db
       - qdrant
+    restart: unless-stopped
     networks:
       - edge
       - core

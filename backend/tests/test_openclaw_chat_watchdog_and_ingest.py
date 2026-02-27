@@ -275,6 +275,12 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         terminal = typing_events[-1]
         self.assertFalse(bool((terminal.get("data") or {}).get("typing")))
         self.assertEqual((terminal.get("data") or {}).get("requestId"), "request-ing-020")
+        thread_work_events = [event for event in published if str(event.get("type") or "") == "openclaw.thread_work"]
+        self.assertTrue(thread_work_events)
+        thread_terminal = thread_work_events[-1]
+        self.assertFalse(bool((thread_terminal.get("data") or {}).get("active")))
+        self.assertEqual((thread_terminal.get("data") or {}).get("requestId"), "request-ing-020")
+        self.assertEqual((thread_terminal.get("data") or {}).get("reason"), "assistant_response")
 
     def test_ing_020b_assistant_append_infers_request_id_from_latest_unresolved_board_send(self):
         sent_at = now_iso()
@@ -425,6 +431,9 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         board_session_key = f"clawboard:task:{topic_id}:{task_id}"
         gateway_session_key = f"agent:main:clawboard:task:{topic_id}:{task_id}"
         created_at = now_iso()
+        created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        first_assistant_at = (created_dt + timedelta(seconds=4)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        replay_assistant_at = (created_dt + timedelta(seconds=11)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         with get_session() as session:
             # Persist the authoritative user send row as /api/openclaw/chat would.
             main_module.append_log_entry(
@@ -453,7 +462,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     type="conversation",
                     content="assistant response 020d",
                     summary="assistant response 020d",
-                    createdAt=now_iso(),
+                    createdAt=first_assistant_at,
                     agentId="assistant",
                     agentLabel="Assistant",
                     source={
@@ -472,7 +481,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     type="conversation",
                     content="assistant response 020d",
                     summary="assistant response 020d",
-                    createdAt=now_iso(),
+                    createdAt=replay_assistant_at,
                     agentId="assistant",
                     agentLabel="Assistant",
                     source={
@@ -930,6 +939,40 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(main_module._openclaw_request_attribution_lookback_seconds(), 1209600)
             self.assertEqual(main_module._openclaw_request_attribution_max_candidates(), 24)
 
+    def test_chat_020j1_board_probe_fallback_respects_global_disable(self):
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "",
+                "OPENCLAW_CHAT_TASK_IN_FLIGHT_PROBE_SECONDS": "",
+            },
+            clear=False,
+        ):
+            self.assertEqual(main_module._openclaw_chat_board_in_flight_probe_seconds(), 0.0)
+
+    def test_chat_020j2_orchestration_follow_up_dispatch_uses_occhat_prefixed_request_id(self):
+        class _Run:
+            runId = "ocorun-chat-020j2"
+            baseSessionKey = "clawboard:topic:topic-chat-020j2"
+
+        captured: dict[str, str] = {}
+
+        def _fake_enqueue(**kwargs):
+            captured.update({k: str(v) for k, v in kwargs.items()})
+
+        with patch.object(main_module, "_enqueue_openclaw_chat_dispatch", side_effect=_fake_enqueue):
+            ok = main_module._orchestration_enqueue_follow_up_dispatch(
+                run=_Run(),
+                message="relay this completed subagent result",
+                idempotency_suffix="item-done:020j2",
+            )
+
+        self.assertTrue(ok)
+        request_id = str(captured.get("request_id") or "")
+        self.assertTrue(request_id.startswith("occhat-fup-"))
+        self.assertEqual(len(request_id), len("occhat-fup-") + 32)
+
     def test_chat_001_persists_user_log_and_enqueues_durable_dispatch(self):
         payload = OpenClawChatRequest(
             sessionKey="clawboard:topic:topic-chat-001",
@@ -1047,7 +1090,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertIn(parent_session, called_sessions)
         self.assertIn(subagent_session, called_sessions)
         self.assertTrue(
-            all(str(params.get("requestId") or "") == request_id for method, params in rpc_calls if method == "chat.abort")
+            all("requestId" not in params for method, params in rpc_calls if method == "chat.abort")
         )
         typing_stops = [
             event
@@ -1166,7 +1209,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         chat_abort_calls = [(method, params) for method, params in rpc_calls if method == "chat.abort"]
         self.assertEqual(len(chat_abort_calls), 1)
         self.assertEqual(str(chat_abort_calls[0][1].get("sessionKey") or ""), session_key)
-        self.assertEqual(str(chat_abort_calls[0][1].get("requestId") or ""), request_id)
+        self.assertNotIn("requestId", chat_abort_calls[0][1])
 
         typing_stop = [
             event
