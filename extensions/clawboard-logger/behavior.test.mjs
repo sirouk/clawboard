@@ -1275,6 +1275,105 @@ test("before_tool_call inherits requestId across wrapped subagent session keys",
   }
 });
 
+test("topic-only board scope hint survives into downstream tool events", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const received = api.__handlers.get("message_received");
+    const toolCall = api.__handlers.get("before_tool_call");
+    assert.equal(typeof received, "function");
+    assert.equal(typeof toolCall, "function");
+
+    await received(
+      {
+        content: "persisted board-only question",
+        metadata: {
+          sessionKey: "clawboard:topic:topic-only-routing-001",
+          messageId: "occhat-topic-only-routing-001",
+          boardScopeKind: "topic_only",
+          boardScopeTopicOnly: true,
+        },
+      },
+      {
+        channelId: "openclaw",
+        sessionKey: "clawboard:topic:topic-only-routing-001",
+        conversationId: "clawboard:topic:topic-only-routing-001",
+        agentId: "main",
+      },
+    );
+
+    await toolCall(
+      {
+        toolName: "memory.get",
+        params: { key: "routing" },
+      },
+      {
+        sessionKey: "clawboard:topic:topic-only-routing-001",
+        channelId: "openclaw",
+        agentId: "main",
+      },
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 2);
+    const toolPayload = meaningfulCalls(calls)
+      .map((call) => parseBody(call))
+      .find((payload) => payload?.type === "action" && payload?.source?.hook === "before_tool_call");
+
+    assert.ok(toolPayload, "expected tool action log");
+    assert.equal(toolPayload.topicId, "topic-only-routing-001");
+    assert.equal(toolPayload.source.boardScopeKind, "topic_only");
+    assert.equal(toolPayload.source.boardScopeTopicOnly, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("before_tool_call applies topic-only hint from tool metadata without prior cache", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const toolCall = api.__handlers.get("before_tool_call");
+    assert.equal(typeof toolCall, "function");
+
+    await toolCall(
+      {
+        toolName: "memory.search",
+        params: { q: "cold state" },
+        metadata: {
+          sessionKey: "clawboard:topic:topic-only-routing-cold-001",
+          boardScopeKind: "topic_only",
+          boardScopeTopicOnly: true,
+        },
+      },
+      {
+        sessionKey: "clawboard:topic:topic-only-routing-cold-001",
+        channelId: "openclaw",
+        agentId: "main",
+      },
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 1);
+    const toolPayload = parseBody(meaningfulCalls(calls)[0]);
+    assert.equal(toolPayload.type, "action");
+    assert.equal(toolPayload.content, "Tool call: memory.search");
+    assert.equal(toolPayload.topicId, "topic-only-routing-cold-001");
+    assert.equal(toolPayload.source.boardScopeKind, "topic_only");
+    assert.equal(toolPayload.source.boardScopeTopicOnly, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("before_tool_call recovers requestId from board session logs when in-memory request map is cold", async () => {
   const originalFetch = globalThis.fetch;
   try {

@@ -99,9 +99,10 @@ type PluginHookAgentContext = PluginHookContextBase;
 type BoardScope = {
   topicId: string;
   taskId?: string;
-  kind: "topic" | "task";
+  kind: "topic" | "task" | "topic_only";
   sessionKey: string;
   inherited: boolean;
+  topicOnly?: boolean;
   updatedAt: number;
 };
 
@@ -1163,6 +1164,7 @@ export default function register(api: OpenClawPluginApi) {
     "sessionKey",
     "messageId",
     "requestId",
+    "boardScopeTopicOnly",
     "boardScopeTopicId",
     "boardScopeKind",
     "boardScopeSessionKey",
@@ -1346,6 +1348,9 @@ export default function register(api: OpenClawPluginApi) {
       if (boardScope.kind === "task" && boardScope.taskId) {
         source.boardScopeTaskId = boardScope.taskId;
       }
+      if (boardScope.topicOnly) {
+        source.boardScopeTopicOnly = true;
+      }
     }
 
     const flow = params.flow;
@@ -1479,22 +1484,38 @@ export default function register(api: OpenClawPluginApi) {
           [normalizedSessionKey, ctxSessionKey, metaSessionKey].flatMap((candidate) => requestSessionKeys(candidate)),
         )
       : [];
+    const topicOnlyFromMeta = boardScopeTopicOnlyFromMeta(meta);
 
     // Direct board scope from any supplied session key always wins.
     for (const candidate of sessionCandidates) {
+      const cached = candidate ? boardScopeBySession.get(candidate) : undefined;
+      if (cached?.topicId) {
+        const cachedScope = withBoardScopeTopicOnlyHint(cached, topicOnlyFromMeta);
+        rememberBoardScope(cachedScope, {
+          sessionKeys: sessionCandidates,
+          agentIds: [normalizeId(ctx2.agentId), subagent?.ownerAgentId],
+        });
+        return {
+          topicId: cachedScope.topicId,
+          taskId: cachedScope.kind === "task" ? cachedScope.taskId : undefined,
+          boardScope: cachedScope,
+        };
+      }
+
       const direct = boardScopeFromSessionKey(candidate);
       if (!direct) continue;
+      const hintedDirect = withBoardScopeTopicOnlyHint(direct, topicOnlyFromMeta);
       const sessionOwners = sessionCandidates
         .map((rawKey) => parseAgentSessionOwner(rawKey))
         .filter((value): value is string => Boolean(value));
-      rememberBoardScope(direct, {
+      rememberBoardScope(hintedDirect, {
         sessionKeys: sessionCandidates,
         agentIds: [normalizeId(ctx2.agentId), subagent?.ownerAgentId, ...sessionOwners],
       });
       return {
-        topicId: direct.topicId,
-        taskId: direct.kind === "task" ? direct.taskId : undefined,
-        boardScope: direct,
+        topicId: hintedDirect.topicId,
+        taskId: hintedDirect.kind === "task" ? hintedDirect.taskId : undefined,
+        boardScope: hintedDirect,
       };
     }
 
@@ -2968,6 +2989,49 @@ export default function register(api: OpenClawPluginApi) {
     return computeEffectiveSessionKey(metaObj, ctx2);
   };
 
+  const parseMetaBoolean = (value: unknown): boolean | undefined => {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value === 1;
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (!normalized) return undefined;
+      if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") return true;
+      if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") return false;
+    }
+    return undefined;
+  };
+
+  const parseBoardScopeKindFromMeta = (meta: Record<string, unknown> | undefined): BoardScope["kind"] | undefined => {
+    const value =
+      typeof meta?.boardScopeKind === "string"
+        ? meta.boardScopeKind
+        : typeof meta?.boardScope_kind === "string"
+          ? meta.boardScope_kind
+          : undefined;
+    if (!value) return undefined;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "topic" || normalized === "task" || normalized === "topic_only") return normalized;
+    return undefined;
+  };
+
+  const boardScopeTopicOnlyFromMeta = (meta: Record<string, unknown> | undefined): boolean => {
+    const direct =
+      parseMetaBoolean(meta?.boardScopeTopicOnly) ??
+      parseMetaBoolean(meta?.topicOnly) ??
+      parseMetaBoolean(meta?.topic_only);
+    if (direct !== undefined) return direct;
+    return parseBoardScopeKindFromMeta(meta) === "topic_only";
+  };
+
+  const withBoardScopeTopicOnlyHint = (scope: BoardScope, topicOnly: boolean): BoardScope => {
+    if (!topicOnly || scope.kind !== "topic") return scope;
+    return {
+      ...scope,
+      kind: "topic_only",
+      topicOnly: true,
+    };
+  };
+
   const normalizeEventMeta = (
     meta: Record<string, unknown> | undefined,
     topLevelSessionKey: unknown,
@@ -3026,7 +3090,10 @@ export default function register(api: OpenClawPluginApi) {
       // WebChat can echo it back with a different messageId; skip to avoid duplicate user rows.
       return;
     }
-    const directBoardScope = boardScopeFromSessionKey(effectiveSessionKey ?? ctx?.sessionKey);
+    const directBoardScope = withBoardScopeTopicOnlyHint(
+      boardScopeFromSessionKey(effectiveSessionKey ?? ctx?.sessionKey),
+      boardScopeTopicOnlyFromMeta(meta),
+    );
     if (directBoardScope) {
       rememberBoardScope(directBoardScope, {
         sessionKeys: [effectiveSessionKey, ctx.sessionKey],

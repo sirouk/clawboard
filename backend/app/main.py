@@ -5784,22 +5784,28 @@ def _parse_board_session_key(session_key: str) -> tuple[str | None, str | None]:
     if not key:
         return (None, None)
 
-    # OpenClaw may attach thread suffixes (`|thread:...`). Strip those for routing.
-    base = (key.split("|", 1)[0] or "").strip()
-    if not base:
-        return (None, None)
+    # OpenClaw may attach thread suffixes (`|thread:...`). Keep full and base
+    # variants so wrapped/legacy variants can still be parsed.
+    candidates: list[str] = [key]
+    base = _base_session_key(key)
+    if base and base not in candidates:
+        candidates.append(base)
 
-    # Robust matching: handles agent: prefixes and other wrappers.
-    # Task format must be checked before topic format, because `clawboard:task:...`
-    # contains a `clawboard:topic:` substring and would otherwise be misclassified.
-    task_match = re.search(r"clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)", base)
-    if task_match:
-        return (task_match.group(1), task_match.group(2))
+    for candidate in candidates:
+        if not candidate:
+            continue
 
-    # Topic format: clawboard:topic:<topic-id>
-    topic_match = re.search(r"clawboard:topic:(topic-[a-zA-Z0-9-]+)", base)
-    if topic_match:
-        return (topic_match.group(1), None)
+        # Robust matching: handles agent: prefixes and other wrappers.
+        # Task format must be checked before topic format, because `clawboard:task:...`
+        # contains a `clawboard:topic:` substring and would otherwise be misclassified.
+        task_match = re.search(r"clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)", candidate)
+        if task_match:
+            return (task_match.group(1), task_match.group(2))
+
+        # Topic format: clawboard:topic:<topic-id>
+        topic_match = re.search(r"clawboard:topic:(topic-[a-zA-Z0-9-]+)", candidate)
+        if topic_match:
+            return (topic_match.group(1), None)
 
     return (None, None)
 
@@ -9419,6 +9425,32 @@ def _openclaw_history_channel(message: dict[str, Any], session_key: str) -> str:
 
 def _openclaw_history_scope_metadata(message: dict[str, Any], session_key: str) -> dict[str, Any]:
     source: dict[str, Any] = {}
+    topic_only = False
+
+    def _coerce_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            if value == 1:
+                return True
+            if value == 0:
+                return False
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return None
+
+    def _coerce_board_scope_kind(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        if normalized in {"topic", "task", "topic_only"}:
+            return normalized
+        return None
+
     metadata_rows = [row for row in [message.get("source"), message.get("metadata"), message.get("meta")] if isinstance(row, dict)]
     for row in metadata_rows:
         candidate_space = _normalize_space_id(row.get("boardScopeSpaceId") or row.get("spaceId"))
@@ -9430,12 +9462,30 @@ def _openclaw_history_scope_metadata(message: dict[str, Any], session_key: str) 
         candidate_task = str(row.get("boardScopeTaskId") or row.get("taskId") or "").strip()
         if candidate_task and "boardScopeTaskId" not in source:
             source["boardScopeTaskId"] = _clip(candidate_task, 240)
+        if "boardScopeKind" not in source:
+            candidate_kind = _coerce_board_scope_kind(
+                row.get("boardScopeKind")
+                if row.get("boardScopeKind") is not None
+                else row.get("boardScope_kind")
+            )
+            if candidate_kind is not None:
+                source["boardScopeKind"] = candidate_kind
+                if candidate_kind == "topic_only":
+                    topic_only = True
+        board_scope_only_value = _coerce_bool(row.get("boardScopeTopicOnly"))
+        if board_scope_only_value is not None:
+            if board_scope_only_value:
+                topic_only = True
         if "boardScopeLock" not in source and row.get("boardScopeLock") is not None:
             lock_raw = row.get("boardScopeLock")
-            if isinstance(lock_raw, bool):
-                source["boardScopeLock"] = lock_raw
-            elif isinstance(lock_raw, str):
-                source["boardScopeLock"] = lock_raw.strip().lower() in {"1", "true", "yes", "on"}
+            parsed_lock = _coerce_bool(lock_raw)
+            if parsed_lock is not None:
+                source["boardScopeLock"] = parsed_lock
+
+    if topic_only:
+        source["boardScopeTopicOnly"] = True
+        source["boardScopeKind"] = "topic_only"
+        source.setdefault("boardScopeLock", True)
 
     topic_id, task_id = _parse_board_session_key(session_key)
     if topic_id and "boardScopeTopicId" not in source:
@@ -9619,6 +9669,8 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
 
     subagent_parts = _openclaw_history_subagent_parts(session_key)
     is_subagent_session = subagent_parts is not None
+    session_board_topic_id, session_board_task_id = _parse_board_session_key(session_key)
+    is_board_session = bool(session_board_topic_id or session_board_task_id)
     with get_session() as session:
         for (timestamp_ms, row), disp_ts_ms in zip(ordered_rows, display_ms):
             if timestamp_ms < since_ms:
@@ -9640,6 +9692,10 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 agent_id = "assistant"
                 agent_label = "Assistant"
             elif role == "user":
+                if is_board_session and not is_subagent_session:
+                    max_safe_ms = max(max_safe_ms, timestamp_ms)
+                    continue
+
                 # Board/user rows must still be ingested from history for replay/import flows.
                 # Duplicate suppression is handled by idempotency + request/message identifiers.
                 if is_subagent_session and subagent_parts:
@@ -9966,7 +10022,21 @@ def _openclaw_gateway_history_unresolved_seed_sessions(*, limit: int, lookback_s
                 if not source:
                     continue
                 session_key = str(source.get("sessionKey") or "").strip()
-                request_id = str(source.get("requestId") or source.get("messageId") or "").strip()
+                raw_request_id = str(source.get("requestId") or source.get("messageId") or "").strip()
+                if not raw_request_id:
+                    continue
+                request_id = _openclaw_request_id_base(raw_request_id)
+                if not request_id:
+                    request_id = raw_request_id
+                route_request_id = _canonical_openclaw_request_id(raw_request_id)
+                if route_request_id:
+                    route_row = session.get(OpenClawRequestRoute, route_request_id)
+                    if route_row:
+                        routed_session_key = str(route_row.baseSessionKey or route_row.sessionKey or "").strip()
+                        if routed_session_key:
+                            session_key = routed_session_key
+                if not session_key:
+                    continue
                 sent_at = normalize_iso(str(row.createdAt or ""))
                 if not session_key or not request_id or not sent_at:
                     continue

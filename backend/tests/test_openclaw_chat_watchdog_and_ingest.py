@@ -3417,6 +3417,27 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(str(new_rows[0].content or ""), "new user prompt from history")
             self.assertNotIn("Conversation info (untrusted metadata)", str(new_rows[0].content or ""))
 
+    def test_chat_035b_history_scope_metadata_preserves_topic_only_hint(self):
+        session_key = "clawboard:topic:topic-history-035b"
+        message = {
+            "timestamp": 1700001602000,
+            "role": "assistant",
+            "text": "history topic-only payload",
+            "source": {
+                "boardScopeKind": "topic_only",
+                "boardScopeTopicOnly": "true",
+                "boardScopeSpaceId": "space-default",
+            },
+        }
+
+        scope = main_module._openclaw_history_scope_metadata(message, session_key)
+
+        self.assertEqual(scope.get("boardScopeKind"), "topic_only")
+        self.assertTrue(bool(scope.get("boardScopeTopicOnly")))
+        self.assertTrue(bool(scope.get("boardScopeLock")))
+        self.assertEqual(scope.get("boardScopeTopicId"), "topic-history-035b")
+        self.assertEqual(scope.get("boardScopeSpaceId"), "space-default")
+
     def test_chat_036_history_session_key_detector_includes_board_keys(self):
         self.assertTrue(main_module._openclaw_history_session_key_likely_gateway("clawboard:topic:topic-history-036"))
         self.assertTrue(
