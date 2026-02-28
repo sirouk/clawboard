@@ -1497,6 +1497,15 @@ function rgba(hex: string, alpha: number) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+function mixRgb(hex: string, ratio: number, base: { r: number; g: number; b: number } = { r: 14, g: 17, b: 22 }) {
+  const { r, g, b } = hexToRgb(hex);
+  const t = Math.max(0, Math.min(1, ratio));
+  const mr = Math.round(r * t + base.r * (1 - t));
+  const mg = Math.round(g * t + base.g * (1 - t));
+  const mb = Math.round(b * t + base.b * (1 - t));
+  return `rgb(${mr}, ${mg}, ${mb})`;
+}
+
 function hashString(seed: string) {
   let hash = 0;
   for (let i = 0; i < seed.length; i += 1) {
@@ -1661,37 +1670,26 @@ function mobileOverlayHeaderStyle(color: string): CSSProperties {
   };
 }
 
-// Sticky section-header backgrounds.
-// A 155deg diagonal layer replicates the card's own gradient at the card-matching alpha so the
-// top blends seamlessly with the card body behind it.  A vertical dark-bottom overlay (using a
-// wide transparent band) then darkens only the lower edge, creating a crisp separator between
-// the pinned title row and the content scrolling beneath — without overpowering the top colour.
+// Sticky section-header backgrounds should read as a single continuous surface with the card.
 function stickyTopicHeaderStyle(color: string, index: number): CSSProperties {
   const band = index % 2 === 0;
-  // Mirror topicGlowStyle expanded alpha values exactly so the header reads as part of the card.
-  const topAlpha = band ? 0.25 : 0.19;
-  const lowAlpha = band ? 0.13 : 0.09;
+  const top = mixRgb(color, band ? 0.42 : 0.34);
+  const mid = "rgb(16, 19, 24)";
+  const low = mixRgb(color, band ? 0.24 : 0.2);
   return {
-    background: [
-      // Dark-bottom overlay: stay transparent for the top ~55% so the card colour shows through.
-      `linear-gradient(to bottom, transparent 55%, rgba(12,14,18,0.96) 100%)`,
-      // Card gradient replica — same angle and stops as topicGlowStyle.
-      `linear-gradient(155deg, ${rgba(color, topAlpha)}, rgba(16,19,24,0.90) 48%, ${rgba(color, lowAlpha)})`,
-    ].join(", "),
+    backgroundColor: mid,
+    backgroundImage: `linear-gradient(155deg, ${top}, ${mid} 48%, ${low})`,
   };
 }
 
 function stickyTaskHeaderStyle(color: string, index: number): CSSProperties {
   const band = index % 2 === 0;
-  // Mirror taskGlowStyle expanded alpha values.
-  const topAlpha = band ? 0.27 : 0.20;
-  const lowAlpha = band ? 0.14 : 0.10;
+  const top = mixRgb(color, band ? 0.44 : 0.35);
+  const mid = "rgb(20, 24, 31)";
+  const low = mixRgb(color, band ? 0.26 : 0.21);
   return {
-    background: [
-      `linear-gradient(to bottom, transparent 55%, rgba(12,14,18,0.96) 100%)`,
-      `linear-gradient(145deg, ${rgba(color, topAlpha)}, rgba(20,24,31,0.86) 52%, ${rgba(color, lowAlpha)})`,
-    ].join(", "),
-    borderColor: rgba(color, 0.3),
+    backgroundColor: mid,
+    backgroundImage: `linear-gradient(145deg, ${top}, ${mid} 52%, ${low})`,
   };
 }
 
@@ -6661,7 +6659,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   topicChatFullscreen ? "hidden" : "",
                   editingTopicId === topic.id ? "flex-wrap" : "flex-nowrap",
                   isExpanded && !topicChatFullscreen
-                    ? "sticky z-10 -mx-4 px-4 py-2 border-b border-[rgb(var(--claw-border))] backdrop-blur md:-mx-5 md:px-5"
+                    ? "sticky z-10 -mx-4 -mt-4 min-h-[76px] rounded-t-[calc(var(--radius-lg)-1px)] px-4 py-2 md:-mx-5 md:-mt-5 md:px-5"
                     : ""
                 )}
                 style={
@@ -6988,8 +6986,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   {renameErrors[`topic:${topic.id}`] && (
                     <p className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`topic:${topic.id}`]}</p>
                   )}
-                  {isExpanded && <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topic.description}</p>}
-		                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-[rgb(var(--claw-muted))] sm:text-xs">
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-[rgb(var(--claw-muted))] sm:text-xs">
                     {topicSpaceName ? (
                       <span
                         className="inline-flex items-center rounded-full border border-[rgba(148,163,184,0.22)] bg-[rgba(148,163,184,0.07)] px-2 py-0.5 text-[10px] font-medium tracking-[0.08em] text-[rgb(var(--claw-muted))]"
@@ -7053,6 +7050,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                    >
                       {!topicChatFullscreen ? (
                         <>
+                      {topic.description ? (
+                        <p className="text-xs text-[rgb(var(--claw-muted))]">{topic.description}</p>
+                      ) : null}
                       {!isUnassigned ? (
                         <div className="flex flex-wrap items-center gap-2">
                           <Input
@@ -7245,11 +7245,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             role="button"
                             tabIndex={0}
                             className={cn(
-                              "flex items-center justify-between gap-2.5 text-left",
+                              "flex items-start justify-between gap-2.5 text-left",
                               taskChatFullscreen ? "hidden" : "",
                               editingTaskId === task.id ? "flex-wrap" : "flex-nowrap",
                               taskExpanded && !taskChatFullscreen
-                                ? "sticky z-20 -mx-3.5 border-b border-[rgb(var(--claw-border))] px-3.5 py-2 backdrop-blur sm:-mx-4 sm:px-4"
+                                ? "sticky z-20 -mx-3.5 -mt-3.5 min-h-[76px] rounded-t-[calc(var(--radius-md)-1px)] px-3.5 py-2 sm:-mx-4 sm:-mt-4 sm:px-4"
                                 : ""
                             )}
                             style={
@@ -7600,7 +7600,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                            {renameErrors[`task:${task.id}`] && (
 	                              <div className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`task:${task.id}`]}</div>
 	                            )}
-                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[rgb(var(--claw-muted))]">
+                            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-[rgb(var(--claw-muted))] sm:text-xs">
                               <span>{taskChatMetricsLabel}</span>
 	                              {hasUnsnoozedTaskBadge ? (
 	                                <button

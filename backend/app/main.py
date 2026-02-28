@@ -5391,16 +5391,18 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 )
             except Exception:
                 board_route_retro_scoped_rows = []
-    if ingest_event_id:
-        _upsert_ingest_receipt(
-            session,
-            event_id=ingest_event_id,
-            log_id=str(entry.id or "").strip() or None,
-            source_path=ingest_path,
-            stamp=updated_at,
-        )
     session.add(entry)
     try:
+        if ingest_event_id:
+            # Ensure the referenced log row is persisted before inserting receipt FK(logId).
+            session.flush()
+            _upsert_ingest_receipt(
+                session,
+                event_id=ingest_event_id,
+                log_id=str(entry.id or "").strip() or None,
+                source_path=ingest_path,
+                stamp=updated_at,
+            )
         session.commit()
     except IntegrityError:
         session.rollback()
@@ -5446,6 +5448,15 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             try:
                 # rollback() can detach pending instances; ensure this insert is part of the new transaction.
                 session.add(entry)
+                if ingest_event_id:
+                    session.flush()
+                    _upsert_ingest_receipt(
+                        session,
+                        event_id=ingest_event_id,
+                        log_id=str(entry.id or "").strip() or None,
+                        source_path=ingest_path,
+                        stamp=updated_at,
+                    )
                 time.sleep(min(0.75, 0.05 * (2**attempt)))
                 session.commit()
                 last_exc = None

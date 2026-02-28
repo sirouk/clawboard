@@ -39,6 +39,49 @@ class OpenClawGatewayConfigTests(unittest.TestCase):
             cfg = gateway_module.load_openclaw_gateway_config()
         self.assertEqual(cfg.host_header, "example.internal:18789")
 
+    def test_gateway_cfg_003_device_auth_defaults_off(self):
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_BASE_URL": "http://127.0.0.1:18789",
+                "OPENCLAW_GATEWAY_TOKEN": "test-token",
+            },
+            clear=True,
+        ), patch.object(gateway_module, "_read_json_file") as read_json:
+            cfg = gateway_module.load_openclaw_gateway_config()
+        self.assertIsNone(cfg.identity)
+        read_json.assert_not_called()
+
+    def test_gateway_cfg_004_device_auth_can_be_enabled_explicitly(self):
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_BASE_URL": "http://127.0.0.1:18789",
+                "OPENCLAW_GATEWAY_TOKEN": "test-token",
+                "OPENCLAW_GATEWAY_USE_DEVICE_AUTH": "1",
+            },
+            clear=True,
+        ), patch.object(
+            gateway_module,
+            "_read_json_file",
+            side_effect=[
+                {
+                    "deviceId": "device-1",
+                    "publicKeyPem": "public-key",
+                    "privateKeyPem": "private-key",
+                },
+                {
+                    "version": 1,
+                    "deviceId": "device-1",
+                    "tokens": {"operator": {"token": "operator-token"}},
+                },
+            ],
+        ):
+            cfg = gateway_module.load_openclaw_gateway_config()
+        self.assertIsNotNone(cfg.identity)
+        assert cfg.identity is not None
+        self.assertEqual(cfg.identity.device_id, "device-1")
+
 
 if __name__ == "__main__":
     unittest.main()

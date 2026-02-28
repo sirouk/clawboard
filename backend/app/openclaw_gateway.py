@@ -151,7 +151,7 @@ def _base64_url(raw: bytes) -> str:
 def _load_device_auth(*, enabled_override: bool | None = None) -> OpenClawDeviceAuth | None:
     enabled = enabled_override
     if enabled is None:
-        enabled = os.getenv("OPENCLAW_GATEWAY_USE_DEVICE_AUTH", "1").strip().lower() not in {"0", "false", "no", "off"}
+        enabled = os.getenv("OPENCLAW_GATEWAY_USE_DEVICE_AUTH", "0").strip().lower() not in {"0", "false", "no", "off"}
     if not enabled:
         return None
 
@@ -344,10 +344,10 @@ async def gateway_rpc(
         if parsed > 0:
             request_timeout_seconds = parsed
 
-    async def _call_once() -> Any:
+    async def _call_once(device_auth_override: bool | None) -> Any:
         cfg = load_openclaw_gateway_config(
             token_override=token_override,
-            use_device_auth_override=use_device_auth_override,
+            use_device_auth_override=device_auth_override,
         )
 
         effective_scopes = _dedupe_scopes(list(scopes) if scopes is not None else list(cfg.default_scopes))
@@ -450,6 +450,28 @@ async def gateway_rpc(
                     raise RuntimeError(message)
                 return response.get("payload")
 
-    if request_timeout_seconds is not None:
-        return await asyncio.wait_for(_call_once(), timeout=request_timeout_seconds)
-    return await _call_once()
+    async def _invoke(device_auth_override: bool | None) -> Any:
+        if request_timeout_seconds is not None:
+            return await asyncio.wait_for(_call_once(device_auth_override), timeout=request_timeout_seconds)
+        return await _call_once(device_auth_override)
+
+    try:
+        return await _invoke(use_device_auth_override)
+    except Exception as exc:
+        # If implicit device auth fails (pairing/metadata mismatch), retry once without
+        # device credentials so token auth can still reach the local gateway.
+        text = str(exc or "").lower()
+        is_pairing_or_device_error = any(
+            token in text
+            for token in [
+                "pairing required",
+                "not_paired",
+                "device token mismatch",
+                "gateway token mismatch",
+                "device auth",
+                "metadata upgrade required",
+            ]
+        )
+        if use_device_auth_override is None and is_pairing_or_device_error:
+            return await _invoke(False)
+        raise

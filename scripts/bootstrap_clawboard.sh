@@ -407,8 +407,10 @@ OPENCLAW_HEAP_SETUP_MODE="${CLAWBOARD_OPENCLAW_HEAP_SETUP:-ask}"
 OPENCLAW_HEAP_SETUP_STATUS="not-run"
 OPENCLAW_HEAP_TARGET=""
 OPENCLAW_HEAP_MB="${CLAWBOARD_OPENCLAW_MAX_OLD_SPACE_MB:-6144}"
+OPENCLAW_GATEWAY_DEVICE_AUTH_OVERRIDE="${CLAWBOARD_OPENCLAW_GATEWAY_USE_DEVICE_AUTH:-}"
 APPLY_AGENT_DIRECTIVES_SETTING="${CLAWBOARD_APPLY_AGENT_DIRECTIVES:-1}"
 SKIP_AGENT_DIRECTIVES=false
+ENV_FILE_CREATED=false
 
 case "$(printf "%s" "$APPLY_AGENT_DIRECTIVES_SETTING" | tr '[:upper:]' '[:lower:]')" in
   0|false|no|off) SKIP_AGENT_DIRECTIVES=true ;;
@@ -454,6 +456,8 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || log_error "--openclaw-base-url requires a value"
       OPENCLAW_BASE_URL_VALUE="$2"; OPENCLAW_BASE_URL_EXPLICIT=true; shift 2
       ;;
+    --openclaw-gateway-device-auth) OPENCLAW_GATEWAY_DEVICE_AUTH_OVERRIDE="1"; shift ;;
+    --no-openclaw-gateway-device-auth) OPENCLAW_GATEWAY_DEVICE_AUTH_OVERRIDE="0"; shift ;;
     --token)
       [ $# -ge 2 ] || log_error "--token requires a value"
       TOKEN="$2"; shift 2
@@ -556,6 +560,8 @@ Environment overrides:
   CLAWBOARD_APPLY_AGENT_DIRECTIVES=<0|1>
                               Reconcile AGENTS/docs roster from directives during bootstrap (default: 1)
   CLAWBOARD_ENV_WIZARD=<0|1>  Force disable/enable interactive .env connection wizard
+  CLAWBOARD_OPENCLAW_GATEWAY_USE_DEVICE_AUTH=<0|1>
+                              Configure OPENCLAW_GATEWAY_USE_DEVICE_AUTH for Clawboard backend
   --api-url <url>      Clawboard API base (default: http://localhost:8010)
   --web-url <url>      Clawboard web URL (default: http://localhost:3010)
   --public-api-base <url>
@@ -564,6 +570,10 @@ Environment overrides:
                        Browser-facing UI URL shown in output summary
   --openclaw-base-url <url>
                        OpenClaw gateway URL used by classifier (writes OPENCLAW_BASE_URL)
+  --openclaw-gateway-device-auth
+                       Enable OPENCLAW_GATEWAY_USE_DEVICE_AUTH=1 for backend gateway RPC (advanced)
+  --no-openclaw-gateway-device-auth
+                       Set OPENCLAW_GATEWAY_USE_DEVICE_AUTH=0 for backend gateway RPC (recommended)
   --token <token>      Use a specific CLAWBOARD_TOKEN
   --title <title>      Instance display name (default: Clawboard)
   --integration-level <manual|write|full>
@@ -828,15 +838,85 @@ prompt_with_default_tty() {
 ensure_env_file() {
   local repo_dir="$1"
   local env_file="$repo_dir/.env"
+  ENV_FILE_CREATED=false
   if [ -f "$env_file" ]; then
     return
   fi
   if [ -f "$repo_dir/.env.example" ]; then
     cp "$repo_dir/.env.example" "$env_file"
+    ENV_FILE_CREATED=true
     log_info "Seeded $env_file from .env.example."
     return
   fi
   touch "$env_file"
+  ENV_FILE_CREATED=true
+}
+
+normalize_bool01() {
+  local raw
+  raw="$(trim_whitespace "${1:-}")"
+  raw="$(printf "%s" "$raw" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+  case "$raw" in
+    1|true|yes|on) printf "1" ;;
+    0|false|no|off) printf "0" ;;
+    *) printf "" ;;
+  esac
+}
+
+resolve_openclaw_gateway_device_auth_value() {
+  local env_file="$1"
+  local is_onboarding="${2:-false}"
+  local normalized_override=""
+  local normalized_existing=""
+  local selected=""
+
+  if [ -n "${OPENCLAW_GATEWAY_DEVICE_AUTH_OVERRIDE:-}" ]; then
+    normalized_override="$(normalize_bool01 "$OPENCLAW_GATEWAY_DEVICE_AUTH_OVERRIDE")"
+    if [ -z "$normalized_override" ]; then
+      log_warn "Invalid CLAWBOARD_OPENCLAW_GATEWAY_USE_DEVICE_AUTH=$OPENCLAW_GATEWAY_DEVICE_AUTH_OVERRIDE. Using recommended default: 0"
+      normalized_override="0"
+    fi
+    printf "%s" "$normalized_override"
+    return
+  fi
+
+  if read_env_value_from_file "$env_file" "OPENCLAW_GATEWAY_USE_DEVICE_AUTH" >/dev/null 2>&1; then
+    normalized_existing="$(normalize_bool01 "$(read_env_value_from_file "$env_file" "OPENCLAW_GATEWAY_USE_DEVICE_AUTH" || true)")"
+    if [ -n "$normalized_existing" ]; then
+      selected="$normalized_existing"
+    fi
+  fi
+  if [ -z "$selected" ]; then
+    selected="0"
+  fi
+
+  # On first-run onboarding, ask explicitly so users understand why default is off.
+  if [ "$is_onboarding" = true ] && [ -r /dev/tty ]; then
+    local prompt_choice=""
+    local prompt_default="1"
+    if [ "$selected" = "1" ]; then
+      prompt_default="2"
+    fi
+    printf "\nOpenClaw backend device auth for Clawboard:\n" > /dev/tty
+    printf "  1) off (recommended): token auth only; avoids CLI/backend pairing metadata conflicts\n" > /dev/tty
+    printf "  2) on  (advanced): requires a dedicated backend device identity paired once\n" > /dev/tty
+    printf "Select [1-2] (default: %s): " "$prompt_default" > /dev/tty
+    read -r prompt_choice < /dev/tty || prompt_choice=""
+    prompt_choice="$(trim_whitespace "$prompt_choice")"
+    if [ -z "$prompt_choice" ]; then
+      prompt_choice="$prompt_default"
+    fi
+    case "$prompt_choice" in
+      1) selected="0" ;;
+      2) selected="1" ;;
+      *)
+        log_warn "Unrecognized choice. Using default: off."
+        selected="0"
+        ;;
+    esac
+  fi
+
+  printf "%s" "$selected"
 }
 
 # Idempotent: ensure clawboard-logger is in plugins.allow (append only, never replace the list).
@@ -1255,6 +1335,136 @@ maybe_run_chutes_fast_path() {
     rm -f "$temp_script"
   fi
   return 0
+}
+
+report_openclaw_pending_device_approvals() {
+  if ! command -v openclaw >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    log_warn "python3 not found; skipping OpenClaw pending-approval origin check. Run: openclaw devices list"
+    return 0
+  fi
+
+  local raw parsed rc count
+  raw="$(OPENCLAW_HOME="$OPENCLAW_HOME" openclaw devices list --json 2>&1 || true)"
+  parsed="$(
+    printf "%s" "$raw" | python3 - <<'PY'
+import json
+import sys
+
+raw = sys.stdin.read()
+decoder = json.JSONDecoder()
+payload = None
+for idx, ch in enumerate(raw):
+    if ch != "{":
+        continue
+    try:
+        candidate, _ = decoder.raw_decode(raw[idx:])
+    except Exception:
+        continue
+    if isinstance(candidate, dict):
+        payload = candidate
+        break
+
+if payload is None:
+    sys.exit(2)
+
+pending = payload.get("pending") if isinstance(payload.get("pending"), list) else []
+paired = payload.get("paired") if isinstance(payload.get("paired"), list) else []
+paired_by_device = {}
+for item in paired:
+    if not isinstance(item, dict):
+        continue
+    device_id = str(item.get("deviceId") or "").strip()
+    if device_id:
+        paired_by_device[device_id] = item
+
+print(f"count\t{len(pending)}")
+
+for item in pending:
+    if not isinstance(item, dict):
+        continue
+    request_id = str(item.get("requestId") or "").strip() or "-"
+    device_id = str(item.get("deviceId") or "").strip() or "-"
+    platform = str(item.get("platform") or "").strip() or "unknown"
+    client_id = str(item.get("clientId") or "").strip() or "unknown"
+    client_mode = str(item.get("clientMode") or "").strip() or "unknown"
+    role = str(item.get("role") or "").strip() or "unknown"
+    state = "repair" if bool(item.get("isRepair")) else "new"
+
+    if client_id == "cli" and client_mode == "cli":
+        origin_hint = "local CLI session"
+    elif client_id == "openclaw-control-ui":
+        origin_hint = "web Control UI client"
+    elif client_id == "openclaw-macos":
+        origin_hint = "OpenClaw macOS app"
+    elif client_id == "gateway-client":
+        origin_hint = "gateway backend service client"
+    elif client_mode == "webchat":
+        origin_hint = "webchat client"
+    else:
+        origin_hint = f"{client_mode} client"
+
+    mismatch = ""
+    paired_item = paired_by_device.get(device_id)
+    if isinstance(paired_item, dict):
+        paired_client = str(paired_item.get("clientId") or "").strip() or "unknown"
+        paired_platform = str(paired_item.get("platform") or "").strip() or "unknown"
+        if paired_client != client_id or paired_platform != platform:
+            mismatch = f"paired as clientId={paired_client}, platform={paired_platform}"
+
+    print(
+        "\t".join(
+            [
+                "pending",
+                request_id,
+                device_id,
+                platform,
+                client_id,
+                client_mode,
+                role,
+                state,
+                origin_hint,
+                mismatch,
+            ]
+        )
+    )
+PY
+  )"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log_warn "Could not parse OpenClaw pending device approvals automatically. Review manually: openclaw devices list"
+    return 0
+  fi
+
+  count="0"
+  while IFS=$'\t' read -r kind value _rest; do
+    if [ "$kind" = "count" ]; then
+      count="$value"
+      break
+    fi
+  done <<< "$parsed"
+
+  if [ "$count" = "0" ]; then
+    log_info "No pending OpenClaw device approvals."
+    return 0
+  fi
+
+  log_warn "OpenClaw has $count pending device approval(s). Review origin before approving."
+  while IFS=$'\t' read -r kind request_id device_id platform client_id client_mode role state origin_hint mismatch; do
+    [ "$kind" = "pending" ] || continue
+    local short_device_id="$device_id"
+    if [ "${#short_device_id}" -gt 16 ]; then
+      short_device_id="${short_device_id:0:16}..."
+    fi
+    log_warn "Pending request: requestId=$request_id device=$short_device_id origin=$origin_hint (clientId=$client_id mode=$client_mode platform=$platform role=$role state=$state)"
+    if [ -n "$mismatch" ]; then
+      log_warn "  Repair mismatch detected for device $short_device_id: $mismatch"
+    fi
+  done <<< "$parsed"
+  log_warn "Approve explicitly: openclaw devices approve <requestId>"
+  log_warn "Avoid blind approval with --latest unless only one trusted request is pending."
 }
 
 resolve_obsidian_brain_setup_script() {
@@ -2009,6 +2219,9 @@ log_info "Writing CLAWBOARD_SERVER_API_BASE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SERVER_API_BASE" "$SERVER_API_BASE_VALUE"
 log_info "Writing OPENCLAW_BASE_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_BASE_URL" "$OPENCLAW_BASE_URL_VALUE"
+OPENCLAW_GATEWAY_USE_DEVICE_AUTH_VALUE="$(resolve_openclaw_gateway_device_auth_value "$INSTALL_DIR/.env" "$ENV_FILE_CREATED")"
+log_info "Writing OPENCLAW_GATEWAY_USE_DEVICE_AUTH=$OPENCLAW_GATEWAY_USE_DEVICE_AUTH_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_GATEWAY_USE_DEVICE_AUTH" "$OPENCLAW_GATEWAY_USE_DEVICE_AUTH_VALUE"
 # Legacy compatibility key used by removed Next.js Prisma storage path.
 remove_env_key "$INSTALL_DIR/.env" "DATABASE_URL"
 
@@ -2497,6 +2710,7 @@ if [ "$SKIP_OPENCLAW" = false ]; then
     log_warn "OpenClaw is still unavailable. Skipping skill/plugin setup."
   else
     OPENCLAW_GATEWAY_RESTART_NEEDED=false
+    report_openclaw_pending_device_approvals
 
     log_info "Enabling OpenClaw OpenResponses endpoint (POST /v1/responses)..."
     CURRENT_RESPONSES_ENABLED="$(openclaw config get gateway.http.endpoints.responses.enabled 2>/dev/null || true)"
