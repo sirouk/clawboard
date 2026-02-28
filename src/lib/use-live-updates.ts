@@ -7,9 +7,21 @@ import type { LiveEvent } from "@/lib/live-utils";
 
 type ReconcileFn = (since?: string) => Promise<string | void>;
 
-export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; reconcile?: ReconcileFn }) {
+// Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s (max), with ±25% jitter.
+function backoffDelayMs(retryCount: number): number {
+  const base = Math.min(30_000, 1_000 * Math.pow(2, retryCount));
+  const jitter = base * 0.25 * (Math.random() * 2 - 1);
+  return Math.max(500, Math.round(base + jitter));
+}
+
+export function useLiveUpdates(options: {
+  onEvent: (event: LiveEvent) => void;
+  reconcile?: ReconcileFn;
+  onConnectionChange?: (connected: boolean) => void;
+}) {
   const handlerRef = useRef(options.onEvent);
   const reconcileRef = useRef<ReconcileFn | undefined>(options.reconcile);
+  const onConnectionChangeRef = useRef(options.onConnectionChange);
   const lastEventTs = useRef<string | undefined>(undefined);
   const lastSseId = useRef<string | undefined>(undefined);
   const lastMessageAt = useRef<number>(0);
@@ -23,6 +35,10 @@ export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; r
   useEffect(() => {
     reconcileRef.current = options.reconcile;
   }, [options.reconcile]);
+
+  useEffect(() => {
+    onConnectionChangeRef.current = options.onConnectionChange;
+  }, [options.onConnectionChange]);
 
   // Subscribe to token/base changes so SSE can reconnect immediately when the user
   // updates Setup (common with remote/Tailscale access).
@@ -49,15 +65,19 @@ export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; r
     let pollTimer: ReturnType<typeof setInterval> | null = null;
     let watchdogTimer: ReturnType<typeof setInterval> | null = null;
     let reconciling = false;
-    let lastReconnectAt = 0;
+    let retryCount = 0;
+    let currentlyConnected = false;
 
-    // Safety net: even with SSE, reconcile periodically so the UI never depends on a single socket.
-    // Keep this fast enough to feel "live" when SSE silently stalls.
-    const WATCHDOG_INTERVAL_MS = 5_000;
     // Server sends `stream.ping` about every ~25s. If we haven't seen any SSE messages for a while,
     // treat the connection as stale and force a reconnect.
+    const WATCHDOG_INTERVAL_MS = 5_000;
     const STALE_SSE_MS = 70_000;
-    const RECONNECT_THROTTLE_MS = 5_000;
+
+    const notifyConnected = (connected: boolean) => {
+      if (currentlyConnected === connected) return;
+      currentlyConnected = connected;
+      onConnectionChangeRef.current?.(connected);
+    };
 
     const runReconcile = async () => {
       if (!reconcileRef.current) return;
@@ -147,20 +167,23 @@ export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; r
 
     const scheduleReconnect = () => {
       if (closed) return;
-      const now = Date.now();
-      const wait = Math.max(0, RECONNECT_THROTTLE_MS - (now - lastReconnectAt));
+      // Don't schedule if the browser reports offline — we'll reconnect on the "online" event.
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
       if (reconnectTimer) return;
+      const delay = backoffDelayMs(retryCount);
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         if (closed) return;
-        lastReconnectAt = Date.now();
         void connect();
-      }, wait);
+      }, delay);
     };
 
     const connect = async () => {
       if (closed || connecting) return;
+      // Don't attempt connection when offline.
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
       connecting = true;
+      retryCount += 1;
       streamAbort = new AbortController();
       lastMessageAt.current = Date.now();
 
@@ -186,8 +209,11 @@ export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; r
           return;
         }
 
+        // Stream opened — reset backoff and mark connected.
+        retryCount = 0;
         lastMessageAt.current = Date.now();
         stopPoll();
+        notifyConnected(true);
         void runReconcile();
 
         const reader = res.body.getReader();
@@ -216,6 +242,7 @@ export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; r
         connecting = false;
         streamAbort = null;
         if (!closed) {
+          notifyConnected(false);
           scheduleReconnect();
         }
       }
@@ -224,12 +251,19 @@ export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; r
     const reconnect = () => {
       if (closed) return;
       startPoll();
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       try {
         streamAbort?.abort();
       } catch {
         // ignore
       }
       streamAbort = null;
+      // Reconnect immediately on explicit triggers (focus, visibility, online).
+      // Reset retry count so we start fresh rather than using a long backoff.
+      retryCount = 0;
       scheduleReconnect();
     };
 
@@ -265,8 +299,35 @@ export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; r
       onForeground();
     };
 
+    const onOnline = () => {
+      if (closed) return;
+      // Back online — reconnect immediately and reconcile.
+      retryCount = 0;
+      void runReconcile();
+      reconnect();
+    };
+
+    const onOffline = () => {
+      if (closed) return;
+      // Browser reports offline — abort the stream, cancel reconnect timer, and mark disconnected.
+      // We won't reschedule reconnection; the "online" event will trigger it.
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      try {
+        streamAbort?.abort();
+      } catch {
+        // ignore
+      }
+      streamAbort = null;
+      notifyConnected(false);
+    };
+
     window.addEventListener("focus", onForeground);
     document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
 
     // Always do an initial reconcile so the UI doesn't depend on SSE opening.
     void runReconcile();
@@ -289,6 +350,8 @@ export function useLiveUpdates(options: { onEvent: (event: LiveEvent) => void; r
       streamAbort = null;
       window.removeEventListener("focus", onForeground);
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
     };
   }, [base, token]);
 }

@@ -45,6 +45,7 @@ type DataContextValue = {
   openclawTyping: Record<string, { typing: boolean; requestId?: string; updatedAt: string }>;
   openclawThreadWork: Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }>;
   hydrated: boolean;
+  sseConnected: boolean;
   setSpaces: React.Dispatch<React.SetStateAction<Space[]>>;
   setTopics: React.Dispatch<React.SetStateAction<Topic[]>>;
   setTasks: React.Dispatch<React.SetStateAction<Task[]>>;
@@ -162,6 +163,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }>
   >({});
   const [hydrated, setHydrated] = useState(false);
+  const [sseConnected, setSseConnected] = useState(false);
   const unsnoozedTopicsRaw = useLocalStorageItem(UNSNOOZED_TOPICS_KEY) ?? "{}";
   const unsnoozedTasksRaw = useLocalStorageItem(UNSNOOZED_TASKS_KEY) ?? "{}";
   const chatSeenRaw = useLocalStorageItem(CHAT_SEEN_AT_KEY) ?? "{}";
@@ -356,6 +358,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       if (Array.isArray(payload.topics)) setTopics(payload.topics as Topic[]);
       if (Array.isArray(payload.tasks)) setTasks(payload.tasks as Task[]);
       if (Array.isArray(payload.logs)) setLogs(mergeLogs([], payload.logs as LogEntry[]));
+      // Ephemeral typing/thread-work signals are stream-only. On full snapshot
+      // resync, clear them so stale in-memory state cannot leak across reconnects.
+      setOpenclawTyping({});
+      setOpenclawThreadWork({});
       if (Array.isArray(payload.drafts)) {
         const next: Record<string, Draft> = {};
         for (const item of payload.drafts as Draft[]) {
@@ -398,6 +404,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   };
 
   useLiveUpdates({
+    onConnectionChange: setSseConnected,
     onEvent: (event: LiveEvent) => {
       if (!event || !event.type) return;
       if (event.type === "space.upserted" && event.data && typeof event.data === "object") {
@@ -806,6 +813,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       openclawTyping,
       openclawThreadWork,
       hydrated,
+      sseConnected,
       setSpaces,
       setTopics,
       setTasks,
@@ -834,6 +842,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       openclawTyping,
       openclawThreadWork,
       hydrated,
+      sseConnected,
       markChatSeen,
       dismissUnsnoozedTopicBadge,
       dismissUnsnoozedTaskBadge,

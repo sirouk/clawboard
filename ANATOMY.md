@@ -112,6 +112,9 @@ Core value:
 - `LogEntry` = conversations, actions, notes, system/import rows.
 - `SessionRoutingMemory` = short continuity memory keyed by `source.sessionKey`.
 - `OpenClawRequestRoute` = per-request route ledger keyed by canonical `occhat-*` request id.
+- `OpenClawChatDispatchQueue` = durable outbound queue for board → gateway sends with retry/backoff.
+- `OrchestrationRun` / `OrchestrationItem` / `OrchestrationEvent` = multi-step work tracking anchored to one user request; stays open while subagent items are non-terminal.
+- `OpenClawGatewayHistoryCursor` / `OpenClawGatewayHistorySyncState` = per-session resume cursor and health snapshot for background gateway history sync.
 - `Space` = scope domain with explicit visibility graph.
 
 Everything interesting is a loop:
@@ -151,6 +154,13 @@ Primary tables:
 - `SessionRoutingMemory`
 - `OpenClawRequestRoute`
 - `IngestQueue`
+- `IngestReceipt` — exactly-once ingest ledger keyed by immutable source event id (live|history paths).
+- `OpenClawChatDispatchQueue` — durable outbound dispatch queue for Clawboard → OpenClaw gateway sends (pending|retry|processing|sent|failed).
+- `OrchestrationRun` — durable run anchored to one user request; tracks execution mode and overall status (running|stalled|done|failed|cancelled).
+- `OrchestrationItem` — delegated work item inside a run (main|subagent|verify|synthesize kinds).
+- `OrchestrationEvent` — append-only lifecycle event stream for runs and items (run_created, item_done, run_failed, etc.).
+- `OpenClawGatewayHistoryCursor` — per-session timestamp cursor for resumable gateway history sync after restarts.
+- `OpenClawGatewayHistorySyncState` — singleton health snapshot for the background gateway history sync worker.
 - `Attachment`
 - `Draft`
 - `InstanceConfig`
@@ -409,6 +419,10 @@ Behavior:
 - If replay window missed, server emits `stream.reset`.
 - Client then reconciles via `/api/changes`.
 - Watchdog + fallback polling prevents stale UI under broken sockets.
+- Reconnection uses exponential backoff with jitter (1 s → 2 s → 4 s → 8 s → 16 s → 30 s cap, ±25% jitter per step) to prevent thundering herd on server restarts.
+- Retry count resets to zero on successful stream open, and on explicit retriggers (window focus, visibility restore, coming back online).
+- `navigator.onLine` is checked before each connect attempt; `online`/`offline` browser events are listened to — the stream is aborted immediately on `offline` and reconnected immediately on `online`.
+- `onConnectionChange(bool)` callback propagates the live connection state into `DataContext` as `sseConnected`, which drives a subtle amber "Reconnecting" pill in the app header (desktop) and a pulsing dot badge (mobile), shown only after the stream has connected at least once so initial-load flicker is suppressed.
 
 ### 6.8 Main-Agent Supervisor Rails (Templates + Directives)
 
@@ -428,7 +442,8 @@ Operational guarantees:
 
 - `DataProvider` performs initial reconcile (`/api/changes`).
 - UI hydrates spaces/topics/tasks/logs/drafts.
-- Live SSE connection starts.
+- Live SSE connection starts; `sseConnected` in `DataContext` becomes `true` once the stream opens.
+- If the stream drops post-connect, a "Reconnecting" indicator appears in the app header and pending message labels show "Delivered · reconnecting" until the stream restores.
 
 ### 7.2 Space selection and scoped board
 
@@ -499,6 +514,8 @@ Operational guarantees:
 | Queue ingest row | plugin queue mode | `POST /api/ingest` | enqueue for async ingest drain | eventual append |
 | Patch log/classification | classifier/manual ops | `PATCH /api/log/{id}` | guarded patch + retry + sanitize | `log.upserted` SSE |
 | Delete one log | moderation/manual cleanup | `DELETE /api/log/{id}` | delete + note cleanup | `log.deleted` SSE |
+| Read chat-entry counts | board unread badges | `GET /api/log/chat-counts` | aggregate topic/task log counts without full payloads | badge refresh |
+| Delete all unassigned tasks | ops/admin cleanup | `DELETE /api/tasks/unassigned/empty` | bulk delete topicId-null tasks, detach their logs | task rows removed |
 | Send board chat | `src/components/board-chat-composer.tsx` (mounted by `src/components/unified-view.tsx`) | `POST /api/openclaw/chat` | persist-first + gateway dispatch + typing/thread-work events + request-scope promotion backfill | queued response + SSE + focused active pane |
 | Cancel board chat | Stop button or `/stop`/`/abort` in board/unified composers | `DELETE /api/openclaw/chat` | immediate typing/thread-work stop signals + queue/orchestration cancel + linked-session `chat.abort` fan-out | thread-scoped stop with fast UI responding-state clear |
 | Discover OpenClaw skills | board/composer helper | `GET /api/openclaw/skills` | gateway capability passthrough | skill metadata |
@@ -537,7 +554,11 @@ These are not top-level features, but they are why the system stays robust:
   - bounded event ring buffer
   - per-subscriber queue bounds
   - replay by event id
-  - stream reset when cursor too old.
+  - stream reset when cursor too old
+  - exponential backoff with jitter on reconnect (1 s → 30 s max, ±25%)
+  - `navigator.onLine` guard prevents blind reconnect attempts while offline
+  - `online`/`offline` event listeners: abort immediately on network loss, reconnect instantly when network returns
+  - `sseConnected` state in `DataContext` enables header-level reconnecting indicator and context-aware pending-message labels.
 - Search safety:
   - bounded content preview scans
   - concurrency gate with degraded fallback.
@@ -672,6 +693,8 @@ If you are debugging a live issue:
 | SSE-01 | Stream reconnect within window | replay-by-last-event-id | no full refresh needed |
 | SSE-02 | Cursor too old | server emits `stream.reset` | client reconciles via `/api/changes` |
 | SSE-03 | Socket degraded | watchdog + polling fallback | eventual convergence maintained |
+| SSE-04 | Browser goes offline | `offline` event → stream abort, reconnect timer cancelled | amber reconnecting indicator shown; no blind retry while offline |
+| SSE-05 | Browser comes back online | `online` event → retryCount reset, immediate reconnect + reconcile | stream resumes, indicator clears, pending messages confirm "Delivered" |
 | DATA-01 | Delete topic/task | delete endpoints | object removed, dependent logs detached not lost |
 | DATA-02 | Purge actions | topic-chat/log-forward purge endpoints | destructive delete with tombstones/events |
 | ADMIN-01 | Start fresh replay | admin endpoint | derived topics/tasks reset, logs pending for rebuild |
@@ -744,6 +767,7 @@ Routes currently implemented in `backend/app/main.py`:
   - `POST /api/tasks/reorder`
   - `POST /api/tasks`
   - `DELETE /api/tasks/{task_id}`
+  - `DELETE /api/tasks/unassigned/empty`
 - Classifier:
   - `GET /api/classifier/pending`
   - `GET /api/classifier/session-routing`
@@ -751,6 +775,7 @@ Routes currently implemented in `backend/app/main.py`:
   - `POST /api/classifier/replay`
 - Logs/purge:
   - `GET /api/log`
+  - `GET /api/log/chat-counts`
   - `GET /api/log/{log_id}`
   - `POST /api/log`
   - `POST /api/ingest`

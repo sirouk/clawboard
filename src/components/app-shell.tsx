@@ -373,7 +373,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 function AppShellLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { spaces: storeSpaces, logs: storeLogs, topics: storeTopics, tasks: storeTasks, setTopics, hydrated } = useDataStore();
+  const { spaces: storeSpaces, logs: storeLogs, topics: storeTopics, tasks: storeTasks, setTopics, hydrated, sseConnected } = useDataStore();
   const { instanceTitle, token, tokenRequired, tokenConfigured, remoteReadLocked } = useAppConfig();
   const collapsed = useLocalStorageItem("clawboard.navCollapsed") === "true";
   const boardSpacesExpanded = useLocalStorageItem(BOARD_SPACES_EXPANDED_KEY) !== "false";
@@ -551,6 +551,12 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  // Only surface the SSE disconnect indicator after we've connected at least once,
+  // so we don't flash a warning on initial page load while the stream is still opening.
+  const everConnectedRef = useRef(false);
+  if (sseConnected) everConnectedRef.current = true;
+  const sseDisconnected = everConnectedRef.current && !sseConnected && status !== "AUTH FAIL" && status !== "LOCKED";
 
   const docsHref = mounted ? `${apiBase || ""}/docs` : "";
   const iconSize = collapsed ? 32 : 40;
@@ -1109,14 +1115,20 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                             ))}
                           </Select>
                           <span
-                            className="inline-flex h-8 w-8 items-center justify-center"
-                            title={statusTooltip}
+                            className="relative inline-flex h-8 w-8 items-center justify-center"
+                            title={sseDisconnected ? "Stream reconnecting — " + statusTooltip : statusTooltip}
                             aria-label={statusTitle}
                           >
                             <StatusGlyph status={status} className={cn("h-5 w-5", statusIconClass)} />
+                            {sseDisconnected ? (
+                              <span className="absolute -right-0.5 -top-0.5 flex h-2 w-2">
+                                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[rgba(234,179,8,0.6)] opacity-75" />
+                                <span className="relative inline-flex h-2 w-2 rounded-full bg-[rgba(234,179,8,0.9)]" />
+                              </span>
+                            ) : null}
                           </span>
-				                </div>
-				              </div>
+			                </div>
+			              </div>
 	              <nav className="mt-1.5 grid grid-cols-5 gap-1 lg:hidden">
 	                {mobilePrimaryItems.map((item) => {
 	                  const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
@@ -1574,6 +1586,19 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                     </svg>
 	                  </button>
 	                  <div className={cn("hidden items-center gap-3 lg:flex", compactHeader ? "" : "")}>
+                        {sseDisconnected ? (
+                          <span
+                            className="inline-flex items-center gap-1.5 rounded-full border border-[rgba(234,179,8,0.3)] bg-[rgba(234,179,8,0.08)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.15em] text-[rgba(234,179,8,0.85)]"
+                            title="Stream disconnected — reconnecting…"
+                            aria-label="Stream reconnecting"
+                          >
+                            <span className="relative flex h-1.5 w-1.5">
+                              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[rgba(234,179,8,0.6)] opacity-75" />
+                              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[rgba(234,179,8,0.9)]" />
+                            </span>
+                            Reconnecting
+                          </span>
+                        ) : null}
                         <span
                           className="inline-flex h-9 w-9 items-center justify-center"
                           title={statusTooltip}
@@ -1583,6 +1608,16 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                         </span>
 	                  </div>
 	                  <div className={cn("lg:hidden", compactHeader ? "" : "hidden")}>
+                      {sseDisconnected ? (
+                        <span
+                          className="relative mr-1 flex h-2 w-2"
+                          title="Stream reconnecting"
+                          aria-label="Stream reconnecting"
+                        >
+                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[rgba(234,179,8,0.6)] opacity-75" />
+                          <span className="relative inline-flex h-2 w-2 rounded-full bg-[rgba(234,179,8,0.9)]" />
+                        </span>
+                      ) : null}
 	                    <span
 	                      className="inline-flex h-8 w-8 items-center justify-center"
 	                      title={statusTooltip}

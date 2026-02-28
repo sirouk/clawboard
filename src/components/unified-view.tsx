@@ -360,6 +360,13 @@ const OPENCLAW_NON_USER_ACTIVITY_TTL_MS =
     10,
     30 * 60
   ) * 1000;
+const OPENCLAW_ORCHESTRATION_ACTIVE_TTL_MS =
+  parseEnvSeconds(
+    process.env.NEXT_PUBLIC_OPENCLAW_ORCHESTRATION_ACTIVE_TTL_SECONDS,
+    20 * 60,
+    30,
+    12 * 60 * 60
+  ) * 1000;
 
 const SEARCH_QUERY_STOPWORDS = new Set([
   "a",
@@ -658,7 +665,9 @@ function buildRecentNonUserActivityIndex(logs: LogEntry[]): Record<string, Sessi
     if (!isNonUserActivityChatLog(entry)) continue;
     const sessionKey = normalizeBoardSessionKey(entry.source?.sessionKey);
     if (!sessionKey) continue;
-    const stamp = String(entry.updatedAt ?? entry.createdAt ?? "").trim();
+    // Use createdAt to avoid classifer/status patch churn on updatedAt from
+    // falsely re-marking old sessions as recently active.
+    const stamp = String(entry.createdAt ?? "").trim();
     if (!stamp) continue;
     const stampMs = parseIsoMs(stamp);
     const current = out[sessionKey];
@@ -745,7 +754,9 @@ function buildOrchestrationThreadWorkIndex(logs: LogEntry[]): Record<string, Ses
     if (requestId) next.requestId = requestId;
 
     next.status = inferOrchestrationRunStatus(entry, source, next.status);
-    const stamp = String(entry.updatedAt ?? entry.createdAt ?? "").trim();
+    // Use createdAt so unrelated row updates (classification/status patches)
+    // do not keep old orchestration runs "fresh" forever.
+    const stamp = String(entry.createdAt ?? "").trim();
     const stampMs = Date.parse(stamp);
     const normalizedStampMs = Number.isFinite(stampMs) ? stampMs : Number.NEGATIVE_INFINITY;
     if (!next.updatedAt || normalizedStampMs >= next.updatedAtMs) {
@@ -1663,13 +1674,6 @@ function mobileOverlaySurfaceStyle(color: string): CSSProperties {
   };
 }
 
-function mobileOverlayHeaderStyle(color: string): CSSProperties {
-  return {
-    background: `linear-gradient(180deg, ${rgba(color, 0.36)} 0%, rgba(12,14,18,0.9) 76%)`,
-    borderColor: rgba(color, 0.34),
-  };
-}
-
 // Sticky section-header backgrounds should read as a single continuous surface with the card.
 function stickyTopicHeaderStyle(color: string, index: number): CSSProperties {
   const band = index % 2 === 0;
@@ -1935,6 +1939,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     markChatSeen: markChatSeenInStore,
     dismissUnsnoozedTopicBadge,
     dismissUnsnoozedTaskBadge,
+    sseConnected,
   } = useDataStore();
   const readOnly = tokenRequired && !token;
   const pathname = usePathname();
@@ -2294,7 +2299,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [composerTarget, setComposerTarget] = useState<UnifiedComposerTarget | null>(null);
   const unifiedComposerFileRef = useRef<HTMLInputElement | null>(null);
   const unifiedComposerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const unifiedComposerBoxRef = useRef<HTMLDivElement | null>(null);
   const unifiedComposerAttachmentsRef = useRef<UnifiedComposerAttachment[]>([]);
+  const unifiedComposerFocusNudgeCleanupRef = useRef<(() => void) | null>(null);
   const revokeUnifiedPreviewUrls = useCallback((attachments: UnifiedComposerAttachment[]) => {
     for (const attachment of attachments) {
       if (!attachment.previewUrl) continue;
@@ -2350,6 +2357,58 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     el.style.height = `${nextHeight}px`;
     el.style.overflowY = el.scrollHeight > UNIFIED_COMPOSER_MAX_HEIGHT_PX ? "auto" : "hidden";
   }, [unifiedComposerDraft, mdUp]);
+
+  const clearUnifiedComposerFocusNudge = useCallback(() => {
+    const cleanup = unifiedComposerFocusNudgeCleanupRef.current;
+    if (!cleanup) return;
+    unifiedComposerFocusNudgeCleanupRef.current = null;
+    cleanup();
+  }, []);
+
+  const startUnifiedComposerFocusNudge = useCallback(() => {
+    if (typeof window === "undefined" || mdUp) return;
+    clearUnifiedComposerFocusNudge();
+
+    const node = unifiedComposerBoxRef.current ?? unifiedComposerTextareaRef.current;
+    if (!node) return;
+
+    let attempts = 0;
+    const nudgeIntoView = () => {
+      const input = unifiedComposerTextareaRef.current;
+      if (!input || document.activeElement !== input) return;
+      attempts += 1;
+      try {
+        node.scrollIntoView({ behavior: "auto", block: "nearest", inline: "nearest" });
+      } catch {
+        node.scrollIntoView();
+      }
+      if (attempts >= 4) clearUnifiedComposerFocusNudge();
+    };
+
+    const viewport = window.visualViewport;
+    const onViewportShift = () => nudgeIntoView();
+    const t1 = window.setTimeout(nudgeIntoView, 90);
+    const t2 = window.setTimeout(nudgeIntoView, 180);
+    const t3 = window.setTimeout(nudgeIntoView, 300);
+    viewport?.addEventListener("resize", onViewportShift);
+    window.addEventListener("orientationchange", onViewportShift);
+
+    unifiedComposerFocusNudgeCleanupRef.current = () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.clearTimeout(t3);
+      viewport?.removeEventListener("resize", onViewportShift);
+      window.removeEventListener("orientationchange", onViewportShift);
+    };
+
+    nudgeIntoView();
+  }, [clearUnifiedComposerFocusNudge, mdUp]);
+
+  useEffect(() => {
+    return () => {
+      clearUnifiedComposerFocusNudge();
+    };
+  }, [clearUnifiedComposerFocusNudge]);
 
   useEffect(() => {
     if (!composerTarget) return;
@@ -2694,6 +2753,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const typing = openclawTyping[key];
       const awaiting = effectiveAwaitingAssistant[key];
       const orchestrationWork = orchestrationThreadWorkBySession[key];
+      const orchestrationWorkMs = parseIsoMs(orchestrationWork?.updatedAt);
+      const hasFreshOrchestrationWork =
+        Boolean(orchestrationWork?.active) &&
+        Number.isFinite(orchestrationWorkMs) &&
+        nowMs - orchestrationWorkMs >= 0 &&
+        nowMs - orchestrationWorkMs <= OPENCLAW_ORCHESTRATION_ACTIVE_TTL_MS;
       const recentNonUserActivity = recentNonUserActivityBySession[key];
       const recentNonUserActivityMs = parseIsoMs(recentNonUserActivity?.updatedAt);
       const hasRecentNonUserActivity =
@@ -2705,7 +2770,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const latestOtherSignalMs = Math.max(
         parseIsoMs(typing?.updatedAt),
         parseIsoMs(awaiting?.sentAt),
-        parseIsoMs(orchestrationWork?.updatedAt),
+        hasFreshOrchestrationWork ? orchestrationWorkMs : Number.NaN,
         recentNonUserActivityMs
       );
       const directThreadSignal = resolveThreadWorkSignal(threadWorkSignal, {
@@ -2722,7 +2787,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         const activeRequestId =
           normalizeOpenClawRequestId(awaiting?.requestId) ||
           normalizeOpenClawRequestId(typing?.requestId) ||
-          normalizeOpenClawRequestId(orchestrationWork?.requestId) ||
+          normalizeOpenClawRequestId(hasFreshOrchestrationWork ? orchestrationWork?.requestId : "") ||
           normalizeOpenClawRequestId(recentNonUserActivity?.requestId);
         if (
           (!stopRequestId || !activeRequestId || stopRequestId === activeRequestId) &&
@@ -2732,14 +2797,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (directThreadSignal === true) return true;
       if (typing?.typing) return true;
       if (Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, key)) return true;
-      if (orchestrationWork?.active) return true;
-      if (hasRecentNonUserActivity) return true;
+      if (hasFreshOrchestrationWork) return true;
 
       const alias = typingAliasRef.current.get(key);
       if (!alias) return false;
       const sourceKey = alias.sourceSessionKey;
       const sourceTyping = openclawTyping[sourceKey];
       const sourceThreadWork = orchestrationThreadWorkBySession[sourceKey];
+      const sourceThreadWorkMs = parseIsoMs(sourceThreadWork?.updatedAt);
+      const sourceHasFreshThreadWork =
+        Boolean(sourceThreadWork?.active) &&
+        Number.isFinite(sourceThreadWorkMs) &&
+        nowMs - sourceThreadWorkMs >= 0 &&
+        nowMs - sourceThreadWorkMs <= OPENCLAW_ORCHESTRATION_ACTIVE_TTL_MS;
       const sourceAwaiting = effectiveAwaitingAssistant[sourceKey];
       const sourceRecentNonUserActivity = recentNonUserActivityBySession[sourceKey];
       const sourceRecentNonUserActivityMs = parseIsoMs(sourceRecentNonUserActivity?.updatedAt);
@@ -2752,7 +2822,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const sourceLatestOtherSignalMs = Math.max(
         parseIsoMs(sourceTyping?.updatedAt),
         parseIsoMs(sourceAwaiting?.sentAt),
-        parseIsoMs(sourceThreadWork?.updatedAt),
+        sourceHasFreshThreadWork ? sourceThreadWorkMs : Number.NaN,
         sourceRecentNonUserActivityMs
       );
       const sourceDirectThreadSignal = resolveThreadWorkSignal(
@@ -2772,7 +2842,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         const sourceActiveRequestId =
           normalizeOpenClawRequestId(sourceAwaiting?.requestId) ||
           normalizeOpenClawRequestId(sourceTyping?.requestId) ||
-          normalizeOpenClawRequestId(sourceThreadWork?.requestId) ||
+          normalizeOpenClawRequestId(sourceHasFreshThreadWork ? sourceThreadWork?.requestId : "") ||
           normalizeOpenClawRequestId(sourceRecentNonUserActivity?.requestId);
         if (
           (!sourceStopRequestId ||
@@ -2785,8 +2855,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         sourceDirectThreadSignal === true ||
         Boolean(sourceTyping?.typing) ||
         Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, sourceKey) ||
-        Boolean(sourceThreadWork?.active) ||
-        sourceHasRecentNonUserActivity;
+        sourceHasFreshThreadWork;
       if (sourceResponding) return true;
 
       // Cleanup only after inactivity. Do not age out while the source session is still responding.
@@ -3102,16 +3171,23 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const expandedTopicChatsSafe = useMemo(() => {
     const topicIds = new Set(topics.map((topic) => topic.id));
-    return new Set([...expandedTopicChats].filter((id) => topicIds.has(id)));
+    return new Set([...expandedTopicChats].filter((id) => topicIds.has(id) && id !== "unassigned"));
   }, [expandedTopicChats, topics]);
 
-  // Keep topic chat strictly coupled to topic expansion: if a topic is collapsed
-  // by any code path, its chat must collapse too.
+  // Topic chat is always visible whenever its parent topic is expanded.
   useEffect(() => {
     setExpandedTopicChats((prev) => {
-      const allowed = new Set(expandedTopicsSafe);
-      const next = new Set(Array.from(prev).filter((id) => allowed.has(id)));
-      if (next.size === prev.size) return prev;
+      const next = new Set(Array.from(expandedTopicsSafe).filter((id) => id !== "unassigned"));
+      if (next.size === prev.size) {
+        let same = true;
+        for (const id of next) {
+          if (!prev.has(id)) {
+            same = false;
+            break;
+          }
+        }
+        if (same) return prev;
+      }
       return next;
     });
   }, [expandedTopicsSafe, setExpandedTopicChats]);
@@ -5077,6 +5153,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       }
     } else {
       next.add(topicId);
+      if (topicId !== "unassigned") {
+        nextChats.add(topicId);
+      }
     }
     setExpandedTopics(next);
     setExpandedTopicChats(nextChats);
@@ -5248,21 +5327,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     pushUrl({ topics: Array.from(nextTopics), tasks: Array.from(next) });
   };
 
-  const toggleTopicChatExpanded = (topicId: string) => {
-    const next = new Set(expandedTopicChatsSafe);
-    if (next.has(topicId)) {
-      next.delete(topicId);
-      setChatMetaCollapseEpoch((prev) => prev + 1);
-    } else {
-      next.add(topicId);
-      scheduleScrollChatToBottom(`topic:${topicId}`);
-      if (!mdUp) {
-        openMobileTopicChat(topicId);
-      }
-    }
-    setExpandedTopicChats(next);
-  };
-
   const toggleDoneVisibility = () => {
     const next = !showDone;
     setShowDone(next);
@@ -5387,12 +5451,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setPage(parsedState.page);
     setExpandedTopics(new Set(nextTopics));
     setExpandedTasks(new Set(nextTasks));
-    // Do not auto-open topic chat from topic expansion/url sync.
-    // Keep only chats that were already open and still belong to expanded topics.
-    setExpandedTopicChats((prev) => {
-      const allowed = new Set(nextTopics);
-      return new Set(Array.from(prev).filter((id) => allowed.has(id)));
-    });
+    // Topic chat lives inline in expanded topics.
+    setExpandedTopicChats(new Set(nextTopics.filter((id) => id !== "unassigned")));
     if (params.get("focus") === "1" && params.get("chat") === "1" && nextTasks.length === 0 && nextTopics.length > 0) {
       // When entering via left nav, take the user straight to the topic chat composer.
       setAutoFocusTopicId(nextTopics[0] ?? null);
@@ -5747,18 +5807,25 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       setUnifiedComposerError(null);
       const requestId = requestIdForSession(target.sessionKey);
       try {
-        const res = await apiFetch(
-          "/api/openclaw/chat",
-          {
-            method: "DELETE",
-            headers: writeHeaders,
-            body: JSON.stringify({
-              sessionKey: target.sessionKey,
-              ...(requestId ? { requestId } : {}),
-            }),
-          },
-          token
-        );
+        const cancelWithPayload = async (includeRequestId: boolean) =>
+          apiFetch(
+            "/api/openclaw/chat",
+            {
+              method: "DELETE",
+              headers: writeHeaders,
+              body: JSON.stringify({
+                sessionKey: target.sessionKey,
+                ...(includeRequestId && requestId ? { requestId } : {}),
+              }),
+            },
+            token
+          );
+
+        let res = await cancelWithPayload(true);
+        if (!res.ok && requestId) {
+          // Request id can drift in long/multi-run sessions. Retry session-scoped cancel.
+          res = await cancelWithPayload(false);
+        }
         if (!res.ok) {
           const detail = await res.json().catch(() => null);
           const msg = typeof detail?.detail === "string" ? detail.detail : `Failed to cancel (${res.status}).`;
@@ -6269,154 +6336,159 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           ) : null}
         </div>
         <div className="space-y-2">
-          <div className="relative rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(8,10,14,0.36)] p-2">
-            <TextArea
-              ref={unifiedComposerTextareaRef}
-              data-testid="unified-composer-textarea"
-              value={unifiedComposerDraft}
-              onChange={(event) => {
-                const value = event.target.value;
-                setUnifiedComposerDraft(value);
-                setUnifiedComposerError(null);
-                setUnifiedCancelNotice(null);
-                setSearch(value);
-                setPage(1);
-                pushUrl({ q: value, page: "1" }, "replace");
-              }}
-              enterKeyHint={mdUp ? undefined : "send"}
-              onPaste={(event) => {
-                const items = event.clipboardData?.items;
-                if (!items) return;
-                const files: File[] = [];
-                for (const item of Array.from(items)) {
-                  if (item.kind !== "file") continue;
-                  const file = item.getAsFile();
-                  if (file) files.push(file);
-                }
-                if (files.length === 0) return;
-                event.preventDefault();
-                addUnifiedComposerFiles(files);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && event.ctrlKey) {
+          <div
+            ref={unifiedComposerBoxRef}
+            className="relative rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(8,10,14,0.36)] p-2"
+          >
+              <TextArea
+                ref={unifiedComposerTextareaRef}
+                data-testid="unified-composer-textarea"
+                value={unifiedComposerDraft}
+                onFocus={startUnifiedComposerFocusNudge}
+                onBlur={clearUnifiedComposerFocusNudge}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setUnifiedComposerDraft(value);
+                  setUnifiedComposerError(null);
+                  setUnifiedCancelNotice(null);
+                  setSearch(value);
+                  setPage(1);
+                  pushUrl({ q: value, page: "1" }, "replace");
+                }}
+                enterKeyHint={mdUp ? undefined : "send"}
+                onPaste={(event) => {
+                  const items = event.clipboardData?.items;
+                  if (!items) return;
+                  const files: File[] = [];
+                  for (const item of Array.from(items)) {
+                    if (item.kind !== "file") continue;
+                    const file = item.getAsFile();
+                    if (file) files.push(file);
+                  }
+                  if (files.length === 0) return;
                   event.preventDefault();
-                  void sendUnifiedComposer(unifiedComposerSendsToNewTopic);
-                  return;
-                }
-                // On mobile the keyboard "Send" key fires plain Enter — treat it as send.
-                if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !mdUp) {
-                  event.preventDefault();
-                  void sendUnifiedComposer(unifiedComposerSendsToNewTopic);
-                }
-              }}
-              placeholder="Chat about a Topic"
-              className="resize-none overflow-y-hidden border-0 bg-transparent p-2 pr-[11.5rem]"
-              style={{ minHeight: mdUp ? "44px" : "36px" }}
-            />
-            <div className="pointer-events-none absolute bottom-2 left-3 right-[11.25rem] flex min-h-8 items-end">
-              {selectedComposerTarget ? (
-                <div
-                  data-testid="unified-composer-target-chip"
-                  className="pointer-events-auto inline-flex max-w-full items-center gap-2 rounded-full border border-[rgba(77,171,158,0.55)] bg-[rgba(18,28,34,0.9)] px-2.5 py-1 text-[11px] text-[rgb(var(--claw-text))]"
-                >
-                  <span className="truncate">
-                    Sending to {selectedComposerTarget.kind === "task"
-                      ? `task: ${selectedComposerTarget.task.title}`
-                      : `topic: ${selectedComposerTarget.topic.name}`}
-                  </span>
+                  addUnifiedComposerFiles(files);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && event.ctrlKey) {
+                    event.preventDefault();
+                    void sendUnifiedComposer(unifiedComposerSendsToNewTopic);
+                    return;
+                  }
+                  // On mobile the keyboard "Send" key fires plain Enter — treat it as send.
+                  if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !mdUp) {
+                    event.preventDefault();
+                    void sendUnifiedComposer(unifiedComposerSendsToNewTopic);
+                  }
+                }}
+                placeholder="Chat about a Topic"
+                className="resize-none overflow-y-hidden border-0 bg-transparent p-2 pr-[11.5rem]"
+                style={{ minHeight: mdUp ? "44px" : "36px" }}
+              />
+              <div className="pointer-events-none absolute bottom-2 left-3 right-[11.25rem] flex min-h-8 items-end">
+                {selectedComposerTarget ? (
+                  <div
+                    data-testid="unified-composer-target-chip"
+                    className="pointer-events-auto inline-flex max-w-full items-center gap-2 rounded-full border border-[rgba(77,171,158,0.55)] bg-[rgba(18,28,34,0.9)] px-2.5 py-1 text-[11px] text-[rgb(var(--claw-text))]"
+                  >
+                    <span className="truncate">
+                      Sending to {selectedComposerTarget.kind === "task"
+                        ? `task: ${selectedComposerTarget.task.title}`
+                        : `topic: ${selectedComposerTarget.topic.name}`}
+                    </span>
+                    <button
+                      type="button"
+                      data-testid="unified-composer-target-clear"
+                      className="rounded border border-transparent px-1 text-[rgb(var(--claw-muted))] transition hover:border-[rgb(var(--claw-border))] hover:text-[rgb(var(--claw-text))]"
+                      onClick={() => {
+                        setComposerTarget(null);
+                        setUnifiedCancelNotice(null);
+                      }}
+                      aria-label="Clear selected send target"
+                      title="Clear selected send target"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ) : (
+                  <span className="text-[11px] text-[rgb(var(--claw-muted))]">No target selected — New Topic</span>
+                )}
+              </div>
+              <div className="absolute bottom-2 right-2 flex items-center gap-1.5">
+                {unifiedComposerHasContent ? (
                   <button
                     type="button"
-                    data-testid="unified-composer-target-clear"
-                    className="rounded border border-transparent px-1 text-[rgb(var(--claw-muted))] transition hover:border-[rgb(var(--claw-border))] hover:text-[rgb(var(--claw-text))]"
                     onClick={() => {
-                      setComposerTarget(null);
+                      setUnifiedComposerDraft('');
+                      setSearch('');
+                      setPage(1);
+                      clearUnifiedComposerAttachments();
+                      setUnifiedComposerError(null);
                       setUnifiedCancelNotice(null);
+                      committedSearch.current = '';
+                      pushUrl({ q: '', page: '1' }, 'replace');
                     }}
-                    aria-label="Clear selected send target"
-                    title="Clear selected send target"
+                    aria-label="Clear composer"
+                    title="Clear composer"
+                    className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.94)] text-[rgb(var(--claw-muted))] transition hover:border-[rgba(255,90,45,0.45)] hover:text-[rgb(var(--claw-text))]"
                   >
-                    ×
+                    <CloseIcon />
                   </button>
-                </div>
-              ) : (
-                <span className="text-[11px] text-[rgb(var(--claw-muted))]">No target selected — New Topic</span>
-              )}
-            </div>
-            <div className="absolute bottom-2 right-2 flex items-center gap-1.5">
-              {unifiedComposerHasContent ? (
+                ) : null}
+                <input
+                  ref={unifiedComposerFileRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(event) => {
+                    addUnifiedComposerFiles(event.target.files ?? []);
+                    event.currentTarget.value = '';
+                  }}
+                />
                 <button
                   type="button"
-                  onClick={() => {
-                    setUnifiedComposerDraft('');
-                    setSearch('');
-                    setPage(1);
-                    clearUnifiedComposerAttachments();
-                    setUnifiedComposerError(null);
-                    setUnifiedCancelNotice(null);
-                    committedSearch.current = '';
-                    pushUrl({ q: '', page: '1' }, 'replace');
-                  }}
-                  aria-label="Clear composer"
-                  title="Clear composer"
-                  className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.94)] text-[rgb(var(--claw-muted))] transition hover:border-[rgba(255,90,45,0.45)] hover:text-[rgb(var(--claw-text))]"
-                >
-                  <CloseIcon />
-                </button>
-              ) : null}
-              <input
-                ref={unifiedComposerFileRef}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(event) => {
-                  addUnifiedComposerFiles(event.target.files ?? []);
-                  event.currentTarget.value = '';
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => unifiedComposerFileRef.current?.click()}
-                aria-label="Attach files"
-                title="Attach files"
-                className={cn(
-                  "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-muted))] transition",
-                  "border-[rgba(255,255,255,0.14)] bg-[rgba(12,14,18,0.86)] backdrop-blur",
-                  "hover:border-[rgba(255,90,45,0.4)] hover:text-[rgb(var(--claw-text))]"
-                )}
-              >
-                <PaperclipIcon />
-              </button>
-              {selectedComposerTargetResponding ? (
-                <button
-                  type="button"
-                  data-testid="unified-composer-stop"
-                  onClick={() => {
-                    setUnifiedCancelNotice(null);
-                    void cancelUnifiedComposerRun({ clearComposer: false });
-                  }}
-                  aria-label="Stop selected run"
-                  title="Stop selected run"
+                  onClick={() => unifiedComposerFileRef.current?.click()}
+                  aria-label="Attach files"
+                  title="Attach files"
                   className={cn(
-                    "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
-                    "border-[rgba(220,38,38,0.7)] bg-[rgba(220,38,38,0.25)] backdrop-blur",
-                    "hover:bg-[rgba(220,38,38,0.4)]"
+                    "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-muted))] transition",
+                    "border-[rgba(255,255,255,0.14)] bg-[rgba(12,14,18,0.86)] backdrop-blur",
+                    "hover:border-[rgba(255,90,45,0.4)] hover:text-[rgb(var(--claw-text))]"
                   )}
                 >
-                  <StopIcon />
+                  <PaperclipIcon />
                 </button>
-              ) : null}
-              {unifiedComposerHasText ? (
-                <Button
-                  data-testid={unifiedComposerSendsToNewTopic ? "unified-composer-new-topic" : "unified-composer-send"}
-                  size="sm"
-                  onClick={() => void sendUnifiedComposer(unifiedComposerSendsToNewTopic)}
-                  disabled={unifiedComposerBusy}
-                >
-                  {unifiedComposerSubmitLabel}
-                </Button>
-              ) : null}
+                {selectedComposerTargetResponding ? (
+                  <button
+                    type="button"
+                    data-testid="unified-composer-stop"
+                    onClick={() => {
+                      setUnifiedCancelNotice(null);
+                      void cancelUnifiedComposerRun({ clearComposer: false });
+                    }}
+                    aria-label="Stop selected run"
+                    title="Stop selected run"
+                    className={cn(
+                      "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
+                      "border-[rgba(220,38,38,0.7)] bg-[rgba(220,38,38,0.25)] backdrop-blur",
+                      "hover:bg-[rgba(220,38,38,0.4)]"
+                    )}
+                  >
+                    <StopIcon />
+                  </button>
+                ) : null}
+                {unifiedComposerHasText ? (
+                  <Button
+                    data-testid={unifiedComposerSendsToNewTopic ? "unified-composer-new-topic" : "unified-composer-send"}
+                    size="sm"
+                    onClick={() => void sendUnifiedComposer(unifiedComposerSendsToNewTopic)}
+                    disabled={unifiedComposerBusy}
+                  >
+                    {unifiedComposerSubmitLabel}
+                  </Button>
+                ) : null}
+              </div>
             </div>
-          </div>
           <div className="flex flex-wrap items-start gap-3">
             {unifiedComposerAttachments.length > 0 ? (
               <AttachmentStrip
@@ -6506,7 +6578,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	            mobileLayer === "chat" &&
 	            mobileChatTarget?.kind === "topic" &&
 	            mobileChatTarget.topicId === topicId;
-	          const topicChatExpanded = topicChatFullscreen || expandedTopicChatsSafe.has(topicId);
 	          const mobileChatTopicId =
 	            mobileLayer === "chat"
               ? mobileChatTarget?.kind === "task"
@@ -8038,7 +8109,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                                         {pending.status === "sending"
                                                           ? "Sending…"
                                                           : pending.status === "sent"
-                                                            ? "Sent"
+                                                            ? sseConnected ? "Delivered" : "Delivered · reconnecting"
                                                             : pending.error
                                                               ? pending.error
                                                               : "Failed to send."}
@@ -8147,25 +8218,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                  {!isUnassigned && (
 	                    <div
 	                      className={cn(
-                          "border border-[rgb(var(--claw-border))] transition-colors duration-300",
                           topicChatFullscreen
-                            ? "flex min-h-0 flex-1 flex-col rounded-none border-0 p-0"
-                            : "rounded-[var(--radius-md)] p-4"
+                            ? "flex min-h-0 flex-1 flex-col overflow-hidden overscroll-none px-4 pb-5 pt-[calc(env(safe-area-inset-top)+2.7rem)]"
+                            : "mt-3 border-t border-[rgba(255,255,255,0.06)] pt-3"
                         )}
-	                      style={topicChatFullscreen ? mobileOverlaySurfaceStyle(topicColor) : taskGlowStyle(topicColor, taskList.length, topicChatExpanded)}
+	                      style={topicChatFullscreen ? mobileOverlaySurfaceStyle(topicColor) : undefined}
 	                    >
                       <div
-                        role="button"
-                        tabIndex={0}
 		                        className={cn(
                           "flex items-center justify-between gap-2.5 text-left",
                           !mdUp && mobileLayer === "chat" ? "max-md:hidden" : ""
                         )}
-	                        onClick={(event) => {
-	                          if (!allowToggle(event.target as HTMLElement)) return;
-	                          toggleTopicChatExpanded(topicId);
-	                        }}
-	                        aria-expanded={topicChatExpanded}
 	                      >
 			                        <div className="min-w-0">
 			                          <div className="flex min-w-0 items-center gap-2">
@@ -8187,30 +8250,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                          </div>
 			                          <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topicChatMetricsLabel}</div>
 			                        </div>
-				                        <button
-				                          type="button"
-				                          data-testid={`toggle-topic-chat-${topicId}`}
-			                          aria-label={topicChatExpanded ? `Collapse topic chat for ${topic.name}` : `Expand topic chat for ${topic.name}`}
-			                          title={topicChatExpanded ? "Collapse" : "Expand"}
-			                          onClick={(event) => {
-			                            event.stopPropagation();
-			                            toggleTopicChatExpanded(topicId);
-			                          }}
-				                          className={cn(
-				                            "flex h-8 w-8 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-base text-[rgb(var(--claw-muted))] transition",
-				                            "hover:border-[rgba(255,90,45,0.3)] hover:text-[rgb(var(--claw-text))]"
-				                          )}
-			                        >
-			                          {topicChatExpanded ? "▾" : "▸"}
-			                        </button>
 		                      </div>
-		                      {topicChatExpanded && (
 		                        <div
                               className={cn(
-                                "mt-2.5 pt-2",
                                 topicChatFullscreen
-                                  ? "mt-0 flex min-h-0 flex-1 flex-col overflow-hidden overscroll-none px-4 pb-5 pt-[calc(env(safe-area-inset-top)+2.7rem)]"
-                                  : ""
+                                  ? "mt-0 flex min-h-0 flex-1 flex-col"
+                                  : "mt-2.5 pt-2"
                               )}
                               style={topicChatFullscreen ? mobileOverlaySurfaceStyle(topicColor) : undefined}
                             >
@@ -8444,7 +8489,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                                     {pending.status === "sending"
                                                       ? "Sending…"
                                                       : pending.status === "sent"
-                                                        ? "Sent"
+                                                        ? sseConnected ? "Delivered" : "Delivered · reconnecting"
                                                         : pending.error
                                                           ? pending.error
                                                           : "Failed to send."}
@@ -8529,12 +8574,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                            onAutoFocusApplied={() =>
 		                              setAutoFocusTopicId((prev) => (prev === topicId ? null : prev))
 		                            }
-		                            testId={`topic-chat-composer-${topicId}`}
-		                          />
-		                        </div>
-		                      )}
-		                    </div>
-	                  )}
+			                            testId={`topic-chat-composer-${topicId}`}
+			                          />
+			                        </div>
+			                    </div>
+		                  )}
                 </div>
 	              )}
 	            </div>

@@ -323,6 +323,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const mobileFocusNudgeCleanupRef = useRef<(() => void) | null>(null);
 
   const resizeTextarea = useCallback(() => {
     const el = textareaRef.current;
@@ -333,6 +334,59 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
     el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
   }, [dense]);
+
+  const clearMobileFocusNudge = useCallback(() => {
+    const cleanup = mobileFocusNudgeCleanupRef.current;
+    if (!cleanup) return;
+    mobileFocusNudgeCleanupRef.current = null;
+    cleanup();
+  }, []);
+
+  const startMobileFocusNudge = useCallback(() => {
+    if (typeof window === "undefined") return;
+    if (!window.matchMedia("(max-width: 767px)").matches) return;
+    clearMobileFocusNudge();
+
+    const node = rootRef.current ?? textareaRef.current;
+    if (!node) return;
+
+    let attempts = 0;
+    const nudgeIntoView = () => {
+      const input = textareaRef.current;
+      if (!input || document.activeElement !== input) return;
+      attempts += 1;
+      try {
+        node.scrollIntoView({ behavior: "auto", block: "nearest", inline: "nearest" });
+      } catch {
+        node.scrollIntoView();
+      }
+      if (attempts >= 4) clearMobileFocusNudge();
+    };
+
+    const viewport = window.visualViewport;
+    const onViewportShift = () => nudgeIntoView();
+    const t1 = window.setTimeout(nudgeIntoView, 90);
+    const t2 = window.setTimeout(nudgeIntoView, 180);
+    const t3 = window.setTimeout(nudgeIntoView, 300);
+    viewport?.addEventListener("resize", onViewportShift);
+    window.addEventListener("orientationchange", onViewportShift);
+
+    mobileFocusNudgeCleanupRef.current = () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.clearTimeout(t3);
+      viewport?.removeEventListener("resize", onViewportShift);
+      window.removeEventListener("orientationchange", onViewportShift);
+    };
+
+    nudgeIntoView();
+  }, [clearMobileFocusNudge]);
+
+  useEffect(() => {
+    return () => {
+      clearMobileFocusNudge();
+    };
+  }, [clearMobileFocusNudge]);
 
   useEffect(() => {
     if (!autoFocus) return;
@@ -541,15 +595,22 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
       onCancel?.();
       setAttachError(null);
       try {
-        const res = await apiFetch(
-          "/api/openclaw/chat",
-          {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionKey, ...(rid ? { requestId: rid } : {}) }),
-          },
-          token
-        );
+        const cancelWithPayload = async (includeRequestId: boolean) =>
+          apiFetch(
+            "/api/openclaw/chat",
+            {
+              method: "DELETE",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ sessionKey, ...(includeRequestId && rid ? { requestId: rid } : {}) }),
+            },
+            token
+          );
+
+        let res = await cancelWithPayload(true);
+        if (!res.ok && rid) {
+          // Request id can drift in long/multi-run sessions. Retry session-scoped cancel.
+          res = await cancelWithPayload(false);
+        }
         if (!res.ok) {
           const detail = await res.json().catch(() => null);
           const msg = typeof detail?.detail === "string" ? detail.detail : `Failed to cancel (${res.status}).`;
@@ -848,14 +909,13 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
             disabled={hardDisabled}
             onPointerDown={handleDensePointerDown}
             onFocus={() => {
-              if (dense && typeof window !== "undefined") {
-                window.requestAnimationFrame(() => {
-                  window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-                });
-              }
+              startMobileFocusNudge();
               onFocus?.();
             }}
-            onBlur={onBlur}
+            onBlur={() => {
+              clearMobileFocusNudge();
+              onBlur?.();
+            }}
             onPaste={(event) => {
               if (hardDisabled) return;
               const items = event.clipboardData?.items;

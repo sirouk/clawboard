@@ -145,6 +145,7 @@ Commands:
   nuke [--yes]                         Stop services + remove volumes
   reset-data [--yes]                   Stop services and wipe local Clawboard data/* (OpenClaw untouched)
   reset-openclaw-sessions [--yes]      Wipe OpenClaw agent session history; keeps memories + credentials
+  reset-all-fresh [--yes]              Wipe OpenClaw memories/sessions + Clawboard data; remove Clawboard OpenClaw cron jobs (preserves qmd indexes + workspace templates/rules)
   start-fresh-replay [--yes]           One-time: clear topics/tasks, reset classifier, wipe vectors, restart
   status                               Show container status
   logs [service]                       Tail logs
@@ -428,9 +429,310 @@ for a in cfg.get("agents", {}).get("list", []):
     if aid:
         printed.append(f"  <oc_home>/agents/{aid}/agent/  [credentials + model config]")
         printed.append(f"  <oc_home>/agents/{aid}/qmd/    [QMD vector index]")
-for line in printed:
+  for line in printed:
     print(line)
 PY
+}
+
+# Resolve configured OpenClaw workspaces from openclaw.json. Output:
+#   WORKSPACE<TAB><abs-path>
+# Falls back to common workspace directories when config parsing is unavailable.
+_oc_agent_workspaces() {
+  local cfg_path
+  local oc_home
+  cfg_path="$(_oc_config_path)"
+  oc_home="$(_oc_home)"
+
+  if [ -n "$cfg_path" ] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$cfg_path" "$oc_home" "${OPENCLAW_PROFILE:-}" <<'PY'
+import json
+import os
+import re
+import sys
+
+
+cfg_path, openclaw_home, profile = sys.argv[1], os.path.abspath(os.path.expanduser(sys.argv[2])), (sys.argv[3] or "").strip()
+
+
+def normalize_path(value):
+    p = os.path.expanduser(str(value or "").strip())
+    if not p:
+        return ""
+    return os.path.abspath(p)
+
+
+def profile_workspace(base_dir, profile_name):
+    raw = (profile_name or "").strip()
+    if not raw or raw.lower() == "default":
+        return os.path.join(base_dir, "workspace")
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-")
+    if not safe:
+        return os.path.join(base_dir, "workspace")
+    return os.path.join(base_dir, f"workspace-{safe}")
+
+
+cfg = {}
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        parsed = json.load(f)
+        if isinstance(parsed, dict):
+            cfg = parsed
+except Exception:
+    cfg = {}
+
+agents = cfg.get("agents", {}).get("list")
+if not isinstance(agents, list):
+    agents = []
+
+defaults_workspace = (
+    (((cfg.get("agents") or {}).get("defaults") or {}).get("workspace"))
+    or ((cfg.get("agents") or {}).get("workspace"))
+    or ((cfg.get("agent") or {}).get("workspace"))
+    or cfg.get("workspace")
+)
+defaults_workspace = normalize_path(defaults_workspace) or profile_workspace(openclaw_home, profile)
+
+workspaces = []
+seen = set()
+
+for entry in agents:
+    if not isinstance(entry, dict):
+        continue
+    ws = normalize_path(entry.get("workspace"))
+    if not ws:
+        ws = defaults_workspace
+    if ws == openclaw_home:
+        ws = profile_workspace(openclaw_home, profile)
+    if not ws or ws in seen:
+        continue
+    seen.add(ws)
+    workspaces.append(ws)
+
+if not workspaces:
+    ws = defaults_workspace
+    if ws and ws not in seen:
+        workspaces.append(ws)
+
+if not workspaces:
+    fallback = profile_workspace(openclaw_home, profile)
+    if fallback:
+        workspaces.append(fallback)
+
+for ws in workspaces:
+    print(f"WORKSPACE\t{ws}")
+PY
+    return
+  fi
+
+  if [ -d "$oc_home/workspace" ]; then
+    echo "WORKSPACE	$oc_home/workspace"
+  fi
+  for ws in "$oc_home"/workspace-*; do
+    [ -d "$ws" ] || continue
+    case "$ws" in
+      "$oc_home/workspace") continue ;;
+      *) echo "WORKSPACE	$ws" ;;
+    esac
+  done
+}
+
+_reindex_openclaw_memory() {
+  local -a agent_ids=()
+  local aid
+
+  if ! command -v openclaw >/dev/null 2>&1; then
+    echo "openclaw CLI not found: skipped memory reindex."
+    return
+  fi
+
+  while IFS=$'\t' read -r aid _path; do
+    aid="${aid//$'\r'/}"
+    if [ -z "$aid" ]; then
+      continue
+    fi
+    agent_ids+=("$aid")
+  done < <(_oc_agent_sessions)
+
+  if [ "${#agent_ids[@]}" -eq 0 ]; then
+    agent_ids=("main")
+  fi
+
+  echo "Re-indexing OpenClaw memory (memory + qmd) for:"
+  local id
+  local attempts=0
+  local failures=0
+  for id in "${agent_ids[@]}"; do
+    attempts=$((attempts + 1))
+    if openclaw memory index --agent "$id" --force; then
+      echo "  [$id] memory index refreshed."
+    else
+      echo "  [$id] memory index failed; continuing."
+      failures=$((failures + 1))
+    fi
+  done
+
+  echo "Done: $attempts agents indexed, $failures failures."
+}
+
+# Wipe agent session files + workspace memory directories for all configured agents.
+_wipe_openclaw_agent_data() {
+  local oc_home="$(_oc_home)"
+  local aid
+  local sessions_dir
+  local count
+  local memory_count
+  local workspace
+  local memory_dir
+  local seen_workspace
+  local ws_path
+
+  echo "OpenClaw data targets:"
+  echo "  - session trace files: ~/.openclaw/agents/*/sessions"
+  echo "  - workspace memory: <workspace>/memory"
+  echo "  - legacy top-level memory: ~/.openclaw/memory (if present)"
+  echo ""
+
+  # Wipe all session files for each agent.
+  while IFS=$'\t' read -r aid sessions_dir; do
+    [ -n "$aid" ] && [ -n "$sessions_dir" ] || continue
+    sessions_dir="${sessions_dir//$'\r'/}"
+    if [ ! -d "$sessions_dir" ]; then
+      echo "  [$aid] no sessions directory — skipping"
+      continue
+    fi
+
+    count=$(find "$sessions_dir" -maxdepth 1 \( -name "*.jsonl" -o -name "*.jsonl.deleted.*" \) 2>/dev/null | wc -l | tr -d ' ')
+
+    find "$sessions_dir" -maxdepth 1 -name "*.jsonl" -delete 2>/dev/null || true
+    find "$sessions_dir" -maxdepth 1 -name "*.jsonl.deleted.*" -delete 2>/dev/null || true
+    find "$sessions_dir" -maxdepth 1 -name "sessions.json.*.tmp" -delete 2>/dev/null || true
+    find "$sessions_dir" -maxdepth 1 -name "sessions.json.backup*" -delete 2>/dev/null || true
+    find "$sessions_dir" -maxdepth 1 -name "sessions.json.bak.*" -delete 2>/dev/null || true
+    find "$sessions_dir" -maxdepth 1 -name "sessions.json.pre-prune-backup" -delete 2>/dev/null || true
+    [ -f "$sessions_dir/sessions.json" ] && echo '{}' > "$sessions_dir/sessions.json"
+
+    echo "  [$aid] cleared $count session file(s)"
+  done < <(_oc_agent_sessions)
+
+  # Wipe workspace memory dirs for configured agents.
+  while IFS=$'\t' read -r _kind workspace; do
+    workspace="${workspace//$'\r'/}"
+    [ -n "$workspace" ] || continue
+    if [ -n "$seen_workspace" ] && printf '%s\n' "$seen_workspace" | grep -Fxq "$workspace"; then
+      continue
+    fi
+    seen_workspace="${seen_workspace}${seen_workspace:+\n}${workspace}"
+    memory_dir="${workspace}/memory"
+    if [ ! -d "$memory_dir" ]; then
+      continue
+    fi
+
+    memory_count=$(find "$memory_dir" -type f 2>/dev/null | wc -l | tr -d ' ')
+    rm -rf "$memory_dir"
+    mkdir -p "$memory_dir"
+    ws_path="${workspace#/}"
+    echo "  [$ws_path] memory dir reset (${memory_count} file(s) removed)"
+  done < <(_oc_agent_workspaces)
+
+  # Preserve and clear legacy top-level OpenClaw memory directory (if present).
+  if [ -d "$oc_home/memory" ]; then
+    memory_count=$(find "$oc_home/memory" -type f 2>/dev/null | wc -l | tr -d ' ')
+    rm -rf "$oc_home/memory"
+    mkdir -p "$oc_home/memory"
+    echo "  [$(printf "%s" "$oc_home" | sed "s|$HOME|~|")/memory] reset ($memory_count file(s) removed)"
+  fi
+}
+
+# ===========================================================================
+# cleanup_openclaw_cron_jobs — remove OpenClaw cron jobs tied to this Clawboard
+# workspace (for a true fresh reset). Non-matching jobs are preserved.
+# ===========================================================================
+_cleanup_openclaw_cron_jobs() {
+  local root_dir
+  local workspace
+  local ids
+  local id
+  local total=0
+  local removed=0
+  local failed=0
+
+  if ! command -v openclaw >/dev/null 2>&1; then
+    echo "openclaw CLI not found: skipped cron cleanup."
+    return
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 not found: skipped cron cleanup."
+    return
+  fi
+
+  root_dir="$ROOT_DIR"
+  workspace="$(cd "$root_dir" && pwd)"
+
+  ids="$(python3 - "$workspace" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+workspace = os.path.abspath(sys.argv[1])
+root_match = os.path.normpath(workspace).lower()
+
+try:
+    raw = subprocess.check_output(["openclaw", "cron", "list", "--json"], stderr=subprocess.DEVNULL)
+    data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+except Exception:
+    sys.exit(0)
+
+jobs = data.get("jobs") if isinstance(data, dict) else []
+if not isinstance(jobs, list):
+    sys.exit(0)
+
+ids = []
+for job in jobs:
+    if not isinstance(job, dict):
+        continue
+
+    job_id = str(job.get("id") or job.get("jobId") or "").strip()
+    if not job_id:
+        continue
+
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    name = str(job.get("name") or "").lower()
+    msg = str(payload.get("message") or "").lower()
+    text = str(payload.get("text") or "").lower()
+    command = str(payload.get("command") or "").lower()
+    joined = f"{name}\n{msg}\n{text}\n{command}"
+    joined = joined.lower()
+
+    is_clawboard = "clawboard" in joined
+    is_obsidian = "obsidian" in joined
+    is_workspace = root_match in joined
+    if is_clawboard or is_obsidian or is_workspace:
+        ids.append(job_id)
+
+print("\n".join(ids), end="")
+PY
+)"
+
+  if [ -z "$ids" ]; then
+    echo "No matching OpenClaw cron jobs to clean."
+    return
+  fi
+
+  echo "Cleaning OpenClaw cron jobs:"
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    total=$((total + 1))
+    if openclaw cron rm "$id" >/dev/null 2>&1; then
+      removed=$((removed + 1))
+      echo "  removed cron job [$id]"
+    else
+      failed=$((failed + 1))
+      echo "  failed to remove cron job [$id]"
+    fi
+  done <<< "$ids"
+
+  echo "  cron jobs cleaned: $removed/$total (failed: $failed)"
 }
 
 # ===========================================================================
@@ -539,6 +841,54 @@ start_fresh_replay() {
   fi
   confirm_or_abort "This will clear topics/tasks and reset classifier state (logs remain). Continue?" "$force"
   python3 "$ROOT_DIR/scripts/one_time_start_fresh_replay.py" --yes --integration-level full
+}
+
+reset_all_fresh() {
+  local force=false
+  local oc_home
+  if [ "${1:-}" = "--yes" ]; then
+    force=true
+  elif [ -n "${1:-}" ]; then
+    echo "Unknown option for reset-all-fresh: $1"
+    echo "Usage: bash deploy.sh reset-all-fresh [--yes]"
+    exit 1
+  fi
+
+  oc_home="$(_oc_home)"
+  echo "OpenClaw home : $oc_home"
+  echo "Clawboard dir : $ROOT_DIR"
+  if [ -d "$ROOT_DIR/data" ]; then
+    echo "Clawboard data: $ROOT_DIR/data"
+  fi
+  echo ""
+  echo "Preserved:"
+  echo "  - qmd index stores under agents/<id>/qmd/"
+  echo "  - OpenClaw config/credentials in $oc_home (agents/*/agent)"
+  echo "  - workspace rule files (AGENTS.md, SOUL.md, HEARTBEAT.md, etc.)"
+  echo "  - cron jobs not matching Clawboard workspace are preserved"
+  echo ""
+
+  confirm_or_abort "This will wipe all Clawboard data + OpenClaw sessions/memory and remove Clawboard OpenClaw cron jobs. Continue?" "$force"
+
+  echo "Stopping services..."
+  down
+
+  echo "Resetting OpenClaw agent memory/session state..."
+  _wipe_openclaw_agent_data
+
+  echo "Cleaning OpenClaw cron jobs..."
+  _cleanup_openclaw_cron_jobs
+
+  echo "Resetting Clawboard data..."
+  reset_data --yes
+
+  echo "Starting services..."
+  up
+
+  echo "Reindexing OpenClaw memory + qmd indexes..."
+  _reindex_openclaw_memory
+
+  echo "Done."
 }
 
 cleanup_orphan_tools() {
@@ -1094,9 +1444,10 @@ run_interactive() {
   echo "10) Clear demo data"
   echo "11) Ensure skill installed"
   echo "12) Reset OpenClaw sessions (clears agent session history, keeps memories)"
-  echo "13) Cleanup orphaned tool logs (control-plane noise)"
-  echo "14) Reconcile allocation guardrails (control-plane + tool traces)"
-  echo "15) Quit"
+  echo "13) Reset all fresh (Clawboard data + OpenClaw sessions/memories/crons; keeps qmd indexes)"
+  echo "14) Cleanup orphaned tool logs (control-plane noise)"
+  echo "15) Reconcile allocation guardrails (control-plane + tool traces)"
+  echo "16) Quit"
   read -r -p "Select an option: " choice
 
   case "$choice" in
@@ -1112,9 +1463,10 @@ run_interactive() {
     10) demo_clear ;;
     11) ensure_skill ;;
     12) reset_openclaw_sessions ;;
-    13) cleanup_orphan_tools ;;
-    14) reconcile_allocation_guardrails ;;
-    15) exit 0 ;;
+    13) reset_all_fresh ;;
+    14) cleanup_orphan_tools ;;
+    15) reconcile_allocation_guardrails ;;
+    16) exit 0 ;;
     *) echo "Invalid choice"; exit 1 ;;
   esac
 }
@@ -1129,6 +1481,7 @@ case "$cmd" in
   nuke) shift; nuke "$@" ;;
   reset-data) shift; reset_data "$@" ;;
   reset-openclaw-sessions|reset_openclaw_sessions) shift; reset_openclaw_sessions "$@" ;;
+  reset-all-fresh|reset_all_fresh) shift; reset_all_fresh "$@" ;;
   start-fresh-replay|start_fresh_replay) shift; start_fresh_replay "$@" ;;
   status) status ;;
   logs) shift; logs "$@" ;;

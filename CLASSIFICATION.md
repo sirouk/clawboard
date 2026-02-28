@@ -41,7 +41,7 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 
 | Layer | Store | Durability Role |
 |---|---|---|
-| Canonical board state | SQLModel DB (`Space`, `Topic`, `Task`, `LogEntry`, `DeletedLog`, `SessionRoutingMemory`, `OpenClawRequestRoute`, `Attachment`, `Draft`, `IngestQueue`) | Source of truth |
+| Canonical board state | SQLModel DB (`Space`, `Topic`, `Task`, `LogEntry`, `DeletedLog`, `SessionRoutingMemory`, `OpenClawRequestRoute`, `IngestReceipt`, `IngestQueue`, `OpenClawChatDispatchQueue`, `OrchestrationRun`, `OrchestrationItem`, `OrchestrationEvent`, `OpenClawGatewayHistoryCursor`, `OpenClawGatewayHistorySyncState`, `Attachment`, `Draft`, `InstanceConfig`) | Source of truth |
 | Plugin spill queue | `~/.openclaw/clawboard-queue.sqlite` | Survives API/network outage |
 | Classifier reindex queue | JSONL (`CLASSIFIER_REINDEX_QUEUE_PATH`) | Decouples embedding refresh from API writes |
 | Classifier embeddings | Qdrant (`QDRANT_URL`/collection config) | Candidate retrieval namespaces |
@@ -316,7 +316,7 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
 
 - `POST /api/openclaw/chat` persists user message first, then asynchronously dispatches `chat.send` over gateway WS RPC.
 - Attachments are uploaded and validated before send.
-- API emits `openclaw.typing` lifecycle events.
+- API emits both `openclaw.typing` (typing=true/false) and `openclaw.thread_work` (active=true/false, with optional `reason` and `requestId`) lifecycle events. Both are emitted at dispatch start, on failure, on cancel, and on terminal assistant/system ingest.
 - Assistant-log watchdog emits system warning when gateway returns but plugin logs do not arrive.
 - History-sync ingest skips injected context wrapper artifacts while still advancing the per-session cursor.
 - Orchestration convergence does not mark `main.response` done while any delegated subagent item is still non-terminal.
@@ -332,7 +332,7 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
 | Classifier multi-instance contention | lock collision | single-flight lock prevents double processing |
 | LLM timeout/invalid output | timeout and strict validator | compact retry, repair pass, then heuristic fallback |
 | Vector backend outage | request failures | Graceful degrade to lexical/BM25 + heuristic routing paths |
-| SSE stalls/drops | heartbeat gap + client watchdog | reconnect + `/api/changes` reconcile |
+| SSE stalls/drops | heartbeat gap + client watchdog | exponential backoff reconnect (1 s→30 s, ±25% jitter) + `/api/changes` reconcile; `navigator.onLine` guard prevents blind retries offline; `online` event triggers immediate reconnect |
 | Missing assistant logs after board send | watchdog grace timeout | system warning log in same session |
 
 ## 10) Operational Controls (Key Knobs)
@@ -389,6 +389,7 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
 
 - `OPENCLAW_CHAT_DISPATCH_*` (durable send queue workers, retries, stale recovery, quarantine)
 - `OPENCLAW_CHAT_IN_FLIGHT_*` (optional post-send progress probe and abort/retry window)
+- `OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS` (post-send orchestration probe interval for board sessions)
 - `OPENCLAW_CHAT_ASSISTANT_LOG_*` (watchdog cadence and backfill throttles)
 - `OPENCLAW_GATEWAY_HISTORY_SYNC_*` (gateway history fallback reconciliation)
 
@@ -481,6 +482,10 @@ This catalog enumerates the complete engineered scenario surface at the methodol
 | ING-018 | queue ingestion mode enabled | row enqueued and async worker processes status transitions | `backend/app/main.py` `/api/ingest`, `_queue_worker` |
 | ING-019 | sqlite write lock during ingest | bounded retry/backoff path | `backend/app/main.py` `append_log_entry` OperationalError branch |
 | ING-020 | assistant row appended | `openclaw.typing=false` event published | `backend/app/main.py` `append_log_entry` typing publish branch |
+| ING-021 | main-session heartbeat/control-plane conversation ingested | terminal failed row, `classificationError=filtered_control_plane`, `topicId`/`taskId` cleared | `backend/app/main.py` `append_log_entry` control-plane filter |
+| ING-022 | subagent scaffold conversation ingested | terminal failed row, `classificationError=filtered_subagent_scaffold`, `topicId`/`taskId` cleared | `backend/app/main.py` `append_log_entry` scaffold filter |
+| ING-023 | scoped tool trace action row ingested | terminalized as `classificationStatus=classified`, `classificationError=filtered_tool_activity` | `backend/app/main.py` `append_log_entry` anchored tool trace branch |
+| ING-024 | unanchored tool trace action row ingested | terminalized as `classificationStatus=failed`, `classificationError=filtered_unanchored_tool_activity`, `topicId`/`taskId` cleared | `backend/app/main.py` `append_log_entry` unanchored tool trace branch |
 
 ### 14.2 Classifier Scheduling and Bundle Selection Scenarios
 
@@ -578,12 +583,12 @@ This catalog enumerates the complete engineered scenario surface at the methodol
   - all unit suites under `classifier/tests/*` pass,
   - `scripts/classifier_e2e_check.py` passes all scenarios,
   - no unbounded pending growth in `/api/metrics.logs.oldestPendingAt` under sustained test load.
-- Current audited status (`2026-02-25`) is tracked in sections 16 and 17:
-  - Trace coverage (code-path): `77/77` (`100.0%`) in section 17
+- Current audited status (`2026-02-28`) is tracked in sections 16 and 17:
+  - Trace coverage (code-path): `84/84` (`100.0%`) in section 17
   - Trace gate: `MET`
-  - `Covered: 77/77`
-  - `Partial: 0/77`
-  - `Gap: 0/77`
+  - `Covered: 84/84`
+  - `Partial: 0/84`
+  - `Gap: 0/84`
   - Automated behavior gate: `MET`
 
 ## Reference Files
@@ -606,10 +611,10 @@ This section is merged from the former `CLASSIFICATION_TEST_MATRIX.md`.
 
 This matrix maps every normative scenario in `CLASSIFICATION.md` section 14 to current automated evidence.
 
-Snapshot date: `2026-02-25`
+Snapshot date: `2026-02-28`
 
 Trace-level companion:
-- section 17 confirms path-level trace coverage for all scenarios: `77/77` (`100.0%`).
+- section 17 confirms path-level trace coverage for all scenarios: `84/84` (`100.0%`).
 
 Status legend:
 - `Covered`: deterministic automated assertion exists for the scenario outcome.
@@ -620,15 +625,15 @@ Status legend:
 
 | Family | Covered | Partial | Gap | Total |
 |---|---:|---:|---:|---:|
-| ING | 20 | 0 | 0 | 20 |
+| ING | 24 | 0 | 0 | 24 |
 | CLS (Scheduling/Bundling) | 16 | 0 | 0 | 16 |
 | CLS (Decision/Guardrails) | 13 | 0 | 0 | 13 |
-| FIL | 8 | 0 | 0 | 8 |
+| FIL | 11 | 0 | 0 | 11 |
 | SRCH | 12 | 0 | 0 | 12 |
 | CHAT | 8 | 0 | 0 | 8 |
-| **Total** | **77** | **0** | **0** | **77** |
+| **Total** | **84** | **0** | **0** | **84** |
 
-Automated behavior full-coverage gate status: `MET` (`77/77` covered).
+Automated behavior full-coverage gate status: `MET` (`84/84` covered).
 
 ### ING Scenarios
 
@@ -759,7 +764,7 @@ Trace-level coverage means each scenario maps to existing implementation files (
 
 ### Summary
 
-- Scenarios traced: `77/77` (`100.0%`)
+- Scenarios traced: `84/84` (`100.0%`)
 - Source of truth: `CLASSIFICATION.md` section 14
 - Auditor: `scripts/classification_trace_audit.py`
 
@@ -767,9 +772,9 @@ Trace-level coverage means each scenario maps to existing implementation files (
 
 | Family | Traced | Total |
 |---|---:|---:|
-| ING | 20 | 20 |
+| ING | 24 | 24 |
 | CLS | 29 | 29 |
-| FIL | 8 | 8 |
+| FIL | 11 | 11 |
 | SRCH | 12 | 12 |
 | CHAT | 8 | 8 |
 
@@ -797,6 +802,10 @@ Trace-level coverage means each scenario maps to existing implementation files (
 | ING-018 | queue ingestion mode enabled | `backend/app/main.py` | Traced | OK |
 | ING-019 | sqlite write lock during ingest | `backend/app/main.py` | Traced | OK |
 | ING-020 | assistant row appended | `backend/app/main.py` | Traced | OK |
+| ING-021 | main-session heartbeat/control-plane conversation ingested | `backend/app/main.py` | Traced | OK |
+| ING-022 | subagent scaffold conversation ingested | `backend/app/main.py` | Traced | OK |
+| ING-023 | scoped tool trace action row ingested | `backend/app/main.py` | Traced | OK |
+| ING-024 | unanchored tool trace action row ingested | `backend/app/main.py` | Traced | OK |
 | CLS-001 | no pending conversations in session | `classifier/classifier.py` | Traced | OK |
 | CLS-002 | pending rows include cron events | `classifier/classifier.py` | Traced | OK |
 | CLS-003 | oldest pending conversation anchor | `classifier/classifier.py` | Traced | OK |
@@ -834,6 +843,9 @@ Trace-level coverage means each scenario maps to existing implementation files (
 | FIL-006 | injected context artifact | `classifier/classifier.py` | Traced | OK |
 | FIL-007 | other conversation noise | `classifier/classifier.py` | Traced | OK |
 | FIL-008 | fallback semantic route | `classifier/classifier.py` | Traced | OK |
+| FIL-009 | heartbeat/control-plane conversation ingested | `backend/app/main.py` | Traced | OK |
+| FIL-010 | subagent scaffold conversation ingested | `backend/app/main.py` | Traced | OK |
+| FIL-011 | tool trace action (anchored/unanchored) | `classifier/classifier.py`; `backend/app/main.py` | Traced | OK |
 | SRCH-001 | `/api/context` auto mode low-signal query | `backend/app/main.py` | Traced | OK |
 | SRCH-002 | `/api/context` full/patient mode | `backend/app/main.py` | Traced | OK |
 | SRCH-003 | board session query | `backend/app/main.py` | Traced | OK |

@@ -2957,6 +2957,13 @@ PY
 
     maybe_run_local_memory_setup
 
+    log_info "Running openclaw doctor --fix to remove any config keys unrecognized by the current gateway version..."
+    if openclaw doctor --fix >/dev/null 2>&1; then
+      log_success "openclaw doctor --fix completed."
+    else
+      log_warn "openclaw doctor --fix returned non-zero (may be safe to ignore)."
+    fi
+
     if [ "$OPENCLAW_GATEWAY_RESTART_NEEDED" = true ]; then
       log_info "Restarting OpenClaw gateway to apply configuration..."
       if openclaw gateway restart >/dev/null 2>&1; then
