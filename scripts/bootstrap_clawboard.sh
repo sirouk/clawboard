@@ -2766,6 +2766,44 @@ if [ "$SKIP_OPENCLAW" = false ]; then
       log_success "tools.agentToAgent.enabled already true."
     fi
 
+    log_info "Tuning QMD memory search (preventing session transcripts from crowding documentation results)..."
+    CURRENT_QMD_SESSIONS_ENABLED="$(openclaw config get memory.qmd.sessions.enabled 2>/dev/null || true)"
+    CURRENT_QMD_SESSIONS_ENABLED="$(printf "%s" "$CURRENT_QMD_SESSIONS_ENABLED" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    if [ "$CURRENT_QMD_SESSIONS_ENABLED" != "false" ]; then
+      if openclaw config set memory.qmd.sessions.enabled --json false >/dev/null 2>&1; then
+        OPENCLAW_GATEWAY_RESTART_NEEDED=true
+        log_success "Disabled QMD session indexing (memory.qmd.sessions.enabled=false)."
+      else
+        log_warn "Failed to disable QMD session indexing. Run: openclaw config set memory.qmd.sessions.enabled --json false"
+      fi
+    else
+      log_success "QMD session indexing already disabled."
+    fi
+
+    CURRENT_QMD_MAX_RESULTS="$(openclaw config get memory.qmd.limits.maxResults 2>/dev/null || true)"
+    CURRENT_QMD_MAX_RESULTS="$(printf "%s" "$CURRENT_QMD_MAX_RESULTS" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    if [ -z "$CURRENT_QMD_MAX_RESULTS" ] || { [ -n "$CURRENT_QMD_MAX_RESULTS" ] && [ "$CURRENT_QMD_MAX_RESULTS" -lt 20 ] 2>/dev/null; }; then
+      if openclaw config set memory.qmd.limits.maxResults --json 20 >/dev/null 2>&1; then
+        log_success "Set memory.qmd.limits.maxResults=20."
+      else
+        log_warn "Failed to set QMD max results. Run: openclaw config set memory.qmd.limits.maxResults --json 20"
+      fi
+    else
+      log_success "QMD max results already set to $CURRENT_QMD_MAX_RESULTS (>=20)."
+    fi
+
+    CURRENT_QMD_TIMEOUT="$(openclaw config get memory.qmd.limits.timeoutMs 2>/dev/null || true)"
+    CURRENT_QMD_TIMEOUT="$(printf "%s" "$CURRENT_QMD_TIMEOUT" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    if [ -z "$CURRENT_QMD_TIMEOUT" ] || { [ -n "$CURRENT_QMD_TIMEOUT" ] && [ "$CURRENT_QMD_TIMEOUT" -lt 8000 ] 2>/dev/null; }; then
+      if openclaw config set memory.qmd.limits.timeoutMs --json 8000 >/dev/null 2>&1; then
+        log_success "Set memory.qmd.limits.timeoutMs=8000."
+      else
+        log_warn "Failed to set QMD timeout. Run: openclaw config set memory.qmd.limits.timeoutMs --json 8000"
+      fi
+    else
+      log_success "QMD timeout already set to ${CURRENT_QMD_TIMEOUT}ms (>=8000)."
+    fi
+
     if [ "$SKIP_SKILL" = false ]; then
       log_info "Installing Clawboard skill (mode: $SKILL_INSTALL_MODE)..."
       SKILL_REPO_SRC="$INSTALL_DIR/skills/clawboard"
@@ -2934,10 +2972,13 @@ PY
         CONTEXT_FALLBACK_MODES_JSON="$CONTEXT_FALLBACK_MODES_JSON\"$_mode\""
       done
       CONTEXT_FALLBACK_MODES_JSON="$CONTEXT_FALLBACK_MODES_JSON]"
+      _LOGGER_API_PORT="$(extract_url_port "$API_URL" "8010")"
+      _LOGGER_FALLBACK_1="http://127.0.0.1:${_LOGGER_API_PORT}"
+      _LOGGER_FALLBACK_2="http://localhost:${_LOGGER_API_PORT}"
       if [ -n "$TOKEN" ]; then
-        CONFIG_JSON=$(printf '{"baseUrl":"%s","token":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextFetchRetries":%s,"contextFallbackModes":%s,"contextMaxChars":%s,"contextCacheTtlMs":%s,"contextCacheMaxEntries":%s,"contextUseCacheOnFailure":%s,"enableOpenClawMemorySearch":%s}' "$API_URL" "$TOKEN" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_FETCH_RETRIES_VALUE" "$CONTEXT_FALLBACK_MODES_JSON" "$CONTEXT_MAX_CHARS_VALUE" "$CONTEXT_CACHE_TTL_MS_VALUE" "$CONTEXT_CACHE_MAX_ENTRIES_VALUE" "$CONTEXT_USE_CACHE_ON_FAILURE_JSON" "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON")
+        CONFIG_JSON=$(printf '{"baseUrl":"%s","token":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextFetchRetries":%s,"contextFallbackModes":%s,"contextMaxChars":%s,"contextCacheTtlMs":%s,"contextCacheMaxEntries":%s,"contextUseCacheOnFailure":%s,"enableOpenClawMemorySearch":%s,"baseUrlFallbacks":["%s","%s"]}' "$API_URL" "$TOKEN" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_FETCH_RETRIES_VALUE" "$CONTEXT_FALLBACK_MODES_JSON" "$CONTEXT_MAX_CHARS_VALUE" "$CONTEXT_CACHE_TTL_MS_VALUE" "$CONTEXT_CACHE_MAX_ENTRIES_VALUE" "$CONTEXT_USE_CACHE_ON_FAILURE_JSON" "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON" "$_LOGGER_FALLBACK_1" "$_LOGGER_FALLBACK_2")
       else
-        CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextFetchRetries":%s,"contextFallbackModes":%s,"contextMaxChars":%s,"contextCacheTtlMs":%s,"contextCacheMaxEntries":%s,"contextUseCacheOnFailure":%s,"enableOpenClawMemorySearch":%s}' "$API_URL" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_FETCH_RETRIES_VALUE" "$CONTEXT_FALLBACK_MODES_JSON" "$CONTEXT_MAX_CHARS_VALUE" "$CONTEXT_CACHE_TTL_MS_VALUE" "$CONTEXT_CACHE_MAX_ENTRIES_VALUE" "$CONTEXT_USE_CACHE_ON_FAILURE_JSON" "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON")
+        CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextFetchRetries":%s,"contextFallbackModes":%s,"contextMaxChars":%s,"contextCacheTtlMs":%s,"contextCacheMaxEntries":%s,"contextUseCacheOnFailure":%s,"enableOpenClawMemorySearch":%s,"baseUrlFallbacks":["%s","%s"]}' "$API_URL" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_FETCH_RETRIES_VALUE" "$CONTEXT_FALLBACK_MODES_JSON" "$CONTEXT_MAX_CHARS_VALUE" "$CONTEXT_CACHE_TTL_MS_VALUE" "$CONTEXT_CACHE_MAX_ENTRIES_VALUE" "$CONTEXT_USE_CACHE_ON_FAILURE_JSON" "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON" "$_LOGGER_FALLBACK_1" "$_LOGGER_FALLBACK_2")
       fi
       openclaw config set plugins.entries.clawboard-logger.config --json "$CONFIG_JSON" >/dev/null 2>&1 || true
       openclaw config set plugins.entries.clawboard-logger.enabled --json true >/dev/null 2>&1 || true
