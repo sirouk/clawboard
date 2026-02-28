@@ -298,11 +298,16 @@ configure_qmd_memory_boost() {
 
   log_info "Detected memory.backend=qmd; applying qmd-side tuning."
   set_cfg memory.qmd.includeDefaultMemory true json false
-  set_cfg memory.qmd.sessions.enabled true json false
+  # Disable QMD session indexing: session recall is handled by the built-in SQLite
+  # mechanism (memorySearch.sources includes "sessions"). Indexing session transcripts
+  # into a QMD collection causes them to flood search results and crowd out documentation.
+  set_cfg memory.qmd.sessions.enabled false json false
   set_cfg memory.qmd.update.interval "5m" string false
   set_cfg memory.qmd.update.debounceMs 15000 json false
-  set_cfg memory.qmd.limits.maxResults 6 json false
-  set_cfg memory.qmd.limits.timeoutMs 4000 json false
+  # 20 results gives enough headroom for documentation across 5 thinking vaults.
+  set_cfg memory.qmd.limits.maxResults 20 json false
+  # 8 s timeout gives QMD time to rank across large vaults without blocking chat.
+  set_cfg memory.qmd.limits.timeoutMs 8000 json false
   set_cfg memory.citations auto string false
 }
 

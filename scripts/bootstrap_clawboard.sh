@@ -2766,44 +2766,6 @@ if [ "$SKIP_OPENCLAW" = false ]; then
       log_success "tools.agentToAgent.enabled already true."
     fi
 
-    log_info "Tuning QMD memory search (preventing session transcripts from crowding documentation results)..."
-    CURRENT_QMD_SESSIONS_ENABLED="$(openclaw config get memory.qmd.sessions.enabled 2>/dev/null || true)"
-    CURRENT_QMD_SESSIONS_ENABLED="$(printf "%s" "$CURRENT_QMD_SESSIONS_ENABLED" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
-    if [ "$CURRENT_QMD_SESSIONS_ENABLED" != "false" ]; then
-      if openclaw config set memory.qmd.sessions.enabled --json false >/dev/null 2>&1; then
-        OPENCLAW_GATEWAY_RESTART_NEEDED=true
-        log_success "Disabled QMD session indexing (memory.qmd.sessions.enabled=false)."
-      else
-        log_warn "Failed to disable QMD session indexing. Run: openclaw config set memory.qmd.sessions.enabled --json false"
-      fi
-    else
-      log_success "QMD session indexing already disabled."
-    fi
-
-    CURRENT_QMD_MAX_RESULTS="$(openclaw config get memory.qmd.limits.maxResults 2>/dev/null || true)"
-    CURRENT_QMD_MAX_RESULTS="$(printf "%s" "$CURRENT_QMD_MAX_RESULTS" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
-    if [ -z "$CURRENT_QMD_MAX_RESULTS" ] || { [ -n "$CURRENT_QMD_MAX_RESULTS" ] && [ "$CURRENT_QMD_MAX_RESULTS" -lt 20 ] 2>/dev/null; }; then
-      if openclaw config set memory.qmd.limits.maxResults --json 20 >/dev/null 2>&1; then
-        log_success "Set memory.qmd.limits.maxResults=20."
-      else
-        log_warn "Failed to set QMD max results. Run: openclaw config set memory.qmd.limits.maxResults --json 20"
-      fi
-    else
-      log_success "QMD max results already set to $CURRENT_QMD_MAX_RESULTS (>=20)."
-    fi
-
-    CURRENT_QMD_TIMEOUT="$(openclaw config get memory.qmd.limits.timeoutMs 2>/dev/null || true)"
-    CURRENT_QMD_TIMEOUT="$(printf "%s" "$CURRENT_QMD_TIMEOUT" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
-    if [ -z "$CURRENT_QMD_TIMEOUT" ] || { [ -n "$CURRENT_QMD_TIMEOUT" ] && [ "$CURRENT_QMD_TIMEOUT" -lt 8000 ] 2>/dev/null; }; then
-      if openclaw config set memory.qmd.limits.timeoutMs --json 8000 >/dev/null 2>&1; then
-        log_success "Set memory.qmd.limits.timeoutMs=8000."
-      else
-        log_warn "Failed to set QMD timeout. Run: openclaw config set memory.qmd.limits.timeoutMs --json 8000"
-      fi
-    else
-      log_success "QMD timeout already set to ${CURRENT_QMD_TIMEOUT}ms (>=8000)."
-    fi
-
     if [ "$SKIP_SKILL" = false ]; then
       log_info "Installing Clawboard skill (mode: $SKILL_INSTALL_MODE)..."
       SKILL_REPO_SRC="$INSTALL_DIR/skills/clawboard"
@@ -2997,6 +2959,47 @@ PY
     verify_agent_contract_alignment
 
     maybe_run_local_memory_setup
+
+    # Enforce correct QMD settings after setup-openclaw-local-memory.sh runs.
+    # The skill script's configure_qmd_memory_boost() may write QMD config values;
+    # this block runs last and guarantees the correct values are always applied.
+    log_info "Enforcing QMD memory search settings (sessions off, maxResults=20, timeoutMs=8000)..."
+    CURRENT_QMD_SESSIONS_ENABLED="$(openclaw config get memory.qmd.sessions.enabled 2>/dev/null || true)"
+    CURRENT_QMD_SESSIONS_ENABLED="$(printf "%s" "$CURRENT_QMD_SESSIONS_ENABLED" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    if [ "$CURRENT_QMD_SESSIONS_ENABLED" != "false" ]; then
+      if openclaw config set memory.qmd.sessions.enabled --json false >/dev/null 2>&1; then
+        OPENCLAW_GATEWAY_RESTART_NEEDED=true
+        log_success "Disabled QMD session indexing (memory.qmd.sessions.enabled=false)."
+      else
+        log_warn "Failed to disable QMD session indexing. Run: openclaw config set memory.qmd.sessions.enabled --json false"
+      fi
+    else
+      log_success "QMD session indexing already disabled."
+    fi
+
+    CURRENT_QMD_MAX_RESULTS="$(openclaw config get memory.qmd.limits.maxResults 2>/dev/null || true)"
+    CURRENT_QMD_MAX_RESULTS="$(printf "%s" "$CURRENT_QMD_MAX_RESULTS" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    if [ -z "$CURRENT_QMD_MAX_RESULTS" ] || { [ -n "$CURRENT_QMD_MAX_RESULTS" ] && [ "$CURRENT_QMD_MAX_RESULTS" -lt 20 ] 2>/dev/null; }; then
+      if openclaw config set memory.qmd.limits.maxResults --json 20 >/dev/null 2>&1; then
+        log_success "Set memory.qmd.limits.maxResults=20."
+      else
+        log_warn "Failed to set QMD max results. Run: openclaw config set memory.qmd.limits.maxResults --json 20"
+      fi
+    else
+      log_success "QMD max results already set to $CURRENT_QMD_MAX_RESULTS (>=20)."
+    fi
+
+    CURRENT_QMD_TIMEOUT="$(openclaw config get memory.qmd.limits.timeoutMs 2>/dev/null || true)"
+    CURRENT_QMD_TIMEOUT="$(printf "%s" "$CURRENT_QMD_TIMEOUT" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    if [ -z "$CURRENT_QMD_TIMEOUT" ] || { [ -n "$CURRENT_QMD_TIMEOUT" ] && [ "$CURRENT_QMD_TIMEOUT" -lt 8000 ] 2>/dev/null; }; then
+      if openclaw config set memory.qmd.limits.timeoutMs --json 8000 >/dev/null 2>&1; then
+        log_success "Set memory.qmd.limits.timeoutMs=8000."
+      else
+        log_warn "Failed to set QMD timeout. Run: openclaw config set memory.qmd.limits.timeoutMs --json 8000"
+      fi
+    else
+      log_success "QMD timeout already set to ${CURRENT_QMD_TIMEOUT}ms (>=8000)."
+    fi
 
     log_info "Running openclaw doctor --fix to remove any config keys unrecognized by the current gateway version..."
     if openclaw doctor --fix >/dev/null 2>&1; then
