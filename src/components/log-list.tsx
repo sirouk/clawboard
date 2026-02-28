@@ -99,6 +99,17 @@ function deriveInlineMetaHint(entry: LogEntry, toolEvent: ToolEvent | null) {
   return collapseHintText(entry.summary ?? entry.content ?? entry.raw ?? "");
 }
 
+function isInlineErrorEntry(entry: LogEntry): boolean {
+  if (entry.type !== "system") return false;
+  const source = (entry.source && typeof entry.source === "object" ? entry.source : {}) as Record<string, unknown>;
+  if (source.requestTerminal === true) return true;
+  if (source.orchestration === true) {
+    const runStatus = String(source.runStatus ?? "").trim().toLowerCase();
+    if (runStatus === "stalled" || runStatus === "failed") return true;
+  }
+  return false;
+}
+
 const logRawCache = new Map<string, string | null>();
 const logRawPromiseCache = new Map<string, Promise<string | null>>();
 
@@ -652,7 +663,7 @@ export function LogList({
     if (variant !== "chat" || !hideToolCallsInChat) return map;
     let pending: LogEntry[] = [];
     for (const entry of visibleFiltered) {
-      if (isToolingOrSystemChatLog(entry)) {
+      if (isToolingOrSystemChatLog(entry) && !isInlineErrorEntry(entry)) {
         pending.push(entry);
         continue;
       }
@@ -963,6 +974,7 @@ export function LogList({
                       ? entries
                       : entries.filter((entry) => {
                           if (!isToolingOrSystemChatLog(entry)) return true;
+                          if (isInlineErrorEntry(entry)) return true;
                           const anchorId = hiddenToolAnchorByEntryId.get(entry.id);
                           if (!anchorId) return false;
                           return Boolean(expandedToolAnchors[anchorId]);
@@ -1165,12 +1177,14 @@ const LogRow = memo(function LogRow({
   const isConversation = entry.type === "conversation";
   const toolEvent = parseToolEvent(entry);
   const isInlineMetaMessage = !isConversation && variant === "chat" && (entry.type === "system" || entry.type === "action");
+  const isInlineError = isInlineMetaMessage && isInlineErrorEntry(entry);
   const inlineMetaDefaultExpanded = useMemo(() => {
     if (!isInlineMetaMessage) return true;
+    if (isInlineError) return true;
     if (metaExpandEpoch > metaCollapseEpoch) return true;
     if (metaCollapseEpoch > metaExpandEpoch) return false;
     return !metaDefaultCollapsed;
-  }, [isInlineMetaMessage, metaCollapseEpoch, metaDefaultCollapsed, metaExpandEpoch]);
+  }, [isInlineError, isInlineMetaMessage, metaCollapseEpoch, metaDefaultCollapsed, metaExpandEpoch]);
   const [inlineMetaExpanded, setInlineMetaExpanded] = useState(() => inlineMetaDefaultExpanded);
   const inlineMetaHint = useMemo(() => deriveInlineMetaHint(entry, toolEvent), [entry, toolEvent]);
   const inlineMetaPillLabel = useMemo(() => {
@@ -1731,11 +1745,22 @@ const LogRow = memo(function LogRow({
 	            <div
 	              title={bubbleTitle}
 	              data-classification-status={classificationStatus}
-	              className={`w-full max-w-[78%] rounded-[14px] border border-[rgba(255,255,255,0.10)] bg-[rgba(20,24,31,0.8)] px-4 py-3 text-xs text-[rgb(var(--claw-muted))] ${
-	                isPending ? "opacity-90" : ""
-	              }`}
+	              className={
+	                isInlineError
+	                  ? `w-full max-w-[78%] rounded-[14px] border px-4 py-3 text-xs border-[rgba(251,191,36,0.35)] bg-[rgba(120,80,0,0.18)] ${isPending ? "opacity-90" : ""}`
+	                  : `w-full max-w-[78%] rounded-[14px] border border-[rgba(255,255,255,0.10)] bg-[rgba(20,24,31,0.8)] px-4 py-3 text-xs text-[rgb(var(--claw-muted))] ${isPending ? "opacity-90" : ""}`
+	              }
 	            >
-	              {isInlineMetaMessage && !inlineMetaExpanded ? (
+	              {isInlineError ? (
+	                <div className="flex flex-col gap-1.5">
+	                  <div className="flex items-start gap-2">
+	                    <span className="mt-px shrink-0 text-[11px] font-semibold uppercase tracking-[0.14em] text-amber-400/90">⚠ Error</span>
+	                    <span className="min-w-0 flex-1 text-[12px] leading-relaxed text-[rgb(var(--claw-text))]">
+	                      {messageText || inlineMetaHint || "An error occurred."}
+	                    </span>
+	                  </div>
+	                </div>
+	              ) : isInlineMetaMessage && !inlineMetaExpanded ? (
 	                <button
 	                  type="button"
 	                  className="inline-flex w-full items-center gap-2 rounded-full border border-[rgba(148,163,184,0.3)] bg-[rgba(10,12,16,0.48)] px-3 py-2 text-left transition hover:border-[rgba(255,90,45,0.35)] hover:bg-[rgba(16,20,26,0.62)]"
@@ -1783,7 +1808,7 @@ const LogRow = memo(function LogRow({
 	                  ) : null}
 	                </>
 	              )}
-	              {isInlineMetaMessage && inlineMetaExpanded ? (
+	              {isInlineMetaMessage && !isInlineError && inlineMetaExpanded ? (
 	                <div className="mt-2 flex justify-start">
 	                  <Button
 	                    variant="ghost"
