@@ -1627,6 +1627,7 @@ def _is_injected_clawboard_context_artifact(value: str | None) -> bool:
 
 
 def _sanitize_log_text(value: str | None) -> str:
+    """Sanitize text for search indexing and summaries. Collapses whitespace."""
     if not value:
         return ""
     text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -1643,6 +1644,32 @@ def _sanitize_log_text(value: str | None) -> str:
     text = re.sub(r"^\[Discord [^\]]+\]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE)
     text = re.sub(r"\[message[_\s-]?id:[^\]]+\]", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _preserve_markdown_text(value: str | None) -> str:
+    """Sanitize text for message content while preserving markdown formatting (newlines, indentation).
+    
+    This function performs the same metadata/context cleanup as _sanitize_log_text but
+    preserves newlines and significant whitespace needed for markdown rendering.
+    """
+    if not value:
+        return ""
+    text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    _, text = _extract_openclaw_untrusted_metadata_wrapper(text)
+    text = _CLAWBOARD_CONTEXT_BLOCK_RE.sub("\n", text)  # Preserve line breaks
+    text = _CLAWBOARD_CONTEXT_HEURISTIC_RE.sub("\n", text)  # Preserve line breaks
+    text = re.sub(
+        r"(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*",
+        "\n",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"^\s*summary\s*[:\-]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r"^\[Discord [^\]]+\]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r"\[message[_\s-]?id:[^\]]+\]", "", text, flags=re.IGNORECASE)
+    # Preserve newlines and indentation - only collapse multiple consecutive newlines
+    text = re.sub(r"\n{3,}", "\n\n", text)  # Max 2 consecutive newlines (one blank line)
     return text
 
 
@@ -6422,8 +6449,8 @@ def _orchestration_append_in_band_log(
             relatedLogId=None,
             idempotencyKey=log_idem,
             type="system",
-            content=_clip(_sanitize_log_text(content), 1200),
-            summary=_clip(_sanitize_log_text(summary), 160),
+            content=_clip(_preserve_markdown_text(content), 1200),
+            summary=_clip(_preserve_markdown_text(summary), 160),
             raw="",
             createdAt=created_value,
             updatedAt=created_value,
@@ -6975,6 +7002,70 @@ def _orchestration_resolve_run_for_log(session: Any, *, request_id: str | None, 
     return session.exec(select(OrchestrationRun).where(OrchestrationRun.runId == item.runId).limit(1)).first()
 
 
+def _orchestration_has_assistant_completion_log(session: Any, *, run: "OrchestrationRun") -> bool:
+    """Return True if an assistant conversation log exists that matches the run's session scope and started after the run.
+
+    Used to auto-complete a stranded main.response item that was never marked done because subagents were
+    still active when the assistant reply arrived (sync_log one-shot gate missed it), or because an
+    exception silently swallowed the completion branch.
+
+    The search covers both the canonical board key (e.g. "clawboard:topic:topic-xxx") and any
+    agent-prefixed variant (e.g. "agent:main:clawboard:topic:topic-xxx") via a LIKE pattern, because
+    the main agent logs its conversation entries under the agent-prefixed session key while
+    run.baseSessionKey stores the canonical board key.
+    """
+    base_session = _base_session_key(str(getattr(run, "baseSessionKey", "") or getattr(run, "sessionKey", "") or ""))
+    if not base_session:
+        return False
+    candidate_keys, canonical_board_key = _session_routing_memory_lookup_keys(base_session)
+    if not candidate_keys:
+        candidate_keys = [base_session]
+    started_at = str(getattr(run, "startedAt", "") or "").strip()
+    if DATABASE_URL.startswith("sqlite"):
+        # Build OR conditions covering exact matches, |suffix variants, and agent-prefixed variants.
+        parts: list[str] = []
+        params: dict[str, Any] = {}
+        for i, key in enumerate(candidate_keys):
+            parts.append(
+                f"(json_extract(source, '$.sessionKey') = :key_{i}"
+                f" OR json_extract(source, '$.sessionKey') LIKE :like_{i})"
+            )
+            params[f"key_{i}"] = key
+            params[f"like_{i}"] = f"{key}|%"
+        if canonical_board_key:
+            # Catch "agent:main:clawboard:topic:..." and similar prefixed variants.
+            parts.append("json_extract(source, '$.sessionKey') LIKE :board_contains")
+            params["board_contains"] = f"%{canonical_board_key}%"
+        session_clause = " OR ".join(parts)
+        query = (
+            select(LogEntry)
+            .where(LogEntry.type == "conversation")
+            .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "assistant")
+            .where(text(f"({session_clause})"))
+            .params(**params)
+        )
+        if started_at:
+            query = query.where(LogEntry.createdAt >= started_at)
+    else:
+        source_session_expr = LogEntry.source["sessionKey"].as_string()
+        session_exprs: list[Any] = []
+        for key in candidate_keys:
+            session_exprs.append(source_session_expr == key)
+            session_exprs.append(source_session_expr.like(f"{key}|%"))
+        if canonical_board_key:
+            # Catch "agent:main:clawboard:topic:..." and similar prefixed variants.
+            session_exprs.append(source_session_expr.like(f"%{canonical_board_key}%"))
+        query = (
+            select(LogEntry)
+            .where(LogEntry.type == "conversation")
+            .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "assistant")
+            .where(or_(*session_exprs))
+        )
+        if started_at:
+            query = query.where(LogEntry.createdAt >= started_at)
+    return session.exec(query.limit(1)).first() is not None
+
+
 def _orchestration_sync_log(log_id: str) -> None:
     if not _orchestration_enabled():
         return
@@ -7134,19 +7225,66 @@ def _orchestration_sync_log(log_id: str) -> None:
                         if was_done and _orchestration_auto_follow_up_enabled() and main_item is not None:
                             main_still_active = str(getattr(main_item, "status", "") or "").strip().lower() not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
                             if main_still_active:
-                                agent_id = str(getattr(item, "agentId", "") or "").strip() or "specialist"
-                                item_session = str(getattr(item, "sessionKey", "") or "").strip()
-                                content_preview = _clip(_sanitize_log_text(_safe_log_attr_text(entry, "content")), 400)
-                                follow_up_msg = (
-                                    f"[ORCHESTRATION_FOLLOW_UP] Subagent '{agent_id}' (session: {item_session}) has just completed. "
-                                    f"Result preview: {content_preview or '(check sessions_history for full output)'}. "
-                                    f"Please call sessions_history('{item_session}') to get the full output, "
-                                    f"then relay the results to Chris in this thread."
+                                # Do not enqueue a follow-up when the original dispatch is still
+                                # actively in-flight.  In that case the main agent is already
+                                # running the original task and will incorporate the subagent
+                                # result itself.  Sending a follow-up while the original job is
+                                # "processing" would cause a queue serialization deadlock: the
+                                # dispatch worker blocks new jobs for the same sessionKey until
+                                # the prior job clears, so the follow-up sits blocked indefinitely
+                                # while the main agent waits for a nudge that never arrives.
+                                original_request_id = str(getattr(run, "requestId", "") or "").strip()
+                                original_still_dispatching = bool(
+                                    original_request_id
+                                    and session.exec(
+                                        select(OpenClawChatDispatchQueue)
+                                        .where(OpenClawChatDispatchQueue.requestId == original_request_id)
+                                        .where(
+                                            OpenClawChatDispatchQueue.status.in_(["pending", "processing", "retry"])
+                                        )
+                                        .limit(1)
+                                    ).first() is not None
                                 )
-                                _orchestration_enqueue_follow_up_dispatch(
-                                    run=run,
-                                    message=follow_up_msg,
-                                    idempotency_suffix=f"subagent-done:{str(getattr(item, 'itemKey', '') or '')}",
+                                if not original_still_dispatching:
+                                    agent_id = str(getattr(item, "agentId", "") or "").strip() or "specialist"
+                                    item_session = str(getattr(item, "sessionKey", "") or "").strip()
+                                    content_preview = _clip(_sanitize_log_text(_safe_log_attr_text(entry, "content")), 400)
+                                    follow_up_msg = (
+                                        f"[ORCHESTRATION_FOLLOW_UP] Subagent '{agent_id}' (session: {item_session}) has just completed. "
+                                        f"Result preview: {content_preview or '(check sessions_history for full output)'}. "
+                                        f"Please call sessions_history('{item_session}') to get the full output, "
+                                        f"then relay the results to Chris in this thread."
+                                    )
+                                    _orchestration_enqueue_follow_up_dispatch(
+                                        run=run,
+                                        message=follow_up_msg,
+                                        idempotency_suffix=f"subagent-done:{str(getattr(item, 'itemKey', '') or '')}",
+                                    )
+                    # Re-evaluate main.response completion now that a subagent has finished.
+                    # The one-shot gate at the assistant-reply ingest time may have been skipped
+                    # because subagents were still active then.  Once all subagents are terminal,
+                    # check whether the main assistant reply already landed and, if so, close out
+                    # the run rather than leaving it perpetually stuck.
+                    if main_item is not None:
+                        main_still_active = str(getattr(main_item, "status", "") or "").strip().lower() not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
+                        if main_still_active:
+                            refreshed_items = session.exec(
+                                select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)
+                            ).all()
+                            still_has_active_subagents = any(
+                                str(getattr(it, "kind", "") or "").strip().lower() == "subagent"
+                                and str(getattr(it, "status", "") or "").strip().lower()
+                                not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
+                                for it in refreshed_items
+                            )
+                            if not still_has_active_subagents and _orchestration_has_assistant_completion_log(session, run=run):
+                                _orchestration_mark_item_status(
+                                    session,
+                                    run_id=run.runId,
+                                    item=main_item,
+                                    status="done",
+                                    now_value=now_value,
+                                    source_log_id=str(getattr(entry, "id", "") or ""),
                                 )
                 elif main_item is not None and (
                     request_matches_run or _session_keys_equivalent(source_session, run.baseSessionKey)
@@ -7283,6 +7421,55 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
             now_dt=current_dt,
             limit=max(40, _orchestration_batch_size()),
         )
+        # Reconciliation sweep: close stranded runs where all subagents are terminal and an
+        # assistant reply already exists but main.response was never marked done.  This catches
+        # runs that are waiting for a future nextCheckAt (up to 3600s out) so they stop
+        # emitting perpetual check-in noise without requiring the next check-in cycle to expire.
+        stranded_runs = session.exec(
+            select(OrchestrationRun)
+            .where(OrchestrationRun.status.in_(list(_ORCHESTRATION_ACTIVE_RUN_STATUSES) + ["running"]))
+            .order_by(OrchestrationRun.updatedAt.asc(), OrchestrationRun.id.asc())
+            .limit(_orchestration_batch_size())
+        ).all()
+        for stranded_run in stranded_runs:
+            stranded_items = session.exec(
+                select(OrchestrationItem).where(OrchestrationItem.runId == stranded_run.runId)
+            ).all()
+            main_resp = next(
+                (it for it in stranded_items if str(getattr(it, "itemKey", "") or "").strip().lower() == "main.response"),
+                None,
+            )
+            if main_resp is None:
+                continue
+            if str(getattr(main_resp, "status", "") or "").strip().lower() in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
+                continue
+            # Only reconcile when at least one check-in has already fired (item.attempts >= 1) so
+            # we don't close runs that just started and whose subagent completion logs haven't
+            # arrived yet.
+            if int(getattr(main_resp, "attempts", 0) or 0) < 1:
+                continue
+            has_active_subagents = any(
+                str(getattr(it, "kind", "") or "").strip().lower() == "subagent"
+                and str(getattr(it, "status", "") or "").strip().lower() not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
+                for it in stranded_items
+            )
+            if has_active_subagents:
+                continue
+            if _orchestration_has_assistant_completion_log(session, run=stranded_run):
+                _orchestration_mark_item_status(
+                    session,
+                    run_id=stranded_run.runId,
+                    item=main_resp,
+                    status="done",
+                    now_value=current_iso,
+                    source_log_id=None,
+                )
+                _orchestration_recompute_run_status(
+                    session, run=stranded_run, items=stranded_items, now_value=current_iso
+                )
+                touched_runs += 1
+        session.commit()
+
         active_rows = session.exec(
             select(OrchestrationRun)
             .where(OrchestrationRun.status.in_(list(_ORCHESTRATION_ACTIVE_RUN_STATUSES) + ["running"]))
@@ -7318,6 +7505,22 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
                             if not candidate_key or candidate_key == "main.response":
                                 continue
                             waiting_item_keys.append(candidate_key)
+                        # Safety net: if no delegated items are still running and we have already
+                        # done at least one check-in cycle, look for an assistant reply that arrived
+                        # while the one-shot gate was blocked (e.g. subagents were still active at
+                        # ingest time, or the sync_log branch threw and was silently swallowed).
+                        # Auto-close the run so it stops emitting perpetual check-in noise.
+                        if not waiting_item_keys and int(item.attempts or 0) >= 2 and _orchestration_has_assistant_completion_log(session, run=run):
+                            _orchestration_mark_item_status(
+                                session,
+                                run_id=run.runId,
+                                item=item,
+                                status="done",
+                                now_value=current_iso,
+                                source_log_id=None,
+                            )
+                            _orchestration_recompute_run_status(session, run=run, items=items, now_value=current_iso)
+                            continue
                         next_check_ts = _iso_to_timestamp(item.nextCheckAt)
                         next_check_in_seconds = 0
                         if next_check_ts is not None:
@@ -8847,13 +9050,6 @@ class _OpenClawAssistantLogWatchdog:
             )
         return max(5.0, poll_seconds)
 
-        # Attempt automatic recovery: send the agent a nudge so it produces a status reply.
-        # This is a best-effort operation — errors are swallowed to protect the watchdog thread.
-        try:
-            _try_openclaw_recovery_prompt(base_key=base_key, request_id=request_id, agent_id=agent_id)
-        except Exception:
-            pass
-
 
 _OPENCLAW_ASSISTANT_LOG_WATCHDOG: _OpenClawAssistantLogWatchdog | None = None
 _OPENCLAW_ASSISTANT_LOG_WATCHDOG_LOCK = threading.Lock()
@@ -9682,7 +9878,12 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 # history sync does not loop over non-user-visible control artifacts.
                 max_safe_ms = max(max_safe_ms, timestamp_ms)
                 continue
-            normalized_text = _sanitize_log_text(text_body)
+            if entry_type == "action":
+                normalized_text = _preserve_markdown_text(text_body)
+                summary_text = _sanitize_log_text(text_body)
+            else:
+                normalized_text = _sanitize_log_text(text_body)
+                summary_text = normalized_text
             if not normalized_text:
                 continue
 
@@ -9884,7 +10085,7 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
             payload = LogAppend(
                 type=entry_type,
                 content=normalized_text,
-                summary=_clip(normalized_text, 160),
+                summary=_clip(summary_text, 160),
                 raw=None,
                 createdAt=created_at,
                 agentId=agent_id,
