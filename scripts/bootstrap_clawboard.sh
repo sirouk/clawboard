@@ -3034,6 +3034,60 @@ PY
 
     maybe_offer_memory_backup_setup "$MEMORY_BACKUP_SETUP_MODE"
 
+
+    # Force a full QMD memory index for every agent after all vault paths are registered.
+    # This runs after setup_obsidian_brain.sh adds the per-agent thinking-vault paths, so
+    # any markdown files already on disk are immediately searchable rather than waiting
+    # up to 5m for qmd's background update.interval to fire.
+    # Ongoing re-indexing of new files is handled automatically by qmd's built-in
+    # update.interval: "5m" — no cron job is needed for normal operation.
+    # To manually re-index at any time: openclaw memory index --agent <id> --force
+    if command -v openclaw >/dev/null 2>&1; then
+      log_info "Refreshing QMD memory indexes for all configured agents..."
+      local _idx_agent_ids=()
+      local _idx_raw
+      _idx_raw="$(python3 - "${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}" <<'PY'
+import json, sys, re
+VALID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+def norm(v):
+    raw = re.sub(r"[^a-z0-9-]+", "-", (v or "").strip().lower()).strip("-")[:64]
+    return raw if raw and VALID.match(raw) else "main"
+try:
+    cfg = json.load(open(sys.argv[1]))
+    seen = set()
+    for e in (cfg.get("agents") or {}).get("list") or []:
+        aid = norm(e.get("id"))
+        if aid not in seen:
+            seen.add(aid)
+            print(aid)
+except Exception:
+    print("main")
+PY
+      2>/dev/null)" || _idx_raw="main"
+      while IFS= read -r _aid; do
+        [[ -n "$_aid" ]] || continue
+        _idx_agent_ids+=("$_aid")
+      done <<< "$_idx_raw"
+      [[ ${#_idx_agent_ids[@]} -gt 0 ]] || _idx_agent_ids=("main")
+
+      local _idx_failures=0
+      for _aid in "${_idx_agent_ids[@]}"; do
+        log_info "  openclaw memory index --agent $_aid --force"
+        if openclaw memory index --agent "$_aid" --force 2>&1; then
+          log_success "  Agent '$_aid' memory index refreshed."
+        else
+          log_warn "  Agent '$_aid' index refresh failed. Retry: openclaw memory index --agent $_aid --force"
+          _idx_failures=$((_idx_failures + 1))
+        fi
+      done
+      if [[ "$_idx_failures" -eq 0 ]]; then
+        log_success "QMD memory index refresh complete for all agents."
+      else
+        log_warn "QMD memory index refresh completed with $_idx_failures warning(s)."
+      fi
+    else
+      log_warn "openclaw CLI not found; skipping QMD index refresh."
+    fi
     ensure_clawboard_logger_in_allow
   fi
 fi

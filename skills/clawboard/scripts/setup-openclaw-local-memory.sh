@@ -304,6 +304,9 @@ configure_qmd_memory_boost() {
   set_cfg memory.qmd.sessions.enabled false json false
   set_cfg memory.qmd.update.interval "5m" string false
   set_cfg memory.qmd.update.debounceMs 15000 json false
+  # Run the embed pass on the same cadence as the update pass so new files get
+  # vector embeddings automatically. "0" disables automatic embedding — avoid it.
+  set_cfg memory.qmd.update.embedInterval "5m" string false
   # 20 results gives enough headroom for documentation across 5 thinking vaults.
   set_cfg memory.qmd.limits.maxResults 20 json false
   # 8 s timeout gives QMD time to rank across large vaults without blocking chat.

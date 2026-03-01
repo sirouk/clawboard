@@ -1175,8 +1175,10 @@ const LogRow = memo(function LogRow({
 
   const typeLabel = TYPE_LABELS[entry.type] ?? entry.type;
   const isConversation = entry.type === "conversation";
+  const isAction = entry.type === "action";
+  const isMarkdownMessage = isConversation || isAction;
   const toolEvent = parseToolEvent(entry);
-  const isInlineMetaMessage = !isConversation && variant === "chat" && (entry.type === "system" || entry.type === "action");
+  const isInlineMetaMessage = !isMarkdownMessage && variant === "chat" && entry.type === "system";
   const isInlineError = isInlineMetaMessage && isInlineErrorEntry(entry);
   const inlineMetaDefaultExpanded = useMemo(() => {
     if (!isInlineMetaMessage) return true;
@@ -1267,9 +1269,9 @@ const LogRow = memo(function LogRow({
 
   if (variant === "chat") {
     const chatBubbleText = (() => {
-      if (!isConversation) return summary || "(empty)";
-      const raw = messageText || summary || "(empty)";
-      return raw;
+        if (!isMarkdownMessage) return summary || "(empty)";
+        const raw = messageText || summary || "(empty)";
+        return raw;
     })();
     const bubbleTitle = sourceMeta ? `${formatDateTime(entry.createdAt)}\n${sourceMeta}` : formatDateTime(entry.createdAt);
     const showReplay =
@@ -1289,7 +1291,7 @@ const LogRow = memo(function LogRow({
         }}
         aria-label={canNavigate ? "Open related conversation" : undefined}
       >
-        {isConversation ? (
+        {isMarkdownMessage ? (
           <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
             <div className="w-full max-w-[78%]">
 	              <div className={`mb-1 flex items-center ${isUser ? "justify-end" : "justify-start"}`}>
@@ -2172,7 +2174,7 @@ const LogRow = memo(function LogRow({
         </div>
       </div>
 
-      {isConversation ? (
+      {isMarkdownMessage ? (
         <div className="mt-3 space-y-2">
           <p className="text-sm font-medium text-[rgb(var(--claw-text))]">{summaryText}</p>
           {compactMode && (
