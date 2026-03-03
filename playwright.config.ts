@@ -3,13 +3,18 @@ import path from "node:path";
 
 const dataPath = path.join(process.cwd(), "tests", "fixtures", "portal.json");
 const reuseServer = process.env.PLAYWRIGHT_REUSE_SERVER === "1" && !process.env.CI;
+const useExternalServer = process.env.PLAYWRIGHT_USE_EXTERNAL_SERVER === "1";
 const mockApiPort = Number(process.env.PLAYWRIGHT_MOCK_API_PORT ?? "3051");
 const webPort = Number(process.env.PLAYWRIGHT_WEB_PORT ?? "3050");
-const mockApiBase = process.env.PLAYWRIGHT_API_BASE ?? `http://localhost:${mockApiPort}`;
-const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://localhost:${webPort}`;
-const useExternalServer = process.env.PLAYWRIGHT_USE_EXTERNAL_SERVER === "1";
+const mockApiBase = `http://127.0.0.1:${mockApiPort}`;
+const mockBaseURL = `http://localhost:${webPort}`;
+const externalApiBase = process.env.PLAYWRIGHT_EXTERNAL_API_BASE ?? "http://127.0.0.1:8010";
+const externalBaseURL = process.env.PLAYWRIGHT_EXTERNAL_BASE_URL ?? "http://127.0.0.1:3010";
+const apiBase = process.env.PLAYWRIGHT_API_BASE ?? (useExternalServer ? externalApiBase : mockApiBase);
+const baseURL =
+  process.env.PLAYWRIGHT_BASE_URL ?? (useExternalServer ? externalBaseURL : mockBaseURL);
 
-if (!process.env.PLAYWRIGHT_API_BASE) process.env.PLAYWRIGHT_API_BASE = mockApiBase;
+if (!process.env.PLAYWRIGHT_API_BASE) process.env.PLAYWRIGHT_API_BASE = apiBase;
 if (!process.env.PLAYWRIGHT_BASE_URL) process.env.PLAYWRIGHT_BASE_URL = baseURL;
 
 export default defineConfig({

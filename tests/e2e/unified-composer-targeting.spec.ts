@@ -249,6 +249,63 @@ test("typed /stop in unified composer without selected target does not post a ne
   expect(deletePayloads.length).toBeLessThanOrEqual(1);
 });
 
+test("unified stop button is visible for a single in-flight board run without a selected target", async ({
+  page,
+  request,
+}) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-unified-stop-single-${suffix}`;
+  const topicName = `Unified Stop Single ${suffix}`;
+  const sessionKey = `clawboard:topic:${topicId}`;
+  const requestId = `req-unified-stop-single-${suffix}`;
+  const deletePayloads: Array<Record<string, unknown>> = [];
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const seedPendingUser = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      type: "conversation",
+      content: `pending-user-${suffix}`,
+      summary: "Pending user prompt",
+      classificationStatus: "classified",
+      agentId: "user",
+      agentLabel: "User",
+      source: { sessionKey, requestId },
+    },
+  });
+  expect(seedPendingUser.ok()).toBeTruthy();
+
+  await page.route("**/api/openclaw/chat", async (route) => {
+    if (route.request().method() !== "DELETE") {
+      await route.continue();
+      return;
+    }
+    const payload = route.request().postDataJSON() as Record<string, unknown>;
+    deletePayloads.push(payload);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ aborted: true, queueCancelled: 1, sessionKey, sessionKeys: [sessionKey] }),
+    });
+  });
+
+  await page.goto("/u");
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const stop = page.getByTestId("unified-composer-stop");
+  await expect(stop).toBeVisible();
+  await stop.click();
+  await expect.poll(() => deletePayloads.length).toBe(1);
+
+  expect(String(deletePayloads[0]?.sessionKey ?? "")).toBe(sessionKey);
+  await expect(page.getByText("Cancelled the only active board run.")).toBeVisible();
+});
+
 test("unified stop button follows orchestration-active selected task and sends scoped requestId", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
   const suffix = Date.now();

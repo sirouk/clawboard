@@ -167,6 +167,68 @@ test("board controls can show hidden tool/system chat rows", async ({ page, requ
   await expect(page.getByText(systemText, { exact: false })).toBeVisible();
 });
 
+test("terminal system failures stay visible when tool/system rows are hidden", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-terminal-system-${suffix}`;
+  const topicName = `Terminal Visibility ${suffix}`;
+  const taskId = `task-terminal-system-${suffix}`;
+  const taskTitle = `Terminal task ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
+  const terminalText = `terminal-system-${suffix}`;
+  const regularSystemText = `regular-system-${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "todo", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  const regularSystem = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      taskId,
+      type: "system",
+      content: regularSystemText,
+      classificationStatus: "classified",
+      agentId: "system",
+      agentLabel: "OpenClaw",
+      source: { sessionKey, requestId: `req-regular-${suffix}`, requestTerminal: false },
+    },
+  });
+  expect(regularSystem.ok()).toBeTruthy();
+  const regularSystemEntry = await regularSystem.json();
+
+  const terminalSystem = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      taskId,
+      type: "system",
+      content: terminalText,
+      classificationStatus: "classified",
+      agentId: "system",
+      agentLabel: "Clawboard",
+      source: { sessionKey, requestId: `req-terminal-${suffix}`, requestTerminal: true },
+    },
+  });
+  expect(terminalSystem.ok()).toBeTruthy();
+  const terminalSystemEntry = await terminalSystem.json();
+
+  await page.goto(`/u/topic/${topicId}/task/${taskId}`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const regularRow = page.locator(`[data-log-id="${regularSystemEntry.id}"]`);
+  const terminalRow = page.locator(`[data-log-id="${terminalSystemEntry.id}"]`);
+
+  await expect(regularRow).toHaveCount(0);
+  await expect(terminalRow).toBeVisible();
+  await expect(page.getByText(terminalText, { exact: false })).toBeVisible();
+});
+
 test("agent message exposes in-between tool call count and can reveal hidden rows", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
   const suffix = Date.now();

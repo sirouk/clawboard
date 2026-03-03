@@ -672,13 +672,7 @@ _wipe_openclaw_agent_data() {
 # workspace (for a true fresh reset). Non-matching jobs are preserved.
 # ===========================================================================
 _cleanup_openclaw_cron_jobs() {
-  local root_dir
   local workspace
-  local ids
-  local id
-  local total=0
-  local removed=0
-  local failed=0
 
   if ! command -v openclaw >/dev/null 2>&1; then
     echo "openclaw CLI not found: skipped cron cleanup."
@@ -689,29 +683,51 @@ _cleanup_openclaw_cron_jobs() {
     return
   fi
 
-  root_dir="$ROOT_DIR"
-  workspace="$(cd "$root_dir" && pwd)"
+  workspace="$(cd "$ROOT_DIR" && pwd)"
 
-  ids="$(python3 - "$workspace" <<'PY'
+  python3 - "$workspace" <<'PY'
 import json
 import os
+import re
 import subprocess
 import sys
 
 workspace = os.path.abspath(sys.argv[1])
 root_match = os.path.normpath(workspace).lower()
 
+def flatten_strings(value):
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        rows = []
+        for key, nested in value.items():
+            rows.extend(flatten_strings(key))
+            rows.extend(flatten_strings(nested))
+        return rows
+    if isinstance(value, list):
+        rows = []
+        for nested in value:
+            rows.extend(flatten_strings(nested))
+        return rows
+    if value is None:
+        return []
+    text = str(value).strip()
+    return [text] if text else []
+
 try:
     raw = subprocess.check_output(["openclaw", "cron", "list", "--json"], stderr=subprocess.DEVNULL)
     data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
 except Exception:
+    print("Failed to list OpenClaw cron jobs; skipped cleanup.")
     sys.exit(0)
 
 jobs = data.get("jobs") if isinstance(data, dict) else []
 if not isinstance(jobs, list):
-    sys.exit(0)
+    jobs = []
 
-ids = []
+print(f"Scanned OpenClaw cron jobs: {len(jobs)}")
+matches = []
 for job in jobs:
     if not isinstance(job, dict):
         continue
@@ -720,43 +736,46 @@ for job in jobs:
     if not job_id:
         continue
 
-    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
-    name = str(job.get("name") or "").lower()
-    msg = str(payload.get("message") or "").lower()
-    text = str(payload.get("text") or "").lower()
-    command = str(payload.get("command") or "").lower()
-    joined = f"{name}\n{msg}\n{text}\n{command}"
-    joined = joined.lower()
+    name = str(job.get("name") or "").strip().lower()
+    all_text = "\n".join(piece.lower() for piece in flatten_strings(job))
 
-    is_clawboard = "clawboard" in joined
-    is_obsidian = "obsidian" in joined
-    is_workspace = root_match in joined
-    if is_clawboard or is_obsidian or is_workspace:
-        ids.append(job_id)
+    reasons = []
+    if root_match and root_match in all_text:
+        reasons.append("workspace_path")
+    if "clawboard" in all_text:
+        reasons.append("clawboard_marker")
+    if "backup_openclaw_curated_memories.sh" in all_text:
+        reasons.append("memory_backup")
+    if "sub-agent-watchdog" in name:
+        reasons.append("watchdog_name")
+    if "watchdog recovery" in all_text and "clawboard_search" in all_text:
+        reasons.append("watchdog_payload")
+    if re.search(r"clawboard:(?:topic|task):", all_text):
+        reasons.append("board_session")
+    if not reasons:
+        continue
+    matches.append((job_id, sorted(set(reasons))))
 
-print("\n".join(ids), end="")
+if not matches:
+    print("No matching OpenClaw cron jobs to clean.")
+    sys.exit(0)
+
+print("Cleaning OpenClaw cron jobs:")
+removed = 0
+failed = 0
+for job_id, reasons in matches:
+    ok = subprocess.call(["openclaw", "cron", "rm", job_id], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+    reason_text = ",".join(reasons)
+    if ok:
+        removed += 1
+        print(f"  removed cron job [{job_id}] ({reason_text})")
+    else:
+        failed += 1
+        print(f"  failed to remove cron job [{job_id}] ({reason_text})")
+
+preserved = max(0, len(jobs) - len(matches))
+print(f"  matched: {len(matches)}, removed: {removed}, failed: {failed}, preserved: {preserved}")
 PY
-)"
-
-  if [ -z "$ids" ]; then
-    echo "No matching OpenClaw cron jobs to clean."
-    return
-  fi
-
-  echo "Cleaning OpenClaw cron jobs:"
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    total=$((total + 1))
-    if openclaw cron rm "$id" >/dev/null 2>&1; then
-      removed=$((removed + 1))
-      echo "  removed cron job [$id]"
-    else
-      failed=$((failed + 1))
-      echo "  failed to remove cron job [$id]"
-    fi
-  done <<< "$ids"
-
-  echo "  cron jobs cleaned: $removed/$total (failed: $failed)"
 }
 
 # ===========================================================================
@@ -789,7 +808,7 @@ reset_data() {
   # Scope is intentionally $DATA_DIR = $ROOT_DIR/data — never $oc_home.
   rm -rf "$DATA_DIR"
   mkdir -p "$DATA_DIR/qdrant" "$DATA_DIR/postgres"
-  echo "Clawboard data reset complete. OpenClaw data was not touched."
+  echo "Clawboard data reset complete. OpenClaw config/credentials were not touched by this step."
 }
 
 # ===========================================================================
@@ -906,6 +925,8 @@ reset_all_fresh() {
 
   echo "Resetting Clawboard data..."
   reset_data --yes
+
+  echo "OpenClaw sessions/memory were reset above; config/credentials and non-Clawboard cron jobs were preserved."
 
   echo "Starting services..."
   up

@@ -2521,6 +2521,16 @@ OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES_VALUE="$(clamp_int "$OPENCLAW_REQUES
 log_info "Writing OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES=$OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES_VALUE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES" "$OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES_VALUE"
 
+OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD_VALUE=""
+if read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD" >/dev/null 2>&1; then
+  OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD" || true)"
+else
+  OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD_VALUE="3"
+fi
+OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD_VALUE="$(clamp_int "$OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD_VALUE" 0 20 || echo "3")"
+log_info "Writing OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD=$OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD" "$OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD_VALUE"
+
 SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE=""
 if [ -n "$SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE" ]; then
   SEARCH_INCLUDE_TOOL_CALL_LOGS_VALUE="$SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE"
@@ -2762,6 +2772,26 @@ if [ "$SKIP_OPENCLAW" = false ]; then
       fi
     else
       log_success "tools.agentToAgent.enabled already true."
+    fi
+
+    log_info "Reconciling iMessage group allowlist config (prevents silent group drops + doctor warnings)..."
+    CURRENT_IMESSAGE_GROUP_POLICY="$(openclaw config get channels.imessage.groupPolicy 2>/dev/null || true)"
+    CURRENT_IMESSAGE_GROUP_POLICY="$(printf "%s" "$CURRENT_IMESSAGE_GROUP_POLICY" | tr -d '\r' | tail -n1 | tr -d '[:space:]\"')"
+    CURRENT_IMESSAGE_GROUP_ALLOW_FROM="$(openclaw config get channels.imessage.groupAllowFrom 2>/dev/null || true)"
+    CURRENT_IMESSAGE_GROUP_ALLOW_FROM="$(printf "%s" "$CURRENT_IMESSAGE_GROUP_ALLOW_FROM" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    if [ "$CURRENT_IMESSAGE_GROUP_POLICY" = "allowlist" ]; then
+      if [ -z "$CURRENT_IMESSAGE_GROUP_ALLOW_FROM" ] || [ "$CURRENT_IMESSAGE_GROUP_ALLOW_FROM" = "[]" ] || [ "$CURRENT_IMESSAGE_GROUP_ALLOW_FROM" = "null" ]; then
+        if openclaw config set channels.imessage.groupAllowFrom --json '["*"]' >/dev/null 2>&1; then
+          OPENCLAW_GATEWAY_RESTART_NEEDED=true
+          log_success "Set channels.imessage.groupAllowFrom=[\"*\"] for allowlist policy."
+        else
+          log_warn "Failed to set channels.imessage.groupAllowFrom. Run: openclaw config set channels.imessage.groupAllowFrom --json '[\"*\"]'"
+        fi
+      else
+        log_success "channels.imessage.groupAllowFrom already set for allowlist policy."
+      fi
+    else
+      log_success "channels.imessage.groupPolicy is not allowlist; no groupAllowFrom patch needed."
     fi
 
     if [ "$SKIP_SKILL" = false ]; then

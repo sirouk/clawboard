@@ -5777,10 +5777,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     openclawThreadWork,
     orchestrationThreadWorkBySession,
   ]);
-  const selectedComposerTargetResponding = useMemo(() => {
-    if (!selectedComposerSessionKey) return false;
-    return isSessionResponding(selectedComposerSessionKey);
-  }, [isSessionResponding, selectedComposerSessionKey]);
 
   const clearUnifiedComposerFields = useCallback(() => {
     setUnifiedComposerDraft("");
@@ -5803,6 +5799,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     return null;
   }, [activeComposerSessionKey, inFlightBoardSessionKeys, selectedComposerSessionKey]);
+
+  const unifiedCancelTarget = useMemo(() => resolveUnifiedCancelTargetSession(), [resolveUnifiedCancelTargetSession]);
+  const unifiedCancelTargetResponding = useMemo(() => {
+    if (!unifiedCancelTarget?.sessionKey) return false;
+    return isSessionResponding(unifiedCancelTarget.sessionKey);
+  }, [isSessionResponding, unifiedCancelTarget]);
 
   const cancelUnifiedComposerRun = useCallback(
     async ({ clearComposer }: { clearComposer: boolean }) => {
@@ -6466,7 +6468,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 >
                   <PaperclipIcon />
                 </button>
-                {selectedComposerTargetResponding ? (
+                {unifiedCancelTargetResponding ? (
                   <button
                     type="button"
                     data-testid="unified-composer-stop"
@@ -6474,8 +6476,20 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       setUnifiedCancelNotice(null);
                       void cancelUnifiedComposerRun({ clearComposer: false });
                     }}
-                    aria-label="Stop selected run"
-                    title="Stop selected run"
+                    aria-label={
+                      unifiedCancelTarget?.reason === "selected"
+                        ? "Stop selected run"
+                        : unifiedCancelTarget?.reason === "active"
+                          ? "Stop active chat run"
+                          : "Stop active run"
+                    }
+                    title={
+                      unifiedCancelTarget?.reason === "selected"
+                        ? "Stop selected run"
+                        : unifiedCancelTarget?.reason === "active"
+                          ? "Stop active chat run"
+                          : "Stop active run"
+                    }
                     className={cn(
                       "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
                       "border-[rgba(220,38,38,0.7)] bg-[rgba(220,38,38,0.25)] backdrop-blur",

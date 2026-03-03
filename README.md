@@ -214,6 +214,7 @@ Operationally important groups:
   - `OPENCLAW_CHAT_DISPATCH_*`
   - `OPENCLAW_CHAT_IN_FLIGHT_*`
   - `OPENCLAW_CHAT_ASSISTANT_LOG_*`
+  - `OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD`
   - `OPENCLAW_GATEWAY_HISTORY_SYNC_*`
 
 ## Operations
@@ -259,7 +260,10 @@ npm run test:classifier
 npm run test:logger
 npm run test:scripts
 npm run test:all
+npm run test:e2e:live-smoke
 ```
+
+Live stack smoke test (`test:e2e:live-smoke`) expects a running stack and external server wiring. Defaults target `http://127.0.0.1:8010` (API) + `http://127.0.0.1:3010` (web); override with `PLAYWRIGHT_API_BASE` / `PLAYWRIGHT_BASE_URL`. For protected deployments set `PLAYWRIGHT_CLAWBOARD_TOKEN` or export `CLAWBOARD_TOKEN`.
 
 Formal full-system soak (docker + security + classifier e2e + backend + frontend + Playwright):
 

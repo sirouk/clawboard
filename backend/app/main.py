@@ -2390,12 +2390,51 @@ def _openclaw_chat_dispatch_is_terminal_error(error_text: str) -> bool:
     text = str(error_text or "").strip().lower()
     if not text:
         return False
+    if re.search(r"\btool(?:\s+error)?\b[^\n]{0,120}\bnot found\b", text):
+        return True
+    status_match = re.search(r"\b([1-5]\d{2})\s+status code\b", text)
+    if status_match:
+        try:
+            status_code = int(status_match.group(1))
+        except Exception:
+            status_code = 0
+        if status_code in {
+            400,
+            401,
+            403,
+            404,
+            405,
+            406,
+            407,
+            409,
+            410,
+            411,
+            412,
+            413,
+            414,
+            415,
+            416,
+            422,
+            423,
+            424,
+            426,
+            428,
+            431,
+            451,
+        }:
+            return True
     terminal_tokens = [
         "attachment missing on disk",
         "unable to read attachment",
         "attachment metadata missing",
         "openclaw gateway token is required",
         "openclaw_base_url is not configured",
+        "tool not found",
+        "unknown tool",
+        "unknown method",
+        "invalid params",
+        "invalid request",
+        "validation error",
     ]
     return any(token in text for token in terminal_tokens)
 
@@ -8625,6 +8664,124 @@ def _iso_to_timestamp(value: str | None) -> float | None:
         return None
 
 
+_OPENCLAW_UNKNOWN_TOOL_ERROR_RE = re.compile(
+    r"\btool(?:\s+error)?\s*[:\-]?\s*[\"'`]?([a-z0-9_.-]+)[\"'`]?\s+not found\b",
+    flags=re.IGNORECASE,
+)
+_OPENCLAW_UNKNOWN_TOOL_GENERIC_RE = re.compile(r"\btool(?:\s+error)?\b[^\n]{0,120}\bnot found\b", flags=re.IGNORECASE)
+
+
+def _openclaw_watchdog_loop_breaker_unknown_tool_threshold() -> int:
+    raw = os.getenv("OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD", "3").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 3
+    return max(0, min(20, value))
+
+
+def _openclaw_watchdog_detect_unknown_tool_loop(
+    session: Any,
+    *,
+    request_id: str,
+    sent_at: str,
+    session_key: str | None = None,
+) -> tuple[int, str | None] | None:
+    threshold = _openclaw_watchdog_loop_breaker_unknown_tool_threshold()
+    if threshold <= 0:
+        return None
+    rid = str(request_id or "").strip()
+    sent = normalize_iso(sent_at)
+    if not rid or not sent:
+        return None
+
+    rid_prefix = f"{rid}:%"
+    rows: list[LogEntry] = []
+    if DATABASE_URL.startswith("sqlite"):
+        query = (
+            select(LogEntry)
+            .where(LogEntry.type == "action")
+            .where(LogEntry.createdAt >= sent)
+            .where(
+                text(
+                    "("
+                    "json_extract(source, '$.requestId') = :rid OR json_extract(source, '$.messageId') = :rid "
+                    "OR json_extract(source, '$.requestId') LIKE :rid_prefix "
+                    "OR json_extract(source, '$.messageId') LIKE :rid_prefix"
+                    ")"
+                )
+            )
+            .params(rid=rid, rid_prefix=rid_prefix)
+            .order_by(LogEntry.createdAt.asc(), LogEntry.id.asc())
+            .limit(120)
+        )
+        rows = session.exec(query).all()
+    else:
+        rows = session.exec(
+            select(LogEntry)
+            .where(LogEntry.type == "action")
+            .where(LogEntry.createdAt >= sent)
+            .where(
+                or_(
+                    LogEntry.source["requestId"].as_string() == rid,
+                    LogEntry.source["messageId"].as_string() == rid,
+                    LogEntry.source["requestId"].as_string().like(rid_prefix),
+                    LogEntry.source["messageId"].as_string().like(rid_prefix),
+                )
+            )
+            .order_by(LogEntry.createdAt.asc(), LogEntry.id.asc())
+            .limit(120)
+        ).all()
+
+    base_key = _base_session_key(session_key)
+    unknown_tool_count = 0
+    tool_counts: dict[str, int] = {}
+    for row in rows:
+        source = row.source if isinstance(row.source, dict) else {}
+        row_session_key = _base_session_key(str(source.get("sessionKey") or ""))
+        if base_key and row_session_key and not _session_keys_equivalent(base_key, row_session_key):
+            continue
+        combined = _combined_log_text(
+            _safe_log_attr_text(row, "content"),
+            _safe_log_attr_text(row, "summary"),
+            _safe_log_attr_text(row, "raw"),
+        ).lower()
+        match = _OPENCLAW_UNKNOWN_TOOL_ERROR_RE.search(combined)
+        if not match and "unknown tool" not in combined and not _OPENCLAW_UNKNOWN_TOOL_GENERIC_RE.search(combined):
+            continue
+        tool_name = str(match.group(1) or "").strip().lower() if match else ""
+        unknown_tool_count += 1
+        if tool_name:
+            tool_counts[tool_name] = int(tool_counts.get(tool_name, 0)) + 1
+        if unknown_tool_count >= threshold:
+            break
+
+    if unknown_tool_count < threshold:
+        return None
+    top_tool = None
+    if tool_counts:
+        top_tool = max(tool_counts.items(), key=lambda item: item[1])[0]
+    return (unknown_tool_count, top_tool)
+
+
+def _openclaw_watchdog_abort_request(*, session_key: str, request_id: str) -> bool:
+    key = _base_session_key(session_key)
+    if not key:
+        return False
+    try:
+        asyncio.run(
+            gateway_rpc(
+                "chat.abort",
+                {"sessionKey": key},
+                scopes=["operator.write"],
+                timeout_seconds=15.0,
+            )
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _openclaw_watchdog_has_terminal_system_log(session: Any, request_id: str) -> bool:
     rid = str(request_id or "").strip()
     if not rid:
@@ -8690,7 +8847,7 @@ def _openclaw_watchdog_has_assistant_by_request(session: Any, request_id: str, s
     sent = normalize_iso(sent_at)
     if not rid or not sent:
         return False
-    query = select(LogEntry.id)
+    query = select(LogEntry)
     if DATABASE_URL.startswith("sqlite"):
         query = query.where(
             text(
@@ -8714,9 +8871,20 @@ def _openclaw_watchdog_has_assistant_by_request(session: Any, request_id: str, s
         query.where(func.lower(LogEntry.agentId) == "assistant")
         .where(LogEntry.createdAt >= sent)
         .order_by(LogEntry.createdAt.desc())
-        .limit(1)
+        .limit(40)
     )
-    return bool(session.exec(query).first())
+    rows = session.exec(query).all()
+    for row in rows:
+        row_type = str(getattr(row, "type", "") or "").strip().lower()
+        if row_type == "action" and _is_tool_trace_text(
+            _safe_log_attr_text(row, "content"),
+            _safe_log_attr_text(row, "summary"),
+            _safe_log_attr_text(row, "raw"),
+        ):
+            # Tool traces prove dispatch progress but do not guarantee an assistant reply.
+            continue
+        return True
+    return False
 
 
 _OPENCLAW_WATCHDOG_BACKFILL_STATE_LOCK = threading.Lock()
@@ -8904,6 +9072,33 @@ class _OpenClawAssistantLogWatchdog:
                 # Prefer requestId-specific assistant logs so overlapping sends in the same session
                 # don't satisfy this check accidentally.
                 if _openclaw_watchdog_has_assistant_by_request(session, request_id, sent_at):
+                    return None
+
+                # Loop breaker: repeated unknown-tool errors (e.g. Tool exec not found) can trap
+                # a run in self-retry cycles with no assistant reply. Surface an explicit terminal
+                # error and best-effort abort to stop further churn.
+                unknown_tool_loop = _openclaw_watchdog_detect_unknown_tool_loop(
+                    session,
+                    request_id=request_id,
+                    sent_at=sent_at,
+                    session_key=base_key,
+                )
+                if unknown_tool_loop is not None:
+                    loop_count, loop_tool = unknown_tool_loop
+                    tool_hint = f" ('{loop_tool}')" if loop_tool else ""
+                    _log_openclaw_chat_error(
+                        session_key=base_key,
+                        request_id=request_id,
+                        detail=(
+                            "OpenClaw chat was aborted after repeated unknown tool errors"
+                            f"{tool_hint} (count={int(loop_count)}). requestId={request_id}"
+                        ),
+                        raw=(
+                            f"loop_breaker=unknown_tool_not_found; count={int(loop_count)};"
+                            f" tool={loop_tool or 'unknown'}"
+                        ),
+                    )
+                    _openclaw_watchdog_abort_request(session_key=base_key, request_id=request_id)
                     return None
 
                 # If any assistant log shows up for this session after the send, the logger plugin is working.
@@ -9647,6 +9842,72 @@ def _openclaw_history_message_text(message: dict[str, Any]) -> str:
     return str(body or "").strip()
 
 
+def _openclaw_history_terminal_error_detail(message: dict[str, Any]) -> str | None:
+    def _normalize_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            for key in ("message", "detail", "error", "errorMessage", "reason", "description", "text"):
+                candidate = _normalize_text(value.get(key))
+                if candidate:
+                    return candidate
+            return ""
+        if isinstance(value, list):
+            for row in value:
+                candidate = _normalize_text(row)
+                if candidate:
+                    return candidate
+            return ""
+        return str(value).strip()
+
+    stop_reason = ""
+    error_text = ""
+    metadata_rows: list[dict[str, Any]] = []
+    for row in [message, message.get("source"), message.get("metadata"), message.get("meta")]:
+        if isinstance(row, dict):
+            metadata_rows.append(row)
+    wrapper_metadata = _openclaw_history_message_untrusted_metadata(message)
+    if isinstance(wrapper_metadata, dict):
+        metadata_rows.append(wrapper_metadata)
+
+    for row in metadata_rows:
+        if not stop_reason:
+            stop_reason = str(
+                row.get("stopReason")
+                or row.get("stop_reason")
+                or row.get("finishReason")
+                or row.get("finish_reason")
+                or ""
+            ).strip().lower()
+        if not error_text:
+            error_text = _normalize_text(
+                row.get("errorMessage")
+                or row.get("error_message")
+                or row.get("lastError")
+                or row.get("last_error")
+                or row.get("error")
+            )
+        if stop_reason and error_text:
+            break
+
+    stop_reason_is_error = stop_reason in {
+        "error",
+        "failed",
+        "failure",
+        "internal_error",
+        "tool_error",
+        "max_turns",
+        "bad_response",
+    }
+    if not error_text and not stop_reason_is_error:
+        return None
+    if error_text:
+        return f"OpenClaw chat failed: {error_text}"
+    if stop_reason:
+        return f"OpenClaw chat failed ({stop_reason})."
+    return "OpenClaw chat failed."
+
+
 def _openclaw_history_channel(message: dict[str, Any], session_key: str) -> str:
     def _candidate(value: Any) -> str:
         raw = str(value or "").strip().lower()
@@ -9917,6 +10178,7 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 continue
 
             text_body = _openclaw_history_message_text(row)
+            terminal_error_detail = _openclaw_history_terminal_error_detail(row)
             if _is_injected_clawboard_context_artifact(text_body):
                 # Skip replay of injected context wrappers and still advance the cursor so
                 # history sync does not loop over non-user-visible control artifacts.
@@ -9962,6 +10224,14 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
             else:
                 normalized_text = sanitized_text
                 summary_text = sanitized_text
+            if role == "assistant" and terminal_error_detail and not normalized_text:
+                # Some terminal assistant failures arrive without text content (only stopReason/errorMessage
+                # metadata). Persist these as explicit terminal system rows so the user sees the failure.
+                entry_type = "system"
+                agent_id = "system"
+                agent_label = "Clawboard"
+                normalized_text = _sanitize_log_text(terminal_error_detail)
+                summary_text = normalized_text
             if not normalized_text:
                 continue
 
@@ -9994,6 +10264,8 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 source["messageId"] = message_id
             if request_id:
                 source["requestId"] = request_id
+            if entry_type == "system" and role == "assistant" and terminal_error_detail:
+                source["requestTerminal"] = True
             if entry_type == "conversation" and str(agent_id or "").strip().lower() == "assistant" and request_id:
                 existing_user_created_at = _find_existing_openclaw_user_request_created_at(
                     session,

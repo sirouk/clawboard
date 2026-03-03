@@ -3603,6 +3603,116 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(payload.get("ok"), True)
         self.assertEqual(call_count["value"], 2)
 
+    def test_chat_040_dispatch_terminal_error_detects_4xx_and_unknown_tool_signals(self):
+        self.assertTrue(main_module._openclaw_chat_dispatch_is_terminal_error("400 status code (no body)"))
+        self.assertTrue(main_module._openclaw_chat_dispatch_is_terminal_error("Tool exec not found"))
+        self.assertTrue(main_module._openclaw_chat_dispatch_is_terminal_error("unknown method: tools.list"))
+        self.assertFalse(main_module._openclaw_chat_dispatch_is_terminal_error("429 status code (retry later)"))
+        self.assertFalse(main_module._openclaw_chat_dispatch_is_terminal_error("500 status code (upstream timeout)"))
+
+    def test_chat_041_history_ingest_promotes_empty_assistant_terminal_error_to_system(self):
+        session_key = "agent:main:clawboard:topic:topic-history-041"
+        request_id = "request-history-041"
+        timestamp_ms = 1700002000000
+
+        ingested, _ = main_module._ingest_openclaw_history_messages(
+            session_key=session_key,
+            messages=[
+                {
+                    "timestamp": timestamp_ms,
+                    "role": "assistant",
+                    "content": [],
+                    "stopReason": "error",
+                    "errorMessage": "400 status code (no body)",
+                    "requestId": request_id,
+                    "id": "hmsg-041-assistant-error",
+                }
+            ],
+            since_ms=0,
+        )
+
+        self.assertEqual(ingested, 1)
+        with get_session() as session:
+            row = session.exec(
+                select(LogEntry)
+                .where(LogEntry.type == "system")
+                .where(LogEntry.source["requestId"].as_string() == request_id)
+                .limit(1)
+            ).first()
+            self.assertIsNotNone(row)
+            self.assertEqual(str(row.agentId or "").lower(), "system")
+            self.assertIn("openclaw chat failed", str(row.content or "").lower())
+            source = row.source if isinstance(row.source, dict) else {}
+            self.assertTrue(bool(source.get("requestTerminal")))
+
+    def test_chat_042_watchdog_loop_breaker_aborts_repeated_unknown_tool_errors(self):
+        session_key = "clawboard:topic:topic-history-042"
+        request_id = "request-history-042"
+        sent_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        )
+
+        with get_session() as session:
+            main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    content="watchdog seed prompt",
+                    summary="watchdog seed prompt",
+                    createdAt=sent_at,
+                    agentId="user",
+                    agentLabel="User",
+                    source={
+                        "channel": "openclaw",
+                        "sessionKey": session_key,
+                        "requestId": request_id,
+                    },
+                ),
+                idempotency_key="watchdog-042-user",
+            )
+            for idx in range(3):
+                main_module.append_log_entry(
+                    session,
+                    LogAppend(
+                        type="action",
+                        content="Tool error: exec",
+                        summary="Tool error: exec",
+                        raw="Tool exec not found",
+                        createdAt=now_iso(),
+                        agentId="assistant",
+                        agentLabel="OpenClaw",
+                        source={
+                            "channel": "openclaw",
+                            "sessionKey": session_key,
+                            "requestId": request_id,
+                        },
+                        classificationStatus="classified",
+                    ),
+                    idempotency_key=f"watchdog-042-action-{idx}",
+                )
+
+        watchdog = main_module._OpenClawAssistantLogWatchdog()
+        with patch.dict(
+            os.environ,
+            {"OPENCLAW_CHAT_LOOP_BREAKER_UNKNOWN_TOOL_THRESHOLD": "3"},
+            clear=False,
+        ), patch.object(main_module, "_openclaw_watchdog_abort_request", return_value=True) as abort_mock, patch.object(
+            main_module, "_log_openclaw_chat_error"
+        ) as error_logger:
+            retry_after = watchdog._check(
+                base_key=session_key,
+                request_id=request_id,
+                sent_at=sent_at,
+                poll_seconds=30.0,
+                idle_seconds=900.0,
+            )
+
+        self.assertIsNone(retry_after)
+        abort_mock.assert_called_once_with(session_key=session_key, request_id=request_id)
+        error_logger.assert_called_once()
+        detail = str(error_logger.call_args.kwargs.get("detail") or "").lower()
+        self.assertIn("unknown tool errors", detail)
+
     def test_chat_007_openclaw_chat_fail_closes_when_persist_fails(self):
         payload = OpenClawChatRequest(
             sessionKey="clawboard:topic:topic-chat-007",
