@@ -304,6 +304,7 @@ This check blocks common leaks in tracked files:
 - Context contract and plugin bridge: `CONTEXT.md`
 - Classification/routing spec and scenario matrix: `CLASSIFICATION.md`
 - Context spec companion: `CONTEXT_SPEC.md`
+- API ownership contract and migration runbook: `docs/API_OWNERSHIP.md`
 - Operator runbook: `design/operator-runbook.md`
 - Visual system spec: `design/visual-end-state-spec.md`
 - Testing guide: `TESTING.md`

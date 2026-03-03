@@ -41,6 +41,11 @@ docker compose up -d --build
 3. Confirm classifier health: new conversation lines transition from pending to classified.
 4. Confirm one task can be opened and replied to in chat.
 5. Confirm no unexpected read-only state in normal operator sessions.
+6. Confirm API ownership telemetry is healthy for a legacy shim route:
+```bash
+curl -sSI -H "X-Clawboard-Token: $CLAWBOARD_TOKEN" http://localhost:3010/api/topics | rg -i "x-clawboard-api-owner|x-clawboard-api-compat"
+```
+Expected result includes `x-clawboard-api-owner: fastapi`.
 
 ## Weekly Reliability Checklist
 
@@ -96,6 +101,16 @@ docker compose restart classifier
 1. Confirm new logs are arriving in `/log`.
 2. Wait one classifier interval and re-check.
 3. Restart `classifier` and `api` if state remains stale.
+
+### Unexpected `410 Gone` from `/api/*`
+
+1. Identify the route returning `410` and check whether it is listed as deprecated in `docs/API_OWNERSHIP.md`.
+2. If deprecated, migrate the caller to canonical FastAPI endpoints and remove legacy route usage.
+3. If not deprecated, treat as regression and escalate with route path, HTTP method, and response headers (`x-clawboard-api-owner`, `x-clawboard-api-legacy-route`).
+4. Inspect Next.js compatibility telemetry:
+```bash
+docker compose logs --tail=200 web | rg "\[api-ownership\]"
+```
 
 ## Change-Control Guardrails
 
