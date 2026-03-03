@@ -3628,7 +3628,7 @@ export default function register(api: OpenClawPluginApi) {
         toolMeta?.requestId,
     });
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
-    const routing = await resolveRoutingScope(effectiveSessionKey, ctx);
+    const routing = await resolveRoutingScope(effectiveSessionKey, ctx, toolMeta);
     requestId = await resolveOpenclawRequestIdForBoardScope({
       requestId,
       sessionKey: effectiveSessionKey ?? ctx.sessionKey,
@@ -3668,6 +3668,9 @@ export default function register(api: OpenClawPluginApi) {
         sessionKey: effectiveSessionKey,
         requestId,
         boardScope: routing.boardScope,
+        extra: {
+          hook: "before_tool_call",
+        },
       }),
     });
   });

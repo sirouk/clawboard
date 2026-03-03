@@ -1319,10 +1319,22 @@ test("topic-only board scope hint survives into downstream tool events", async (
       },
     );
 
-    await waitFor(() => meaningfulCalls(calls).length >= 2);
-    const toolPayload = meaningfulCalls(calls)
+    await waitFor(
+      () =>
+        calls.some((call) => {
+          if (String(call.options?.method || "").toUpperCase() !== "POST") return false;
+          if (!String(call.url).includes("/api/log")) return false;
+          const payload = parseBody(call);
+          return payload?.type === "action" && payload?.content === "Tool call: memory.get";
+        }),
+      2000,
+    );
+    const postCalls = calls.filter(
+      (call) => String(call.options?.method || "").toUpperCase() === "POST" && String(call.url).includes("/api/log")
+    );
+    const toolPayload = postCalls
       .map((call) => parseBody(call))
-      .find((payload) => payload?.type === "action" && payload?.source?.hook === "before_tool_call");
+      .find((payload) => payload?.type === "action" && payload?.content === "Tool call: memory.get");
 
     assert.ok(toolPayload, "expected tool action log");
     assert.equal(toolPayload.topicId, "topic-only-routing-001");
@@ -1362,8 +1374,23 @@ test("before_tool_call applies topic-only hint from tool metadata without prior 
       },
     );
 
-    await waitFor(() => meaningfulCalls(calls).length >= 1);
-    const toolPayload = parseBody(meaningfulCalls(calls)[0]);
+    await waitFor(
+      () =>
+        calls.some((call) => {
+          if (String(call.options?.method || "").toUpperCase() !== "POST") return false;
+          if (!String(call.url).includes("/api/log")) return false;
+          const payload = parseBody(call);
+          return payload?.type === "action" && payload?.content === "Tool call: memory.search";
+        }),
+      2000,
+    );
+    const postCalls = calls.filter(
+      (call) => String(call.options?.method || "").toUpperCase() === "POST" && String(call.url).includes("/api/log")
+    );
+    const toolPayload = postCalls
+      .map((call) => parseBody(call))
+      .find((payload) => payload?.type === "action" && payload?.content === "Tool call: memory.search");
+    assert.ok(toolPayload, "expected tool action log");
     assert.equal(toolPayload.type, "action");
     assert.equal(toolPayload.content, "Tool call: memory.search");
     assert.equal(toolPayload.topicId, "topic-only-routing-cold-001");

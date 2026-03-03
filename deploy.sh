@@ -396,40 +396,61 @@ PY
 # Reads workspace/memory dirs and QMD vault paths from openclaw.json.
 _oc_preserved_paths_summary() {
   local cfg_path
+  local oc_home
   cfg_path="$(_oc_config_path)"
+  oc_home="$(_oc_home)"
   [ -n "$cfg_path" ] && command -v python3 >/dev/null 2>&1 || return 0
-  python3 - "$cfg_path" <<'PY'
+  python3 - "$cfg_path" "$oc_home" <<'PY'
 import sys, json, os
-cfg_path = sys.argv[1]
+cfg_path, oc_home = sys.argv[1], os.path.abspath(os.path.expanduser(sys.argv[2]))
 try:
     with open(cfg_path) as f:
         cfg = json.load(f)
 except Exception:
     sys.exit(0)
+
 printed = []
+seen = set()
+agents = cfg.get("agents", {}).get("list", [])
+if not isinstance(agents, list):
+    agents = []
+
+
+def add(line):
+    text = str(line or "").strip()
+    if not text or text in seen:
+        return
+    seen.add(text)
+    printed.append(text)
+
+
 # Per-agent workspace/memory (daily long-term memories)
-for a in cfg.get("agents", {}).get("list", []):
+for a in agents:
     if not isinstance(a, dict):
         continue
-    ws = str(a.get("workspace", "") or "").strip()
+    ws = os.path.abspath(os.path.expanduser(str(a.get("workspace", "") or "").strip()))
     aid = str(a.get("id", "") or "").strip()
     if ws:
         mem = os.path.join(ws, "memory")
-        printed.append(f"  {mem}  [{aid} long-term memories]")
+        label = f"{aid} long-term memories" if aid else "long-term memories"
+        add(f"  {mem}  [{label}]")
+
 # QMD vault paths
 for p in cfg.get("memory", {}).get("qmd", {}).get("paths", []):
     if isinstance(p, dict) and p.get("path"):
         label = str(p.get("name", "")).strip() or "qmd"
-        printed.append(f"  {p['path']}  [QMD vault: {label}]")
+        add(f"  {p['path']}  [QMD vault: {label}]")
+
 # agent/ credential dirs
-for a in cfg.get("agents", {}).get("list", []):
+for a in agents:
     if not isinstance(a, dict):
         continue
     aid = str(a.get("id", "") or "").strip()
     if aid:
-        printed.append(f"  <oc_home>/agents/{aid}/agent/  [credentials + model config]")
-        printed.append(f"  <oc_home>/agents/{aid}/qmd/    [QMD vector index]")
-  for line in printed:
+        add(f"  {os.path.join(oc_home, 'agents', aid, 'agent')}  [credentials + model config]")
+        add(f"  {os.path.join(oc_home, 'agents', aid, 'qmd')}    [QMD vector index]")
+
+for line in printed:
     print(line)
 PY
 }
@@ -577,6 +598,7 @@ _reindex_openclaw_memory() {
 # Wipe agent session files + workspace memory directories for all configured agents.
 _wipe_openclaw_agent_data() {
   local oc_home="$(_oc_home)"
+  local oc_home_display
   local aid
   local sessions_dir
   local count
@@ -586,10 +608,11 @@ _wipe_openclaw_agent_data() {
   local seen_workspace
   local ws_path
 
+  oc_home_display="$(printf "%s" "$oc_home" | sed "s|$HOME|~|")"
   echo "OpenClaw data targets:"
-  echo "  - session trace files: ~/.openclaw/agents/*/sessions"
+  echo "  - session trace files: $oc_home_display/agents/*/sessions"
   echo "  - workspace memory: <workspace>/memory"
-  echo "  - legacy top-level memory: ~/.openclaw/memory (if present)"
+  echo "  - legacy top-level memory: $oc_home_display/memory (if present)"
   echo ""
 
   # Wipe all session files for each agent.
@@ -601,10 +624,11 @@ _wipe_openclaw_agent_data() {
       continue
     fi
 
-    count=$(find "$sessions_dir" -maxdepth 1 \( -name "*.jsonl" -o -name "*.jsonl.deleted.*" \) 2>/dev/null | wc -l | tr -d ' ')
+    count=$(find "$sessions_dir" -maxdepth 1 \( -name "*.jsonl" -o -name "*.jsonl.deleted.*" -o -name "*.jsonl.tmp" \) 2>/dev/null | wc -l | tr -d ' ')
 
     find "$sessions_dir" -maxdepth 1 -name "*.jsonl" -delete 2>/dev/null || true
     find "$sessions_dir" -maxdepth 1 -name "*.jsonl.deleted.*" -delete 2>/dev/null || true
+    find "$sessions_dir" -maxdepth 1 -name "*.jsonl.tmp" -delete 2>/dev/null || true
     find "$sessions_dir" -maxdepth 1 -name "sessions.json.*.tmp" -delete 2>/dev/null || true
     find "$sessions_dir" -maxdepth 1 -name "sessions.json.backup*" -delete 2>/dev/null || true
     find "$sessions_dir" -maxdepth 1 -name "sessions.json.bak.*" -delete 2>/dev/null || true
@@ -809,11 +833,12 @@ reset_openclaw_sessions() {
     fi
 
     local count=0
-    count=$(find "$sessions_dir" -maxdepth 1 \( -name "*.jsonl" -o -name "*.jsonl.deleted.*" \) 2>/dev/null | wc -l | tr -d ' ')
+    count=$(find "$sessions_dir" -maxdepth 1 \( -name "*.jsonl" -o -name "*.jsonl.deleted.*" -o -name "*.jsonl.tmp" \) 2>/dev/null | wc -l | tr -d ' ')
 
     # Active and soft-deleted session files
     find "$sessions_dir" -maxdepth 1 -name "*.jsonl"            -delete 2>/dev/null || true
     find "$sessions_dir" -maxdepth 1 -name "*.jsonl.deleted.*"  -delete 2>/dev/null || true
+    find "$sessions_dir" -maxdepth 1 -name "*.jsonl.tmp"        -delete 2>/dev/null || true
     # Stale atomic-write temp files and doctor backup snapshots
     find "$sessions_dir" -maxdepth 1 -name "sessions.json.*.tmp"          -delete 2>/dev/null || true
     find "$sessions_dir" -maxdepth 1 -name "sessions.json.backup*"        -delete 2>/dev/null || true
@@ -1026,14 +1051,25 @@ from app.models import LogEntry, Task, Topic
 
 
 APPLY = os.getenv("CLAWBOARD_RECONCILE_APPLY", "0").strip() == "1"
+TOOL_TRACE_RE = re.compile(r"(tool call:|tool result:|tool error:)", flags=re.IGNORECASE)
+MEMORY_ACTION_RE = re.compile(
+    r"\bmemory[_-]?(search|get|query|fetch|retrieve|read|write|store|list|prune|delete)\b",
+    flags=re.IGNORECASE,
+)
+BOARD_TASK_RE = re.compile(r"clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)")
+BOARD_TOPIC_RE = re.compile(r"clawboard:topic:(topic-[a-zA-Z0-9-]+)")
+TRUE_VALUES = {"1", "true", "yes", "on"}
+SCOPE_PRUNE_KEYS = (
+    "boardScopeTopicId",
+    "boardScopeTaskId",
+    "boardScopeKind",
+    "boardScopeLock",
+    "boardScopeTopicOnly",
+)
 
 
 def _text(value):
     return str(value or "").strip()
-
-
-def _combined_text(row):
-    return " ".join(part for part in (_text(row.content), _text(row.summary), _text(row.raw)) if part).strip()
 
 
 def _source_map(row):
@@ -1041,38 +1077,54 @@ def _source_map(row):
     return dict(src) if isinstance(src, dict) else {}
 
 
-def _session_base(source):
-    return (_text(source.get("sessionKey")).split("|", 1)[0] or "").strip().lower()
+def _combined_text(row):
+    return " ".join(part for part in (_text(getattr(row, "content", None)), _text(getattr(row, "summary", None)), _text(getattr(row, "raw", None))) if part).strip()
 
 
-def _parse_board_session_key(source):
-    base = (_text(source.get("sessionKey")).split("|", 1)[0] or "").strip()
-    if not base:
+def _to_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _terminal_attempts(row):
+    return max(1, _to_int(getattr(row, "classificationAttempts", 0), 0))
+
+
+def _truthy(value):
+    if isinstance(value, bool):
+        return value
+    return _text(value).lower() in TRUE_VALUES
+
+
+def _base_session_key(source):
+    return (_text((source or {}).get("sessionKey")).split("|", 1)[0] or "").strip()
+
+
+def _parse_board_session_key(base):
+    key = _text(base)
+    if not key:
         return (None, None)
-    task_match = re.search(r"clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)", base)
+    task_match = BOARD_TASK_RE.search(key)
     if task_match:
         return (task_match.group(1), task_match.group(2))
-    topic_match = re.search(r"clawboard:topic:(topic-[a-zA-Z0-9-]+)", base)
+    topic_match = BOARD_TOPIC_RE.search(key)
     if topic_match:
         return (topic_match.group(1), None)
     return (None, None)
 
 
-def _is_subagent_scaffold(row, source, text):
-    if _text(getattr(row, "type", "")).lower() != "conversation":
+def _is_subagent_scaffold(row_type, base_session_key, text):
+    if row_type != "conversation":
         return False
-    if ":subagent:" not in _session_base(source):
+    if ":subagent:" not in _text(base_session_key).lower():
         return False
     return bool(re.match(r"^\s*\[subagent context\]", text, flags=re.IGNORECASE))
 
 
-def _is_heartbeat_control_plane(row, source, text):
-    if _text(getattr(row, "type", "")).lower() != "conversation":
-        return False
-    channel = _text(source.get("channel")).lower()
-    if channel == "heartbeat":
-        return True
-    if _session_base(source) != "agent:main:main":
+def _is_heartbeat_text(text):
+    if not text:
         return False
     if re.match(r"^\s*\[cron:[^\]]+\]", text, flags=re.IGNORECASE):
         return True
@@ -1083,120 +1135,243 @@ def _is_heartbeat_control_plane(row, source, text):
     return bool(re.search(r"heartbeat and watchdog recovery check", text, flags=re.IGNORECASE))
 
 
-def _is_tool_trace(row, text):
-    if _text(getattr(row, "type", "")).lower() != "action":
+def _is_control_plane_conversation(row_type, source, text):
+    if row_type != "conversation":
         return False
-    lower = text.lower()
-    return "tool call:" in lower or "tool result:" in lower or "tool error:" in lower
+    channel = _text((source or {}).get("channel")).lower()
+    if channel == "heartbeat":
+        return True
+    if _text(_base_session_key(source)).lower() != "agent:main:main":
+        return False
+    return _is_heartbeat_text(text)
 
 
-def _scope_anchor(row, source):
-    topic_id = _text(getattr(row, "topicId", "")) or _text(source.get("boardScopeTopicId"))
-    task_id = _text(getattr(row, "taskId", "")) or _text(source.get("boardScopeTaskId"))
-    parsed_topic_id, parsed_task_id = _parse_board_session_key(source)
-    if not topic_id and parsed_topic_id:
-        topic_id = parsed_topic_id
-    if not task_id and parsed_task_id:
-        task_id = parsed_task_id
-    return (topic_id or None, task_id or None)
+def _is_tool_trace(row_type, text):
+    return row_type == "action" and bool(TOOL_TRACE_RE.search(text or ""))
 
 
-def _reconciled_attempts(row):
-    return max(1, int(getattr(row, "classificationAttempts", 0) or 0))
+def _is_memory_tool_action(text):
+    combined = _text(text)
+    if not combined:
+        return False
+    if not TOOL_TRACE_RE.search(combined):
+        return False
+    return bool(MEMORY_ACTION_RE.search(combined))
+
+
+def _supports_bundle_tool_scoping(base_session_key):
+    base = _text(base_session_key).lower()
+    if not base:
+        return False
+    if base.startswith("channel:"):
+        return True
+    if base.startswith("clawboard:topic:") or base.startswith("clawboard:task:"):
+        return True
+    return ":clawboard:topic:" in base or ":clawboard:task:" in base
+
+
+def _prune_scope(source):
+    out = dict(source or {})
+    for key in SCOPE_PRUNE_KEYS:
+        out.pop(key, None)
+    return out
+
+
+def _canonical_source_for_anchor(source, *, topic_id, task_id, space_id):
+    out = dict(source or {})
+    if topic_id:
+        out["boardScopeTopicId"] = topic_id
+        if task_id:
+            out["boardScopeTaskId"] = task_id
+            out["boardScopeKind"] = "task"
+            out["boardScopeLock"] = True
+            out.pop("boardScopeTopicOnly", None)
+        else:
+            out.pop("boardScopeTaskId", None)
+            if _truthy(out.get("boardScopeTopicOnly")):
+                out["boardScopeTopicOnly"] = True
+                out["boardScopeKind"] = "topic_only"
+                out["boardScopeLock"] = True
+            else:
+                out.pop("boardScopeTopicOnly", None)
+                out["boardScopeKind"] = "topic"
+                if "boardScopeLock" in out:
+                    out["boardScopeLock"] = _truthy(out.get("boardScopeLock"))
+                else:
+                    out["boardScopeLock"] = False
+    else:
+        out = _prune_scope(out)
+
+    if space_id:
+        out["boardScopeSpaceId"] = space_id
+    return out
+
+
+def _resolve_anchor(row, source, topic_by_id, task_by_id):
+    topic_id = _text(getattr(row, "topicId", None)) or _text((source or {}).get("boardScopeTopicId"))
+    task_id = _text(getattr(row, "taskId", None)) or _text((source or {}).get("boardScopeTaskId"))
+    parsed_topic, parsed_task = _parse_board_session_key(_base_session_key(source))
+    if not topic_id and parsed_topic:
+        topic_id = parsed_topic
+    if not task_id and parsed_task:
+        task_id = parsed_task
+
+    task_row = task_by_id.get(task_id) if task_id else None
+    if task_id and not task_row:
+        task_id = ""
+    if task_row:
+        owner_topic = _text(task_row.get("topicId"))
+        if owner_topic:
+            topic_id = owner_topic
+        else:
+            task_id = ""
+            task_row = None
+
+    topic_row = topic_by_id.get(topic_id) if topic_id else None
+    if topic_id and not topic_row:
+        topic_id = ""
+        topic_row = None
+        if task_id:
+            task_id = ""
+            task_row = None
+
+    if task_id and task_row:
+        owner_topic = _text(task_row.get("topicId"))
+        if owner_topic and owner_topic != topic_id:
+            topic_id = owner_topic
+            topic_row = topic_by_id.get(topic_id)
+
+    space_id = ""
+    if task_row:
+        space_id = _text(task_row.get("spaceId"))
+    if not space_id and topic_row:
+        space_id = _text(topic_row.get("spaceId"))
+
+    return (topic_id or None, task_id or None, space_id or None)
 
 
 with get_session() as session:
-    valid_topic_ids = {str(row.id) for row in session.exec(select(Topic)).all() if getattr(row, "id", None)}
-    valid_tasks = {
-        str(row.id): str(row.topicId)
-        for row in session.exec(select(Task)).all()
-        if getattr(row, "id", None) and getattr(row, "topicId", None)
-    }
-    rows = session.exec(select(LogEntry).where(LogEntry.type.in_(["conversation", "action"]))).all()
+    topic_by_id = {}
+    for row in session.exec(select(Topic)).all():
+        topic_id = _text(getattr(row, "id", None))
+        if topic_id:
+            topic_by_id[topic_id] = {"spaceId": _text(getattr(row, "spaceId", None))}
+
+    task_by_id = {}
+    for row in session.exec(select(Task)).all():
+        task_id = _text(getattr(row, "id", None))
+        if task_id:
+            task_by_id[task_id] = {
+                "topicId": _text(getattr(row, "topicId", None)),
+                "spaceId": _text(getattr(row, "spaceId", None)),
+            }
+
+    rows = session.exec(select(LogEntry).where(LogEntry.type.in_(["conversation", "action", "system", "import"]))).all()
 
     touched = 0
     reasons = Counter()
 
     for row in rows:
         source = _source_map(row)
+        row_type = _text(getattr(row, "type", None)).lower()
         text = _combined_text(row)
+        base_session_key = _base_session_key(source)
+        channel = _text(source.get("channel")).lower()
+        current_status = _text(getattr(row, "classificationStatus", None)).lower() or "pending"
+
         desired = None
         desired_source = None
         reason = None
 
-        channel = _text(source.get("channel")).lower()
-        if channel == "cron-event" and _text(getattr(row, "type", "")).lower() == "conversation":
+        if channel == "cron-event":
             desired = {
                 "topicId": None,
                 "taskId": None,
                 "classificationStatus": "failed",
-                "classificationAttempts": _reconciled_attempts(row),
+                "classificationAttempts": _terminal_attempts(row),
                 "classificationError": "filtered_cron_event",
             }
-            pruned = dict(source)
-            for key in ("boardScopeTopicId", "boardScopeTaskId", "boardScopeKind", "boardScopeLock"):
-                pruned.pop(key, None)
-            desired_source = pruned
+            desired_source = _prune_scope(source)
             reason = "control:filtered_cron_event"
-        elif _is_subagent_scaffold(row, source, text):
+        elif _is_subagent_scaffold(row_type, base_session_key, text):
             desired = {
                 "topicId": None,
                 "taskId": None,
                 "classificationStatus": "failed",
-                "classificationAttempts": _reconciled_attempts(row),
+                "classificationAttempts": _terminal_attempts(row),
                 "classificationError": "filtered_subagent_scaffold",
             }
-            pruned = dict(source)
-            for key in ("boardScopeTopicId", "boardScopeTaskId", "boardScopeKind", "boardScopeLock"):
-                pruned.pop(key, None)
-            desired_source = pruned
+            desired_source = _prune_scope(source)
             reason = "control:filtered_subagent_scaffold"
-        elif _is_heartbeat_control_plane(row, source, text):
+        elif _is_control_plane_conversation(row_type, source, text):
             desired = {
                 "topicId": None,
                 "taskId": None,
                 "classificationStatus": "failed",
-                "classificationAttempts": _reconciled_attempts(row),
+                "classificationAttempts": _terminal_attempts(row),
                 "classificationError": "filtered_control_plane",
             }
-            pruned = dict(source)
-            for key in ("boardScopeTopicId", "boardScopeTaskId", "boardScopeKind", "boardScopeLock"):
-                pruned.pop(key, None)
-            desired_source = pruned
+            desired_source = _prune_scope(source)
             reason = "control:filtered_control_plane"
-        elif _is_tool_trace(row, text):
-            anchor_topic_id, anchor_task_id = _scope_anchor(row, source)
-            if anchor_task_id and anchor_task_id not in valid_tasks:
-                anchor_task_id = None
-            if anchor_topic_id and anchor_topic_id not in valid_topic_ids:
-                anchor_topic_id = None
-            if anchor_task_id:
-                owner_topic_id = valid_tasks.get(anchor_task_id)
-                if owner_topic_id:
-                    anchor_topic_id = owner_topic_id
-            if anchor_topic_id and anchor_task_id:
-                owner_topic_id = valid_tasks.get(anchor_task_id)
-                if owner_topic_id and owner_topic_id != anchor_topic_id:
-                    anchor_topic_id = owner_topic_id
+        elif _is_tool_trace(row_type, text):
+            anchor_topic_id, anchor_task_id, anchor_space_id = _resolve_anchor(
+                row,
+                source,
+                topic_by_id,
+                task_by_id,
+            )
+            anchored = bool(anchor_topic_id or anchor_task_id)
+            is_memory_action = _is_memory_tool_action(text)
 
-            if anchor_topic_id or anchor_task_id:
+            target_topic_id = anchor_topic_id if anchored else None
+            target_task_id = anchor_task_id if anchored else None
+            target_space_id = anchor_space_id if anchored else None
+
+            if is_memory_action:
                 desired = {
-                    "topicId": anchor_topic_id,
-                    "taskId": anchor_task_id,
+                    "topicId": target_topic_id,
+                    "taskId": target_task_id,
                     "classificationStatus": "classified",
-                    "classificationAttempts": _reconciled_attempts(row),
+                    "classificationAttempts": _terminal_attempts(row),
+                    "classificationError": "filtered_memory_action",
+                }
+                reason = "tool:filtered_memory_action"
+            elif anchored:
+                desired = {
+                    "topicId": target_topic_id,
+                    "taskId": target_task_id,
+                    "classificationStatus": "classified",
+                    "classificationAttempts": _terminal_attempts(row),
                     "classificationError": "filtered_tool_activity",
                 }
                 reason = "tool:filtered_tool_activity"
+            elif _supports_bundle_tool_scoping(base_session_key) and current_status == "pending":
+                desired = {
+                    "topicId": None,
+                    "taskId": None,
+                    "classificationStatus": "pending",
+                    "classificationAttempts": 0,
+                    "classificationError": None,
+                }
+                reason = "tool:deferred_unanchored_bundle_scope"
             else:
                 desired = {
                     "topicId": None,
                     "taskId": None,
                     "classificationStatus": "failed",
-                    "classificationAttempts": _reconciled_attempts(row),
+                    "classificationAttempts": _terminal_attempts(row),
                     "classificationError": "filtered_unanchored_tool_activity",
                 }
                 reason = "tool:filtered_unanchored_tool_activity"
+
+            if target_space_id and (target_topic_id or target_task_id):
+                desired["spaceId"] = target_space_id
+            desired_source = _canonical_source_for_anchor(
+                source,
+                topic_id=target_topic_id,
+                task_id=target_task_id,
+                space_id=target_space_id,
+            )
 
         if not desired or not reason:
             continue

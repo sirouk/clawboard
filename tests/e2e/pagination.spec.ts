@@ -11,10 +11,9 @@ test("logs page uses 50-row load more increment", async ({ page, request }) => {
   });
   expect(topicRes.ok()).toBeTruthy();
 
-  let oldestContent = "";
+  let oldestLogId = "";
   for (let i = 0; i < 55; i += 1) {
     const content = `log-paging-${suffix}-${i}`;
-    if (i === 0) oldestContent = content;
     const createLog = await request.post(`${apiBase}/api/log`, {
       data: {
         topicId,
@@ -28,15 +27,18 @@ test("logs page uses 50-row load more increment", async ({ page, request }) => {
       },
     });
     expect(createLog.ok()).toBeTruthy();
+    const row = await createLog.json();
+    if (i === 0) oldestLogId = String(row?.id ?? "");
   }
 
   await page.goto("/log");
   await page.getByRole("heading", { name: "All Activity" }).waitFor();
   await page.getByRole("button", { name: "Load 50 more" }).waitFor();
 
-  await expect(page.getByText(oldestContent, { exact: true })).toHaveCount(0);
+  expect(oldestLogId).toBeTruthy();
+  await expect(page.locator(`[data-log-id="${oldestLogId}"]`)).toHaveCount(0);
   await page.getByRole("button", { name: "Load 50 more" }).click();
-  await expect(page.getByText(oldestContent, { exact: true })).toBeVisible();
+  await expect(page.locator(`[data-log-id="${oldestLogId}"]`)).toBeVisible();
 });
 
 test("unified view uses task=2 and topic=4 load increments", async ({ page, request }) => {

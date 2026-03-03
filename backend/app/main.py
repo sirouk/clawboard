@@ -7002,7 +7002,30 @@ def _orchestration_resolve_run_for_log(session: Any, *, request_id: str | None, 
     return session.exec(select(OrchestrationRun).where(OrchestrationRun.runId == item.runId).limit(1)).first()
 
 
-def _orchestration_has_assistant_completion_log(session: Any, *, run: "OrchestrationRun") -> bool:
+def _orchestration_latest_terminal_subagent_iso(items: list["OrchestrationItem"]) -> str | None:
+    latest_iso: str | None = None
+    for item in items:
+        if str(getattr(item, "kind", "") or "").strip().lower() != "subagent":
+            continue
+        if str(getattr(item, "status", "") or "").strip().lower() not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
+            continue
+        candidate_iso = (
+            normalize_iso(str(getattr(item, "completedAt", "") or ""))
+            or normalize_iso(str(getattr(item, "updatedAt", "") or ""))
+            or normalize_iso(str(getattr(item, "startedAt", "") or ""))
+            or normalize_iso(str(getattr(item, "createdAt", "") or ""))
+        )
+        if candidate_iso and (latest_iso is None or candidate_iso > latest_iso):
+            latest_iso = candidate_iso
+    return latest_iso
+
+
+def _orchestration_has_assistant_completion_log(
+    session: Any,
+    *,
+    run: "OrchestrationRun",
+    min_created_at: str | None = None,
+) -> bool:
     """Return True if an assistant conversation log exists that matches the run's session scope and started after the run.
 
     Used to auto-complete a stranded main.response item that was never marked done because subagents were
@@ -7020,7 +7043,11 @@ def _orchestration_has_assistant_completion_log(session: Any, *, run: "Orchestra
     candidate_keys, canonical_board_key = _session_routing_memory_lookup_keys(base_session)
     if not candidate_keys:
         candidate_keys = [base_session]
-    started_at = str(getattr(run, "startedAt", "") or "").strip()
+    started_at = normalize_iso(str(getattr(run, "startedAt", "") or ""))
+    min_created = normalize_iso(str(min_created_at or ""))
+    lower_bound = started_at or ""
+    if min_created and (not lower_bound or min_created > lower_bound):
+        lower_bound = min_created
     if DATABASE_URL.startswith("sqlite"):
         # Build OR conditions covering exact matches, |suffix variants, and agent-prefixed variants.
         parts: list[str] = []
@@ -7044,8 +7071,8 @@ def _orchestration_has_assistant_completion_log(session: Any, *, run: "Orchestra
             .where(text(f"({session_clause})"))
             .params(**params)
         )
-        if started_at:
-            query = query.where(LogEntry.createdAt >= started_at)
+        if lower_bound:
+            query = query.where(LogEntry.createdAt >= lower_bound)
     else:
         source_session_expr = LogEntry.source["sessionKey"].as_string()
         session_exprs: list[Any] = []
@@ -7061,8 +7088,8 @@ def _orchestration_has_assistant_completion_log(session: Any, *, run: "Orchestra
             .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "assistant")
             .where(or_(*session_exprs))
         )
-        if started_at:
-            query = query.where(LogEntry.createdAt >= started_at)
+        if lower_bound:
+            query = query.where(LogEntry.createdAt >= lower_bound)
     return session.exec(query.limit(1)).first() is not None
 
 
@@ -7271,13 +7298,18 @@ def _orchestration_sync_log(log_id: str) -> None:
                             refreshed_items = session.exec(
                                 select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)
                             ).all()
+                            min_completion_ts = _orchestration_latest_terminal_subagent_iso(refreshed_items)
                             still_has_active_subagents = any(
                                 str(getattr(it, "kind", "") or "").strip().lower() == "subagent"
                                 and str(getattr(it, "status", "") or "").strip().lower()
                                 not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
                                 for it in refreshed_items
                             )
-                            if not still_has_active_subagents and _orchestration_has_assistant_completion_log(session, run=run):
+                            if not still_has_active_subagents and _orchestration_has_assistant_completion_log(
+                                session,
+                                run=run,
+                                min_created_at=min_completion_ts,
+                            ):
                                 _orchestration_mark_item_status(
                                     session,
                                     run_id=run.runId,
@@ -7455,7 +7487,11 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
             )
             if has_active_subagents:
                 continue
-            if _orchestration_has_assistant_completion_log(session, run=stranded_run):
+            if _orchestration_has_assistant_completion_log(
+                session,
+                run=stranded_run,
+                min_created_at=_orchestration_latest_terminal_subagent_iso(stranded_items),
+            ):
                 _orchestration_mark_item_status(
                     session,
                     run_id=stranded_run.runId,
@@ -7510,7 +7546,15 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
                         # while the one-shot gate was blocked (e.g. subagents were still active at
                         # ingest time, or the sync_log branch threw and was silently swallowed).
                         # Auto-close the run so it stops emitting perpetual check-in noise.
-                        if not waiting_item_keys and int(item.attempts or 0) >= 2 and _orchestration_has_assistant_completion_log(session, run=run):
+                        if (
+                            not waiting_item_keys
+                            and int(item.attempts or 0) >= 2
+                            and _orchestration_has_assistant_completion_log(
+                                session,
+                                run=run,
+                                min_created_at=_orchestration_latest_terminal_subagent_iso(items),
+                            )
+                        ):
                             _orchestration_mark_item_status(
                                 session,
                                 run_id=run.runId,
@@ -9878,25 +9922,13 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 # history sync does not loop over non-user-visible control artifacts.
                 max_safe_ms = max(max_safe_ms, timestamp_ms)
                 continue
-            if entry_type == "action":
-                normalized_text = _preserve_markdown_text(text_body)
-                summary_text = _sanitize_log_text(text_body)
-            else:
-                normalized_text = _sanitize_log_text(text_body)
-                summary_text = normalized_text
-            if not normalized_text:
-                continue
-
+            sanitized_text = _sanitize_log_text(text_body)
             role = str(row.get("role") or "").strip().lower()
             if role == "assistant":
                 entry_type = "conversation"
                 agent_id = "assistant"
                 agent_label = "Assistant"
             elif role == "user":
-                if is_board_session and not is_subagent_session:
-                    max_safe_ms = max(max_safe_ms, timestamp_ms)
-                    continue
-
                 # Board/user rows must still be ingested from history for replay/import flows.
                 # Duplicate suppression is handled by idempotency + request/message identifiers.
                 if is_subagent_session and subagent_parts:
@@ -9905,7 +9937,7 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                     owner_id, _ = subagent_parts
                     agent_id = owner_id
                     agent_label = "OpenClaw" if owner_id.lower() == "main" else f"Agent {owner_id}"
-                elif normalized_text.startswith("[System Message]"):
+                elif sanitized_text.startswith("[System Message]"):
                     # OpenClaw injects system notifications (subagent failures, etc.) as role=user
                     # into the board session transcript. Re-attribute them as system events so they
                     # don't render as human messages in the Clawboard UI.
@@ -9924,6 +9956,14 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 entry_type = "action"
                 agent_id = role or "openclaw"
                 agent_label = role.title() if role else "OpenClaw"
+            if entry_type == "action":
+                normalized_text = _preserve_markdown_text(text_body)
+                summary_text = sanitized_text
+            else:
+                normalized_text = sanitized_text
+                summary_text = sanitized_text
+            if not normalized_text:
+                continue
 
             # Use the display timestamp (spread by 1 ms when same-second precision) for
             # createdAt so adjacent messages sort in session-history order.

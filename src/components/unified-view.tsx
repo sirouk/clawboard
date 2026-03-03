@@ -3278,7 +3278,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   // Full logs map (includes pending) used for active Topic/Task chat panes.
   const logsByTaskAll = useMemo(() => {
-    const eligible = showRaw ? logs : logs.filter((entry) => !isCronEventLog(entry));
+    const eligible = showRaw
+      ? logs
+      : logs.filter(
+          (entry) => (entry.classificationStatus ?? "pending") === "classified" && !isCronEventLog(entry)
+        );
     const sorted = [...eligible].sort(compareLogCreatedAtAsc);
     const map = new Map<string, LogEntry[]>();
     for (const entry of sorted) {
@@ -3291,7 +3295,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   }, [logs, showRaw]);
 
   const logsByTopicAll = useMemo(() => {
-    const eligible = showRaw ? logs : logs.filter((entry) => !isCronEventLog(entry));
+    const eligible = showRaw
+      ? logs
+      : logs.filter(
+          (entry) => (entry.classificationStatus ?? "pending") === "classified" && !isCronEventLog(entry)
+        );
     const sorted = [...eligible].sort(compareLogCreatedAtAsc);
     const map = new Map<string, LogEntry[]>();
     for (const entry of sorted) {
@@ -7093,6 +7101,76 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                    )}
 	                  </div>
 	                </div>
+                  {!isUnassigned ? (
+                    <button
+                      type="button"
+                      data-testid={`toggle-topic-chat-${topicId}`}
+                      data-no-swipe="true"
+                      aria-label={
+                        !mdUp
+                          ? topicChatFullscreen
+                            ? `Collapse topic chat ${topic.name}`
+                            : `Expand topic chat ${topic.name}`
+                          : isExpanded
+                            ? `Topic chat open for ${topic.name}`
+                            : `Expand topic chat ${topic.name}`
+                      }
+                      title={
+                        !mdUp
+                          ? topicChatFullscreen
+                            ? "Close chat"
+                            : "Open chat"
+                          : isExpanded
+                            ? "Topic chat open"
+                            : "Expand topic chat"
+                      }
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (!mdUp) {
+                          if (topicChatFullscreen) {
+                            closeMobileChatLayer();
+                            return;
+                          }
+                          openMobileTopicChat(topicId);
+                          return;
+                        }
+                        if (!isExpanded) {
+                          toggleTopicExpanded(topicId);
+                          return;
+                        }
+                        setExpandedTopicChats((prev) => {
+                          if (prev.has(topicId)) return prev;
+                          const next = new Set(prev);
+                          next.add(topicId);
+                          return next;
+                        });
+                        setAutoFocusTopicId(topicId);
+                        activeChatAtBottomRef.current = true;
+                        scheduleScrollChatToBottom(`topic:${topicId}`);
+                      }}
+                      className={cn(
+                        "flex h-8 w-8 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-sm text-[rgb(var(--claw-muted))] transition",
+                        "hover:border-[rgba(255,90,45,0.3)] hover:text-[rgb(var(--claw-text))]"
+                      )}
+                    >
+                      {topicChatFullscreen ? (
+                        "✕"
+                      ) : (
+                        <svg
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.7"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          className="h-4 w-4"
+                          aria-hidden
+                        >
+                          <path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H8l-5 3V11.5A8.5 8.5 0 0 1 11.5 3h1A8.5 8.5 0 0 1 21 11.5Z" />
+                        </svg>
+                      )}
+                    </button>
+                  ) : null}
 	                <button
 	                  type="button"
 	                  aria-label={isExpanded ? `Collapse topic ${topic.name}` : `Expand topic ${topic.name}`}

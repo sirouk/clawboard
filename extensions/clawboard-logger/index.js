@@ -3265,6 +3265,9 @@ export default function register(api) {
                 sessionKey: effectiveSessionKey,
                 requestId,
                 boardScope: routing.boardScope,
+                extra: {
+                    hook: "before_tool_call",
+                },
             }),
         });
     });
