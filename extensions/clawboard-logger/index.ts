@@ -1579,6 +1579,8 @@ export default function register(api: OpenClawPluginApi) {
       const boardScope: BoardScope = {
         kind: "topic_only",
         topicId: resolvedTopicId,
+        sessionKey: normalizedSessionKey ?? "",
+        inherited: false,
         topicOnly: true,
         updatedAt: nowMs(),
       };
@@ -1591,8 +1593,15 @@ export default function register(api: OpenClawPluginApi) {
 
     // Fallback routing when no board scope is found.
     // Include topicOnly hint if present in meta.
-    const fallbackScope: BoardScope | undefined = topicOnlyFromMeta
-      ? { kind: "topic_only", topicId: resolvedTopicId, topicOnly: true, updatedAt: nowMs() }
+    const fallbackScope: BoardScope | undefined = topicOnlyFromMeta && resolvedTopicId
+      ? {
+          kind: "topic_only",
+          topicId: resolvedTopicId,
+          sessionKey: normalizedSessionKey ?? "",
+          inherited: false,
+          topicOnly: true,
+          updatedAt: nowMs(),
+        }
       : undefined;
 
     return {
@@ -1600,6 +1609,7 @@ export default function register(api: OpenClawPluginApi) {
       taskId: resolvedTaskId,
       boardScope: fallbackScope,
     };
+  }
   // When Clawboard isn't reachable (common during local dev restarts and during purge),
   // Node's fetch throws (often: "TypeError: fetch failed"). Don't spam the logs.
   const SEND_WARN_INTERVAL_MS = 30_000;
@@ -3035,23 +3045,27 @@ export default function register(api: OpenClawPluginApi) {
     return undefined;
   };
 
-  const boardScopeTopicOnlyFromMeta = (meta: Record<string, unknown> | undefined): boolean => {
+  function boardScopeTopicOnlyFromMeta(meta: Record<string, unknown> | undefined): boolean {
     const direct =
       parseMetaBoolean(meta?.boardScopeTopicOnly) ??
       parseMetaBoolean(meta?.topicOnly) ??
       parseMetaBoolean(meta?.topic_only);
     if (direct !== undefined) return direct;
     return parseBoardScopeKindFromMeta(meta) === "topic_only";
-  };
+  }
 
-  const withBoardScopeTopicOnlyHint = (scope: BoardScope, topicOnly: boolean): BoardScope => {
+  function withBoardScopeTopicOnlyHint(scope: BoardScope, topicOnly: boolean): BoardScope;
+  function withBoardScopeTopicOnlyHint(scope: undefined, topicOnly: boolean): undefined;
+  function withBoardScopeTopicOnlyHint(scope: BoardScope | undefined, topicOnly: boolean): BoardScope | undefined;
+  function withBoardScopeTopicOnlyHint(scope: BoardScope | undefined, topicOnly: boolean): BoardScope | undefined {
+    if (!scope) return undefined;
     if (!topicOnly || scope.kind !== "topic") return scope;
     return {
       ...scope,
       kind: "topic_only",
       topicOnly: true,
     };
-  };
+  }
 
   const normalizeEventMeta = (
     meta: Record<string, unknown> | undefined,
@@ -4113,7 +4127,6 @@ export default function register(api: OpenClawPluginApi) {
     }
   }
 }
-
 
 // Export utility functions for testing
 export {

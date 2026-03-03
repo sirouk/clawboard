@@ -891,7 +891,7 @@ resolve_openclaw_gateway_device_auth_value() {
   fi
 
   # On first-run onboarding, ask explicitly so users understand why default is off.
-  if [ "$is_onboarding" = true ] && [ -r /dev/tty ]; then
+  if [ "$is_onboarding" = true ] && [ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
     local prompt_choice=""
     local prompt_default="1"
     if [ "$selected" = "1" ]; then
@@ -1348,7 +1348,7 @@ report_openclaw_pending_device_approvals() {
 
   local raw parsed rc count
   raw="$(OPENCLAW_HOME="$OPENCLAW_HOME" openclaw devices list --json 2>&1 || true)"
-  parsed="$(
+  if ! parsed="$(
     printf "%s" "$raw" | python3 - <<'PY'
 import json
 import sys
@@ -1431,9 +1431,7 @@ for item in pending:
         )
     )
 PY
-  )"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
+  )"; then
     log_warn "Could not parse OpenClaw pending device approvals automatically. Review manually: openclaw devices list"
     return 0
   fi
@@ -3044,8 +3042,8 @@ PY
     # To manually re-index at any time: openclaw memory index --agent <id> --force
     if command -v openclaw >/dev/null 2>&1; then
       log_info "Refreshing QMD memory indexes for all configured agents..."
-      local _idx_agent_ids=()
-      local _idx_raw
+      _idx_agent_ids=()
+      _idx_raw=""
       _idx_raw="$(python3 - "${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}" <<'PY'
 import json, sys, re
 VALID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -3070,7 +3068,7 @@ PY
       done <<< "$_idx_raw"
       [[ ${#_idx_agent_ids[@]} -gt 0 ]] || _idx_agent_ids=("main")
 
-      local _idx_failures=0
+      _idx_failures=0
       for _aid in "${_idx_agent_ids[@]}"; do
         log_info "  openclaw memory index --agent $_aid --force"
         if openclaw memory index --agent "$_aid" --force 2>&1; then
