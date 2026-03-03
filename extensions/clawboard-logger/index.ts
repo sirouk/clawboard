@@ -1572,13 +1572,34 @@ export default function register(api: OpenClawPluginApi) {
         };
       }
     }
+    const resolvedTopicId = await resolveTopicId(normalizedSessionKey);
+    const resolvedTaskId = resolveTaskId(normalizedSessionKey);
+
+    if (topicOnlyFromMeta && resolvedTopicId) {
+      const boardScope: BoardScope = {
+        kind: "topic_only",
+        topicId: resolvedTopicId,
+        topicOnly: true,
+        updatedAt: nowMs(),
+      };
+      return {
+        topicId: resolvedTopicId,
+        taskId: resolvedTaskId,
+        boardScope,
+      };
+    }
+
+    // Fallback routing when no board scope is found.
+    // Include topicOnly hint if present in meta.
+    const fallbackScope: BoardScope | undefined = topicOnlyFromMeta
+      ? { kind: "topic_only", topicId: resolvedTopicId, topicOnly: true, updatedAt: nowMs() }
+      : undefined;
 
     return {
-      topicId: await resolveTopicId(normalizedSessionKey),
-      taskId: resolveTaskId(normalizedSessionKey),
+      topicId: resolvedTopicId,
+      taskId: resolvedTaskId,
+      boardScope: fallbackScope,
     };
-  }
-
   // When Clawboard isn't reachable (common during local dev restarts and during purge),
   // Node's fetch throws (often: "TypeError: fetch failed"). Don't spam the logs.
   const SEND_WARN_INTERVAL_MS = 30_000;

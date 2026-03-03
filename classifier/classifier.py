@@ -887,6 +887,19 @@ def _entry_locked_scope(entry: dict) -> tuple[str | None, str | None, str | None
             kind = "topic_only"
         else:
             kind = "topic" if topic_id else ""
+    # If topic_only is set, upgrade kind to respect the topic_only constraint.
+    # This handles the cold-cache scenario where boardScopeTopicOnly is set but
+    # boardScopeKind might be "topic" (the base scope from session key).
+    if topic_only:
+        if task_id:
+            kind = "task"
+        elif topic_id:
+            kind = "topic_only"
+        else:
+            kind = "topic_only"
+    # If kind is topic_only, also set topic_only to ensure lock is True
+    if kind == "topic_only" and topic_id:
+        topic_only = True
     lock = _is_truthy(source.get("boardScopeLock")) or topic_only or bool(task_id)
 
     if not lock:
