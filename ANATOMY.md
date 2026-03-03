@@ -68,7 +68,6 @@ Related specs:
 - `design/brand-notes.md`
 - `design/operator-runbook.md`
 - `design/visual-end-state-spec.md`
-- `research/RETENTION_AND_REDACTION_POLICY.md`
 - `skills/clawboard/SKILL.md`
 - `skills/clawboard/references/clawboard-api.md`
 - `skills/clawboard/references/openclaw-hooks.md`
@@ -602,7 +601,8 @@ What is bounded:
 - expensive retrieval depths for performance.
 
 Retention policy:
-- see `research/RETENTION_AND_REDACTION_POLICY.md` for operational retention/cleanup guidance.
+- no standalone retention-policy markdown is currently maintained in `research/`.
+- use `README.md` (Operations), `design/operator-runbook.md`, and the API inventory below for current cleanup/delete/purge procedures.
 
 ## 12) Testing and Coverage Posture
 
@@ -717,7 +717,6 @@ If you are debugging a live issue:
 | `design/brand-notes.md` | visual identity guidance | frontend styling/component decisions |
 | `design/operator-runbook.md` | day-2 operations and incident playbooks | `/api/metrics`, `/api/stream`, classifier/search/context health paths |
 | `design/visual-end-state-spec.md` | visual QA acceptance criteria | Playwright specs in `tests/e2e/*` and component states |
-| `research/RETENTION_AND_REDACTION_POLICY.md` | lifecycle + redaction contract | cleanup commands, delete/purge endpoints, retention operations |
 | `skills/clawboard/SKILL.md` | Codex helper workflow | developer-assist only, no production runtime effect |
 | `skills/clawboard/references/clawboard-api.md` | API reference for Codex skill | mirrors backend routes; documentation aid |
 | `skills/clawboard/references/openclaw-hooks.md` | hook integration notes | `extensions/clawboard-logger/index.ts` behavior guide |
