@@ -249,16 +249,22 @@ run_build() {
       if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile || pnpm install; else pnpm install; fi
       pnpm ui:build
       pnpm build
+      # Ensure all transitive dependencies are properly resolved after build
+      pnpm install --no-frozen-lockfile
       ;;
     npm)
       if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi
       npm run ui:build
       npm run build
+      # Ensure all transitive dependencies are properly resolved after build
+      npm install
       ;;
     bun)
       if [ -f bun.lock ] || [ -f bun.lockb ]; then bun install --frozen-lockfile || bun install; else bun install; fi
       bun run ui:build
       bun run build
+      # Ensure all transitive dependencies are properly resolved after build
+      bun install
       ;;
   esac
 }
