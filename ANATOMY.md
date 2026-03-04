@@ -429,6 +429,12 @@ Deployed via bootstrap (`agent-templates/main/*` + `directives/main/GENERAL_CONT
 - **Main-only direct lane**: trivial asks that are faster than delegation.
 - **Single-specialist lane (default)**: one domain owner via `sessions_spawn`.
 - **Multi-specialist lane (huddle/federated)**: multiple delegated workstreams, then one synthesized final response.
+- Directive reconciliation is scope-aware and deterministic:
+  - global blocks from `directives/all/*`,
+  - per-agent blocks from `directives/<agent-id>/*`,
+  - in-place block replacement on rerun,
+  - stale/mis-scoped directive block pruning.
+- Main delegation targets are synchronized from configured non-main agents (`subagents.allowAgents`) so agent pool expansion does not require manual allow-list edits.
 
 Operational guarantees:
 - Delegation ladder cadence remains fixed: `1m -> 3m -> 10m -> 15m -> 30m -> 1h`.

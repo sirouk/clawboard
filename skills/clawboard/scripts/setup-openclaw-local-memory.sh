@@ -79,6 +79,7 @@ need_cmd python3
 MAIN_AGENT_ID="main"
 declare -a AGENT_IDS=()
 declare -a WORKSPACES=()
+MAIN_ALLOW_AGENTS_JSON='[]'
 
 discover_agents_and_workspaces() {
   [[ -f "$OPENCLAW_CONFIG_PATH" ]] || die "OpenClaw config not found at: $OPENCLAW_CONFIG_PATH"
@@ -408,7 +409,6 @@ configure_main_agent_tools() {
   # Uses an explicit allow list — do NOT set profile:minimal here.
   # profile:minimal only grants session_status and intersects (not unions) with allow,
   # which silently blocks sessions_spawn and breaks all delegation.
-  local -a base_path_args
   # Find the main agent index in the JSON config
   local main_idx
   main_idx="$(python3 - "$OPENCLAW_CONFIG_PATH" "$MAIN_AGENT_ID" <<'PY'
@@ -428,7 +428,38 @@ PY
   fi
 
   local base="agents.list.${main_idx}"
+  local allow_agents_json
   log_info "Configuring main agent tool policy (index $main_idx)..."
+
+  # Keep main delegation targets aligned with actual configured agents.
+  # This allows an elastic specialist pool without hardcoding ids in this script.
+  allow_agents_json="$(
+    python3 - "$MAIN_AGENT_ID" "${AGENT_IDS[@]}" <<'PY'
+import json
+import sys
+
+main_id = (sys.argv[1] or "").strip().lower()
+out = []
+seen = set()
+for raw in sys.argv[2:]:
+    item = (raw or "").strip()
+    if not item:
+        continue
+    low = item.lower()
+    if low == main_id:
+        continue
+    if low in seen:
+        continue
+    seen.add(low)
+    out.append(item)
+print(json.dumps(out, separators=(",", ":")))
+PY
+  )"
+  allow_agents_json="${allow_agents_json//$'\r'/}"
+  [[ -n "$allow_agents_json" ]] || allow_agents_json='[]'
+  MAIN_ALLOW_AGENTS_JSON="$allow_agents_json"
+
+  run_cfg_set "${base}.subagents.allowAgents" "$allow_agents_json" json false
 
   # Explicit allow: delegation + memory + Clawboard ledger tools.
   # cron allows durable one-shot follow-up jobs per delegation.
@@ -554,6 +585,7 @@ main() {
   echo "Workspaces: ${WORKSPACES[*]}"
   echo "Model path: $model_path"
   echo "Session memory source enabled: $MEMORY_ENABLE_SESSIONS"
+  echo "Main allowAgents: $MAIN_ALLOW_AGENTS_JSON"
   echo ""
   echo "Delegation tools: sessions_spawn, sessions_list, sessions_history, sessions_send, cron"
   echo "Clawboard ledger tools: clawboard_search, clawboard_update_task, clawboard_context, clawboard_get_task"

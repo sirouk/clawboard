@@ -159,7 +159,9 @@ Bootstrap characteristics (current):
 - atomic per-file deployment of shipped docs/templates
 - deploys main-agent templates (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`) into the resolved OpenClaw main workspace
 - deploys Clawboard contract docs (`ANATOMY.md`, `CONTEXT.md`, `CLASSIFICATION.md`, etc.) into the same workspace
-- applies directive reconciliation so main-agent execution lanes (main-only direct, single-specialist, multi-specialist/huddle) remain aligned with repository contracts
+- applies scope-aware directive reconciliation (`directives/all/*` + `directives/<agent-id>/*`) with in-place updates and stale-block pruning
+- keeps main-agent execution lanes (main-only direct, single-specialist, multi-specialist/huddle) aligned with repository contracts
+- syncs main `subagents.allowAgents` from configured non-main agents for elastic delegation pool growth without manual list drift
 - migrates legacy `CLAWBOARD_LOGGER_DISABLE_OPENCLAW_MEMORY_SEARCH` to `CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH`
 
 If OpenClaw is not installed and you want Chutes first:

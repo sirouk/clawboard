@@ -3,14 +3,15 @@ set -euo pipefail
 
 # apply_directives_to_agents.sh
 #
-# Interactive helper to append directive markdown files into each discovered
+# Interactive helper to reconcile directive markdown files into each discovered
 # agent workspace AGENTS.md, idempotently.
 #
 # Behavior:
 # 1) Process directives/all/*.md first.
 # 2) Process directives/<folder>/*.md for all folders except "all".
 # 3) For every directive, prompt per discovered agent workspace.
-# 4) Append directive block once (marker-based idempotency).
+# 4) Replace/update matching directive blocks in-place (marker-based idempotency).
+# 5) Prune stale/mis-scoped directive blocks no longer applicable to each agent.
 #
 # Usage:
 #   bash scripts/apply_directives_to_agents.sh
@@ -250,6 +251,20 @@ prompt_yes_no_quit() {
   done
 }
 
+directive_applies_to_agent() {
+  local scope="$1"
+  local agent_id="$2"
+  case "$scope" in
+    all) return 0 ;;
+    specialists|non-main) [ "$agent_id" != "main" ] && return 0 ;;
+    main-only) [ "$agent_id" = "main" ] && return 0 ;;
+    *)
+      [ "$scope" = "$agent_id" ] && return 0
+      ;;
+  esac
+  return 1
+}
+
 append_directive_block() {
   local agents_file="$1"
   local directive_file="$2"
@@ -273,29 +288,170 @@ if os.path.exists(agents_file):
     with open(agents_file, "r", encoding="utf-8") as f:
         existing = f.read()
 
-if start_marker in existing:
-    print("exists")
-    sys.exit(0)
-
-if mode == "dry-run":
-    print("would-append")
-    sys.exit(0)
-
 with open(directive_file, "r", encoding="utf-8") as f:
     directive_content = f.read().rstrip("\n")
 
-os.makedirs(os.path.dirname(agents_file), exist_ok=True)
-with open(agents_file, "a", encoding="utf-8") as f:
-    if existing and not existing.endswith("\n"):
-        f.write("\n")
-    f.write("\n")
-    f.write(start_marker + "\n")
-    f.write("<!-- Source: clawboard/directives/" + directive_rel + " -->\n\n")
-    f.write(directive_content + "\n\n")
-    f.write(end_marker + "\n")
+block = (
+    start_marker
+    + "\n"
+    + "<!-- Source: clawboard/directives/"
+    + directive_rel
+    + " -->\n\n"
+    + directive_content
+    + "\n\n"
+    + end_marker
+    + "\n"
+)
 
-print("appended")
+status = "appended"
+matches = []
+scan_pos = 0
+while True:
+    s = existing.find(start_marker, scan_pos)
+    if s == -1:
+        break
+    e = existing.find(end_marker, s + len(start_marker))
+    if e == -1:
+        e_after = len(existing)
+    else:
+        e_after = e + len(end_marker)
+        if e_after < len(existing) and existing[e_after : e_after + 1] == "\n":
+            e_after += 1
+    matches.append((s, e_after))
+    scan_pos = e_after
+
+if matches:
+    first_start = matches[0][0]
+    pieces = []
+    cursor = 0
+    for s, e_after in matches:
+        pieces.append(existing[cursor:s])
+        cursor = e_after
+    pieces.append(existing[cursor:])
+    without_all = "".join(pieces)
+
+    before = without_all[:first_start].rstrip("\n")
+    after = without_all[first_start:].lstrip("\n")
+    updated = ""
+    if before:
+        updated += before + "\n\n"
+    updated += block
+    if after:
+        updated = updated.rstrip("\n") + "\n\n" + after
+    if updated and not updated.endswith("\n"):
+        updated += "\n"
+
+    if updated == existing:
+        print("exists")
+        sys.exit(0)
+
+    status = "updated"
+else:
+    updated = existing
+    if updated and not updated.endswith("\n"):
+        updated += "\n"
+    if updated and not updated.endswith("\n\n"):
+        updated += "\n"
+    updated += block
+    if updated == existing:
+        print("exists")
+        sys.exit(0)
+
+if mode == "dry-run":
+    if status == "updated":
+        print("would-update")
+    else:
+        print("would-append")
+    sys.exit(0)
+
+os.makedirs(os.path.dirname(agents_file), exist_ok=True)
+with open(agents_file, "w", encoding="utf-8") as f:
+    f.write(updated)
+
+print(status)
 PY
+}
+
+prune_nonmatching_directive_blocks() {
+  local agents_file="$1"
+  local mode="$2"
+  shift 2
+  python3 - "$agents_file" "$mode" "$@" <<'PY'
+import os
+import re
+import sys
+
+agents_file = sys.argv[1]
+mode = sys.argv[2]
+keep = set(x.strip() for x in sys.argv[3:] if x.strip())
+
+if not os.path.exists(agents_file):
+    print("unchanged")
+    sys.exit(0)
+
+with open(agents_file, "r", encoding="utf-8") as f:
+    existing = f.read()
+
+start_re = re.compile(r"<!--\s*CLAWBOARD_DIRECTIVE:START\s+([^>]+?)\s*-->")
+pos = 0
+pieces = []
+removed = 0
+
+while True:
+    m = start_re.search(existing, pos)
+    if not m:
+        pieces.append(existing[pos:])
+        break
+    rel = m.group(1).strip()
+    end_marker = f"<!-- CLAWBOARD_DIRECTIVE:END {rel} -->"
+    end_idx = existing.find(end_marker, m.end())
+    if end_idx == -1:
+        pieces.append(existing[pos:])
+        break
+    end_after = end_idx + len(end_marker)
+    if end_after < len(existing) and existing[end_after : end_after + 1] == "\n":
+        end_after += 1
+    pieces.append(existing[pos:m.start()])
+    segment = existing[m.start():end_after]
+    if rel in keep:
+        pieces.append(segment)
+    else:
+        removed += 1
+    pos = end_after
+
+if removed == 0:
+    print("unchanged")
+    sys.exit(0)
+
+updated = "".join(pieces)
+updated = re.sub(r"\n{3,}", "\n\n", updated)
+updated = updated.rstrip() + "\n" if updated.strip() else ""
+
+if mode == "dry-run":
+    print("would-prune")
+    sys.exit(0)
+
+with open(agents_file, "w", encoding="utf-8") as f:
+    f.write(updated)
+
+print("pruned")
+PY
+}
+
+allowed_directives_for_agent() {
+  local agent_id="$1"
+  local directive_file directive_rel scope
+  for directive_file in "${ALL_DIRECTIVES[@]}"; do
+    directive_rel="${directive_file#$DIRECTIVES_DIR/}"
+    printf "%s\n" "$directive_rel"
+  done
+  for directive_file in "${SCOPED_DIRECTIVES[@]}"; do
+    directive_rel="${directive_file#$DIRECTIVES_DIR/}"
+    scope="$(basename "$(dirname "$directive_file")")"
+    if directive_applies_to_agent "$scope" "$agent_id"; then
+      printf "%s\n" "$directive_rel"
+    fi
+  done
 }
 
 process_directive_file() {
@@ -312,6 +468,12 @@ process_directive_file() {
     agent_name="${AGENT_NAMES[$idx]}"
     workspace="${AGENT_WORKSPACES[$idx]}"
     agents_file="$workspace/AGENTS.md"
+
+    if ! directive_applies_to_agent "$scope_label" "$agent_id"; then
+      SCOPE_SKIP_COUNT=$((SCOPE_SKIP_COUNT + 1))
+      idx=$((idx + 1))
+      continue
+    fi
 
     decision="Apply [$scope_label] $directive_name to agent '$agent_name' ($agent_id)?"
     set +e
@@ -339,6 +501,10 @@ process_directive_file() {
         APPLIED_COUNT=$((APPLIED_COUNT + 1))
         log_success "Applied $directive_rel -> $agents_file"
         ;;
+      updated)
+        APPLIED_COUNT=$((APPLIED_COUNT + 1))
+        log_success "Applied $directive_rel -> $agents_file"
+        ;;
       exists)
         EXISTS_COUNT=$((EXISTS_COUNT + 1))
         log_info "Already present, skipping: $directive_rel -> $agents_file"
@@ -346,6 +512,10 @@ process_directive_file() {
       would-append)
         APPLIED_COUNT=$((APPLIED_COUNT + 1))
         log_info "(dry-run) Would append $directive_rel -> $agents_file"
+        ;;
+      would-update)
+        APPLIED_COUNT=$((APPLIED_COUNT + 1))
+        log_info "(dry-run) Would update $directive_rel -> $agents_file"
         ;;
       *)
         ERROR_COUNT=$((ERROR_COUNT + 1))
@@ -362,9 +532,71 @@ process_directive_file() {
 APPLIED_COUNT=0
 EXISTS_COUNT=0
 DECLINED_COUNT=0
+PRUNED_COUNT=0
+SCOPE_SKIP_COUNT=0
 ERROR_COUNT=0
 TEAM_ROSTER_STATUS="not-run"
 PHASE4_STATUS="not-run"
+
+prune_agent_directive_blocks() {
+  local idx agent_id agent_name workspace agents_file decision rc status mode
+  local -a keep_list=()
+  idx=0
+  mode="write"
+  if [ "$DRY_RUN" = true ]; then
+    mode="dry-run"
+  fi
+  while [ "$idx" -lt "${#AGENT_IDS[@]}" ]; do
+    agent_id="${AGENT_IDS[$idx]}"
+    agent_name="${AGENT_NAMES[$idx]}"
+    workspace="${AGENT_WORKSPACES[$idx]}"
+    agents_file="$workspace/AGENTS.md"
+    keep_list=()
+    while IFS= read -r rel; do
+      [ -n "${rel:-}" ] || continue
+      keep_list+=("$rel")
+    done < <(allowed_directives_for_agent "$agent_id")
+
+    decision="Prune stale directive blocks for agent '$agent_name' ($agent_id)?"
+    set +e
+    prompt_yes_no_quit "$decision"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 2 ]; then
+      return 2
+    fi
+    if [ "$rc" -ne 0 ]; then
+      DECLINED_COUNT=$((DECLINED_COUNT + 1))
+      idx=$((idx + 1))
+      continue
+    fi
+
+    if [ "${#keep_list[@]}" -gt 0 ]; then
+      status="$(prune_nonmatching_directive_blocks "$agents_file" "$mode" "${keep_list[@]}")"
+    else
+      status="$(prune_nonmatching_directive_blocks "$agents_file" "$mode")"
+    fi
+    case "$status" in
+      unchanged)
+        log_info "No stale directive blocks to prune: $agents_file"
+        ;;
+      pruned)
+        PRUNED_COUNT=$((PRUNED_COUNT + 1))
+        log_success "Pruned stale directive block(s): $agents_file"
+        ;;
+      would-prune)
+        PRUNED_COUNT=$((PRUNED_COUNT + 1))
+        log_info "(dry-run) Would prune stale directive block(s): $agents_file"
+        ;;
+      *)
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        log_warn "Unexpected prune status '$status' for $agents_file"
+        ;;
+    esac
+    idx=$((idx + 1))
+  done
+  return 0
+}
 
 upsert_main_team_roster_section() {
   local idx main_workspace main_agents_file
@@ -1191,7 +1423,7 @@ main() {
     done
 
     if [ "${#SCOPED_DIRECTIVES[@]}" -gt 0 ]; then
-      log_info "Phase 2: applying directives/<scope>/*.md (excluding all)"
+      log_info "Phase 2: applying directives/<scope>/*.md (scope-aware by agent id)"
     fi
     for directive_file in "${SCOPED_DIRECTIVES[@]}"; do
       directive_rel="${directive_file#$DIRECTIVES_DIR/}"
@@ -1205,9 +1437,18 @@ main() {
         break
       fi
     done
+
+    log_info "Phase 3: pruning stale or mis-scoped directive blocks"
+    set +e
+    prune_agent_directive_blocks
+    rc=$?
+    set -e
+    if [ "$rc" -eq 2 ]; then
+      log_warn "Stopped by user."
+    fi
   fi
 
-  log_info "Phase 3: updating team roster section in main AGENTS.md"
+  log_info "Phase 4: updating team roster section in main AGENTS.md"
   upsert_main_team_roster_section
 
   if phase4_validate_alignment; then
@@ -1220,6 +1461,8 @@ main() {
   log_success "Directive apply run complete."
   echo "Applied: $APPLIED_COUNT"
   echo "Already present (idempotent skips): $EXISTS_COUNT"
+  echo "Pruned stale blocks: $PRUNED_COUNT"
+  echo "Skipped by scope: $SCOPE_SKIP_COUNT"
   echo "Declined: $DECLINED_COUNT"
   echo "Errors: $ERROR_COUNT"
   echo "Team roster status: $TEAM_ROSTER_STATUS"
