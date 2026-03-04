@@ -133,6 +133,19 @@ declare -a OPENCLAW_CFG_TXN_EXPECTED=()
 declare -a OPENCLAW_CFG_TXN_REQUIRED=()
 OPENCLAW_DOCTOR_FIX_ATTEMPTED=false
 
+openclaw_doctor_fix_safe() {
+  if openclaw doctor --fix --non-interactive --yes >/dev/null 2>&1; then
+    return 0
+  fi
+  if openclaw doctor --fix --non-interactive >/dev/null 2>&1; then
+    return 0
+  fi
+  if openclaw doctor --fix >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
 seed_minimal_openclaw_config() {
   local workspace="${1:-}"
   local tmp
@@ -209,7 +222,7 @@ openclaw_doctor_fix_once() {
     return 1
   fi
   OPENCLAW_DOCTOR_FIX_ATTEMPTED=true
-  if openclaw doctor --fix >/dev/null 2>&1; then
+  if openclaw_doctor_fix_safe; then
     log_warn "Detected config schema drift; applied openclaw doctor --fix and retrying config writes."
     return 0
   fi
@@ -442,10 +455,14 @@ openclaw_cfg_set_txn() {
   local value="$2"
   local mode="${3:-string}"      # string | json
   local required="${4:-true}"    # true | false
-  local allow_file_fallback="${5:-true}" # true | false
+  local allow_file_fallback="${5:-}" # true | false
   local expected_json=""
   local cmd=(openclaw config set "$key" "$value")
   local attempt actual_raw expected_norm actual_norm cmd_output cmd_rc cmd_preview
+
+  if [ -z "$allow_file_fallback" ]; then
+    allow_file_fallback="$required"
+  fi
 
   openclaw_cfg_txn_begin
   if [ "$mode" = "json" ]; then
@@ -476,6 +493,15 @@ PY
     fi
     sleep 1
   done
+
+  if printf "%s" "$cmd_output" | grep -Eqi 'unrecognized key|unknown config key|unknown config keys'; then
+    if [ "$required" = true ]; then
+      openclaw_cfg_txn_rollback
+      log_error "Required config key is unsupported by this OpenClaw version: $key"
+    fi
+    log_warn "Skipping optional unsupported OpenClaw key: $key"
+    return 1
+  fi
 
   if [ "$allow_file_fallback" = true ] && openclaw_cfg_file_fallback_enabled && openclaw_cfg_set_file_fallback "$key" "$value" "$mode"; then
     log_warn "Applied direct config file fallback for $key after CLI set failures."
@@ -3567,7 +3593,7 @@ PY
     fi
 
     log_info "Running openclaw doctor --fix to remove any config keys unrecognized by the current gateway version..."
-    if openclaw doctor --fix >/dev/null 2>&1; then
+    if openclaw_doctor_fix_safe; then
       log_success "openclaw doctor --fix completed."
     else
       log_warn "openclaw doctor --fix returned non-zero (may be safe to ignore)."

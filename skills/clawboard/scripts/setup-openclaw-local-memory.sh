@@ -32,12 +32,25 @@ die() { echo "error: $1" >&2; exit 1; }
 
 OPENCLAW_DOCTOR_FIX_ATTEMPTED=false
 
+run_doctor_fix_safe() {
+  if openclaw doctor --fix --non-interactive --yes >/dev/null 2>&1; then
+    return 0
+  fi
+  if openclaw doctor --fix --non-interactive >/dev/null 2>&1; then
+    return 0
+  fi
+  if openclaw doctor --fix >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
 run_doctor_fix_once() {
   if [[ "$OPENCLAW_DOCTOR_FIX_ATTEMPTED" == "true" ]]; then
     return 1
   fi
   OPENCLAW_DOCTOR_FIX_ATTEMPTED=true
-  if openclaw doctor --fix >/dev/null 2>&1; then
+  if run_doctor_fix_safe; then
     log_warn "Detected config schema drift; applied openclaw doctor --fix and retrying config writes."
     return 0
   fi
@@ -242,6 +255,14 @@ cfg_get_json() {
   openclaw config get "$key" --json 2>/dev/null || true
 }
 
+cfg_output_has_unsupported_key() {
+  local msg="${1:-}"
+  if printf "%s" "$msg" | grep -Eqi 'unrecognized key|unknown config key|unknown config keys'; then
+    return 0
+  fi
+  return 1
+}
+
 set_cfg_file_fallback() {
   local key="$1"
   local value="$2"
@@ -434,9 +455,16 @@ set_cfg() {
   local value="$2"
   local mode="${3:-string}"     # string | json
   local required="${4:-true}"   # true | false
+  local allow_file_fallback="${5:-}"
   local expected_json=""
   local actual_raw expected_norm actual_norm
   local cmd=(openclaw config set "$key" "$value")
+  local cmd_output=""
+
+  if [[ -z "$allow_file_fallback" ]]; then
+    allow_file_fallback="$required"
+  fi
+
   begin_cfg_txn
   if [[ "$mode" == "json" ]]; then
     cmd+=(--json)
@@ -449,17 +477,25 @@ print(json.dumps(sys.argv[1]))
 PY
 )"
   fi
-  if "${cmd[@]}" >/dev/null 2>&1; then
+  if cmd_output="$("${cmd[@]}" 2>&1)"; then
     log_info "set $key"
     record_cfg_expectation "$key" "$expected_json" "$required"
     return 0
   fi
-  if run_doctor_fix_once && "${cmd[@]}" >/dev/null 2>&1; then
+  if run_doctor_fix_once && cmd_output="$("${cmd[@]}" 2>&1)"; then
     log_info "set $key"
     record_cfg_expectation "$key" "$expected_json" "$required"
     return 0
   fi
-  if cfg_file_fallback_enabled && set_cfg_file_fallback "$key" "$value" "$mode"; then
+  if cfg_output_has_unsupported_key "$cmd_output"; then
+    if [[ "$required" == "true" ]]; then
+      rollback_cfg_txn
+      die "Required config key is unsupported by this OpenClaw version: $key"
+    fi
+    log_warn "Skipping optional unsupported config key: $key"
+    return 1
+  fi
+  if [[ "$allow_file_fallback" == "true" ]] && cfg_file_fallback_enabled && set_cfg_file_fallback "$key" "$value" "$mode"; then
     log_warn "set $key via direct config file fallback after CLI set failure."
     record_cfg_expectation "$key" "$expected_json" "$required"
     return 0
@@ -482,6 +518,50 @@ PY
 
 # run_cfg_set is an alias for set_cfg — same signature: (key, value, mode, required)
 run_cfg_set() { set_cfg "$@"; }
+
+OPENCLAW_VERSION_RAW=""
+OPENCLAW_SUPPORTS_LOOP_DETECTION=""
+
+openclaw_version_raw() {
+  if [[ -n "$OPENCLAW_VERSION_RAW" ]]; then
+    printf "%s\n" "$OPENCLAW_VERSION_RAW"
+    return 0
+  fi
+  OPENCLAW_VERSION_RAW="$(openclaw --version 2>/dev/null | tr '\r' '\n' | sed -n '1p' | tr -d '[:space:]')"
+  printf "%s\n" "$OPENCLAW_VERSION_RAW"
+}
+
+openclaw_supports_loop_detection() {
+  if [[ -n "$OPENCLAW_SUPPORTS_LOOP_DETECTION" ]]; then
+    printf "%s\n" "$OPENCLAW_SUPPORTS_LOOP_DETECTION"
+    return 0
+  fi
+  local ver
+  ver="$(openclaw_version_raw)"
+  OPENCLAW_SUPPORTS_LOOP_DETECTION="$(
+    python3 - "$ver" <<'PY'
+import re
+import sys
+
+raw = (sys.argv[1] or "").strip()
+m = re.search(r"(\d+)\.(\d+)\.(\d+)", raw)
+if not m:
+    print("false")
+    raise SystemExit(0)
+major, minor, patch = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+print("true" if (major, minor, patch) >= (2026, 3, 0) else "false")
+PY
+  )"
+  printf "%s\n" "$OPENCLAW_SUPPORTS_LOOP_DETECTION"
+}
+
+sanitize_openclaw_config_schema() {
+  if run_doctor_fix_safe; then
+    log_info "OpenClaw config schema sanitized for current CLI version."
+  else
+    log_warn "Could not auto-sanitize OpenClaw config schema (openclaw doctor --fix failed)."
+  fi
+}
 
 as_bool() {
   local raw
@@ -750,6 +830,46 @@ configure_qmd_memory_boost() {
   set_cfg memory.citations auto string false
 }
 
+configure_tool_loop_detection() {
+  if [[ "$(openclaw_supports_loop_detection)" != "true" ]]; then
+    log_warn "Skipping tools.loopDetection writes: unsupported by OpenClaw $(openclaw_version_raw)."
+    return 0
+  fi
+
+  # OpenClaw tool-loop guardrails are disabled by default.
+  # Enable conservative defaults to stop repeated no-progress retries
+  # (for example unknown tool name loops like run/exec in main-agent turns).
+  set_cfg tools.loopDetection.enabled true json false
+  set_cfg tools.loopDetection.historySize 30 json false
+  set_cfg tools.loopDetection.warningThreshold 3 json false
+  set_cfg tools.loopDetection.criticalThreshold 6 json false
+  set_cfg tools.loopDetection.globalCircuitBreakerThreshold 9 json false
+  set_cfg tools.loopDetection.detectors.genericRepeat true json false
+  set_cfg tools.loopDetection.detectors.knownPollNoProgress true json false
+  set_cfg tools.loopDetection.detectors.pingPong true json false
+
+  local enabled_norm
+  enabled_norm="$(normalize_scalar_json_output "$(cfg_get_json tools.loopDetection.enabled)")"
+  if [[ "$enabled_norm" == "true" ]]; then
+    log_success "Global tool-loop detection configured."
+    return 0
+  fi
+
+  # Best-effort fallback for older/legacy OpenClaw schemas.
+  set_cfg tools.loopDetection.detectorCooldownMs 12000 json false
+  set_cfg tools.loopDetection.repeatThreshold 3 json false
+  set_cfg tools.loopDetection.detectors.repeatedFailure true json false
+  set_cfg tools.loopDetection.detectors.knownPollLoop true json false
+  set_cfg tools.loopDetection.detectors.repeatingNoProgress true json false
+
+  enabled_norm="$(normalize_scalar_json_output "$(cfg_get_json tools.loopDetection.enabled)")"
+  if [[ "$enabled_norm" == "true" ]]; then
+    log_success "Legacy-compatible tool-loop detection configured."
+  else
+    log_warn "Could not verify tools.loopDetection.enabled=true on this OpenClaw version."
+  fi
+}
+
 index_agent() {
   local agent_id="$1"
   local max_attempts delay_s attempt rc output timeout_s
@@ -966,6 +1086,21 @@ PY
 
   run_cfg_set "${base}.tools.elevated.enabled" false json true
 
+  if [[ "$(openclaw_supports_loop_detection)" == "true" ]]; then
+    # Main agent is most sensitive to orchestration loops. Use tighter thresholds
+    # than global defaults so repeated no-progress tool calls are stopped quickly.
+    run_cfg_set "${base}.tools.loopDetection.enabled" true json false
+    run_cfg_set "${base}.tools.loopDetection.historySize" 20 json false
+    run_cfg_set "${base}.tools.loopDetection.warningThreshold" 2 json false
+    run_cfg_set "${base}.tools.loopDetection.criticalThreshold" 4 json false
+    run_cfg_set "${base}.tools.loopDetection.globalCircuitBreakerThreshold" 6 json false
+    run_cfg_set "${base}.tools.loopDetection.detectors.genericRepeat" true json false
+    run_cfg_set "${base}.tools.loopDetection.detectors.knownPollNoProgress" true json false
+    run_cfg_set "${base}.tools.loopDetection.detectors.pingPong" true json false
+  else
+    log_info "Skipping main-agent loopDetection overrides on unsupported OpenClaw version."
+  fi
+
   # Heartbeat: 5m interval as a durable sweep. Per-delegation follow-up cadence is
   # model-driven via cron ladder (1m, 3m, 10m, 15m, 30m, 1h).
   run_cfg_set "${base}.heartbeat.every" "5m" string true
@@ -1052,6 +1187,7 @@ PY
 
 main() {
   ensure_openclaw_config_file || die "OpenClaw config not found at: $OPENCLAW_CONFIG_PATH"
+  sanitize_openclaw_config_schema
   log_info "Resolving agents/workspaces from $OPENCLAW_CONFIG_PATH..."
   discover_agents_and_workspaces
   ensure_memory_dirs
@@ -1063,6 +1199,7 @@ main() {
   model_path="$(resolve_model_path)"
   configure_memory_search "$model_path" "$backend"
   configure_qmd_memory_boost "$backend"
+  configure_tool_loop_detection
   configure_main_agent_tools
   verify_cfg_txn
   commit_cfg_txn

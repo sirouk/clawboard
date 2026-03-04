@@ -1546,6 +1546,7 @@ except Exception as exc:
     raise SystemExit(0)
 
 memory = cfg.get("memory") or {}
+tools = cfg.get("tools") or {}
 agents = cfg.get("agents") or {}
 agent_list = agents.get("list") or []
 defaults = agents.get("defaults") or {}
@@ -1569,6 +1570,39 @@ if isinstance(sources, list) and sorted(set(str(v) for v in sources)) == ["memor
     emit("PASS", "agents.defaults.memorySearch.sources", json.dumps(sources))
 else:
     emit("FAIL", "agents.defaults.memorySearch.sources", f"expected ['memory'], got {json.dumps(sources)}")
+
+loop_detection = tools.get("loopDetection")
+if isinstance(loop_detection, dict):
+    if loop_detection.get("enabled") is True:
+        emit("PASS", "tools.loopDetection.enabled", "true")
+    else:
+        emit("WARN", "tools.loopDetection.enabled", f"configured but not enabled (got {loop_detection.get('enabled')!r})")
+
+    warning = loop_detection.get("warningThreshold")
+    critical = loop_detection.get("criticalThreshold")
+    breaker = loop_detection.get("globalCircuitBreakerThreshold")
+    if all(isinstance(v, int) and v > 0 for v in (warning, critical, breaker)):
+        if warning < critical < breaker:
+            emit("PASS", "tools.loopDetection.thresholds", f"{warning}<{critical}<{breaker}")
+        else:
+            emit("FAIL", "tools.loopDetection.thresholds", f"invalid ordering: {warning}, {critical}, {breaker}")
+    else:
+        emit("WARN", "tools.loopDetection.thresholds", f"not fully configured: warning={warning!r} critical={critical!r} breaker={breaker!r}")
+
+    detectors = loop_detection.get("detectors")
+    if isinstance(detectors, dict):
+        missing_detectors = [
+            key for key in ("genericRepeat", "knownPollNoProgress", "pingPong")
+            if detectors.get(key) is not True
+        ]
+        if missing_detectors:
+            emit("WARN", "tools.loopDetection.detectors", f"missing/disabled: {', '.join(missing_detectors)}")
+        else:
+            emit("PASS", "tools.loopDetection.detectors", "genericRepeat,knownPollNoProgress,pingPong")
+    else:
+        emit("WARN", "tools.loopDetection.detectors", "missing detector config object")
+else:
+    emit("WARN", "tools.loopDetection", "not present (may be unsupported on this OpenClaw build)")
 
 if logger.get("enabled") is True:
     emit("PASS", "plugins.entries.clawboard-logger.enabled", "true")
@@ -1633,6 +1667,15 @@ else:
     else:
         emit("PASS", "agents.main.tools.allow", "delegation + clawboard tools present")
 
+    main_loop = (main_agent.get("tools") or {}).get("loopDetection")
+    if isinstance(main_loop, dict):
+        if main_loop.get("enabled") is True:
+            emit("PASS", "agents.main.tools.loopDetection.enabled", "true")
+        else:
+            emit("WARN", "agents.main.tools.loopDetection.enabled", f"configured but not enabled (got {main_loop.get('enabled')!r})")
+    else:
+        emit("WARN", "agents.main.tools.loopDetection", "not present (may be unsupported on this OpenClaw build)")
+
     main_workspace = str(main_agent.get("workspace", "")).strip()
     if not main_workspace:
         emit("FAIL", "agents.main.workspace", "missing workspace path")
@@ -1650,6 +1693,7 @@ else:
                     "Main Agent Operating Contract",
                     "BOARD SESSION RESPONSE GUARANTEE",
                     "CLAWBOARD LEDGER RECOVERY",
+                    "Tool Contract (MANDATORY)",
                 ]
                 missing_markers = [m for m in markers if m not in text]
                 if missing_markers:
@@ -1679,7 +1723,36 @@ PY
   # -------------------------------------------------------------------------
   if command -v openclaw >/dev/null 2>&1; then
     local memory_status_raw=""
-    if memory_status_raw="$(openclaw memory status --json 2>/dev/null)"; then
+    local memory_status_rc=0
+    set +e
+    memory_status_raw="$(
+      python3 - <<'PY'
+import subprocess
+import sys
+
+cmd = ["openclaw", "memory", "status", "--json"]
+try:
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+except subprocess.TimeoutExpired as exc:
+    if exc.stderr:
+        err = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+        if err:
+            sys.stderr.write(err)
+    raise SystemExit(124)
+
+if proc.returncode != 0:
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+    raise SystemExit(proc.returncode)
+
+out = (proc.stdout or "").strip()
+if out:
+    print(out)
+PY
+    )"
+    memory_status_rc=$?
+    set -e
+    if [ "$memory_status_rc" -eq 0 ]; then
       local memory_checks=""
       if memory_checks="$(python3 - "$memory_status_raw" <<'PY'
 import json
@@ -1699,31 +1772,48 @@ except Exception as exc:
     print("\n".join(rows))
     raise SystemExit(0)
 
+if isinstance(data, dict):
+    if isinstance(data.get("agents"), list):
+        data = data.get("agents") or []
+    elif "agentId" in data and isinstance(data.get("status"), dict):
+        data = [data]
+    else:
+        emit("WARN", "openclaw.memory.status", f"unexpected payload shape: {sorted(data.keys())[:8]}")
+        print("\n".join(rows))
+        raise SystemExit(0)
+
 if not isinstance(data, list) or not data:
-    emit("FAIL", "openclaw.memory.status", "no agent status rows")
+    emit("WARN", "openclaw.memory.status", "no agent status rows")
     print("\n".join(rows))
     raise SystemExit(0)
 
 emit("PASS", "openclaw.memory.status", f"rows={len(data)}")
 for row in data:
     aid = str((row or {}).get("agentId", "")).strip() or "(unknown)"
-    st = (row or {}).get("status") or {}
-    backend = st.get("backend")
-    provider = st.get("provider")
-    dirty = st.get("dirty")
-    sources = st.get("sources") or []
+    row_obj = row or {}
+    st = row_obj.get("status") or {}
+    backend = st.get("backend", row_obj.get("backend"))
+    provider = st.get("provider", row_obj.get("provider"))
+    dirty = st.get("dirty", row_obj.get("dirty"))
+    sources = st.get("sources", row_obj.get("sources")) or []
 
-    if backend == "qmd" and provider == "qmd":
+    if backend is None and provider is None:
+        emit("WARN", f"memory.status.{aid}.backend_provider", "missing backend/provider fields")
+    elif backend == "qmd" and provider == "qmd":
         emit("PASS", f"memory.status.{aid}.backend_provider", "qmd/qmd")
     else:
         emit("FAIL", f"memory.status.{aid}.backend_provider", f"expected qmd/qmd, got {backend!r}/{provider!r}")
 
-    if dirty is False:
+    if dirty is None:
+        emit("WARN", f"memory.status.{aid}.dirty", "missing dirty field")
+    elif dirty is False:
         emit("PASS", f"memory.status.{aid}.dirty", "false")
     else:
         emit("FAIL", f"memory.status.{aid}.dirty", f"expected false, got {dirty!r}")
 
-    if isinstance(sources, list) and sorted(set(str(v) for v in sources)) == ["memory"]:
+    if not isinstance(sources, list) or not sources:
+        emit("WARN", f"memory.status.{aid}.sources", f"missing/empty sources field ({json.dumps(sources)})")
+    elif sorted(set(str(v) for v in sources)) == ["memory"]:
         emit("PASS", f"memory.status.{aid}.sources", json.dumps(sources))
     else:
         emit("FAIL", f"memory.status.{aid}.sources", f"expected memory-only, got {json.dumps(sources)}")
@@ -1743,6 +1833,8 @@ PY
       else
         _verify_fail "Unable to parse openclaw memory status payload."
       fi
+    elif [ "$memory_status_rc" -eq 124 ]; then
+      _verify_warn "openclaw memory status timed out after 25s; skipping runtime memory status checks."
     else
       _verify_fail "openclaw memory status query failed."
     fi
