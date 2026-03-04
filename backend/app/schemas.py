@@ -271,11 +271,6 @@ class LogOutLite(ModelBase):
 
 
 class LogChatCountsResponse(BaseModel):
-    topicChatCounts: Dict[str, int] = Field(
-        default_factory=dict,
-        description="Aggregate topic-chat entry counts keyed by topic id (taskId is null).",
-        examples=[{"topic-1": 12, "topic-2": 3}],
-    )
     taskChatCounts: Dict[str, int] = Field(
         default_factory=dict,
         description="Aggregate task-chat entry counts keyed by task id.",
@@ -506,8 +501,8 @@ class DraftUpsert(BaseModel):
         ...,
         min_length=1,
         max_length=240,
-        description="Stable draft key (e.g. draft:chat:clawboard:topic:topic-123).",
-        examples=["draft:chat:clawboard:topic:topic-123"],
+        description="Stable draft key (e.g. draft:chat:clawboard:task:topic-123:task-456).",
+        examples=["draft:chat:clawboard:task:topic-123:task-456"],
     )
     value: str = Field(
         default="",
@@ -518,7 +513,7 @@ class DraftUpsert(BaseModel):
 
 
 class DraftOut(ModelBase):
-    key: str = Field(description="Draft key.", examples=["draft:chat:clawboard:topic:topic-123"])
+    key: str = Field(description="Draft key.", examples=["draft:chat:clawboard:task:topic-123:task-456"])
     value: str = Field(description="Draft value.", examples=["Working on the onboarding flow..."])
     createdAt: str = Field(description="ISO timestamp when created.", examples=["2026-02-09T18:00:00.000Z"])
     updatedAt: str = Field(description="ISO timestamp when updated.", examples=["2026-02-09T18:05:00.000Z"])
@@ -541,7 +536,7 @@ class OpenClawChatRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "sessionKey": "clawboard:thread-123",
+                "sessionKey": "clawboard:task:topic-123:task-456",
                 "message": "Summarize what we did today and propose next steps.",
                 "agentId": "main",
             }
@@ -549,8 +544,8 @@ class OpenClawChatRequest(BaseModel):
     )
     sessionKey: str = Field(
         ...,
-        description="OpenClaw session key for thread continuity. Use a stable value per thread.",
-        examples=["clawboard:thread-123"],
+        description="OpenClaw session key for thread continuity. Board sends must use clawboard:task:<topicId>:<taskId>.",
+        examples=["clawboard:task:topic-123:task-456"],
         min_length=1,
         max_length=240,
     )
@@ -574,16 +569,59 @@ class OpenClawChatRequest(BaseModel):
         ),
         examples=["main"],
     )
-    topicOnly: Optional[bool] = Field(
-        default=None,
-        description="When true on a topic-scoped session, keep this send in topic chat only (no task routing).",
-        examples=[True],
-    )
     attachmentIds: Optional[List[str]] = Field(
         default=None,
         description="Attachment IDs (from POST /api/attachments) to include in the OpenClaw request.",
         examples=[["att-123", "att-456"]],
         max_length=16,
+    )
+
+
+class OpenClawResolveBoardSendRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "message": "Please prep migration for Postgres indexes this week.",
+                "spaceId": "space-default",
+                "selectedTopicId": "topic-123",
+                "selectedTaskId": None,
+            }
+        }
+    )
+
+    message: str = Field(
+        ...,
+        description="User message content used for resolver topic/task decisioning.",
+        min_length=1,
+        max_length=20_000,
+    )
+    spaceId: Optional[str] = Field(
+        default=None,
+        description="Optional board source space id to scope resolver context.",
+        examples=["space-default"],
+    )
+    selectedTopicId: Optional[str] = Field(
+        default=None,
+        description="Optional selected topic id from Unified view.",
+        examples=["topic-123"],
+    )
+    selectedTaskId: Optional[str] = Field(
+        default=None,
+        description="Optional selected task id from Unified view.",
+        examples=["task-456"],
+    )
+
+
+class OpenClawResolveBoardSendResponse(BaseModel):
+    topicId: str = Field(description="Resolved topic id.")
+    topicName: str = Field(description="Resolved topic name.")
+    topicCreated: bool = Field(description="Whether resolver created topic.")
+    taskId: str = Field(description="Resolved task id.")
+    taskTitle: str = Field(description="Resolved task title.")
+    taskCreated: bool = Field(description="Whether resolver created task.")
+    sessionKey: str = Field(description="Resolved task session key (clawboard:task:<topicId>:<taskId>).")
+    decisionSource: str = Field(
+        description="Resolver decision mode source (llm|heuristic|direct_selected_task|selected_topic_fallback).",
     )
 
 
@@ -851,7 +889,10 @@ class ClassifierReplayRequest(BaseModel):
 class ClassifierReplayResponse(BaseModel):
     ok: bool = Field(default=True, description="Whether the replay request was accepted.", examples=[True])
     anchorLogId: str = Field(description="Anchor log id that started the replay.", examples=["log-123"])
-    sessionKey: str = Field(description="Session key being replayed (source.sessionKey).", examples=["clawboard:topic:topic-1"])
+    sessionKey: str = Field(
+        description="Session key being replayed (source.sessionKey). Task Chat only.",
+        examples=["clawboard:task:topic-1:task-1"],
+    )
     topicId: Optional[str] = Field(description="Resolved topic id for the session (if board-scoped).", examples=["topic-1"])
     logCount: int = Field(description="Number of logs marked pending for replay.", examples=[6])
     logIds: List[str] = Field(default_factory=list, description="IDs of logs marked pending for replay.")

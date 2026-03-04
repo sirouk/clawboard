@@ -495,14 +495,14 @@ test("message_sending includes requestId in source metadata when present", async
       {
         content: "Assistant reply with request id",
         metadata: {
-          sessionKey: "clawboard:topic:topic-req-1",
+          sessionKey: "clawboard:task:topic-req-1:task-req-1",
           messageId: "assistant-msg-req-1",
           requestId: "occhat-request-meta-1",
         },
       },
       {
         channelId: "openclaw",
-        conversationId: "clawboard:topic:topic-req-1",
+        conversationId: "clawboard:task:topic-req-1:task-req-1",
         agentId: "main",
       }
     );
@@ -535,14 +535,14 @@ test("agent_end fallback reuses recent board-session requestId", async () => {
       {
         content: "already persisted by backend",
         metadata: {
-          sessionKey: "clawboard:topic:topic-req-fallback",
+          sessionKey: "clawboard:task:topic-req-fallback:task-req-fallback",
           messageId: "occhat-request-fallback-1",
         },
       },
       {
         channelId: "openclaw",
-        sessionKey: "clawboard:topic:topic-req-fallback",
-        conversationId: "clawboard:topic:topic-req-fallback",
+        sessionKey: "clawboard:task:topic-req-fallback:task-req-fallback",
+        conversationId: "clawboard:task:topic-req-fallback:task-req-fallback",
         agentId: "main",
       }
     );
@@ -553,7 +553,7 @@ test("agent_end fallback reuses recent board-session requestId", async () => {
         messages: [{ role: "assistant", content: "Fallback assistant payload with request id" }],
       },
       {
-        sessionKey: "clawboard:topic:topic-req-fallback",
+        sessionKey: "clawboard:task:topic-req-fallback:task-req-fallback",
         channelId: "openclaw",
         agentId: "main",
       }
@@ -650,8 +650,8 @@ test("before_agent_start adds no-reply-directive hint for board sessions", async
         messages: [],
       },
       {
-        sessionKey: "clawboard:topic:topic-123",
-        conversationId: "clawboard:topic:topic-123",
+        sessionKey: "clawboard:task:topic-123:task-123",
+        conversationId: "clawboard:task:topic-123:task-123",
       }
     );
 
@@ -1241,15 +1241,15 @@ test("before_tool_call inherits requestId across wrapped subagent session keys",
       {
         content: "start request chain",
         metadata: {
-          sessionKey: "clawboard:topic:topic-tool-request-001",
+          sessionKey: "clawboard:task:topic-tool-request-001:task-tool-request-001",
           messageId: "occhat-tool-request-001",
           requestId: "occhat-tool-request-001",
         },
       },
       {
         channelId: "webchat",
-        sessionKey: "clawboard:topic:topic-tool-request-001",
-        conversationId: "clawboard:topic:topic-tool-request-001",
+        sessionKey: "clawboard:task:topic-tool-request-001:task-tool-request-001",
+        conversationId: "clawboard:task:topic-tool-request-001:task-tool-request-001",
       }
     );
 
@@ -1259,7 +1259,7 @@ test("before_tool_call inherits requestId across wrapped subagent session keys",
         params: { q: "progress" },
       },
       {
-        sessionKey: "bridge:subagent:worker-1:clawboard:topic:topic-tool-request-001",
+        sessionKey: "bridge:subagent:worker-1:clawboard:task:topic-tool-request-001:task-tool-request-001",
         channelId: "webchat",
         agentId: "assistant",
       }
@@ -1275,7 +1275,7 @@ test("before_tool_call inherits requestId across wrapped subagent session keys",
   }
 });
 
-test("topic-only board scope hint survives into downstream tool events", async () => {
+test("task-scoped board hint survives into downstream tool events", async () => {
   const originalFetch = globalThis.fetch;
   try {
     const { fn, calls } = createFetchMock([]);
@@ -1293,16 +1293,16 @@ test("topic-only board scope hint survives into downstream tool events", async (
       {
         content: "persisted board-only question",
         metadata: {
-          sessionKey: "clawboard:topic:topic-only-routing-001",
-          messageId: "occhat-topic-only-routing-001",
-          boardScopeKind: "topic_only",
-          boardScopeTopicOnly: true,
+          sessionKey: "clawboard:task:topic-routing-001:task-routing-001",
+          messageId: "occhat-task-routing-001",
+          boardScopeKind: "task",
+          boardScopeTaskId: "task-routing-001",
         },
       },
       {
         channelId: "openclaw",
-        sessionKey: "clawboard:topic:topic-only-routing-001",
-        conversationId: "clawboard:topic:topic-only-routing-001",
+        sessionKey: "clawboard:task:topic-routing-001:task-routing-001",
+        conversationId: "clawboard:task:topic-routing-001:task-routing-001",
         agentId: "main",
       },
     );
@@ -1313,7 +1313,7 @@ test("topic-only board scope hint survives into downstream tool events", async (
         params: { key: "routing" },
       },
       {
-        sessionKey: "clawboard:topic:topic-only-routing-001",
+        sessionKey: "clawboard:task:topic-routing-001:task-routing-001",
         channelId: "openclaw",
         agentId: "main",
       },
@@ -1337,15 +1337,16 @@ test("topic-only board scope hint survives into downstream tool events", async (
       .find((payload) => payload?.type === "action" && payload?.content === "Tool call: memory.get");
 
     assert.ok(toolPayload, "expected tool action log");
-    assert.equal(toolPayload.topicId, "topic-only-routing-001");
-    assert.equal(toolPayload.source.boardScopeKind, "topic_only");
-    assert.equal(toolPayload.source.boardScopeTopicOnly, true);
+    assert.equal(toolPayload.topicId, "topic-routing-001");
+    assert.equal(toolPayload.taskId, "task-routing-001");
+    assert.equal(toolPayload.source.boardScopeKind, "task");
+    assert.equal(toolPayload.source.boardScopeTaskId, "task-routing-001");
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("before_tool_call applies topic-only hint from tool metadata without prior cache", async () => {
+test("before_tool_call applies task hint from tool metadata without prior cache", async () => {
   const originalFetch = globalThis.fetch;
   try {
     const { fn, calls } = createFetchMock([]);
@@ -1362,13 +1363,13 @@ test("before_tool_call applies topic-only hint from tool metadata without prior 
         toolName: "memory.search",
         params: { q: "cold state" },
         metadata: {
-          sessionKey: "clawboard:topic:topic-only-routing-cold-001",
-          boardScopeKind: "topic_only",
-          boardScopeTopicOnly: true,
+          sessionKey: "clawboard:task:topic-routing-cold-001:task-routing-cold-001",
+          boardScopeKind: "task",
+          boardScopeTaskId: "task-routing-cold-001",
         },
       },
       {
-        sessionKey: "clawboard:topic:topic-only-routing-cold-001",
+        sessionKey: "clawboard:task:topic-routing-cold-001:task-routing-cold-001",
         channelId: "openclaw",
         agentId: "main",
       },
@@ -1393,9 +1394,10 @@ test("before_tool_call applies topic-only hint from tool metadata without prior 
     assert.ok(toolPayload, "expected tool action log");
     assert.equal(toolPayload.type, "action");
     assert.equal(toolPayload.content, "Tool call: memory.search");
-    assert.equal(toolPayload.topicId, "topic-only-routing-cold-001");
-    assert.equal(toolPayload.source.boardScopeKind, "topic_only");
-    assert.equal(toolPayload.source.boardScopeTopicOnly, true);
+    assert.equal(toolPayload.topicId, "topic-routing-cold-001");
+    assert.equal(toolPayload.taskId, "task-routing-cold-001");
+    assert.equal(toolPayload.source.boardScopeKind, "task");
+    assert.equal(toolPayload.source.boardScopeTaskId, "task-routing-cold-001");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1530,7 +1532,7 @@ test("before_tool_call prefers canonical occhat requestId over non-occhat runId"
         runId: "run-non-openclaw-req-1",
       },
       {
-        sessionKey: "agent:main:clawboard:topic:topic-canonical-tool-req-1",
+        sessionKey: "agent:main:clawboard:task:topic-canonical-tool-req-1:task-canonical-tool-req-1",
         channelId: "openclaw",
         agentId: "main",
       }
@@ -2233,13 +2235,13 @@ test("board-session user message echo is skipped to avoid double logging (ING-00
       {
         content: "already persisted by /api/openclaw/chat",
         metadata: {
-          sessionKey: "clawboard:topic:topic-123",
+          sessionKey: "clawboard:task:topic-123:task-123",
           messageId: "board-msg-1",
         },
       },
       {
         channelId: "openclaw",
-        sessionKey: "clawboard:topic:topic-123",
+        sessionKey: "clawboard:task:topic-123:task-123",
         conversationId: "channel:ignored",
       }
     );

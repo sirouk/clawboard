@@ -6,7 +6,7 @@ const resolveToken = () =>
   (process.env.PLAYWRIGHT_CLAWBOARD_TOKEN ?? "").trim() ||
   (process.env.CLAWBOARD_TOKEN ?? "").trim();
 
-const authHeaders = (token: string) => {
+const authHeaders = (token: string): Record<string, string> => {
   if (!token) return {};
   return { "X-Clawboard-Token": token };
 };
@@ -20,7 +20,9 @@ test.describe("live stack smoke", () => {
     const suffix = Date.now();
     const topicId = `topic-live-smoke-${suffix}`;
     const topicName = `Live Smoke ${suffix}`;
-    const sessionKey = `clawboard:topic:${topicId}`;
+    const taskId = `task-live-smoke-${suffix}`;
+    const taskTitle = `Live Smoke Task ${suffix}`;
+    const sessionKey = `clawboard:task:${topicId}:${taskId}`;
     const message = `live-smoke-message-${suffix}`;
 
     let createTopic: Awaited<ReturnType<typeof request.post>>;
@@ -41,6 +43,12 @@ test.describe("live stack smoke", () => {
     }
     expect(createTopic.ok()).toBeTruthy();
 
+    const createTask = await request.post(`${apiBase}/api/tasks`, {
+      headers: authHeaders(token),
+      data: { id: taskId, topicId, title: taskTitle, status: "doing", pinned: false },
+    });
+    expect(createTask.ok()).toBeTruthy();
+
     await page.addInitScript(
       ([apiBaseValue, tokenValue]) => {
         window.localStorage.setItem("clawboard.apiBase", apiBaseValue);
@@ -53,16 +61,10 @@ test.describe("live stack smoke", () => {
       [apiBase, token]
     );
 
-    await page.goto(`/u/topic/${topicId}`);
+    await page.goto(`/u/topic/${topicId}/task/${taskId}`);
     await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
-    const topicToggle = page.getByTestId(`toggle-topic-chat-${topicId}`);
-    const label = (await topicToggle.getAttribute("aria-label")) ?? "";
-    if (/expand/i.test(label)) {
-      await topicToggle.click();
-    }
-
-    const composer = page.getByTestId(`topic-chat-composer-${topicId}`).getByRole("textbox");
+    const composer = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
     await expect(composer).toBeVisible();
 
     const send = page.waitForResponse(

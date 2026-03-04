@@ -32,9 +32,9 @@ test("computeEffectiveSessionKey prefers board sessionKey over conversationId", 
   const ctx = {
     channelId: "discord",
     conversationId: "channel:discord-123",
-    sessionKey: "clawboard:topic:topic-123",
+    sessionKey: "clawboard:task:topic-123:task-123",
   };
-  assert.equal(computeEffectiveSessionKey(meta, ctx), "clawboard:topic:topic-123");
+  assert.equal(computeEffectiveSessionKey(meta, ctx), "clawboard:task:topic-123:task-123");
 });
 
 test("computeEffectiveSessionKey prefers wrapped board sessionKey over conversationId", () => {
@@ -42,23 +42,15 @@ test("computeEffectiveSessionKey prefers wrapped board sessionKey over conversat
   const ctx = {
     channelId: "discord",
     conversationId: "channel:discord-123",
-    sessionKey: "agent:main:clawboard:topic:topic-123",
+    sessionKey: "agent:main:clawboard:task:topic-123:task-123",
   };
-  assert.equal(computeEffectiveSessionKey(meta, ctx), "agent:main:clawboard:topic:topic-123");
+  assert.equal(computeEffectiveSessionKey(meta, ctx), "agent:main:clawboard:task:topic-123:task-123");
 });
 
 test("computeEffectiveSessionKey does not append thread suffix to board sessionKey", () => {
   const meta = { threadId: "999" };
   const ctx = { sessionKey: "clawboard:task:topic-123:task-456" };
   assert.equal(computeEffectiveSessionKey(meta, ctx), "clawboard:task:topic-123:task-456");
-});
-
-test("parseBoardSessionKey parses topic scope", () => {
-  assert.deepEqual(parseBoardSessionKey("clawboard:topic:topic-123"), { kind: "topic", topicId: "topic-123" });
-});
-
-test("parseBoardSessionKey parses wrapped topic scope", () => {
-  assert.deepEqual(parseBoardSessionKey("agent:main:clawboard:topic:topic-123"), { kind: "topic", topicId: "topic-123" });
 });
 
 test("parseBoardSessionKey parses task scope", () => {
@@ -78,7 +70,11 @@ test("parseBoardSessionKey parses wrapped task scope", () => {
 });
 
 test("parseBoardSessionKey ignores thread suffix", () => {
-  assert.deepEqual(parseBoardSessionKey("clawboard:topic:topic-123|thread:999"), { kind: "topic", topicId: "topic-123" });
+  assert.deepEqual(parseBoardSessionKey("clawboard:task:topic-123:task-456|thread:999"), {
+    kind: "task",
+    topicId: "topic-123",
+    taskId: "task-456",
+  });
 });
 
 test("parseBoardSessionKey rejects malformed values", () => {
@@ -109,6 +105,6 @@ test("computeEffectiveSessionKey handles channel fallback correctly", () => {
 
 test("computeEffectiveSessionKey handles threadId edge cases", () => {
   const meta = { threadId: "thread-123" };
-  const ctx = { sessionKey: "clawboard:topic:topic-123|thread:thread-123" };
-  assert.equal(computeEffectiveSessionKey(meta, ctx), "clawboard:topic:topic-123|thread:thread-123");
+  const ctx = { sessionKey: "clawboard:task:topic-123:task-123|thread:thread-123" };
+  assert.equal(computeEffectiveSessionKey(meta, ctx), "clawboard:task:topic-123:task-123|thread:thread-123");
 });

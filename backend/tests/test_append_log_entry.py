@@ -129,7 +129,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "createdAt": ts,
                 "agentId": "user",
                 "agentLabel": "User",
-                "source": {"channel": "tests", "sessionKey": "clawboard:topic:topic-b", "messageId": "m1"},
+                "source": {"channel": "tests", "sessionKey": "clawboard:task:topic-b:task-a", "messageId": "m1"},
             },
         )
         self.assertEqual(res.status_code, 200, res.text)
@@ -722,7 +722,7 @@ class AppendLogEntryTests(unittest.TestCase):
             )
             session.add(
                 SessionRoutingMemory(
-                    sessionKey="clawboard:topic:topic-a",
+                    sessionKey="clawboard:task:topic-a:task-a",
                     items=[
                         {
                             "ts": ts,
@@ -752,7 +752,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "OpenClaw",
                 "source": {
                     "channel": "webchat",
-                    "sessionKey": "agent:main:clawboard:topic:topic-a",
+                    "sessionKey": "agent:main:clawboard:task:topic-a:task-a",
                     "messageId": "oc:wrapped-memory-infer-1",
                 },
             },
@@ -817,7 +817,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "User",
                 "source": {
                     "channel": "openclaw",
-                    "sessionKey": "clawboard:topic:topic-a",
+                    "sessionKey": "clawboard:task:topic-a:task-a",
                     "requestId": "occhat-promote-bridge-1",
                     "messageId": "occhat-promote-bridge-1",
                 },
@@ -842,7 +842,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "OpenClaw",
                 "source": {
                     "channel": "webchat",
-                    "sessionKey": "agent:main:clawboard:topic:topic-a",
+                    "sessionKey": "agent:main:clawboard:task:topic-a:task-a",
                     "requestId": "occhat-promote-bridge-1",
                     "messageId": "oc:assistant-promote-bridge-1",
                 },
@@ -912,7 +912,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "User",
                 "source": {
                     "channel": "openclaw",
-                    "sessionKey": "clawboard:topic:topic-a",
+                    "sessionKey": "clawboard:task:topic-a:task-a",
                     "requestId": "occhat-dedupe-wrap-1",
                     "messageId": "occhat-dedupe-wrap-1",
                 },
@@ -937,7 +937,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "User",
                 "source": {
                     "channel": "webchat",
-                    "sessionKey": "agent:main:clawboard:topic:topic-a",
+                    "sessionKey": "agent:main:clawboard:task:topic-a:task-a",
                     "requestId": "occhat-dedupe-wrap-1",
                     "messageId": "occhat-dedupe-wrap-1:replay",
                 },
@@ -987,7 +987,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "OpenClaw",
                 "source": {
                     "channel": "clawboard",
-                    "sessionKey": "clawboard:topic:topic-a",
+                    "sessionKey": "clawboard:task:topic-a:task-a",
                 },
             },
         )
@@ -1010,7 +1010,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "OpenClaw",
                 "source": {
                     "channel": "direct",
-                    "sessionKey": "agent:main:clawboard:topic:topic-a",
+                    "sessionKey": "agent:main:clawboard:task:topic-a:task-a",
                     "messageId": "oc:assistant-wrap-vs-board-1",
                 },
             },
@@ -1065,7 +1065,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "OpenClaw",
                 "source": {
                     "channel": "clawboard",
-                    "sessionKey": "clawboard:topic:topic-a",
+                    "sessionKey": "clawboard:task:topic-a:task-a",
                     "requestId": request_id,
                 },
             },
@@ -1089,7 +1089,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "OpenClaw",
                 "source": {
                     "channel": "direct",
-                    "sessionKey": "agent:main:clawboard:topic:topic-a",
+                    "sessionKey": "agent:main:clawboard:task:topic-a:task-a",
                     "requestId": request_id,
                     "messageId": "oc:assistant-wrap-vs-board-request-message-1",
                 },
@@ -1208,7 +1208,7 @@ class AppendLogEntryTests(unittest.TestCase):
             agentLabel="User",
             source={
                 "channel": "openclaw",
-                "sessionKey": "clawboard:topic:topic-race-a",
+                "sessionKey": "clawboard:task:topic-race-a:task-race-a",
                 "requestId": "occhat-race-append-1",
                 "messageId": "occhat-race-append-1",
             },
@@ -1224,7 +1224,7 @@ class AppendLogEntryTests(unittest.TestCase):
             agentLabel="User",
             source={
                 "channel": "webchat",
-                "sessionKey": "agent:main:clawboard:topic:topic-race-a",
+                "sessionKey": "agent:main:clawboard:task:topic-race-a:task-race-a",
                 "requestId": "occhat-race-append-1",
                 "messageId": "occhat-race-append-1:replay",
             },
@@ -1259,7 +1259,7 @@ class AppendLogEntryTests(unittest.TestCase):
             rows = session.exec(select(LogEntry)).all()
             self.assertEqual(len(rows), 1)
             row = rows[0]
-            self.assertEqual(str(row.sourceIdentityKey or ""), "srcid:conversation:user:openclaw:clawboard:topic:topic-race-a:req:occhat-race-append-1")
+            self.assertEqual(str(row.sourceIdentityKey or ""), "srcid:conversation:user:openclaw:clawboard:task:topic-race-a:task-race-a:req:occhat-race-append-1")
 
     def test_append_log_creates_request_route_from_board_user_send(self):
         ts = now_iso()
@@ -1294,7 +1294,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "User",
                 "source": {
                     "channel": "openclaw",
-                    "sessionKey": "clawboard:topic:topic-a",
+                    "sessionKey": "clawboard:task:topic-a:task-a",
                     "requestId": "occhat-route-seed-1",
                     "messageId": "occhat-route-seed-1",
                 },
@@ -1344,7 +1344,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "User",
                 "source": {
                     "channel": "openclaw",
-                    "sessionKey": "clawboard:topic:topic-a",
+                    "sessionKey": "clawboard:task:topic-a:task-a",
                     "requestId": "run-not-occhat-route-seed-1",
                     "messageId": "occhat-route-seed-message-1",
                 },
@@ -1441,7 +1441,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "OpenClaw",
                 "source": {
                     "channel": "webchat",
-                    "sessionKey": "agent:main:clawboard:topic:topic-b",
+                    "sessionKey": "agent:main:clawboard:task:topic-b:task-b",
                     "requestId": "occhat-route-lock-1",
                     "messageId": "oc:route-lock-1-assistant",
                     "boardScopeTopicId": "topic-b",
@@ -1538,7 +1538,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "OpenClaw",
                 "source": {
                     "channel": "openclaw",
-                    "sessionKey": "agent:main:clawboard:topic:topic-b",
+                    "sessionKey": "agent:main:clawboard:task:topic-b:task-b",
                     "requestId": "run-route-by-messageid-1",
                     "messageId": "occhat-route-by-messageid-1",
                     "boardScopeTopicId": "topic-b",
@@ -1602,7 +1602,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "User",
                 "source": {
                     "channel": "openclaw",
-                    "sessionKey": "clawboard:topic:topic-a",
+                    "sessionKey": "clawboard:task:topic-a:task-a",
                     "requestId": "occhat-promote-route-1",
                     "messageId": "occhat-promote-route-1",
                 },
@@ -1683,7 +1683,7 @@ class AppendLogEntryTests(unittest.TestCase):
                 "agentLabel": "User",
                 "source": {
                     "channel": "openclaw",
-                    "sessionKey": "clawboard:topic:topic-a",
+                    "sessionKey": "clawboard:task:topic-a:task-a",
                     "requestId": request_id,
                     "messageId": request_id,
                 },
@@ -1712,7 +1712,7 @@ class AppendLogEntryTests(unittest.TestCase):
                     "agentLabel": "OpenClaw",
                     "source": {
                         "channel": "clawboard",
-                        "sessionKey": "clawboard:topic:topic-a",
+                        "sessionKey": "clawboard:task:topic-a:task-a",
                         "requestId": request_id,
                         "boardScopeTopicId": "topic-a",
                         "boardScopeTaskId": "task-a",

@@ -14,7 +14,6 @@ const subscribers = new Set();
 const eventBuffer = [];
 const MAX_EVENTS = 200;
 let nextEventId = 0;
-const BOARD_TOPIC_SESSION_PREFIX = "clawboard:topic:";
 const BOARD_TASK_SESSION_PREFIX = "clawboard:task:";
 
 function nowIso() {
@@ -94,10 +93,6 @@ function normalizeLog(entry) {
 function parseBoardSessionKey(sessionKey) {
   const key = String(sessionKey || "").trim();
   if (!key) return { topicId: null, taskId: null };
-  if (key.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
-    const topicId = key.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim();
-    return { topicId: topicId || null, taskId: null };
-  }
   if (key.startsWith(BOARD_TASK_SESSION_PREFIX)) {
     const rest = key.slice(BOARD_TASK_SESSION_PREFIX.length).trim();
     const parts = rest.split(":");

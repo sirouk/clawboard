@@ -1080,14 +1080,12 @@ MEMORY_ACTION_RE = re.compile(
     flags=re.IGNORECASE,
 )
 BOARD_TASK_RE = re.compile(r"clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)")
-BOARD_TOPIC_RE = re.compile(r"clawboard:topic:(topic-[a-zA-Z0-9-]+)")
 TRUE_VALUES = {"1", "true", "yes", "on"}
 SCOPE_PRUNE_KEYS = (
     "boardScopeTopicId",
     "boardScopeTaskId",
     "boardScopeKind",
     "boardScopeLock",
-    "boardScopeTopicOnly",
 )
 
 
@@ -1132,9 +1130,6 @@ def _parse_board_session_key(base):
     task_match = BOARD_TASK_RE.search(key)
     if task_match:
         return (task_match.group(1), task_match.group(2))
-    topic_match = BOARD_TOPIC_RE.search(key)
-    if topic_match:
-        return (topic_match.group(1), None)
     return (None, None)
 
 
@@ -1188,9 +1183,9 @@ def _supports_bundle_tool_scoping(base_session_key):
         return False
     if base.startswith("channel:"):
         return True
-    if base.startswith("clawboard:topic:") or base.startswith("clawboard:task:"):
+    if base.startswith("clawboard:task:"):
         return True
-    return ":clawboard:topic:" in base or ":clawboard:task:" in base
+    return ":clawboard:task:" in base
 
 
 def _prune_scope(source):
@@ -1202,26 +1197,11 @@ def _prune_scope(source):
 
 def _canonical_source_for_anchor(source, *, topic_id, task_id, space_id):
     out = dict(source or {})
-    if topic_id:
+    if topic_id and task_id:
         out["boardScopeTopicId"] = topic_id
-        if task_id:
-            out["boardScopeTaskId"] = task_id
-            out["boardScopeKind"] = "task"
-            out["boardScopeLock"] = True
-            out.pop("boardScopeTopicOnly", None)
-        else:
-            out.pop("boardScopeTaskId", None)
-            if _truthy(out.get("boardScopeTopicOnly")):
-                out["boardScopeTopicOnly"] = True
-                out["boardScopeKind"] = "topic_only"
-                out["boardScopeLock"] = True
-            else:
-                out.pop("boardScopeTopicOnly", None)
-                out["boardScopeKind"] = "topic"
-                if "boardScopeLock" in out:
-                    out["boardScopeLock"] = _truthy(out.get("boardScopeLock"))
-                else:
-                    out["boardScopeLock"] = False
+        out["boardScopeTaskId"] = task_id
+        out["boardScopeKind"] = "task"
+        out["boardScopeLock"] = True
     else:
         out = _prune_scope(out)
 

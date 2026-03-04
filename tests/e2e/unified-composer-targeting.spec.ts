@@ -8,6 +8,8 @@ test("unified composer auto-grows and routes continuation to explicit selected t
   const taskId = `task-target-${suffix}`;
   const taskTitle = `Target Task ${suffix}`;
   const logNeedle = `needle-${suffix}`;
+  const resolvedTopicId = `topic-resolved-${suffix}`;
+  const resolvedTaskId = `task-resolved-${suffix}`;
 
   const createTopic = await request.post(`${apiBase}/api/topics`, {
     data: { id: topicId, name: topicName, pinned: false },
@@ -35,6 +37,22 @@ test("unified composer auto-grows and routes continuation to explicit selected t
   expect(createLog.ok()).toBeTruthy();
 
   const sentPayloads: Array<Record<string, unknown>> = [];
+  await page.route("**/api/openclaw/resolve-board-send", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        topicId: resolvedTopicId,
+        topicName: `Resolved Topic ${suffix}`,
+        topicCreated: true,
+        taskId: resolvedTaskId,
+        taskTitle: `Resolved Task ${suffix}`,
+        taskCreated: true,
+        sessionKey: `clawboard:task:${resolvedTopicId}:${resolvedTaskId}`,
+        decisionSource: "test",
+      }),
+    });
+  });
   await page.route("**/api/openclaw/chat", async (route) => {
     const payload = route.request().postDataJSON() as Record<string, unknown>;
     sentPayloads.push(payload);
@@ -57,10 +75,10 @@ test("unified composer auto-grows and routes continuation to explicit selected t
   expect(afterHeight).toBeGreaterThan(beforeHeight);
   await expect(textarea).toHaveCSS("overflow-y", "hidden");
 
-  await page.getByTestId("unified-composer-new-topic").click();
+  await textarea.press("Control+Enter");
   await expect.poll(() => sentPayloads.length).toBe(1);
-  expect(String(sentPayloads[0]?.sessionKey ?? "")).toMatch(/^clawboard:topic:topic-/);
-  expect(sentPayloads[0]?.topicOnly).toBe(false);
+  expect(String(sentPayloads[0]?.sessionKey ?? "")).toBe(`clawboard:task:${resolvedTopicId}:${resolvedTaskId}`);
+  expect(Object.prototype.hasOwnProperty.call(sentPayloads[0] ?? {}, "topicOnly")).toBe(false);
 
   await textarea.fill("continue in explicit task target");
   await page.getByTestId(`select-task-target-${taskId}`).click();
@@ -76,12 +94,40 @@ test("keyboard send in unified composer uses new topic when no target and select
   const suffix = Date.now();
   const topicId = `topic-keyboard-${suffix}`;
   const topicName = `Keyboard Topic ${suffix}`;
+  const topicTaskId = `task-keyboard-${suffix}`;
   const sentPayloads: Array<Record<string, unknown>> = [];
 
   const createTopic = await request.post(`${apiBase}/api/topics`, {
     data: { id: topicId, name: topicName, pinned: false },
   });
   expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: topicTaskId, topicId, title: `Keyboard Task ${suffix}`, status: "todo", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  await page.route("**/api/openclaw/resolve-board-send", async (route) => {
+    const payload = route.request().postDataJSON() as Record<string, unknown>;
+    const selectedTopicId = String(payload?.selectedTopicId ?? "");
+    const sessionKey = selectedTopicId
+      ? `clawboard:task:${selectedTopicId}:${topicTaskId}`
+      : `clawboard:task:topic-auto-${suffix}:task-auto-${suffix}`;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        topicId: selectedTopicId || `topic-auto-${suffix}`,
+        topicName: selectedTopicId ? topicName : `Auto Topic ${suffix}`,
+        topicCreated: !selectedTopicId,
+        taskId: selectedTopicId ? topicTaskId : `task-auto-${suffix}`,
+        taskTitle: selectedTopicId ? `Keyboard Task ${suffix}` : `Auto Task ${suffix}`,
+        taskCreated: !selectedTopicId,
+        sessionKey,
+        decisionSource: "test",
+      }),
+    });
+  });
 
   await page.route("**/api/openclaw/chat", async (route) => {
     const payload = route.request().postDataJSON() as Record<string, unknown>;
@@ -102,17 +148,17 @@ test("keyboard send in unified composer uses new topic when no target and select
   await textarea.fill(`keyboard-new-topic-${suffix}`);
   await textarea.press("Control+Enter");
   await expect.poll(() => sentPayloads.length).toBe(1);
-  expect(String(sentPayloads[0]?.sessionKey ?? "")).toMatch(/^clawboard:topic:topic-/);
+  expect(String(sentPayloads[0]?.sessionKey ?? "")).toBe(`clawboard:task:topic-auto-${suffix}:task-auto-${suffix}`);
 
   await textarea.fill(`target ${topicName}`);
   await expect(page.getByTestId(`select-topic-target-${topicId}`)).toBeVisible();
   await page.getByTestId(`select-topic-target-${topicId}`).click();
-  await expect(page.getByTestId("unified-composer-target-chip")).toContainText(`topic: ${topicName}`);
+  await expect(page.getByTestId("unified-composer-target-chip")).toContainText(topicName);
 
   await textarea.fill(`keyboard-selected-target-${suffix}`);
   await textarea.press("Control+Enter");
   await expect.poll(() => sentPayloads.length).toBe(2);
-  expect(sentPayloads[1]?.sessionKey).toBe(`clawboard:topic:${topicId}`);
+  expect(sentPayloads[1]?.sessionKey).toBe(`clawboard:task:${topicId}:${topicTaskId}`);
 });
 
 test("typed /stop in unified composer cancels selected target run without posting a new chat send", async ({ page, request }) => {
@@ -120,7 +166,9 @@ test("typed /stop in unified composer cancels selected target run without postin
   const suffix = Date.now();
   const topicId = `topic-unified-stop-${suffix}`;
   const topicName = `Unified Stop Topic ${suffix}`;
-  const sessionKey = `clawboard:topic:${topicId}`;
+  const taskId = `task-unified-stop-${suffix}`;
+  const taskTitle = `Unified Stop Task ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
   let postCount = 0;
   const deletePayloads: Array<Record<string, unknown>> = [];
 
@@ -128,6 +176,11 @@ test("typed /stop in unified composer cancels selected target run without postin
     data: { id: topicId, name: topicName, pinned: false },
   });
   expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "doing", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
 
   page.on("request", (req) => {
     if (req.url().includes("/api/openclaw/chat") && req.method() === "POST") {
@@ -156,14 +209,18 @@ test("typed /stop in unified composer cancels selected target run without postin
     await route.continue();
   });
 
-  await page.goto(`/u/topic/${topicId}`);
+  await page.goto(`/u/topic/${topicId}/task/${taskId}`);
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
-  await textarea.fill(`target ${topicName}`);
-  await expect(page.getByTestId(`select-topic-target-${topicId}`)).toBeVisible();
-  await page.getByTestId(`select-topic-target-${topicId}`).click();
-  await expect(page.getByTestId("unified-composer-target-chip")).toContainText(`topic: ${topicName}`);
+  const targetChip = page.getByTestId("unified-composer-target-chip");
+  const chipVisible = await targetChip.isVisible().catch(() => false);
+  if (!chipVisible) {
+    await textarea.fill(`target ${taskTitle}`);
+    await expect(page.getByTestId(`select-task-target-${taskId}`)).toBeVisible();
+    await page.getByTestId(`select-task-target-${taskId}`).click();
+  }
+  await expect(page.getByTestId("unified-composer-target-chip")).toContainText(taskTitle);
 
   await textarea.fill(`start-unified-run-${suffix}`);
   const firstSend = page.waitForResponse((resp) => {
@@ -257,7 +314,9 @@ test("unified stop button is visible for a single in-flight board run without a 
   const suffix = Date.now();
   const topicId = `topic-unified-stop-single-${suffix}`;
   const topicName = `Unified Stop Single ${suffix}`;
-  const sessionKey = `clawboard:topic:${topicId}`;
+  const taskId = `task-unified-stop-single-${suffix}`;
+  const taskTitle = `Unified Stop Single Task ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
   const requestId = `req-unified-stop-single-${suffix}`;
   const deletePayloads: Array<Record<string, unknown>> = [];
 
@@ -266,9 +325,15 @@ test("unified stop button is visible for a single in-flight board run without a 
   });
   expect(createTopic.ok()).toBeTruthy();
 
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "doing", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
   const seedPendingUser = await request.post(`${apiBase}/api/log`, {
     data: {
       topicId,
+      taskId,
       type: "conversation",
       content: `pending-user-${suffix}`,
       summary: "Pending user prompt",
@@ -343,7 +408,7 @@ test("unified stop button follows orchestration-active selected task and sends s
       agentLabel: "Clawboard",
       source: {
         channel: "clawboard",
-        sessionKey: `clawboard:topic:${topicId}`,
+        sessionKey: taskSession,
         requestId,
         orchestration: true,
         runId,
@@ -370,19 +435,22 @@ test("unified stop button follows orchestration-active selected task and sends s
     });
   });
 
-  await page.goto(`/u/topic/${topicId}/task/${taskId}`);
+  await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
-  const targetChip = page.getByTestId("unified-composer-target-chip");
-  const targetChipVisible = await targetChip.isVisible().catch(() => false);
-  const targetChipText = targetChipVisible ? (await targetChip.textContent()) ?? "" : "";
-  if (!targetChipVisible || !targetChipText.toLowerCase().includes(taskTitle.toLowerCase())) {
-    const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
-    // Keep query length <2 so target buttons are not gated on semantic-search completion.
-    await textarea.fill("t");
-    await expect(page.getByTestId(`select-task-target-${taskId}`)).toBeVisible({ timeout: 20_000 });
-    await page.getByTestId(`select-task-target-${taskId}`).click();
+  const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
+  await textarea.fill(taskTitle.slice(0, 1) || "t");
+  const topicHeader = page.locator(`[data-topic-card-id="${topicId}"] > div[role="button"]`).first();
+  await expect(topicHeader).toBeVisible();
+  const topicExpanded = (await topicHeader.getAttribute("aria-expanded")) === "true";
+  if (!topicExpanded) {
+    await topicHeader.click();
   }
-  await expect(targetChip).toContainText(`task: ${taskTitle}`);
+  const taskHeader = page.locator(`[data-task-card-id="${taskId}"] > div[role="button"]`).first();
+  await expect(taskHeader).toBeVisible({ timeout: 20_000 });
+  const selectTarget = page.getByTestId(`select-task-target-${taskId}`);
+  await expect(selectTarget).toBeVisible({ timeout: 20_000 });
+  await selectTarget.click();
+  await expect(page.getByTestId("unified-composer-target-chip")).toContainText(`task: ${taskTitle}`);
 
   await expect(page.getByTestId("unified-composer-stop")).toBeVisible();
   await page.getByTestId("unified-composer-stop").click();
@@ -435,6 +503,23 @@ test("unified attachment upload uses multipart and preserves draft/attachment on
     });
   });
 
+  await page.route("**/api/openclaw/resolve-board-send", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        topicId: `topic-upload-${suffix}`,
+        topicName: `Upload Topic ${suffix}`,
+        topicCreated: true,
+        taskId: `task-upload-${suffix}`,
+        taskTitle: `Upload Task ${suffix}`,
+        taskCreated: true,
+        sessionKey: `clawboard:task:topic-upload-${suffix}:task-upload-${suffix}`,
+        decisionSource: "test",
+      }),
+    });
+  });
+
   await page.route("**/api/openclaw/chat", async (route) => {
     if (route.request().method() === "POST") {
       postPayloads.push(route.request().postDataJSON() as Record<string, unknown>);
@@ -460,7 +545,7 @@ test("unified attachment upload uses multipart and preserves draft/attachment on
     .setInputFiles({ name: fileName, mimeType: "text/plain", buffer: Buffer.from("hello attachment") });
   await expect(page.getByText(fileName)).toBeVisible();
 
-  await page.getByTestId("unified-composer-new-topic").click();
+  await textarea.press("Control+Enter");
   await expect.poll(() => attachmentsCalls).toBe(1);
   expect(sawMultipart).toBeTruthy();
   expect(postPayloads).toHaveLength(0);

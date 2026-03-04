@@ -1247,6 +1247,19 @@ PY
   echo "clawboard-token-$(date +%s)"
 }
 
+is_placeholder_token() {
+  local value lowered
+  value="$(trim_whitespace "${1:-}")"
+  [ -n "$value" ] || return 1
+  lowered="$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')"
+  case "$lowered" in
+    your-token-here|your_token_here|change-me|change_me|changeme|replace-me|replace_me|replace-with-token|replace_with_token|example-token|example_token|token-here|token_here)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 upsert_env_value() {
   local file_path="$1"
   local key="$2"
@@ -2772,6 +2785,11 @@ if [ -z "$TOKEN" ]; then
   fi
 fi
 
+if [ -n "$TOKEN" ] && is_placeholder_token "$TOKEN"; then
+  log_warn "Found placeholder CLAWBOARD_TOKEN value; generating a secure token."
+  TOKEN=""
+fi
+
 if [ -z "$TOKEN" ]; then
   TOKEN="$(generate_token)"
 fi
@@ -3850,7 +3868,23 @@ echo "────────────────────────�
 echo "Memory status"
 echo "──────────────────────────────────────────────────────────────────────────"
 if command -v openclaw >/dev/null 2>&1; then
-  openclaw memory status --deep || true
+  MEMORY_STATUS_TIMEOUT_SEC="${OPENCLAW_MEMORY_STATUS_TIMEOUT_SEC:-20}"
+  if ! [[ "$MEMORY_STATUS_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$MEMORY_STATUS_TIMEOUT_SEC" -lt 5 ] || [ "$MEMORY_STATUS_TIMEOUT_SEC" -gt 300 ]; then
+    log_warn "Invalid OPENCLAW_MEMORY_STATUS_TIMEOUT_SEC=${MEMORY_STATUS_TIMEOUT_SEC}; using 20s."
+    MEMORY_STATUS_TIMEOUT_SEC=20
+  fi
+  set +e
+  MEMORY_STATUS_OUTPUT="$(run_with_timeout_capture "$MEMORY_STATUS_TIMEOUT_SEC" openclaw memory status --deep)"
+  MEMORY_STATUS_RC=$?
+  set -e
+  if [ -n "$MEMORY_STATUS_OUTPUT" ]; then
+    printf "%s\n" "$MEMORY_STATUS_OUTPUT"
+  fi
+  if [ "$MEMORY_STATUS_RC" -eq 124 ]; then
+    log_warn "openclaw memory status timed out after ${MEMORY_STATUS_TIMEOUT_SEC}s; continuing."
+  elif [ "$MEMORY_STATUS_RC" -ne 0 ]; then
+    log_warn "openclaw memory status exited with code $MEMORY_STATUS_RC; continuing."
+  fi
 else
   echo "(openclaw not on PATH — skipping memory status)"
 fi

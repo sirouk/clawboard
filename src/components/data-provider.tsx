@@ -614,7 +614,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     if (additions.length === 1) {
       const topic = additions[0];
-      const url = `${buildTopicUrl(topic, topics)}?chat=1&focus=1`;
+      const url = `${buildTopicUrl(topic, topics)}?focus=1`;
       void showPwaNotification(
         {
           title: `Topic unsnoozed: ${topic.name}`,
@@ -741,23 +741,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           void showPwaNotification(
             {
               title: `Task Chat: ${task.title}`,
-              body,
-              tag: chatTag(chatKey),
-              url,
-              data: { chatKey },
-            },
-            notificationsEnabled
-          );
-          return;
-        }
-      } else if (chatKey.startsWith("topic:")) {
-        const topicId = chatKey.slice("topic:".length).trim();
-        const topic = topicById.get(topicId);
-        if (topic) {
-          const url = `${buildTopicUrl(topic, topics)}?chat=1&focus=1`;
-          void showPwaNotification(
-            {
-              title: `Topic Chat: ${topic.name}`,
               body,
               tag: chatTag(chatKey),
               url,

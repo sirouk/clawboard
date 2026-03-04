@@ -31,7 +31,7 @@ Net effect: the agent can "remember" what happened across Topics/Tasks/logs/note
 ---
 
 ### Board chat routing contract (UI -> OpenClaw)
-- Topic/task chat sends from Clawboard go through `POST /api/openclaw/chat` with a board session key (`clawboard:topic:*` or `clawboard:task:*`).
+- Board chat sends from Clawboard go through `POST /api/openclaw/chat` with a task board session key (`clawboard:task:*:*`).
 - Task sessions are still main-mediated orchestration lanes: main receives the turn, then delegates as needed.
 - `agentId` on board chat requests is advisory metadata for dispatch bookkeeping; it does not force direct subagent ownership of a task chat.
 - Thread-scoped cancel uses `DELETE /api/openclaw/chat` (`sessionKey`, optional `requestId`) and can fan out to linked child sessions when lineage is resolvable.
@@ -54,7 +54,6 @@ Aligned with `CLASSIFICATION.md` section 4.1 and `ANATOMY.md` section 4.1.
 
 - Only logs in direct user-request lineage are eligible for Topic/Task allocation and downstream continuity recall.
 - `clawboard:task:<topicId>:<taskId>` sessions are hard-locked to that topic+task.
-- `clawboard:topic:<topicId>` sessions are hard-locked to that topic; task promotion is allowed only inside that same topic.
 - Canonical OpenClaw request routing is persisted in `OpenClawRequestRoute` (keyed by canonical `occhat-*` id); same-request follow-ups must obey that route after promotion.
 - Subagent logs inherit board scope only when lineage is explicit:
   - explicit `source.boardScope*` on the row, or
@@ -98,7 +97,7 @@ Important constraints:
 - Very short user input should not stampede expensive recall:
   - `/api/context?mode=auto` keeps this cheap server-side (Layer A continuity; no heavy recall by default except scoped board-session continuity turns).
 - Context retrieval modes (passed to `GET /api/context?mode=...` and controlled by the OpenClaw plugin `clawboard-logger`):
-  - `auto` (default): Layer A always; semantic recall when query has signal, plus low-signal board-session turns (for "resume/continue" in `clawboard:topic|task` chats)
+  - `auto` (default): Layer A always; semantic recall when query has signal, plus low-signal board-session turns (for "resume/continue" in `clawboard:task` chats)
   - `cheap`: Layer A only (fastest)
   - `full`: Layer A + semantic recall
   - `patient`: like `full`, but the server may use larger bounded recall limits (slower; best for planning)
@@ -146,7 +145,7 @@ Source-space resolution (server-side):
 - explicit `spaceId` query param wins
 - otherwise, endpoints such as `/api/context`, `/api/search`, `/api/topics`, and `/api/tasks` try to infer source space from `sessionKey` using:
   - recent logs (`source.boardScopeSpaceId`, then `log.spaceId`)
-  - board session keys (`clawboard:topic:<topicId>` / `clawboard:task:<topicId>:<taskId>`)
+  - board session keys (`clawboard:task:<topicId>:<taskId>`)
   - session routing memory (`SessionRoutingMemory`)
 - if neither explicit nor inferable, retrieval remains unscoped (back-compat behavior)
 
@@ -270,8 +269,7 @@ Clawboard supports short digests on Topics and Tasks:
 Clawboard uses `source.sessionKey` as the main continuity bucket across channels and UIs.
 
 The plugin computes an "effective session key" in `computeEffectiveSessionKey(...)` (`extensions/clawboard-logger/session-key.ts`):
-- If the session is a **Clawboard board chat**, it uses reserved session keys:
-  - `clawboard:topic:<topicId>`
+- If the session is a **Clawboard board chat**, it uses reserved task session keys:
   - `clawboard:task:<topicId>:<taskId>`
   These keys intentionally win over provider conversation ids to prevent mis-attribution.
 - Otherwise it prefers the provider's `conversationId`, and optionally appends `|thread:<threadId>` to avoid collisions.
@@ -281,9 +279,9 @@ Important: to avoid double-logging Clawboard UI chat, the plugin explicitly skip
 
 During ingest, Clawboard normalizes source scope metadata (`boardScopeTopicId`, `boardScopeTaskId`, `boardScopeSpaceId`) so later context/search calls can infer the correct source space from session continuity.
 
-When a topic-session turn is promoted to a task:
-- patching aligns `source.boardScope*` to the promoted task scope and rebases same-request rows into that task where eligible
-- later non-user rows in that topic session can inherit promoted task scope from session routing memory (same-session continuity only)
+When routing assigns a task:
+- patching aligns `source.boardScope*` to the resolved task scope and rebases same-request rows into that task where eligible
+- later non-user rows in that task session can inherit task scope from session routing memory (same-session continuity only)
 
 For subagents, board scope inheritance is explicit-link only:
 - parent board-scoped runs that call `sessions_spawn` can publish child session keys into the logger cache
@@ -426,7 +424,7 @@ Triggering rules (default):
 - `mode=cheap`: Layer A only
 - `mode=full`: Layer A + Layer B
 - `mode=patient`: Layer A + Layer B, but the server may use larger bounded recall limits (slower; best for planning)
-- `mode=auto`: Layer B when query has signal, or for low-signal board-session turns (`clawboard:topic|task`) where scoped semantic recall helps continuity
+- `mode=auto`: Layer B when query has signal, or for low-signal board-session turns (`clawboard:task`) where scoped semantic recall helps continuity
 
 #### Server Endpoint: `GET /api/context`
 

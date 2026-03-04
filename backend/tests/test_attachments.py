@@ -98,7 +98,7 @@ class AttachmentApiTests(unittest.TestCase):
         os.environ["OPENCLAW_BASE_URL"] = "http://127.0.0.1:9"
         os.environ["OPENCLAW_GATEWAY_TOKEN"] = "test"
 
-        session_key = "clawboard:topic:topic-test"
+        session_key = "clawboard:task:topic-test:task-test"
         msg = "check attachment"
         chat = self.client.post(
             "/api/openclaw/chat",

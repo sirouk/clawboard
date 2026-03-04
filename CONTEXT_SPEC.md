@@ -54,7 +54,7 @@ Triggering rules (default):
 - `mode=cheap`: Layer A only
 - `mode=full`: Layer A + Layer B
 - `mode=patient`: Layer A + Layer B, but the server may use larger bounded recall limits (slower; best for planning)
-- `mode=auto`: Layer B only if the query has signal, plus low-signal board-session turns (`clawboard:topic|task`) where scoped continuity recall is intentionally enabled
+- `mode=auto`: Layer B only if the query has signal, plus low-signal board-session turns (`clawboard:task`) where scoped continuity recall is intentionally enabled
 
 ## Server Endpoint: `GET /api/context`
 

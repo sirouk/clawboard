@@ -181,7 +181,7 @@ class ClassifierFailurePathTests(unittest.TestCase):
         self.assertIsNone(patched[0][1].get("classificationError"))
 
     def test_cls_023_forced_topic_stays_pinned_when_llm_times_out(self):
-        session_key = "clawboard:topic:topic-forced"
+        session_key = "clawboard:task:topic-forced:task-forced"
         logs = [_pending_log(session_key=session_key)]
         patched: list[tuple[str, dict]] = []
 
@@ -192,8 +192,8 @@ class ClassifierFailurePathTests(unittest.TestCase):
             patch.object(c, "call_classifier", side_effect=c.requests.exceptions.ReadTimeout()),
             patch.object(c, "build_notes_index", return_value={}),
             patch.object(c, "memory_snippets", return_value=[]),
-            patch.object(c, "task_candidates", return_value=[]),
-            patch.object(c, "list_tasks", return_value=[]),
+            patch.object(c, "task_candidates", return_value=[{"id": "task-forced", "title": "Forced task", "score": 0.99}]),
+            patch.object(c, "list_tasks", return_value=[{"id": "task-forced", "title": "Forced task", "status": "todo"}]),
             patch.object(c, "_window_has_task_intent", return_value=False),
             patch.object(c, "list_topics", return_value=[{"id": "topic-forced", "name": "Forced"}]),
             patch.object(c, "list_logs_by_topic", return_value=[]),
@@ -203,6 +203,7 @@ class ClassifierFailurePathTests(unittest.TestCase):
 
         self.assertTrue(patched)
         self.assertEqual(patched[0][1].get("topicId"), "topic-forced")
+        self.assertEqual(patched[0][1].get("taskId"), "task-forced")
         self.assertEqual(patched[0][1].get("classificationStatus"), "classified")
 
     def test_cls_025_guardrail_reuses_strong_candidate_over_new_topic(self):

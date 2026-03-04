@@ -178,7 +178,6 @@ Aligned with `CLASSIFICATION.md` section 4.1 and `CONTEXT.md` allocation guardra
 
 - Topic/Task allocation is allowed only for logs with direct user-request lineage.
 - Task chat keys (`clawboard:task:<topicId>:<taskId>`) are hard-pinned and never rerouted.
-- Topic chat keys (`clawboard:topic:<topicId>`) are topic-pinned; task inference/creation is allowed only within that same topic.
 - Subagent scope inheritance is allowed only via explicit lineage:
   - explicit `source.boardScope*` metadata, or
   - explicit `sessions_spawn` child-session linkage cached by exact child session key.
@@ -277,18 +276,18 @@ Flow:
 12. Orchestration convergence keeps `main.response` open while any subagent item is non-terminal; run closes only after final main assistant completion.
 
 Unified composer routing contract (current UX):
-- Freeform with no selected target creates a new topic first, derives a concise name from the prompt text, then sends on `clawboard:topic:<topicId>`.
-- Freeform with a selected topic sends on `clawboard:topic:<topicId>`.
+- Freeform with no selected target resolves topic+task first and sends on `clawboard:task:<topicId>:<taskId>`.
+- Freeform with a selected topic resolves/creates a task in that topic first, then sends on `clawboard:task:<topicId>:<taskId>`.
 - Freeform with a selected task sends on `clawboard:task:<topicId>:<taskId>`.
 - Topic/task direct composers always send on their pinned session keys.
 - Topic/task direct composers expose Stop while in-flight; typed `/stop` and `/abort` are aliases for the same thread-scoped cancel action.
 - Unified top composer Stop is scoped to the selected thread target and calls the same cancel endpoint.
 - UI immediately expands the relevant pane, focuses the correct composer, and reveals it near the bottom viewport position (`focus({ reveal: true })` behavior).
-- When classifier promotion adds `taskId` to a topic-scoped turn, UI auto-expands/focuses the promoted task chat, keeps typing indicators aliased, and on mobile opens the task chat fullscreen.
+- Unified top-composer sends are always task-scoped after resolver preflight.
 
 Request-scope continuity guarantees:
-- First append or patch that assigns `taskId` to a board-scoped row normalizes `source.boardScope*` and retro-scopes same-request topic-session rows into that task scope.
-- Later non-user/system/action rows in the same topic session may inherit the promoted task scope from session-routing memory when explicit task scope is absent, preventing split turns across topic/task chats.
+- Append/patch that assigns `taskId` to a board-scoped row normalizes `source.boardScope*` and keeps same-request rows in that task scope.
+- Later non-user/system/action rows in the same task session may inherit task scope from session-routing memory when explicit task scope is absent.
 - Ingest/patch writes also update `OpenClawRequestRoute` (canonical `occhat-*` key, topic/task lock semantics). Future rows for that request obey this ledger even when sender metadata is stale.
 
 Key invariant:
@@ -306,7 +305,6 @@ Flow:
 4. Build one coherent bundle.
 5. Apply forcing:
    - `clawboard:task:*` hard lock.
-   - `clawboard:topic:*` topic lock with optional task inference.
 6. Retrieve candidates (topic/task + context + optional memory hits).
 7. Classify via LLM strict JSON path or heuristic fallback.
 8. Run creation/task guardrails.
@@ -469,7 +467,6 @@ Operational guarantees:
 - Pending local message state appears immediately.
 - Backend persistence + SSE reconcile clears pending and shows canonical rows.
 - Topic/task composers refocus and reveal after send; selected chat panes keep active-bottom auto-scroll when new rows arrive.
-- Promotion from topic chat to task chat preserves turn continuity by moving the active/focused pane to the promoted task.
 
 ### 7.5 Search and recall
 
@@ -536,7 +533,6 @@ Operational guarantees:
 | Write routing memory | classifier | `POST /api/classifier/session-routing` | session memory append/upsert | improves follow-up routing |
 | Trigger classifier replay | UI/ops path | `POST /api/classifier/replay` | mark bundle pending from anchor | logs repatched next cycles |
 | Trigger targeted reindex | ops/debug | `POST /api/reindex` | enqueue embedding refresh | search freshness |
-| Purge topic chat | UI controls | `POST /api/topics/{id}/topic_chat/purge` | irreversible delete + tombstones | delete events |
 | Purge log thread forward | UI controls | `POST /api/log/{id}/purge_forward` | session-scope destructive purge | delete events |
 | Fresh rebuild | admin controls | `POST /api/admin/start-fresh-replay` | wipe derived topic/task + mark logs pending | classifier re-derives |
 | Operational telemetry | dashboards/ops | `GET /api/metrics` | metrics snapshot | lag/queue observability |
@@ -632,7 +628,7 @@ Core commands:
 
 Contracts:
 - Visibility safety when source space is resolved.
-- Board session routing determinism (`clawboard:topic:*`, `clawboard:task:*:*`).
+- Board session routing determinism (`clawboard:task:*:*`).
 - Retrieval pollution defenses (sanitize + classifier noise filters).
 - Async eventual consistency via SSE + reconcile.
 - Delegated-run supervision cadence is deterministic in bootstrap-installed main-agent policy: `1m -> 3m -> 10m -> 15m -> 30m -> 1h` (cap `1h`), with explicit user status updates after `>5m`.

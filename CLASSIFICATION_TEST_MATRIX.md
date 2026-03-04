@@ -25,7 +25,6 @@ For user-visible conversation logs, the classifier must also maintain:
 - `scripts/classifier_e2e_check.py` exercises:
   - Offworld sessions (sessionKey starts with `channel:` or includes `source.channel`).
   - Clawboard board sessions:
-    - Topic scope: `clawboard:topic:<topicId>`
     - Task scope: `clawboard:task:<topicId>:<taskId>`
   - Mixed log scopes where actions/system/import appear between conversations and are patched in-scope.
 - Filtering behaviors (commands, injected noise, memory tool noise) do not strand rows in `pending`.
@@ -37,7 +36,7 @@ For user-visible conversation logs, the classifier must also maintain:
 
 ## Defaults Assumed By Tests
 
-- Board chat session keys are always in the form `clawboard:topic:<topicId>` or `clawboard:task:<topicId>:<taskId>`.
+- Board chat session keys are always in the form `clawboard:task:<topicId>:<taskId>`.
 - Topic/task IDs referenced by Clawboard UI exist when using Task Chat.
 - Non-board (“offworld”) threads may legitimately include `|thread:` suffixes.
 - Classifier E2E runs in deterministic heuristic mode by default (`CLASSIFIER_LLM_MODE=off` in `tests.sh`).
@@ -93,10 +92,6 @@ Executed by `tests.sh` via `python3 scripts/classifier_e2e_check.py`.
   - `scripts/classifier_e2e_check.py` scenario `assistant-contamination`
 - Multi-bundle sessions can split into distinct topics:
   - `scripts/classifier_e2e_check.py` scenario `multi-bundle`
-- Clawboard Topic Chat can be promoted into a Task (topic pinned, task inferred/created):
-  - `scripts/classifier_e2e_check.py` scenario `board-topic-promote-task`
-- Clawboard Topic Chat small-talk stays pinned to the selected topic (not rerouted to “Small Talk”):
-  - `scripts/classifier_e2e_check.py` scenario `board-topic-smalltalk`
 - Clawboard Task Chat stays fixed (classifier cannot reroute away from pinned task):
   - `scripts/classifier_e2e_check.py` scenario `board-task-fixed-scope`
 - Filtering in-scope for mixed logs:

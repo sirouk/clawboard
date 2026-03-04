@@ -34,9 +34,8 @@ test("app routes redirect and deep-links resolve into unified view", async ({ pa
   await expect(page).toHaveURL(/\/u$/);
 
   await page.goto(`/chat/${encodeURIComponent(`topic:${topicId}`)}`);
-  await expect(page).toHaveURL(new RegExp(`/u/topic/${topicId}\\?chat=1`));
+  await expect(page).toHaveURL(new RegExp(`/u/topic/${topicId}`));
 
   await page.goto(`/chat/${encodeURIComponent(`task:${topicId}:${taskId}`)}`);
   await expect(page).toHaveURL(new RegExp(`/u/topic/${topicId}/task/${taskId}`));
 });
-

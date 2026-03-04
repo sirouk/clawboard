@@ -18,10 +18,10 @@ class SpaceScopedSessionTests(unittest.TestCase):
             patch.object(c, "_resolve_allowed_space_ids_for_session", return_value=("space-alpha", "space-beta")),
             patch.object(c, "classify_session", side_effect=_capture_scope),
         ):
-            c._classify_session_scoped("clawboard:topic:topic-123")
+            c._classify_session_scoped("clawboard:task:topic-123:task-123")
 
         self.assertEqual(len(observed_scopes), 1)
-        self.assertEqual(observed_scopes[0][0], "clawboard:topic:topic-123")
+        self.assertEqual(observed_scopes[0][0], "clawboard:task:topic-123:task-123")
         self.assertEqual(observed_scopes[0][1], ("space-alpha", "space-beta"))
         self.assertIsNone(c._SPACE_SCOPE_ALLOWED_IDS.get())
 

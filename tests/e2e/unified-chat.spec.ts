@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("unified chat renders natural bubbles and topic-only chat entries", async ({ page, request }) => {
+test("unified chat renders natural bubbles for task chat entries", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
   const suffix = Date.now();
   const topicId = `topic-chat-${suffix}`;
@@ -21,7 +21,6 @@ test("unified chat renders natural bubbles and topic-only chat entries", async (
 
   const assistantLong = `assistant-${suffix} ${"a".repeat(260)} assistant-tail-${suffix}`;
   const userLong = `user-${suffix} ${"b".repeat(260)} user-tail-${suffix}`;
-  const topicOnlyMessage = `topic-only-${suffix}`;
 
   const assistantLogRes = await request.post(`${apiBase}/api/log`, {
     data: {
@@ -55,20 +54,6 @@ test("unified chat renders natural bubbles and topic-only chat entries", async (
   expect(userLogRes.ok()).toBeTruthy();
   const userLog = await userLogRes.json();
 
-  const topicOnlyRes = await request.post(`${apiBase}/api/log`, {
-    data: {
-      topicId,
-      type: "conversation",
-      content: topicOnlyMessage,
-      summary: "Topic-level note",
-      classificationStatus: "classified",
-      agentId: "assistant",
-      agentLabel: "OpenClaw",
-      source: { sessionKey },
-    },
-  });
-  expect(topicOnlyRes.ok()).toBeTruthy();
-
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
@@ -88,14 +73,6 @@ test("unified chat renders natural bubbles and topic-only chat entries", async (
   await expect(page.getByText(`user-tail-${suffix}`)).toBeVisible();
 
   await expect(page.getByText("TASK CHAT")).toBeVisible();
-
-  await expect(page.getByText("TOPIC CHAT")).toBeVisible();
-  const topicChatToggle = page.getByTestId(`toggle-topic-chat-${topicId}`);
-  const topicChatToggleLabel = (await topicChatToggle.getAttribute("aria-label")) ?? "";
-  if (/expand/i.test(topicChatToggleLabel)) {
-    await topicChatToggle.click();
-  }
-  await expect(page.getByText(topicOnlyMessage, { exact: false })).toBeVisible();
 });
 
 test("board controls can show hidden tool/system chat rows", async ({ page, request }) => {
@@ -382,7 +359,6 @@ test("topic and task labels include scoped tool/system call totals", async ({ pa
   const taskBTitle = `Call Totals B ${suffix}`;
   const taskASessionKey = `clawboard:task:${topicId}:${taskAId}`;
   const taskBSessionKey = `clawboard:task:${topicId}:${taskBId}`;
-  const topicSessionKey = `clawboard:topic:${topicId}`;
 
   const createTopic = await request.post(`${apiBase}/api/topics`, {
     data: { id: topicId, name: topicName, pinned: false },
@@ -398,20 +374,6 @@ test("topic and task labels include scoped tool/system call totals", async ({ pa
     data: { id: taskBId, topicId, title: taskBTitle, status: "todo", pinned: false },
   });
   expect(createTaskB.ok()).toBeTruthy();
-
-  const topicAction = await request.post(`${apiBase}/api/log`, {
-    data: {
-      topicId,
-      type: "action",
-      content: `topic-tool-${suffix}`,
-      summary: "Tool call: topic-tool",
-      classificationStatus: "classified",
-      agentId: "assistant",
-      agentLabel: "OpenClaw",
-      source: { sessionKey: topicSessionKey },
-    },
-  });
-  expect(topicAction.ok()).toBeTruthy();
 
   const taskAAction = await request.post(`${apiBase}/api/log`, {
     data: {
@@ -465,7 +427,7 @@ test("topic and task labels include scoped tool/system call totals", async ({ pa
   const taskACard = page.locator(`[data-task-card-id="${taskAId}"]`).first();
   const taskBCard = page.locator(`[data-task-card-id="${taskBId}"]`).first();
 
-  await expect(topicCard.getByText(/4 tool\/system calls/i).first()).toBeVisible();
+  await expect(topicCard.getByText(/3 tool\/system calls/i).first()).toBeVisible();
   await expect(taskACard.getByText(/2 tool\/system calls/i).first()).toBeVisible();
   await expect(taskBCard.getByText(/1 tool\/system call/i).first()).toBeVisible();
 });

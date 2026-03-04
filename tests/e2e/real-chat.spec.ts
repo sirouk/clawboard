@@ -6,7 +6,9 @@ test.describe("Real Chat E2E", () => {
     const suffix = Date.now();
     const topicId = `topic-real-chat-${suffix}`;
     const topicName = `Real Chat ${suffix}`;
-    const sessionKey = `clawboard:topic:${topicId}`;
+    const taskId = `task-real-chat-${suffix}`;
+    const taskTitle = `Real Chat Task ${suffix}`;
+    const sessionKey = `clawboard:task:${topicId}:${taskId}`;
     const message = `Hello from Playwright E2E ${suffix}`;
 
     const createTopic = await request.post(`${apiBase}/api/topics`, {
@@ -14,33 +16,40 @@ test.describe("Real Chat E2E", () => {
     });
     expect(createTopic.ok()).toBeTruthy();
 
-    await page.goto(`/u/topic/${topicId}`);
+    const createTask = await request.post(`${apiBase}/api/tasks`, {
+      data: { id: taskId, topicId, title: taskTitle, status: "doing", pinned: false },
+    });
+    expect(createTask.ok()).toBeTruthy();
+
+    await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
     await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
-    const topicToggle = page.getByTestId(`toggle-topic-chat-${topicId}`);
-    const label = (await topicToggle.getAttribute("aria-label")) ?? "";
-    if (/expand/i.test(label)) {
-      await topicToggle.click();
-    }
-
-    const composer = page.getByTestId(`topic-chat-composer-${topicId}`).getByRole("textbox");
+    const composer = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
     await expect(composer).toBeVisible();
+    await composer.fill(taskTitle.slice(0, 1) || "t");
+    const topicHeader = page.locator(`[data-topic-card-id="${topicId}"] > div[role="button"]`).first();
+    await expect(topicHeader).toBeVisible();
+    const topicExpanded = (await topicHeader.getAttribute("aria-expanded")) === "true";
+    if (!topicExpanded) {
+      await topicHeader.click();
+    }
+    const taskHeader = page.locator(`[data-task-card-id="${taskId}"] > div[role="button"]`).first();
+    await expect(taskHeader).toBeVisible({ timeout: 20_000 });
+    const selectTarget = page.getByTestId(`select-task-target-${taskId}`);
+    await expect(selectTarget).toBeVisible({ timeout: 20_000 });
+    await selectTarget.click();
+    await expect(page.getByTestId("unified-composer-target-chip")).toContainText(`task: ${taskTitle}`);
 
-    const send = page.waitForResponse(
-      (resp) => resp.url().includes("/api/openclaw/chat") && resp.request().method() === "POST"
-    );
     await composer.fill(message);
-    await composer.press("Enter");
-    await send;
-
-    await expect(page.locator("[data-testid^='message-bubble-']").filter({ hasText: message }).first()).toBeVisible();
-
-    const logsRes = await request.get(
-      `${apiBase}/api/log?sessionKey=${encodeURIComponent(sessionKey)}&limit=30`
-    );
-    expect(logsRes.ok()).toBeTruthy();
-    const rows = (await logsRes.json()) as Array<{ content?: string }>;
-    expect(rows.some((row) => row.content === message)).toBeTruthy();
+    await composer.press("Control+Enter");
+    await expect
+      .poll(async () => {
+        const logsRes = await request.get(`${apiBase}/api/log?sessionKey=${encodeURIComponent(sessionKey)}&limit=30`);
+        if (!logsRes.ok()) return false;
+        const rows = (await logsRes.json()) as Array<{ content?: string }>;
+        return rows.some((row) => row.content === message);
+      })
+      .toBeTruthy();
 
     await page.goto("/log");
     await page.getByRole("heading", { name: "All Activity" }).waitFor();

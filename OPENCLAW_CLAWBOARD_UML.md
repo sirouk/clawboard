@@ -267,11 +267,9 @@ stateDiagram-v2
     PatchFilteredOnly --> [*]
 
     BuildBundle --> ForcedTaskScope : sessionKey clawboard:task:...
-    BuildBundle --> ForcedTopicScope : sessionKey clawboard:topic:...
     BuildBundle --> NormalScope : all other sessions
 
     ForcedTaskScope --> PatchScope
-    ForcedTopicScope --> CandidateRetrieval
     NormalScope --> CandidateRetrieval
 
     CandidateRetrieval --> SmallTalkFastPath : small-talk bundle

@@ -1426,8 +1426,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                              boardTopicsForNav.map((topic) => {
 			                                const selected = topic.id === activeBoardIds.topicId;
 			                                const href = buildTopicUrl(topic, topics);
-			                                const chatHref = href.includes("?") ? `${href}&chat=1` : `${href}?chat=1`;
-			                                const chatFocusHref = chatHref.includes("?") ? `${chatHref}&focus=1` : `${chatHref}?focus=1`;
+			                                const topicDestination = withSpaceParam(withRevealParam(href, true), topic.spaceId);
 			                                const recentTask = mostRecentTaskByTopicId.get(topic.id) ?? null;
 			                                const expanded = normalizedTopicSearch.length === 0 && expandedTopicIds.includes(topic.id);
 			                                const visibleTasks = expanded ? (visibleTasksByTopicId.get(topic.id) ?? []) : [];
@@ -1446,7 +1445,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                                  const handle = window.setTimeout(() => {
 			                                    timers.delete(topic.id);
 			                                    void recentTask; // keep computed value available for future UX tweaks
-			                                    router.push(chatFocusHref);
+			                                    router.push(topicDestination);
 			                                  }, 250);
 			                                  timers.set(topic.id, handle);
 			                                };

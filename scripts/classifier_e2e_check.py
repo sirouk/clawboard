@@ -420,14 +420,6 @@ def main() -> int:
             "mode": "multi-bundle",
         },
         {
-            "label": "board-topic-promote-task",
-            "mode": "board-topic-promote-task",
-        },
-        {
-            "label": "board-topic-smalltalk",
-            "mode": "board-topic-smalltalk",
-        },
-        {
             "label": "board-task-fixed-scope",
             "mode": "board-task-fixed-scope",
         },
@@ -444,106 +436,6 @@ def main() -> int:
         for scenario_idx, scenario in enumerate(scenarios):
             label = str(scenario["label"])
             session_key = f"channel:classifier-e2e:{label}:{run_token.lower()}"
-
-            if str(scenario.get("mode") or "") == "board-topic-promote-task":
-                # Board Topic Chat pins the topic scope, but classifier may infer/create a task within it.
-                topic_name = f"Board Topic Promote Z{run_token}"
-                topic_id = _create_topic(topic_name)
-                explicit_topic_ids.add(topic_id)
-                session_key = f"clawboard:topic:{topic_id}"
-
-                steps: list[tuple[str, str, str, str]] = [
-                    ("conversation", "user", "User", f"Fix OAuth redirect Z{run_token} in the portal login flow."),
-                    ("action", "assistant", "Assistant", "Tool call: web.search oauth redirect loop"),
-                    ("conversation", "assistant", "Assistant", "Ok. I will inspect the callback handler and patch it."),
-                ]
-
-                expected_ids: set[str] = set()
-                ids_in_order: list[str] = []
-                for idx, (kind, agent_id, agent_label, content) in enumerate(steps):
-                    message_id = f"classifier-e2e:{label}:{idx}:{run_token.lower()}"
-                    created_at = f"{CREATED_AT_BASE}:{scenario_idx:02d}:{idx:02d}.000Z"
-                    if kind == "conversation":
-                        log_id = _append_conversation(
-                            session_key,
-                            agent_id,
-                            agent_label,
-                            content,
-                            message_id=message_id,
-                            created_at=created_at,
-                        )
-                    else:
-                        log_id = _append_action(
-                            session_key,
-                            agent_id,
-                            agent_label,
-                            content,
-                            message_id=message_id,
-                            created_at=created_at,
-                        )
-                    created_log_ids.append(log_id)
-                    expected_ids.add(log_id)
-                    ids_in_order.append(log_id)
-
-                print(f"classifier e2e: waiting {label} session {session_key}")
-                rows = _wait_for_classification(session_key, expected_ids)
-
-                task_ids = _validate_rows(rows, label=label, require_task=True, forbid_task=False)
-                if len(task_ids) != 1:
-                    fail(f"{label}: expected exactly one inferred task, got {sorted(task_ids)}")
-                inferred_task_id = next(iter(task_ids))
-
-                for rid in ids_in_order:
-                    row = rows.get(rid) or {}
-                    if str(row.get("topicId") or "") != topic_id:
-                        fail(f"{label}: log {rid} expected topic {topic_id}, got {row.get('topicId')}")
-                    if str(row.get("type") or "") == "action":
-                        if str(row.get("taskId") or "") != inferred_task_id:
-                            fail(
-                                f"{label}: action log {rid} expected task {inferred_task_id}, got {row.get('taskId')}"
-                            )
-
-                explicit_task_ids.add(inferred_task_id)
-                extra_sessions.append(session_key)
-                continue
-
-            if str(scenario.get("mode") or "") == "board-topic-smalltalk":
-                # Board Topic Chat pins the topic scope; even small-talk should not be rerouted into "Small Talk".
-                topic_id = _create_topic(f"Board Topic Smalltalk Z{run_token}")
-                explicit_topic_ids.add(topic_id)
-                session_key = f"clawboard:topic:{topic_id}"
-
-                steps: list[tuple[str, str, str]] = [
-                    ("user", "User", "Hey there."),
-                    ("assistant", "Assistant", "Hey! What's up?"),
-                ]
-
-                expected_ids: set[str] = set()
-                for idx, (agent_id, agent_label, content) in enumerate(steps):
-                    message_id = f"classifier-e2e:{label}:{idx}:{run_token.lower()}"
-                    created_at = f"{CREATED_AT_BASE}:{scenario_idx:02d}:{idx:02d}.000Z"
-                    log_id = _append_conversation(
-                        session_key,
-                        agent_id,
-                        agent_label,
-                        content,
-                        message_id=message_id,
-                        created_at=created_at,
-                    )
-                    created_log_ids.append(log_id)
-                    expected_ids.add(log_id)
-
-                print(f"classifier e2e: waiting {label} session {session_key}")
-                rows = _wait_for_classification(session_key, expected_ids)
-                _validate_rows(rows, label=label, require_task=False, forbid_task=True)
-                for rid, row in rows.items():
-                    if str((row or {}).get("topicId") or "") != topic_id:
-                        fail(f"{label}: log {rid} expected topic {topic_id}, got {(row or {}).get('topicId')}")
-                    if str((row or {}).get("taskId") or ""):
-                        fail(f"{label}: log {rid} expected no taskId, got {(row or {}).get('taskId')}")
-
-                extra_sessions.append(session_key)
-                continue
 
             if str(scenario.get("mode") or "") == "board-task-fixed-scope":
                 # Board Task Chat pins both topic + task; classifier must not reroute.

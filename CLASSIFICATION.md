@@ -55,8 +55,6 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 - Classified semantic conversations must have a topic assignment.
 - Task assignment is optional and must belong to the selected topic.
 - **Task Chat** (`clawboard:task:<topicId>:<taskId>`): messages **never** get allocated to another topic or task; classifier patches with fixed scope and does not reroute.
-- **Topic Chat** (`clawboard:topic:<topicId>`): messages stay in **this topic only**; task inference/creation only within this topic and only when there is a clear, concrete task.
-- When a topic-scoped request is promoted to a task, same-request rows are backfilled into that task scope so one user turn does not remain split across topic/task chats.
 - Canonical request routing is ledgered in `OpenClawRequestRoute` (keyed by canonical `occhat-*` id); same-request follow-ups obey this route even when incoming metadata carries non-`occhat` run ids.
 - Non-user follow-up rows (assistant/system/tool/action) in board sessions must prefer explicit board scope; when absent in topic sessions, task continuity can be inferred from session-routing memory (same session only).
 - Slash commands and classifier/context artifacts are non-semantic and must not create topics/tasks.
@@ -74,7 +72,6 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
 - Allocation to Topic/Task is allowed only for logs in a direct user-request lineage.
 - Board sessions are hard constraints:
   - `clawboard:task:<topicId>:<taskId>` is permanently pinned to that topic+task.
-  - `clawboard:topic:<topicId>` is permanently pinned to that topic; task inference/creation can happen only inside that same topic.
 - Subagent scope inheritance is allowed only when explicitly linked to the parent request chain:
   - explicit board scope on the log (`source.boardScope*`), or
   - explicit parent-child session linkage captured from `sessions_spawn` (`childSessionKey`) and cached by exact child session key.
@@ -176,11 +173,6 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
 - **Task Chat** (`clawboard:task:<topicId>:<taskId>`):
   - Messages **never** get allocated elsewhere. Classifier patches all scope logs with this topic+task and returns; no LLM, no candidate retrieval, no reroute.
   - Per-entry lock from `source.boardScope*` also forces topic+task when present.
-- **Topic Chat** (`clawboard:topic:<topicId>`):
-  - Messages stay in **this topic only**. Topic is pinned; classifier candidate retrieval is restricted to this topic (and its tasks).
-  - Task inference or creation is allowed **only within this topic**, and only when there is a **clear, concrete task** (gated by `_task_creation_allowed` and `call_creation_gate`).
-  - If promotion occurs, append/patch routing rebases in-scope request rows to the promoted task without changing topic ownership.
-  - Never allocate to another topic.
 - Subagent sessions can be pinned only by explicit board scope lineage (`source.boardScope*`) or prior classified scope in that same subagent session; never by global/cross-session recency fallback.
 
 ### 6.5 Candidate Retrieval and Scoring
@@ -281,7 +273,7 @@ This section is normative for `ANATOMY.md` and `CONTEXT.md`.
 - Layer A and Layer B are filtered by effective allowed spaces when source space is known.
 - Layer B (conditional): semantic recall from `_search_impl`.
 - Modes:
-  - `auto`: semantic when query has signal; low-signal queries stay Layer A-only unless they are board-scoped (`clawboard:topic|task`) with non-empty input
+  - `auto`: semantic when query has signal; low-signal queries stay Layer A-only unless they are board-scoped (`clawboard:task`) with non-empty input
   - `cheap`: disable semantic layer
   - `full`: always semantic
   - `patient`: always semantic with larger limits.

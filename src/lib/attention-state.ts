@@ -1,6 +1,5 @@
 import {
   BOARD_TASK_SESSION_PREFIX,
-  BOARD_TOPIC_SESSION_PREFIX,
   normalizeBoardSessionKey,
 } from "@/lib/board-session";
 import type { LogEntry } from "@/lib/types";
@@ -22,10 +21,6 @@ export function chatKeyForTask(taskId: string) {
 export function chatKeyFromSessionKey(sessionKey: string) {
   const key = normalizeBoardSessionKey(sessionKey);
   if (!key) return "";
-  if (key.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
-    const topicId = key.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim();
-    return chatKeyForTopic(topicId);
-  }
   if (key.startsWith(BOARD_TASK_SESSION_PREFIX)) {
     const rest = key.slice(BOARD_TASK_SESSION_PREFIX.length).trim();
     const parts = rest.split(":", 2);
@@ -40,8 +35,6 @@ export function chatKeyFromLogEntry(entry: Pick<LogEntry, "taskId" | "topicId" |
   if (fromSession) return fromSession;
   const taskId = String(entry.taskId ?? "").trim();
   if (taskId) return chatKeyForTask(taskId);
-  const topicId = String(entry.topicId ?? "").trim();
-  if (topicId) return chatKeyForTopic(topicId);
   return "";
 }
 

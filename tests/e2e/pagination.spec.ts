@@ -41,7 +41,7 @@ test("logs page uses 50-row load more increment", async ({ page, request }) => {
   await expect(page.locator(`[data-log-id="${oldestLogId}"]`)).toBeVisible();
 });
 
-test("unified view uses task=2 and topic=4 load increments", async ({ page, request }) => {
+test("unified view task chat uses task=2 load increment", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
   const suffix = Date.now();
   const topicId = `topic-unified-paging-${suffix}`;
@@ -81,30 +81,6 @@ test("unified view uses task=2 and topic=4 load increments", async ({ page, requ
     if (i === 0) hiddenTaskLogId = taskLog.id;
   }
 
-  let hiddenTopicLogId = "";
-  let hiddenTopicLogContent = "";
-  for (let i = 0; i < 6; i += 1) {
-    const content = `topic-paging-${suffix}-${i}`;
-    const createLog = await request.post(`${apiBase}/api/log`, {
-      data: {
-        topicId,
-        type: "conversation",
-        content,
-        summary: content,
-        classificationStatus: "classified",
-        agentId: i % 2 === 0 ? "assistant" : "user",
-        agentLabel: i % 2 === 0 ? "OpenClaw" : "User",
-        source: { sessionKey, messageId: `topic-msg-${suffix}-${i}` },
-      },
-    });
-    expect(createLog.ok()).toBeTruthy();
-    const topicLog = await createLog.json();
-    if (i === 0) {
-      hiddenTopicLogId = topicLog.id;
-      hiddenTopicLogContent = content;
-    }
-  }
-
   await page.goto("/u");
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
@@ -119,15 +95,6 @@ test("unified view uses task=2 and topic=4 load increments", async ({ page, requ
   await taskCard.getByRole("button", { name: "Load older" }).first().click();
   await expect(page.locator(`[data-log-id="${hiddenTaskLogId}"]`)).toBeVisible();
 
-  // Avoid ambiguous "Load older" buttons by collapsing the task before testing topic chat.
-  await taskButton.click();
-
-  const topicCard = page.locator(`[data-topic-card-id="${topicId}"]`).first();
-  await topicCard.getByTestId(`toggle-topic-chat-${topicId}`).click();
-  await topicCard.getByRole("button", { name: "Load older" }).first().waitFor();
-  await expect(page.locator(`[data-log-id="${hiddenTopicLogId}"]`)).toHaveCount(0);
-  await topicCard.getByRole("button", { name: "Load older" }).first().click();
-  await expect(page.getByText(hiddenTopicLogContent, { exact: true })).toBeVisible();
 });
 
 test("unified view does not auto-load older history on initial render", async ({ page, request }) => {
@@ -170,26 +137,6 @@ test("unified view does not auto-load older history on initial render", async ({
     if (i === 0) hiddenTaskLogId = taskLog.id;
   }
 
-  let hiddenTopicLogId = "";
-  for (let i = 0; i < 6; i += 1) {
-    const content = `topic-no-autoload-${suffix}-${i}`;
-    const createLog = await request.post(`${apiBase}/api/log`, {
-      data: {
-        topicId,
-        type: "conversation",
-        content,
-        summary: content,
-        classificationStatus: "classified",
-        agentId: i % 2 === 0 ? "assistant" : "user",
-        agentLabel: i % 2 === 0 ? "OpenClaw" : "User",
-        source: { sessionKey, messageId: `topic-no-autoload-msg-${suffix}-${i}` },
-      },
-    });
-    expect(createLog.ok()).toBeTruthy();
-    const topicLog = await createLog.json();
-    if (i === 0) hiddenTopicLogId = topicLog.id;
-  }
-
   await page.goto("/u");
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
@@ -218,25 +165,4 @@ test("unified view does not auto-load older history on initial render", async ({
   await expect(taskLoadOlder).toBeVisible();
   await expect(page.locator(`[data-log-id="${hiddenTaskLogId}"]`)).toHaveCount(0);
 
-  await taskButton.click();
-  const topicCard = page.locator(`[data-topic-card-id="${topicId}"]`).first();
-  await topicCard.getByTestId(`toggle-topic-chat-${topicId}`).click();
-  const topicLoadOlder = topicCard.getByRole("button", { name: "Load older" }).first();
-  await topicLoadOlder.waitFor();
-  await expect(topicLoadOlder).toBeVisible();
-  const topicControls = page.getByTestId(`topic-chat-controls-${topicId}`);
-  const topicEntries = page.getByTestId(`topic-chat-entries-${topicId}`);
-  const topicControlsWrap = await topicControls.evaluate((el) => window.getComputedStyle(el).flexWrap);
-  expect(topicControlsWrap).toBe("nowrap");
-  const topicLoadOlderWhiteSpace = await topicLoadOlder.evaluate((el) => window.getComputedStyle(el).whiteSpace);
-  expect(topicLoadOlderWhiteSpace).toBe("nowrap");
-  const topicLoadOlderBox = await topicLoadOlder.boundingBox();
-  const topicEntriesBox = await topicEntries.boundingBox();
-  expect(topicLoadOlderBox).not.toBeNull();
-  expect(topicEntriesBox).not.toBeNull();
-  expect((topicLoadOlderBox?.x ?? 0)).toBeGreaterThan((topicEntriesBox?.x ?? 0));
-  await expect(page.locator(`[data-log-id="${hiddenTopicLogId}"]`)).toHaveCount(0);
-  await page.waitForTimeout(1000);
-  await expect(topicLoadOlder).toBeVisible();
-  await expect(page.locator(`[data-log-id="${hiddenTopicLogId}"]`)).toHaveCount(0);
 });

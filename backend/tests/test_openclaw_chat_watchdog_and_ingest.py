@@ -266,7 +266,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                         agentId="assistant",
                         agentLabel="Assistant",
                         source={
-                            "sessionKey": "clawboard:topic:topic-chat-ing-020",
+                            "sessionKey": "clawboard:task:topic-chat-ing-020:task-chat-ing-020",
                             "requestId": "request-ing-020",
                         },
                     ),
@@ -288,7 +288,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
     def test_ing_020b_assistant_append_infers_request_id_from_latest_unresolved_board_send(self):
         sent_at = now_iso()
         request_id = "occhat-request-020b"
-        session_key = "clawboard:topic:topic-chat-ing-020b"
+        session_key = "clawboard:task:topic-chat-ing-020b:task-chat-ing-020b"
         with get_session() as session:
             main_module.append_log_entry(
                 session,
@@ -624,7 +624,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
     def test_ing_020e2_history_ingest_preserves_assistant_reply_when_request_id_matches_user_row(self):
         request_id = "occhat-request-020e2"
         topic_id = "topic-ing-020e2"
-        board_session_key = f"clawboard:topic:{topic_id}"
+        board_session_key = f"clawboard:task:{topic_id}:task-{topic_id}"
         with get_session() as session:
             main_module.append_log_entry(
                 session,
@@ -686,7 +686,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="Assistant",
                     source={
                         "channel": "webchat",
-                        "sessionKey": "agent:main:clawboard:topic:topic-ing-020f",
+                        "sessionKey": "agent:main:clawboard:task:topic-ing-020f:task-ing-020f",
                         "requestId": request_id,
                         "messageId": "oc:assistant-020f",
                     },
@@ -710,7 +710,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="Assistant",
                     source={
                         "channel": "clawboard",
-                        "sessionKey": "clawboard:topic:topic-ing-020g",
+                        "sessionKey": "clawboard:task:topic-ing-020g:task-ing-020g",
                         "requestId": f"{request_id_base}:retry-1",
                         "messageId": "oc:assistant-020g-a",
                     },
@@ -729,7 +729,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="Assistant",
                     source={
                         "channel": "webchat",
-                        "sessionKey": "agent:main:clawboard:topic:topic-ing-020g",
+                        "sessionKey": "agent:main:clawboard:task:topic-ing-020g:task-ing-020g",
                         "requestId": request_id_base,
                         "messageId": "oc:assistant-020g-b",
                     },
@@ -749,7 +749,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
 
     def test_ing_020h_history_ingest_dedupes_when_existing_request_id_has_retry_suffix(self):
         request_id_base = "occhat-request-020h"
-        board_session_key = "clawboard:topic:topic-ing-020h"
+        board_session_key = "clawboard:task:topic-ing-020h:task-ing-020h"
         with get_session() as session:
             main_module.append_log_entry(
                 session,
@@ -762,7 +762,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="Assistant",
                     source={
                         "channel": "webchat",
-                        "sessionKey": "agent:main:clawboard:topic:topic-ing-020h",
+                        "sessionKey": "agent:main:clawboard:task:topic-ing-020h:task-ing-020h",
                         "requestId": f"{request_id_base}:retry-1",
                         "messageId": "oc:assistant-020h",
                     },
@@ -796,7 +796,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
     def test_ing_020h2_history_ingest_keeps_distinct_assistant_completion_for_same_request(self):
         request_id = "occhat-request-020h2"
         topic_id = "topic-ing-020h2"
-        board_session_key = f"clawboard:topic:{topic_id}"
+        board_session_key = f"clawboard:task:{topic_id}:task-{topic_id}"
         with get_session() as session:
             main_module.append_log_entry(
                 session,
@@ -864,7 +864,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
     def test_ing_020h3_assistant_identifier_dedupe_prefers_content_match_over_first_candidate(self):
         request_id = "occhat-request-020h3"
         topic_id = "topic-ing-020h3"
-        board_session_key = f"clawboard:topic:{topic_id}"
+        board_session_key = f"clawboard:task:{topic_id}:task-{topic_id}"
         child_session_key = "agent:coding:subagent:ing-020h3-child"
         gateway_session_key = f"agent:main:{board_session_key}"
         with get_session() as session:
@@ -936,7 +936,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(len(assistant_rows), 2)
 
     def test_ing_020h4_history_ingest_skips_injected_context_artifacts_and_advances_cursor(self):
-        session_key = "clawboard:topic:topic-ing-020h4"
+        session_key = "clawboard:task:topic-ing-020h4:task-ing-020h4"
         artifact_ts = 1700000040000
         ingested, max_seen = main_module._ingest_openclaw_history_messages(
             session_key=session_key,
@@ -957,7 +957,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(rows, [])
 
     def test_ing_020h5_history_ingest_skips_legacy_context_wrapper_artifacts_and_advances_cursor(self):
-        session_key = "clawboard:topic:topic-ing-020h5"
+        session_key = "clawboard:task:topic-ing-020h5:task-ing-020h5"
         artifact_ts = 1700000045000
         ingested, max_seen = main_module._ingest_openclaw_history_messages(
             session_key=session_key,
@@ -1017,7 +1017,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
     def test_chat_020j2_orchestration_follow_up_dispatch_uses_occhat_prefixed_request_id(self):
         class _Run:
             runId = "ocorun-chat-020j2"
-            baseSessionKey = "clawboard:topic:topic-chat-020j2"
+            baseSessionKey = "clawboard:task:topic-chat-020j2:task-chat-020j2"
 
         captured: dict[str, str] = {}
 
@@ -1038,7 +1038,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
 
     def test_chat_001_persists_user_log_and_enqueues_durable_dispatch(self):
         payload = OpenClawChatRequest(
-            sessionKey="clawboard:topic:topic-chat-001",
+            sessionKey="clawboard:task:topic-chat-001:task-chat-001",
             message="persist before dispatch",
             agentId="main",
         )
@@ -1064,7 +1064,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             ).first()
             self.assertIsNotNone(queue_row)
             self.assertEqual(str(queue_row.status or ""), "pending")
-            self.assertEqual(str(queue_row.sessionKey or ""), "clawboard:topic:topic-chat-001")
+            self.assertEqual(str(queue_row.sessionKey or ""), "clawboard:task:topic-chat-001:task-chat-001")
 
     def test_chat_001b_cancel_fans_out_to_linked_subagent_sessions(self):
         request_id = "occhat-cancel-001b"
@@ -1190,7 +1190,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
     def test_chat_001c_cancel_request_filter_matches_retry_suffix_rows(self):
         request_id_base = "occhat-cancel-001c"
         request_id_retry = f"{request_id_base}:retry-2"
-        session_key = "clawboard:topic:topic-cancel-001c"
+        session_key = "clawboard:task:topic-cancel-001c:task-cancel-001c"
         created = now_iso()
         with get_session() as session:
             session.add(
@@ -1230,7 +1230,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
 
     def test_chat_001d_cancel_main_run_emits_immediate_stop_signals(self):
         request_id = "occhat-cancel-001d"
-        session_key = "clawboard:topic:topic-cancel-001d"
+        session_key = "clawboard:task:topic-cancel-001d:task-cancel-001d"
         created = now_iso()
         with get_session() as session:
             session.add(
@@ -1326,7 +1326,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 "request-chat-002",
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-002",
+                session_key="clawboard:task:topic-chat-002:task-chat-002",
                 agent_id="main",
                 sent_at=now_iso(),
                 message="send with attachment",
@@ -1361,7 +1361,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 "request-chat-003",
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-003",
+                session_key="clawboard:task:topic-chat-003:task-chat-003",
                 agent_id="main",
                 sent_at=now_iso(),
                 message="hello",
@@ -1384,7 +1384,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 "request-chat-004",
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-004",
+                session_key="clawboard:task:topic-chat-004:task-chat-004",
                 agent_id="main",
                 sent_at=now_iso(),
                 message="trigger failure",
@@ -1431,7 +1431,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 "request-chat-004b",
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-004b",
+                session_key="clawboard:task:topic-chat-004b:task-chat-004b",
                 agent_id="main",
                 sent_at=now_iso(),
                 message="trigger in-flight recovery",
@@ -1443,7 +1443,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(calls[1][1].get("idempotencyKey"), "request-chat-004b")
         self.assertEqual(calls[3][1].get("idempotencyKey"), "request-chat-004b:retry-1")
         abort_params = calls[2][1]
-        self.assertEqual(abort_params.get("sessionKey"), "clawboard:topic:topic-chat-004b")
+        self.assertEqual(abort_params.get("sessionKey"), "clawboard:task:topic-chat-004b:task-chat-004b")
         self.assertEqual(abort_params.get("runId"), "run-004b-1")
         self.assertEqual(len(scheduled), 1)
         error_logger.assert_not_called()
@@ -1485,7 +1485,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 "request-chat-004b1",
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-004b1",
+                session_key="clawboard:task:topic-chat-004b1:task-chat-004b1",
                 agent_id="main",
                 sent_at=now_iso(),
                 message="trigger board fallback recovery",
@@ -1497,7 +1497,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(calls[1][1].get("idempotencyKey"), "request-chat-004b1")
         self.assertEqual(calls[3][1].get("idempotencyKey"), "request-chat-004b1:retry-1")
         abort_params = calls[2][1]
-        self.assertEqual(abort_params.get("sessionKey"), "clawboard:topic:topic-chat-004b1")
+        self.assertEqual(abort_params.get("sessionKey"), "clawboard:task:topic-chat-004b1:task-chat-004b1")
         self.assertEqual(abort_params.get("runId"), "run-004b1-1")
         self.assertEqual(len(scheduled), 1)
         error_logger.assert_not_called()
@@ -1533,7 +1533,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 "request-chat-004b1a",
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-004b1a",
+                session_key="clawboard:task:topic-chat-004b1a:task-chat-004b1a",
                 agent_id="main",
                 sent_at=now_iso(),
                 message="board default should avoid abort retry",
@@ -1578,7 +1578,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 "request-chat-004b1aa",
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-004b1aa",
+                session_key="clawboard:task:topic-chat-004b1aa:task-chat-004b1aa",
                 agent_id="main",
                 sent_at=now_iso(),
                 message="board default should try direct retry before watchdog-only recovery",
@@ -1625,7 +1625,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 "request-chat-004b1ab",
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-004b1ab",
+                session_key="clawboard:task:topic-chat-004b1ab:task-chat-004b1ab",
                 agent_id="main",
                 sent_at=now_iso(),
                 message="board direct retry should fail fast when no progress follows",
@@ -1679,7 +1679,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 "request-chat-004b1b",
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-004b1b",
+                session_key="clawboard:task:topic-chat-004b1b:task-chat-004b1b",
                 agent_id="main",
                 sent_at=now_iso(),
                 message="trigger board fallback recovery with retry attempt",
@@ -1692,7 +1692,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(calls[1][1].get("idempotencyKey"), "request-chat-004b1b:retry-2")
         self.assertEqual(calls[3][1].get("idempotencyKey"), "request-chat-004b1b:retry-2-probe-retry-1")
         abort_params = calls[2][1]
-        self.assertEqual(abort_params.get("sessionKey"), "clawboard:topic:topic-chat-004b1b")
+        self.assertEqual(abort_params.get("sessionKey"), "clawboard:task:topic-chat-004b1b:task-chat-004b1b")
         self.assertEqual(abort_params.get("runId"), "run-004b1b-1")
         self.assertEqual(len(scheduled), 1)
         error_logger.assert_not_called()
@@ -1770,7 +1770,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 "request-chat-004c",
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-004c",
+                session_key="clawboard:task:topic-chat-004c:task-chat-004c",
                 agent_id="main",
                 sent_at=now_iso(),
                 message="trigger in-flight recovery failure",
@@ -1820,7 +1820,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 "request-chat-004d",
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-004d",
+                session_key="clawboard:task:topic-chat-004d:task-chat-004d",
                 agent_id="main",
                 sent_at=now_iso(),
                 message="trigger post-retry grace failure",
@@ -1850,7 +1850,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="Toolresult",
                     source={
                         "channel": "clawboard",
-                        "sessionKey": "clawboard:topic:topic-chat-004d1",
+                        "sessionKey": "clawboard:task:topic-chat-004d1:task-chat-004d1",
                         "requestId": "request-chat-004d1:retry-1",
                         "messageId": "request-chat-004d1:retry-1",
                     },
@@ -1862,7 +1862,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             main_module._openclaw_chat_request_has_non_user_activity(
                 request_id="request-chat-004d1",
                 sent_at=sent_at,
-                session_key="clawboard:topic:topic-chat-004d1",
+                session_key="clawboard:task:topic-chat-004d1:task-chat-004d1",
             )
         )
 
@@ -1880,7 +1880,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="Toolresult",
                     source={
                         "channel": "clawboard",
-                        "sessionKey": "clawboard:topic:topic-chat-004d2|thread:worker",
+                        "sessionKey": "clawboard:task:topic-chat-004d2:task-chat-004d2|thread:worker",
                     },
                 ),
                 idempotency_key="chat-004d2-progress",
@@ -1890,7 +1890,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             main_module._openclaw_chat_request_has_non_user_activity(
                 request_id="request-chat-004d2",
                 sent_at=sent_at,
-                session_key="clawboard:topic:topic-chat-004d2|thread:main",
+                session_key="clawboard:task:topic-chat-004d2:task-chat-004d2|thread:main",
             )
         )
 
@@ -1942,7 +1942,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 request_id,
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-004e|thread:test",
+                session_key="clawboard:task:topic-chat-004e:task-chat-004e|thread:test",
                 agent_id="main",
                 sent_at=now_iso(),
                 message=f"dispatch {request_id}",
@@ -2081,7 +2081,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="User",
                     source={
                         "channel": "openclaw",
-                        "sessionKey": "clawboard:topic:topic-recover-011",
+                        "sessionKey": "clawboard:task:topic-recover-011:task-recover-011",
                         "requestId": "request-recover-011",
                     },
                 ),
@@ -2113,7 +2113,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(len(stub.calls), 1)
         call = stub.calls[0]
         self.assertEqual(call.get("request_id"), "request-recover-011")
-        self.assertEqual(call.get("session_key"), "clawboard:topic:topic-recover-011")
+        self.assertEqual(call.get("session_key"), "clawboard:task:topic-recover-011:task-recover-011")
         self.assertEqual(call.get("sent_at"), sent_at)
         self.assertEqual(float(call.get("delay_seconds", 1.0)), 0.0)
 
@@ -2131,7 +2131,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="User",
                     source={
                         "channel": "openclaw",
-                        "sessionKey": "clawboard:topic:topic-recover-012",
+                        "sessionKey": "clawboard:task:topic-recover-012:task-recover-012",
                         "requestId": "request-recover-terminal",
                     },
                 ),
@@ -2148,7 +2148,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="Clawboard",
                     source={
                         "channel": "clawboard",
-                        "sessionKey": "clawboard:topic:topic-recover-012",
+                        "sessionKey": "clawboard:task:topic-recover-012:task-recover-012",
                         "requestId": "request-recover-terminal",
                     },
                 ),
@@ -2165,7 +2165,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="User",
                     source={
                         "channel": "openclaw",
-                        "sessionKey": "clawboard:topic:topic-recover-012",
+                        "sessionKey": "clawboard:task:topic-recover-012:task-recover-012",
                         "requestId": "request-recover-assistant",
                     },
                 ),
@@ -2182,7 +2182,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="Assistant",
                     source={
                         "channel": "openclaw",
-                        "sessionKey": "clawboard:topic:topic-recover-012",
+                        "sessionKey": "clawboard:task:topic-recover-012:task-recover-012",
                         "requestId": "request-recover-assistant",
                     },
                 ),
@@ -2224,7 +2224,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="User",
                     source={
                         "channel": "openclaw",
-                        "sessionKey": "clawboard:topic:topic-recover-012b",
+                        "sessionKey": "clawboard:task:topic-recover-012b:task-recover-012b",
                         "requestId": "request-recover-warning-only",
                     },
                 ),
@@ -2241,7 +2241,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="Clawboard",
                     source={
                         "channel": "clawboard",
-                        "sessionKey": "clawboard:topic:topic-recover-012b",
+                        "sessionKey": "clawboard:task:topic-recover-012b:task-recover-012b",
                         "requestId": "request-recover-warning-only",
                         "watchdogMissingAssistant": True,
                     },
@@ -2356,7 +2356,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="User",
                     source={
                         "channel": "openclaw",
-                        "sessionKey": "clawboard:topic:topic-recover-015-old",
+                        "sessionKey": "clawboard:task:topic-recover-015-old:task-recover-015-old",
                         "requestId": "request-recover-015-duplicate",
                     },
                 ),
@@ -2373,7 +2373,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     agentLabel="User",
                     source={
                         "channel": "openclaw",
-                        "sessionKey": "clawboard:topic:topic-recover-015-new",
+                        "sessionKey": "clawboard:task:topic-recover-015-new:task-recover-015-new",
                         "requestId": "request-recover-015-duplicate",
                     },
                 ),
@@ -2405,12 +2405,12 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(len(stub.calls), 1)
         call = stub.calls[0]
         self.assertEqual(call.get("request_id"), "request-recover-015-duplicate")
-        self.assertEqual(call.get("session_key"), "clawboard:topic:topic-recover-015-new")
+        self.assertEqual(call.get("session_key"), "clawboard:task:topic-recover-015-new:task-recover-015-new")
         self.assertEqual(call.get("sent_at"), sent_at_new)
         self.assertEqual(float(call.get("delay_seconds", 1.0)), 0.0)
 
     def test_chat_016_gateway_history_sync_ingests_and_persists_cursor(self):
-        session_key = "agent:main:clawboard:topic:topic-history-016"
+        session_key = "agent:main:clawboard:task:topic-history-016:task-history-016"
         history_messages = [
             {"timestamp": 1700000001000, "role": "user", "text": "history user", "id": "hmsg-016-user"},
             {"timestamp": 1700000002000, "role": "assistant", "text": "history assistant", "id": "hmsg-016-assistant"},
@@ -2461,7 +2461,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(int(cursor.lastTimestampMs or 0), 1700000003000)
 
     def test_chat_017_history_ingest_uses_stable_message_id_dedupe(self):
-        session_key = "agent:main:clawboard:topic:topic-history-017"
+        session_key = "agent:main:clawboard:task:topic-history-017:task-history-017"
         messages = [
             {
                 "timestamp": 1700000010000,
@@ -2490,8 +2490,8 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(len(logs), 1)
 
     def test_chat_021_gateway_history_sync_continues_on_per_session_failure(self):
-        failed_key = "agent:main:clawboard:topic:topic-history-021-failed"
-        ok_key = "agent:main:clawboard:topic:topic-history-021-ok"
+        failed_key = "agent:main:clawboard:task:topic-history-021-failed:task-history-021-failed"
+        ok_key = "agent:main:clawboard:task:topic-history-021-ok:task-history-021-ok"
 
         def _fake_sync_rpc(method: str, params: dict, *, scopes=None):
             if method == "sessions.list":
@@ -2538,7 +2538,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
 
     def test_chat_022_gateway_history_sync_uses_cursor_seed_when_sessions_list_fails(self):
-        session_key = "agent:main:clawboard:topic:topic-history-022"
+        session_key = "agent:main:clawboard:task:topic-history-022:task-history-022"
         with get_session() as session:
             session.add(
                 OpenClawGatewayHistoryCursor(
@@ -2620,7 +2620,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(calls[1], ["operator.write"])
 
     def test_chat_024_gateway_history_sync_uses_recent_log_seeds(self):
-        session_key = "agent:main:clawboard:topic:topic-history-024"
+        session_key = "agent:main:clawboard:task:topic-history-024:task-history-024"
         with get_session() as session:
             main_module.append_log_entry(
                 session,
@@ -2681,7 +2681,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
 
     def test_chat_024b_gateway_history_sync_seeds_spawned_subagent_sessions_when_sessions_list_disabled(self):
-        parent_session = "clawboard:topic:topic-history-024b"
+        parent_session = "clawboard:task:topic-history-024b:task-history-024b"
         child_session = "agent:coding:subagent:history-024b"
         with get_session() as session:
             main_module.append_log_entry(
@@ -2755,7 +2755,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(str(source.get("sessionKey") or ""), child_session)
 
     def test_chat_025_history_ingest_does_not_advance_cursor_past_write_failure(self):
-        session_key = "agent:main:clawboard:topic:topic-history-025"
+        session_key = "agent:main:clawboard:task:topic-history-025:task-history-025"
         ts_1 = 1700000400000
         ts_2 = 1700000401000
         messages = [
@@ -2799,7 +2799,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
 
     def test_chat_026_watchdog_attempts_history_backfill_before_warning(self):
         watchdog = main_module._OpenClawAssistantLogWatchdog()
-        session_key = "agent:main:clawboard:topic:topic-history-026"
+        session_key = "agent:main:clawboard:task:topic-history-026:task-history-026"
         request_id = "request-history-026"
         sent_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -2845,9 +2845,9 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertTrue(main_module._openclaw_watchdog_has_assistant_by_request(session, request_id, sent_at))
 
     def test_chat_027_unresolved_seed_sessions_excludes_resolved_and_terminal(self):
-        unresolved_session = "agent:main:clawboard:topic:topic-history-027-unresolved"
-        resolved_session = "agent:main:clawboard:topic:topic-history-027-resolved"
-        terminal_session = "agent:main:clawboard:topic:topic-history-027-terminal"
+        unresolved_session = "agent:main:clawboard:task:topic-history-027-unresolved:task-history-027-unresolved"
+        resolved_session = "agent:main:clawboard:task:topic-history-027-resolved:task-history-027-resolved"
+        terminal_session = "agent:main:clawboard:task:topic-history-027-terminal:task-history-027-terminal"
         now = now_iso()
         with get_session() as session:
             main_module.append_log_entry(
@@ -2949,7 +2949,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(seeds, [unresolved_session])
 
     def test_chat_028_history_sync_retries_timeout_with_smaller_limit(self):
-        session_key = "agent:main:clawboard:topic:topic-history-028"
+        session_key = "agent:main:clawboard:task:topic-history-028:task-history-028"
         calls: list[int] = []
 
         def _fake_sync_rpc(method: str, params: dict, *, scopes=None):
@@ -2993,10 +2993,10 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
 
     def test_chat_029_seed_sessions_are_preserved_when_candidate_list_is_trimmed(self):
-        unresolved_key = "agent:main:clawboard:topic:topic-history-029-unresolved"
-        hot_a = "agent:main:clawboard:topic:topic-history-029-a"
-        hot_b = "agent:main:clawboard:topic:topic-history-029-b"
-        hot_c = "agent:main:clawboard:topic:topic-history-029-c"
+        unresolved_key = "agent:main:clawboard:task:topic-history-029-unresolved:task-history-029-unresolved"
+        hot_a = "agent:main:clawboard:task:topic-history-029-a:task-history-029-a"
+        hot_b = "agent:main:clawboard:task:topic-history-029-b:task-history-029-b"
+        hot_c = "agent:main:clawboard:task:topic-history-029-c:task-history-029-c"
         requested_keys: list[str] = []
 
         def _fake_sync_rpc(method: str, params: dict, *, scopes=None):
@@ -3050,7 +3050,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertIn(unresolved_key, requested_keys)
 
     def test_chat_030_sessions_list_timeout_retries_with_reduced_window(self):
-        session_key = "agent:main:clawboard:topic:topic-history-030"
+        session_key = "agent:main:clawboard:task:topic-history-030:task-history-030"
         sessions_list_calls: list[tuple[int, int]] = []
 
         def _fake_sync_rpc(method: str, params: dict, *, scopes=None):
@@ -3140,7 +3140,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             session.add(
                 OpenClawChatDispatchQueue(
                     requestId="occhat-quarantine-real",
-                    sessionKey="clawboard:topic:topic-real-123",
+                    sessionKey="clawboard:task:topic-real-123:task-real-123",
                     agentId="main",
                     sentAt=old_stamp,
                     message="real user message should remain queued",
@@ -3196,7 +3196,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             session.add(
                 OpenClawChatDispatchQueue(
                     requestId="occhat-recover-pre-restart",
-                    sessionKey="clawboard:topic:topic-recover-032b",
+                    sessionKey="clawboard:task:topic-recover-032b:task-recover-032b",
                     agentId="main",
                     sentAt=old_stamp,
                     message="pre restart claim",
@@ -3214,7 +3214,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             session.add(
                 OpenClawChatDispatchQueue(
                     requestId="occhat-recover-post-restart",
-                    sessionKey="clawboard:topic:topic-recover-032b",
+                    sessionKey="clawboard:task:topic-recover-032b:task-recover-032b",
                     agentId="main",
                     sentAt=old_stamp,
                     message="post restart claim",
@@ -3256,7 +3256,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(str(post_row.claimedAt or ""), post_restart_claim)
 
     def test_chat_033_history_ingest_dedupes_when_metadata_drifts(self):
-        session_key = "agent:main:clawboard:topic:topic-history-033"
+        session_key = "agent:main:clawboard:task:topic-history-033:task-history-033"
         ts = 1700001234567
         messages_a = [
             {
@@ -3293,7 +3293,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
 
     def test_chat_034_history_sync_seed_only_mode_skips_sessions_list(self):
-        session_key = "clawboard:topic:topic-history-034"
+        session_key = "clawboard:task:topic-history-034:task-history-034"
         rpc_calls: list[str] = []
 
         def _fake_sync_rpc(method: str, params: dict, *, scopes=None):
@@ -3343,7 +3343,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
 
     def test_chat_035_history_ingest_unwraps_untrusted_metadata_and_request_id(self):
-        session_key = "clawboard:topic:topic-history-035"
+        session_key = "clawboard:task:topic-history-035:task-history-035"
         existing_request_id = "occhat-history-035-existing"
         existing_created_at = datetime.fromtimestamp(1700001600, tz=timezone.utc).isoformat(timespec="milliseconds").replace(
             "+00:00", "Z"
@@ -3417,8 +3417,8 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertEqual(str(new_rows[0].content or ""), "new user prompt from history")
             self.assertNotIn("Conversation info (untrusted metadata)", str(new_rows[0].content or ""))
 
-    def test_chat_035b_history_scope_metadata_preserves_topic_only_hint(self):
-        session_key = "clawboard:topic:topic-history-035b"
+    def test_chat_035b_history_scope_metadata_ignores_topic_only_hint_and_keeps_task_scope(self):
+        session_key = "clawboard:task:topic-history-035b:task-history-035b"
         message = {
             "timestamp": 1700001602000,
             "role": "assistant",
@@ -3432,14 +3432,15 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
 
         scope = main_module._openclaw_history_scope_metadata(message, session_key)
 
-        self.assertEqual(scope.get("boardScopeKind"), "topic_only")
-        self.assertTrue(bool(scope.get("boardScopeTopicOnly")))
+        self.assertEqual(scope.get("boardScopeKind"), "task")
+        self.assertNotIn("boardScopeTopicOnly", scope)
         self.assertTrue(bool(scope.get("boardScopeLock")))
         self.assertEqual(scope.get("boardScopeTopicId"), "topic-history-035b")
+        self.assertEqual(scope.get("boardScopeTaskId"), "task-history-035b")
         self.assertEqual(scope.get("boardScopeSpaceId"), "space-default")
 
     def test_chat_036_history_session_key_detector_includes_board_keys(self):
-        self.assertTrue(main_module._openclaw_history_session_key_likely_gateway("clawboard:topic:topic-history-036"))
+        self.assertTrue(main_module._openclaw_history_session_key_likely_gateway("clawboard:task:topic-history-036:task-history-036"))
         self.assertTrue(
             main_module._openclaw_history_session_key_likely_gateway(
                 "clawboard:task:topic-history-036:task-history-036"
@@ -3447,13 +3448,13 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         )
         self.assertTrue(
             main_module._openclaw_history_session_key_likely_gateway(
-                "agent:main:clawboard:topic:topic-history-036|thread:abc"
+                "agent:main:clawboard:task:topic-history-036:task-history-036|thread:abc"
             )
         )
         self.assertFalse(main_module._openclaw_history_session_key_likely_gateway("unrelated:session:key"))
 
     def test_chat_037_watchdog_backfill_cooldown_applies_exponential_spacing(self):
-        session_key = "clawboard:topic:topic-history-037"
+        session_key = "clawboard:task:topic-history-037:task-history-037"
         with patch.dict(
             os.environ,
             {
@@ -3481,7 +3482,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertTrue(main_module._openclaw_watchdog_backfill_should_run(session_key, now_mono=402.0))
 
     def test_chat_038_history_sync_defers_session_after_timeout_failure(self):
-        session_key = "agent:main:clawboard:topic:topic-history-038"
+        session_key = "agent:main:clawboard:task:topic-history-038:task-history-038"
         chat_history_calls_first = {"count": 0}
 
         def _failing_sync_rpc(method: str, params: dict, *, scopes=None):
@@ -3611,7 +3612,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertFalse(main_module._openclaw_chat_dispatch_is_terminal_error("500 status code (upstream timeout)"))
 
     def test_chat_041_history_ingest_promotes_empty_assistant_terminal_error_to_system(self):
-        session_key = "agent:main:clawboard:topic:topic-history-041"
+        session_key = "agent:main:clawboard:task:topic-history-041:task-history-041"
         request_id = "request-history-041"
         timestamp_ms = 1700002000000
 
@@ -3646,7 +3647,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertTrue(bool(source.get("requestTerminal")))
 
     def test_chat_042_watchdog_loop_breaker_aborts_repeated_unknown_tool_errors(self):
-        session_key = "clawboard:topic:topic-history-042"
+        session_key = "clawboard:task:topic-history-042:task-history-042"
         request_id = "request-history-042"
         sent_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat(timespec="milliseconds").replace(
             "+00:00", "Z"
@@ -3715,7 +3716,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
 
     def test_chat_007_openclaw_chat_fail_closes_when_persist_fails(self):
         payload = OpenClawChatRequest(
-            sessionKey="clawboard:topic:topic-chat-007",
+            sessionKey="clawboard:task:topic-chat-007:task-chat-007",
             message="cannot persist",
             agentId="main",
         )
@@ -3744,7 +3745,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 "request-chat-008",
                 base_url="http://127.0.0.1:18789",
                 token="test-token",
-                session_key="clawboard:topic:topic-chat-008",
+                session_key="clawboard:task:topic-chat-008:task-chat-008",
                 agent_id="main",
                 sent_at=now_iso(),
                 message="with missing attachment",

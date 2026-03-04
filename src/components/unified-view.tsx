@@ -32,7 +32,6 @@ import {
 } from "@/components/board-chat-composer";
 import {
   BOARD_TASK_SESSION_PREFIX,
-  BOARD_TOPIC_SESSION_PREFIX,
   normalizeBoardSessionKey,
   taskSessionKey,
   topicSessionKey,
@@ -745,9 +744,6 @@ function buildOrchestrationThreadWorkIndex(logs: LogEntry[]): Record<string, Ses
     const boardTaskId = String(source.boardScopeTaskId ?? entry.taskId ?? "").trim();
     if (boardTopicId && boardTaskId) {
       next.sessionKeys.add(taskSessionKey(boardTopicId, boardTaskId));
-    }
-    if (boardTopicId) {
-      next.sessionKeys.add(topicSessionKey(boardTopicId));
     }
 
     const requestId = normalizeOpenClawRequestId(source.requestId ?? source.messageId);
@@ -3205,9 +3201,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const key = String(chatKey ?? "").trim();
       if (!key) return "";
       if (key.startsWith("topic:")) {
-        const topicId = key.slice("topic:".length).trim();
-        if (!topicId || topicId === "unassigned") return "";
-        return topicSessionKey(topicId);
+        return "";
       }
       if (key.startsWith("task:")) {
         const taskId = key.slice("task:".length).trim();
@@ -3458,10 +3452,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const chatKeyFromSessionKey = useCallback((sessionKey: string) => {
     const key = normalizeBoardSessionKey(sessionKey);
     if (!key) return "";
-    if (key.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
-      const topicId = key.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim();
-      return topicId ? `topic:${topicId}` : "";
-    }
     if (key.startsWith(BOARD_TASK_SESSION_PREFIX)) {
       const rest = key.slice(BOARD_TASK_SESSION_PREFIX.length).trim();
       const parts = rest.split(":", 2);
@@ -3759,7 +3749,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const active = activeComposer;
       const session =
         active?.kind === "topic"
-          ? topicSessionKey(active.topicId)
+          ? ""
           : active?.kind === "task"
             ? taskSessionKey(active.topicId, active.taskId)
             : "";
@@ -3967,15 +3957,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       map.set(taskSessionKey(topicId, taskId), count);
     }
 
-    for (const [topicId, rows] of topicRootLogsByTopic.entries()) {
-      if (!topicId || topicId === "unassigned") continue;
-      const count = countTrailingHiddenToolCallsAwaitingAgent(rows);
-      if (count < 1) continue;
-      map.set(topicSessionKey(topicId), count);
-    }
-
     return map;
-  }, [logsByTaskAll, showToolCalls, taskTopicById, topicRootLogsByTopic]);
+  }, [logsByTaskAll, showToolCalls, taskTopicById]);
 
   const hiddenToolCallCountForSession = useCallback(
     (sessionKey: string) => {
@@ -5430,7 +5413,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const syncFromUrl = useCallback(() => {
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
-    const params = url.searchParams;
     const rawDefaultWhenMissing = window.matchMedia("(min-width: 768px)").matches;
     const parsedState = parseUnifiedUrlState(url, {
       basePath,
@@ -5461,10 +5443,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setExpandedTasks(new Set(nextTasks));
     // Topic chat lives inline in expanded topics.
     setExpandedTopicChats(new Set(nextTopics.filter((id) => id !== "unassigned")));
-    if (params.get("focus") === "1" && params.get("chat") === "1" && nextTasks.length === 0 && nextTopics.length > 0) {
-      // When entering via left nav, take the user straight to the topic chat composer.
-      setAutoFocusTopicId(nextTopics[0] ?? null);
-    }
 
     if (restoreScrollOnNextSyncRef.current) {
       restoreScrollOnNextSyncRef.current = false;
@@ -5506,23 +5484,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     skipNextUrlSyncUrlRef.current = null;
     syncFromUrl();
   }, [currentUrlKey, pathname, searchParams, syncFromUrl]);
-
-  useEffect(() => {
-    if (!autoFocusTopicId) return;
-    const chatKey = `topic:${autoFocusTopicId}`;
-    activeChatKeyRef.current = chatKey;
-    activeChatAtBottomRef.current = true;
-    scheduleScrollChatToBottom(chatKey);
-
-    const session = topicSessionKey(autoFocusTopicId);
-    const focusComposer = () => {
-      const handle = composerHandlesRef.current.get(session);
-      handle?.focus({ reveal: true, behavior: "auto", block: "end" });
-    };
-    focusComposer();
-    const timer = window.setTimeout(focusComposer, 120);
-    return () => window.clearTimeout(timer);
-  }, [autoFocusTopicId, scheduleScrollChatToBottom]);
 
   useEffect(() => {
     if (!autoFocusTask) return;
@@ -5690,8 +5651,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   }, [composerTarget, tasks, topics]);
   const unifiedComposerHasText = unifiedComposerDraft.trim().length > 0;
   const unifiedComposerHasContent = unifiedComposerHasText || unifiedComposerAttachments.length > 0;
-  const unifiedComposerSendsToNewTopic = !selectedComposerTarget;
-  const unifiedComposerSubmitLabel = unifiedComposerSendsToNewTopic ? "New Topic" : "Send";
+  const unifiedComposerAutoResolve = !selectedComposerTarget || selectedComposerTarget.kind === "topic";
+  const unifiedComposerSubmitLabel = unifiedComposerAutoResolve ? "Resolve & Send" : "Send";
   const selectedComposerSessionKey = useMemo(() => {
     if (selectedComposerTarget?.kind === "task") {
       const topicId = String(selectedComposerTarget.task.topicId ?? "").trim();
@@ -5699,20 +5660,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (!topicId || !taskId) return "";
       return taskSessionKey(topicId, taskId);
     }
-    if (selectedComposerTarget?.kind === "topic") {
-      const topicId = String(selectedComposerTarget.topic.id ?? "").trim();
-      if (!topicId) return "";
-      return topicSessionKey(topicId);
-    }
     return "";
   }, [selectedComposerTarget]);
   const activeComposerSessionKey = useMemo(() => {
     if (!activeComposer) return "";
-    if (activeComposer.kind === "topic") {
-      const topicId = String(activeComposer.topicId ?? "").trim();
-      if (!topicId) return "";
-      return topicSessionKey(topicId);
-    }
+    if (activeComposer.kind === "topic") return "";
     const topicId = String(activeComposer.topicId ?? "").trim();
     const taskId = String(activeComposer.taskId ?? "").trim();
     if (!topicId || !taskId) return "";
@@ -5895,7 +5847,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     [clearUnifiedComposerFields, requestIdForSession, resolveUnifiedCancelTargetSession, token, writeHeaders]
   );
 
-  const sendUnifiedComposer = useCallback(async (forceNewTopic: boolean) => {
+  const sendUnifiedComposer = useCallback(async () => {
     if (readOnly) return;
     const message = unifiedComposerDraft.trim();
     if (!message) return;
@@ -5918,77 +5870,45 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         : null;
 
     const routedSpaceId = selectedSpaceId || undefined;
-
-    const asNewTopic = forceNewTopic || (!selectedTask && !selectedTopic);
-    let createdTopicId = "";
-    let sessionKey = "";
+    let resolvedTopicId = String(selectedTopic?.id ?? selectedTask?.topicId ?? "").trim();
+    let resolvedTaskId = String(selectedTask?.id ?? "").trim();
+    let sessionKey = selectedTask && resolvedTopicId
+      ? taskSessionKey(resolvedTopicId, resolvedTaskId)
+      : "";
 
     setUnifiedComposerBusy(true);
     try {
-      if (asNewTopic) {
-        const scopeSpaceId = String(selectedSpaceId ?? "").trim();
-        const scopeTag = spaceTagFromSelection(scopeSpaceId, spaces);
-        const tags = scopeTag ? [scopeTag] : [];
-
-        const usage = new Map<string, number>();
-        const scopedColors: string[] = [];
-        const recentGlobal: string[] = [];
-        const stableTopics = storeTopics.slice().sort((a, b) => a.id.localeCompare(b.id));
-        for (const topic of stableTopics) {
-          const color =
-            normalizeHexColor(topic.color) ??
-            topicDisplayColors.get(topic.id) ??
-            colorFromSeed(`topic:${topic.id}:${topic.name}`, TOPIC_FALLBACK_COLORS);
-          if (!color) continue;
-          usage.set(color, (usage.get(color) ?? 0) + 1);
-          recentGlobal.push(color);
-          if (recentGlobal.length > 24) recentGlobal.shift();
-          if (scopeSpaceId && topicSpaceIds(topic).includes(scopeSpaceId)) scopedColors.push(color);
-        }
-        const topicColor = pickVibrantDistinctColor({
-          palette: TOPIC_FALLBACK_COLORS,
-          seed: `topic:unified:new:${scopeSpaceId || "global"}:${Date.now()}:${message.slice(0, 80)}`,
-          primaryAvoid: scopedColors,
-          secondaryAvoid: recentGlobal,
-          usageCount: usage,
-        });
-        const topicName = deriveUnifiedTopicNameFromMessage(message);
-
-        const createTopicRes = await apiFetch(
-          "/api/topics",
+      if (!sessionKey) {
+        const resolveRes = await apiFetch(
+          "/api/openclaw/resolve-board-send",
           {
             method: "POST",
             headers: writeHeaders,
             body: JSON.stringify({
-              name: topicName,
-              color: topicColor,
-              ...(tags.length > 0 ? { tags } : {}),
+              message,
+              spaceId: routedSpaceId,
+              selectedTopicId: selectedTopic ? selectedTopic.id : undefined,
+              selectedTaskId: undefined,
             }),
           },
           token
         );
-        if (!createTopicRes.ok) throw new Error("new_topic_create_failed");
-        const createdTopic = parseTopicPayload(await createTopicRes.json().catch(() => null));
-        if (!createdTopic?.id) throw new Error("new_topic_create_invalid");
-
-        createdTopicId = createdTopic.id;
-        const hydratedTopic: Topic = {
-          ...createdTopic,
-          color: normalizeHexColor(createdTopic.color) ?? topicColor,
-          tags: Array.isArray(createdTopic.tags) ? createdTopic.tags : tags,
-        };
-        setTopics((prev) => {
-          if (prev.some((topic) => topic.id === hydratedTopic.id)) {
-            return prev.map((topic) => (topic.id === hydratedTopic.id ? { ...topic, ...hydratedTopic } : topic));
-          }
-          return [hydratedTopic, ...prev];
-        });
-
-        sessionKey = topicSessionKey(createdTopicId);
-      } else {
-        sessionKey = selectedTask
-          ? taskSessionKey(String(selectedTask.topicId || ""), selectedTask.id)
-          : topicSessionKey(String(selectedTopic?.id || ""));
+        if (!resolveRes.ok) {
+          const detail = await resolveRes.json().catch(() => null);
+          const msg = typeof detail?.detail === "string" ? detail.detail : `Failed to resolve send target (${resolveRes.status}).`;
+          throw new Error(msg);
+        }
+        const resolved = (await resolveRes.json().catch(() => null)) as {
+          topicId?: string;
+          taskId?: string;
+          sessionKey?: string;
+        } | null;
+        resolvedTopicId = String(resolved?.topicId ?? "").trim();
+        resolvedTaskId = String(resolved?.taskId ?? "").trim();
+        sessionKey = String(resolved?.sessionKey ?? "").trim();
+        if (!sessionKey && resolvedTopicId && resolvedTaskId) {
+          sessionKey = taskSessionKey(resolvedTopicId, resolvedTaskId);
+        }
       }
 
       if (!sessionKey) return;
@@ -6026,8 +5946,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             sessionKey,
             message,
             spaceId: routedSpaceId,
-            // Keep unified messages promotable into task scope when classifier/orchestration decides.
-            topicOnly: false,
             attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined,
           }),
         },
@@ -6041,19 +5959,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
       clearUnifiedComposerFields();
 
-      if (asNewTopic && createdTopicId) {
-        setComposerTarget({ kind: "topic", topicId: createdTopicId });
-        setExpandedTopics((prev) => new Set(prev).add(createdTopicId));
-        setExpandedTopicChats((prev) => new Set(prev).add(createdTopicId));
-        setAutoFocusTopicId(createdTopicId);
-        const nextTopics = Array.from(new Set([...expandedTopicsSafe, createdTopicId]));
-        pushUrl({ topics: nextTopics, reveal: "1" }, "replace");
-        if (!mdUp) openMobileTopicChat(createdTopicId);
-        return;
-      }
-      if (selectedTask && selectedTask.topicId) {
-        const topicId = selectedTask.topicId;
-        const taskId = selectedTask.id;
+      if (selectedTask && selectedTask.topicId && selectedTask.id) {
+        const topicId = String(selectedTask.topicId).trim();
+        const taskId = String(selectedTask.id).trim();
         setExpandedTopics((prev) => new Set(prev).add(topicId));
         setExpandedTasks((prev) => new Set(prev).add(taskId));
         setAutoFocusTask({ topicId, taskId });
@@ -6063,15 +5971,18 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         if (!mdUp) openMobileTaskChat(topicId, taskId);
         return;
       }
-      if (selectedTopic) {
-        const topicId = selectedTopic.id;
-        setExpandedTopics((prev) => new Set(prev).add(topicId));
-        setExpandedTopicChats((prev) => new Set(prev).add(topicId));
-        setAutoFocusTopicId(topicId);
-        const nextTopics = Array.from(new Set([...expandedTopicsSafe, topicId]));
-        pushUrl({ topics: nextTopics, reveal: '1' }, 'replace');
-        if (!mdUp) openMobileTopicChat(topicId);
-      }
+
+      const topicId = resolvedTopicId;
+      const taskId = resolvedTaskId;
+      if (!topicId || !taskId) return;
+      setComposerTarget({ kind: "task", topicId, taskId });
+      setExpandedTopics((prev) => new Set(prev).add(topicId));
+      setExpandedTasks((prev) => new Set(prev).add(taskId));
+      setAutoFocusTask({ topicId, taskId });
+      const nextTopics = Array.from(new Set([...expandedTopicsSafe, topicId]));
+      const nextTasks = Array.from(new Set([...expandedTasksSafe, taskId]));
+      pushUrl({ topics: nextTopics, tasks: nextTasks, reveal: "1" }, "replace");
+      if (!mdUp) openMobileTaskChat(topicId, taskId);
     } catch (error) {
       const messageText = error instanceof Error ? error.message : "Failed to send message.";
       setUnifiedComposerError(messageText);
@@ -6086,93 +5997,18 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     markRecentBoardSend,
     mdUp,
     openMobileTaskChat,
-    openMobileTopicChat,
     pushUrl,
     readOnly,
     selectedComposerTarget,
     selectedSpaceId,
     setExpandedTasks,
-    setExpandedTopicChats,
     setExpandedTopics,
-    setTopics,
-    spaces,
-    storeTopics,
     token,
-    topicDisplayColors,
     unifiedComposerAttachments,
     unifiedComposerBusy,
     unifiedComposerDraft,
     writeHeaders,
   ]);
-
-  // Auto-promote topic chat into a task when classifier patches a topic-scoped log with taskId.
-  // This keeps the "continue chatting" UX deterministic: once a task exists, new sends should target
-  // the task sessionKey so future turns attach immediately.
-  useEffect(() => {
-    const prev = prevTaskByLogId.current;
-    let promotion: { topicId: string; taskId: string; sessionKey: string } | null = null;
-
-    for (const entry of logs) {
-      const hadPrev = prev.has(entry.id);
-      const prevTask = prev.get(entry.id) ?? null;
-      const nextTask = entry.taskId ?? null;
-      if (!promotion && hadPrev && prevTask == null && nextTask != null) {
-        const sessionKey = normalizeBoardSessionKey(entry.source?.sessionKey);
-        if (sessionKey && sessionKey.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
-          const topicId = sessionKey.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim();
-          if (topicId) promotion = { topicId, taskId: nextTask, sessionKey };
-        }
-      }
-      prev.set(entry.id, nextTask);
-    }
-
-    if (prev.size > Math.max(5000, logs.length * 2)) {
-      const alive = new Set(logs.map((e) => e.id));
-      for (const id of prev.keys()) {
-        if (!alive.has(id)) prev.delete(id);
-      }
-    }
-
-    if (!promotion) return;
-    const sentAt = recentBoardSendAtRef.current.get(promotion.sessionKey) ?? 0;
-    if (!sentAt || Date.now() - sentAt > OPENCLAW_PROMOTION_SIGNAL_WINDOW_MS) return;
-    recentBoardSendAtRef.current.delete(promotion.sessionKey);
-
-    setExpandedTopics((prevSet) => {
-      const next = new Set(prevSet);
-      next.add(promotion.topicId);
-      return next;
-    });
-    setExpandedTasks((prevSet) => {
-      const next = new Set(prevSet);
-      next.add(promotion.taskId);
-      return next;
-    });
-    // Update the unified composer target so future sends go to the promoted task session,
-    // not the original topic session.
-    setComposerTarget({ kind: "task", topicId: promotion.topicId, taskId: promotion.taskId });
-    setAutoFocusTask({ topicId: promotion.topicId, taskId: promotion.taskId });
-    // If the classifier promotes a topic session into a task mid-turn, keep "typing" and
-    // response indicators visible in the new task chat even though the underlying sessionKey
-    // for this turn was topic-scoped.
-    typingAliasRef.current.set(taskSessionKey(promotion.topicId, promotion.taskId), {
-      sourceSessionKey: topicSessionKey(promotion.topicId),
-      createdAt: Date.now(),
-    });
-    // Ensure the newly promoted task chat opens scrolled to the latest messages
-    // without forcing a window scroll.
-    const promotedChatKey = `task:${promotion.taskId}`;
-    activeChatKeyRef.current = promotedChatKey;
-    activeChatAtBottomRef.current = true;
-    scheduleScrollChatToBottom(promotedChatKey);
-    if (!mdUp) {
-      openMobileTaskChat(promotion.topicId, promotion.taskId);
-    }
-
-    const nextTopics = Array.from(new Set([...expandedTopicsSafe, promotion.topicId]));
-    const nextTasks = Array.from(new Set([...expandedTasksSafe, promotion.taskId]));
-    pushUrl({ topics: nextTopics, tasks: nextTasks }, "replace");
-  }, [expandedTasksSafe, expandedTopicsSafe, logs, mdUp, openMobileTaskChat, pushUrl, scheduleScrollChatToBottom, setComposerTarget, setExpandedTasks, setExpandedTopics]);
 
   return (
     <div className="space-y-4">
@@ -6410,16 +6246,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && event.ctrlKey) {
                     event.preventDefault();
-                    void sendUnifiedComposer(unifiedComposerSendsToNewTopic);
+                    void sendUnifiedComposer();
                     return;
                   }
                   // On mobile the keyboard "Send" key fires plain Enter — treat it as send.
                   if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !mdUp) {
                     event.preventDefault();
-                    void sendUnifiedComposer(unifiedComposerSendsToNewTopic);
+                    void sendUnifiedComposer();
                   }
                 }}
-                placeholder="Chat about a Topic"
+                placeholder="Send to Task Chat"
                 className="resize-none overflow-y-hidden border-0 bg-transparent p-2 pr-[11.5rem]"
                 style={{ minHeight: mdUp ? "44px" : "36px" }}
               />
@@ -6432,7 +6268,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     <span className="truncate">
                       Sending to {selectedComposerTarget.kind === "task"
                         ? `task: ${selectedComposerTarget.task.title}`
-                        : `topic: ${selectedComposerTarget.topic.name}`}
+                        : `topic (resolve task): ${selectedComposerTarget.topic.name}`}
                     </span>
                     <button
                       type="button"
@@ -6449,7 +6285,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     </button>
                   </div>
                 ) : (
-                  <span className="text-[11px] text-[rgb(var(--claw-muted))]">No target selected — New Topic</span>
+                  <span className="text-[11px] text-[rgb(var(--claw-muted))]">No target selected - resolver will pick topic and task</span>
                 )}
               </div>
               <div className="absolute bottom-2 right-2 flex items-center gap-1.5">
@@ -6529,9 +6365,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 ) : null}
                 {unifiedComposerHasText ? (
                   <Button
-                    data-testid={unifiedComposerSendsToNewTopic ? "unified-composer-new-topic" : "unified-composer-send"}
+                    data-testid={unifiedComposerAutoResolve ? "unified-composer-resolve-send" : "unified-composer-send"}
                     size="sm"
-                    onClick={() => void sendUnifiedComposer(unifiedComposerSendsToNewTopic)}
+                    onClick={() => void sendUnifiedComposer()}
                     disabled={unifiedComposerBusy}
                   >
                     {unifiedComposerSubmitLabel}
@@ -7143,7 +6979,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                    )}
 	                  </div>
 	                </div>
-                  {!isUnassigned ? (
+                  {false && !isUnassigned ? (
                     <button
                       type="button"
                       data-testid={`toggle-topic-chat-${topicId}`}
@@ -7151,11 +6987,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       aria-label={
                         !mdUp
                           ? topicChatFullscreen
-                            ? `Collapse topic chat ${topic.name}`
-                            : `Expand topic chat ${topic.name}`
+                            ? `Collapse chat ${topic.name}`
+                            : `Expand chat ${topic.name}`
                           : isExpanded
-                            ? `Topic chat open for ${topic.name}`
-                            : `Expand topic chat ${topic.name}`
+                            ? `Chat open for ${topic.name}`
+                            : `Expand chat ${topic.name}`
                       }
                       title={
                         !mdUp
@@ -7163,8 +6999,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             ? "Close chat"
                             : "Open chat"
                           : isExpanded
-                            ? "Topic chat open"
-                            : "Expand topic chat"
+                            ? "Chat open"
+                            : "Expand chat"
                       }
                       onClick={(event) => {
                         event.stopPropagation();
@@ -8335,7 +8171,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         </>
                       ) : null}
 
-	                  {!isUnassigned && (
+	                  {false && !isUnassigned && (
 	                    <div
 	                      className={cn(
                           topicChatFullscreen
@@ -8359,12 +8195,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                            {topicChatBlurb ? (
 			                              <>
 			                                <span className="text-xs text-[rgba(var(--claw-muted),0.55)]">·</span>
-			                                <div
-			                                  className="min-w-0 max-w-[56ch] truncate text-xs text-[rgba(var(--claw-muted),0.9)]"
-			                                  title={topicChatBlurb.full}
-			                                >
-			                                  {topicChatBlurb.clipped}
-			                                </div>
+				                                <div
+				                                  className="min-w-0 max-w-[56ch] truncate text-xs text-[rgba(var(--claw-muted),0.9)]"
+				                                  title={topicChatBlurb?.full ?? ""}
+				                                >
+				                                  {topicChatBlurb?.clipped ?? ""}
+				                                </div>
 			                              </>
 			                            ) : null}
 			                          </div>

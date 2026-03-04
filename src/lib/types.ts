@@ -82,11 +82,10 @@ export type LogEntry = {
     boardScopeSpaceId?: string;
     boardScopeTopicId?: string;
     boardScopeTaskId?: string;
-    boardScopeKind?: "topic" | "task" | "topic_only";
+    boardScopeKind?: "task";
     boardScopeSessionKey?: string;
     boardScopeInherited?: boolean;
     boardScopeLock?: boolean;
-    boardScopeTopicOnly?: boolean;
     speakerId?: string;
     speakerLabel?: string;
     audienceId?: string;

@@ -89,7 +89,7 @@ class ClassifierReplayTests(unittest.TestCase):
             session.commit()
 
     def _append(self, *, type: str, content: str, agent_id: str, created_at: str, message_id: str) -> str:
-        session_key = "clawboard:topic:topic-1"
+        session_key = "clawboard:task:topic-1:task-1"
         res = self.client.post(
             "/api/log",
             headers=self.auth_headers,
@@ -110,7 +110,7 @@ class ClassifierReplayTests(unittest.TestCase):
         payload = res.json()
         return str(payload.get("id") or "")
 
-    def test_replay_marks_bundle_pending_and_clears_task(self):
+    def test_replay_marks_bundle_pending_and_keeps_task_scope(self):
         base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
         # Bundle 1 (should be replayed).
@@ -144,7 +144,7 @@ class ClassifierReplayTests(unittest.TestCase):
         payload = res.json()
         self.assertTrue(payload.get("ok"))
         self.assertEqual(payload.get("anchorLogId"), user1)
-        self.assertEqual(payload.get("sessionKey"), "clawboard:topic:topic-1")
+        self.assertEqual(payload.get("sessionKey"), "clawboard:task:topic-1:task-1")
         self.assertEqual(payload.get("topicId"), "topic-1")
         self.assertEqual(payload.get("logCount"), 7)
         self.assertEqual(len(payload.get("logIds") or []), 7)
@@ -159,7 +159,7 @@ class ClassifierReplayTests(unittest.TestCase):
                 self.assertEqual(row.classificationStatus, "pending")
                 self.assertEqual(row.classificationAttempts, 0)
                 self.assertIsNone(row.classificationError)
-                self.assertIsNone(row.taskId)
+                self.assertEqual(row.taskId, "task-1")
 
             for lid in untouched:
                 row = session.get(LogEntry, lid)
@@ -168,4 +168,3 @@ class ClassifierReplayTests(unittest.TestCase):
                 self.assertEqual(row.classificationAttempts, 2)
                 self.assertEqual(row.classificationError, "prior")
                 self.assertEqual(row.taskId, "task-1")
-

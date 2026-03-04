@@ -89,7 +89,7 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             return main_module.append_log_entry(session, payload, idempotency_key=idem)
 
     def test_orch_001_chat_creates_run_and_main_item(self):
-        session_key = "clawboard:topic:topic-orch-001"
+        session_key = "clawboard:task:topic-orch-001:task-orch-001"
         request_id = self._openclaw_chat(session_key=session_key, message="Plan and execute this task.")
         request_base = main_module._openclaw_request_id_base(request_id)
 
@@ -225,7 +225,7 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             self.assertIsNone(item)
 
     def test_orch_003_main_response_does_not_close_while_subagent_still_active(self):
-        session_key = "clawboard:topic:topic-orch-003"
+        session_key = "clawboard:task:topic-orch-003:task-orch-003"
         request_id = self._openclaw_chat(session_key=session_key, message="Do this with a subagent.")
         child_session = "agent:coding:subagent:orch-003-child"
 
@@ -509,7 +509,7 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             self.assertIn(statuses.get(f"subagent:{child_session}"), {"cancelled", "done"})
 
     def test_orch_005_context_includes_orchestration_snapshot(self):
-        session_key = "clawboard:topic:topic-orch-005"
+        session_key = "clawboard:task:topic-orch-005:task-orch-005"
         request_id = self._openclaw_chat(session_key=session_key, message="Track this with orchestration.")
         response = main_module.context(
             q="what is running?",
@@ -532,7 +532,7 @@ class OrchestrationRuntimeTests(unittest.TestCase):
         self.assertIn(str(convergence.get("reason") or ""), {"awaiting_run", "awaiting_items"})
 
     def test_orch_006_tick_marks_idle_items_stalled(self):
-        session_key = "clawboard:topic:topic-orch-006"
+        session_key = "clawboard:task:topic-orch-006:task-orch-006"
         request_id = self._openclaw_chat(session_key=session_key, message="This will idle.")
         old_dt = datetime.now(timezone.utc) - timedelta(hours=2)
         old_iso = old_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -572,7 +572,7 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             self.assertEqual(run.status, "stalled")
 
     def test_orch_006b_tick_stalls_items_when_last_activity_metadata_is_missing(self):
-        session_key = "clawboard:topic:topic-orch-006b"
+        session_key = "clawboard:task:topic-orch-006b:task-orch-006b"
         request_id = self._openclaw_chat(session_key=session_key, message="Idle without explicit lastActivity metadata.")
         old_dt = datetime.now(timezone.utc) - timedelta(hours=2)
         old_iso = old_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -615,7 +615,7 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             self.assertLess(abs(float(last_activity or 0.0) - old_dt.timestamp()), 2.0)
 
     def test_orch_006c_tick_emits_periodic_main_check_in_events(self):
-        session_key = "clawboard:topic:topic-orch-006c"
+        session_key = "clawboard:task:topic-orch-006c:task-orch-006c"
         request_id = self._openclaw_chat(session_key=session_key, message="Keep me posted while this runs.")
         due_dt = datetime.now(timezone.utc) - timedelta(minutes=2)
         due_iso = due_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -674,7 +674,7 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             self.assertGreaterEqual(int(payload.get("nextCheckInSeconds") or 0), 60)
 
     def test_orch_007_main_only_assistant_reply_closes_run_without_subagents(self):
-        session_key = "clawboard:topic:topic-orch-007"
+        session_key = "clawboard:task:topic-orch-007:task-orch-007"
         request_id = self._openclaw_chat(session_key=session_key, message="Simple question: what is 2 + 2?")
 
         self._append_log(
@@ -700,7 +700,7 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             self.assertEqual(str(items[0].status or ""), "done")
 
     def test_orch_008_multi_subagent_run_requires_all_children_and_main_final(self):
-        session_key = "clawboard:topic:topic-orch-008"
+        session_key = "clawboard:task:topic-orch-008:task-orch-008"
         request_id = self._openclaw_chat(session_key=session_key, message="Coordinate coding + web research.")
         child_a = "agent:coding:subagent:orch-008-a"
         child_b = "agent:web:subagent:orch-008-b"

@@ -105,7 +105,7 @@ class UnsnoozeOnActivityTests(unittest.TestCase):
                 "createdAt": ts,
                 "agentId": "user",
                 "agentLabel": "User",
-                "source": {"channel": "tests", "sessionKey": "clawboard:topic:topic-1", "messageId": "m1"},
+                "source": {"channel": "tests", "sessionKey": "clawboard:task:topic-1:task-1", "messageId": "m1"},
                 "classificationStatus": "classified",
             },
         )

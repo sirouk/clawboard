@@ -1683,7 +1683,7 @@ const LogRow = memo(function LogRow({
                                 title={
                                   scopeTaskId
                                     ? "Delete this message and everything after it in this Task Chat"
-                                    : "Delete this message and everything after it in this Topic Chat"
+                                    : "Delete this message and everything after it in this Task Chat"
                                 }
                               >
                                 Purge from here
@@ -2092,7 +2092,7 @@ const LogRow = memo(function LogRow({
                             title={
                               scopeTaskId
                                 ? "Delete this message and everything after it in this Task Chat"
-                                : "Delete this message and everything after it in this Topic Chat"
+                                : "Delete this message and everything after it in this Task Chat"
                             }
                           >
                             Purge from here
@@ -2571,7 +2571,7 @@ const LogRow = memo(function LogRow({
                       title={
                         scopeTaskId
                           ? "Delete this message and everything after it in this Task Chat"
-                          : "Delete this message and everything after it in this Topic Chat"
+                          : "Delete this message and everything after it in this Task Chat"
                       }
                     >
                       Purge from here

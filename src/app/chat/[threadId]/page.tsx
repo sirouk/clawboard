@@ -17,7 +17,7 @@ export default async function ChatThreadRedirect({ params }: { params: MaybeProm
 
   if (threadId.startsWith("topic:")) {
     const topicId = threadId.slice("topic:".length).trim();
-    if (topicId) redirect(`/u/topic/${encodeURIComponent(topicId)}?chat=1`);
+    if (topicId) redirect(`/u/topic/${encodeURIComponent(topicId)}`);
     redirect("/u");
   }
 

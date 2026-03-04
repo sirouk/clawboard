@@ -78,7 +78,6 @@ Statuses are how the system tracks state:
 
 - Board-session scope is deterministic:
   - `clawboard:task:<topicId>:<taskId>` is hard-pinned to that topic/task.
-  - `clawboard:topic:<topicId>` is topic-pinned; task promotion/inference can happen only inside that same topic.
 - Task chat routing is main-mediated:
   - messages sent in topic/task chat sessions go through main orchestration, which may delegate to specialists/subagents.
   - task session ownership is not direct subagent dispatch by default.
