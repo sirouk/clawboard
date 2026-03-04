@@ -18,6 +18,37 @@ log_info() { echo -e "\033[0;34minfo:\033[0m $1"; }
 log_success() { echo -e "\033[0;32msuccess:\033[0m $1"; }
 log_warn() { echo -e "\033[1;33mwarning:\033[0m $1"; }
 
+deploy_file_atomic_if_changed() {
+  local src="$1"
+  local dst="$2"
+  if [ ! -f "$src" ]; then
+    return 11
+  fi
+
+  local dst_dir
+  dst_dir="$(dirname "$dst")"
+  mkdir -p "$dst_dir"
+
+  if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+    return 10
+  fi
+
+  local tmp
+  tmp="$(mktemp "${dst}.tmp.XXXXXX")" || return 12
+  if ! cp "$src" "$tmp"; then
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 12
+  fi
+  if ! mv -f "$tmp" "$dst"; then
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 12
+  fi
+  if ! cmp -s "$src" "$dst"; then
+    return 12
+  fi
+  return 0
+}
+
 resolve_workspace_for_agent() {
   local agent_id="$1"
   local fallback="$OPENCLAW_HOME/workspace-$agent_id"
@@ -117,14 +148,26 @@ for name in $SPECIALISTS; do
     continue
   fi
   mkdir -p "$ws_dir"
+  mkdir -p "$ws_dir/memory" "$ws_dir/obsidian"
   deployed=0
+  unchanged=0
   for f in AGENTS.md SOUL.md; do
     if [ -f "$tmpl_dir/$f" ]; then
-      cp "$tmpl_dir/$f" "$ws_dir/$f"
-      deployed=$((deployed + 1))
+      if deploy_file_atomic_if_changed "$tmpl_dir/$f" "$ws_dir/$f"; then
+        deployed=$((deployed + 1))
+      else
+        rc=$?
+        if [ "$rc" -eq 10 ]; then
+          unchanged=$((unchanged + 1))
+        else
+          log_warn "Failed deploying $name template file: $f"
+        fi
+      fi
     fi
   done
   if [ "$deployed" -gt 0 ]; then
-    log_success "Provisioned $name workspace at $ws_dir ($deployed file(s))."
+    log_success "Provisioned $name workspace at $ws_dir ($deployed updated, $unchanged unchanged)."
+  elif [ "$unchanged" -gt 0 ]; then
+    log_info "$name workspace already aligned at $ws_dir."
   fi
 done

@@ -29,20 +29,270 @@ log_warn() { echo "warn: $1" >&2; }
 log_success() { echo "success: $1"; }
 die() { echo "error: $1" >&2; exit 1; }
 
+OPENCLAW_DOCTOR_FIX_ATTEMPTED=false
+
+run_doctor_fix_once() {
+  if [[ "$OPENCLAW_DOCTOR_FIX_ATTEMPTED" == "true" ]]; then
+    return 1
+  fi
+  OPENCLAW_DOCTOR_FIX_ATTEMPTED=true
+  if openclaw doctor --fix >/dev/null 2>&1; then
+    log_warn "Detected config schema drift; applied openclaw doctor --fix and retrying config writes."
+    return 0
+  fi
+  return 1
+}
+
+normalize_scalar_json_output() {
+  local raw="${1:-}"
+  raw="$(printf "%s" "$raw" | tr -d '\r' | tail -n1 | tr -d '"' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  printf "%s" "$raw"
+}
+
+read_memory_backend() {
+  local backend
+  backend="$(openclaw config get memory.backend --json 2>/dev/null || true)"
+  backend="$(normalize_scalar_json_output "$backend")"
+  if [[ -z "$backend" || "$backend" == "null" ]]; then
+    if run_doctor_fix_once; then
+      backend="$(openclaw config get memory.backend --json 2>/dev/null || true)"
+      backend="$(normalize_scalar_json_output "$backend")"
+    fi
+  fi
+  printf "%s" "$backend"
+}
+
+CFG_TXN_ACTIVE=false
+CFG_TXN_SNAPSHOT=""
+declare -a CFG_TXN_KEYS=()
+declare -a CFG_TXN_EXPECTED=()
+declare -a CFG_TXN_REQUIRED=()
+
+record_cfg_expectation() {
+  local key="$1"
+  local expected_json="$2"
+  local required="$3"
+  local i
+  for i in "${!CFG_TXN_KEYS[@]}"; do
+    if [[ "${CFG_TXN_KEYS[$i]}" == "$key" ]]; then
+      CFG_TXN_EXPECTED[$i]="$expected_json"
+      if [[ "$required" == "true" ]]; then
+        CFG_TXN_REQUIRED[$i]="true"
+      fi
+      return 0
+    fi
+  done
+  CFG_TXN_KEYS+=("$key")
+  CFG_TXN_EXPECTED+=("$expected_json")
+  CFG_TXN_REQUIRED+=("$required")
+}
+
+begin_cfg_txn() {
+  if [[ "$CFG_TXN_ACTIVE" == "true" ]]; then
+    return 0
+  fi
+  ensure_openclaw_config_file || die "OpenClaw config not found at: $OPENCLAW_CONFIG_PATH"
+  CFG_TXN_SNAPSHOT="$(mktemp "${OPENCLAW_CONFIG_PATH}.txn.XXXXXX")"
+  cp "$OPENCLAW_CONFIG_PATH" "$CFG_TXN_SNAPSHOT"
+  CFG_TXN_ACTIVE=true
+  CFG_TXN_KEYS=()
+  CFG_TXN_EXPECTED=()
+  CFG_TXN_REQUIRED=()
+  log_info "Started OpenClaw config transaction."
+}
+
+rollback_cfg_txn() {
+  if [[ "$CFG_TXN_ACTIVE" != "true" ]]; then
+    return 0
+  fi
+  if [[ -n "$CFG_TXN_SNAPSHOT" && -f "$CFG_TXN_SNAPSHOT" ]]; then
+    cp "$CFG_TXN_SNAPSHOT" "$OPENCLAW_CONFIG_PATH"
+    log_warn "Rolled back OpenClaw config transaction."
+  fi
+  CFG_TXN_ACTIVE=false
+  CFG_TXN_KEYS=()
+  CFG_TXN_EXPECTED=()
+  CFG_TXN_REQUIRED=()
+}
+
+commit_cfg_txn() {
+  if [[ "$CFG_TXN_ACTIVE" != "true" ]]; then
+    return 0
+  fi
+  CFG_TXN_ACTIVE=false
+  if [[ -n "$CFG_TXN_SNAPSHOT" && -f "$CFG_TXN_SNAPSHOT" ]]; then
+    rm -f "$CFG_TXN_SNAPSHOT"
+  fi
+  CFG_TXN_SNAPSHOT=""
+  CFG_TXN_KEYS=()
+  CFG_TXN_EXPECTED=()
+  CFG_TXN_REQUIRED=()
+  log_success "Committed OpenClaw config transaction."
+}
+
+parse_json_payload() {
+  local raw="${1:-}"
+  python3 - "$raw" <<'PY'
+import json
+import sys
+
+raw = sys.argv[1]
+if not raw.strip():
+    raise SystemExit(1)
+
+decoder = json.JSONDecoder()
+text = raw.strip()
+
+try:
+    obj = json.loads(text)
+except Exception:
+    obj = None
+    starts = "{[\"-0123456789tfn"
+    for idx, ch in enumerate(text):
+        if ch not in starts:
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text[idx:])
+            break
+        except Exception:
+            continue
+    if obj is None:
+        raise SystemExit(1)
+
+print(json.dumps(obj, separators=(",", ":"), sort_keys=True))
+PY
+}
+
+cfg_get_json() {
+  local key="$1"
+  openclaw config get "$key" --json 2>/dev/null || true
+}
+
+seed_minimal_openclaw_config() {
+  local workspace="$1"
+  local tmp
+  tmp="$(mktemp "${OPENCLAW_CONFIG_PATH}.seed.XXXXXX")" || return 1
+  if ! python3 - "$tmp" "$workspace" <<'PY'; then
+import json
+import os
+import sys
+
+path = sys.argv[1]
+workspace = os.path.abspath(os.path.expanduser(sys.argv[2] or ""))
+if not workspace:
+    raise SystemExit(1)
+
+data = {
+    "agents": {
+        "defaults": {"workspace": workspace},
+        "list": [{"id": "main", "default": True, "workspace": workspace}],
+    }
+}
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 1
+  fi
+  mv -f "$tmp" "$OPENCLAW_CONFIG_PATH"
+}
+
+ensure_openclaw_config_file() {
+  if [[ -f "$OPENCLAW_CONFIG_PATH" ]]; then
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$OPENCLAW_CONFIG_PATH")"
+  if openclaw doctor --fix >/dev/null 2>&1; then
+    if [[ -f "$OPENCLAW_CONFIG_PATH" ]]; then
+      log_info "Initialized OpenClaw config via openclaw doctor --fix."
+      return 0
+    fi
+  fi
+  openclaw config get agents.defaults.workspace --json >/dev/null 2>&1 || true
+  if [[ -f "$OPENCLAW_CONFIG_PATH" ]]; then
+    log_info "Initialized OpenClaw config via openclaw config command."
+    return 0
+  fi
+
+  local workspace="$OPENCLAW_HOME/workspace"
+  mkdir -p "$workspace"
+  if seed_minimal_openclaw_config "$workspace"; then
+    log_warn "OpenClaw config was missing; wrote minimal config at $OPENCLAW_CONFIG_PATH."
+    return 0
+  fi
+
+  return 1
+}
+
+verify_cfg_txn() {
+  if [[ "$CFG_TXN_ACTIVE" != "true" ]]; then
+    return 0
+  fi
+  local i key expected required actual_raw expected_norm actual_norm
+  for i in "${!CFG_TXN_KEYS[@]}"; do
+    key="${CFG_TXN_KEYS[$i]}"
+    expected="${CFG_TXN_EXPECTED[$i]}"
+    required="${CFG_TXN_REQUIRED[$i]}"
+    actual_raw="$(cfg_get_json "$key")"
+    expected_norm="$(parse_json_payload "$expected" 2>/dev/null || true)"
+    actual_norm="$(parse_json_payload "$actual_raw" 2>/dev/null || true)"
+    if [[ -n "$expected_norm" && -n "$actual_norm" && "$expected_norm" == "$actual_norm" ]]; then
+      continue
+    fi
+    if [[ "$required" == "true" ]]; then
+      rollback_cfg_txn
+      die "Config verification failed for required key: $key"
+    fi
+    log_warn "Config verification failed for optional key: $key"
+  done
+}
+
+cleanup_cfg_txn_on_exit() {
+  local rc=$?
+  if [[ "$CFG_TXN_ACTIVE" == "true" ]]; then
+    rollback_cfg_txn || true
+  fi
+  if [[ -n "$CFG_TXN_SNAPSHOT" && -f "$CFG_TXN_SNAPSHOT" ]]; then
+    rm -f "$CFG_TXN_SNAPSHOT" || true
+    CFG_TXN_SNAPSHOT=""
+  fi
+  return "$rc"
+}
+
 set_cfg() {
   local key="$1"
   local value="$2"
   local mode="${3:-string}"     # string | json
   local required="${4:-true}"   # true | false
+  local expected_json=""
   local cmd=(openclaw config set "$key" "$value")
+  begin_cfg_txn
   if [[ "$mode" == "json" ]]; then
     cmd+=(--json)
+    expected_json="$value"
+  else
+    expected_json="$(python3 - "$value" <<'PY'
+import json
+import sys
+print(json.dumps(sys.argv[1]))
+PY
+)"
   fi
   if "${cmd[@]}" >/dev/null 2>&1; then
     log_info "set $key"
+    record_cfg_expectation "$key" "$expected_json" "$required"
+    return 0
+  fi
+  if run_doctor_fix_once && "${cmd[@]}" >/dev/null 2>&1; then
+    log_info "set $key"
+    record_cfg_expectation "$key" "$expected_json" "$required"
     return 0
   fi
   if [[ "$required" == "true" ]]; then
+    rollback_cfg_txn
     die "Failed to set required config key: $key"
   fi
   log_warn "Could not set optional key (likely unsupported on this OpenClaw version): $key"
@@ -72,6 +322,7 @@ if [[ "$OPENCLAW_HOME" != "/" ]]; then
   OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 fi
 OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-$OPENCLAW_HOME/openclaw.json}"
+trap cleanup_cfg_txn_on_exit EXIT
 
 need_cmd openclaw
 need_cmd python3
@@ -255,6 +506,7 @@ resolve_model_path() {
 
 configure_memory_search() {
   local model_path="$1"
+  local backend="${2:-}"
 
   # Optional across OpenClaw versions: some builds do not expose memoryFlush.
   # Keep best-effort so bootstrap remains portable/idempotent instead of hard-failing.
@@ -264,12 +516,15 @@ configure_memory_search() {
   set_cfg agents.defaults.memorySearch.fallback "$MEMORY_FALLBACK" string false
   set_cfg agents.defaults.memorySearch.local.modelPath "$model_path" string true
 
-  if [[ "$MEMORY_ENABLE_SESSIONS" == "true" ]]; then
-    set_cfg agents.defaults.memorySearch.sources '["memory","sessions"]' json false
-    set_cfg agents.defaults.memorySearch.experimental.sessionMemory true json false
+  if [[ "$MEMORY_ENABLE_SESSIONS" == "true" && "$backend" != "qmd" ]]; then
+    set_cfg agents.defaults.memorySearch.sources '["memory","sessions"]' json true
+    set_cfg agents.defaults.memorySearch.experimental.sessionMemory true json true
   else
-    set_cfg agents.defaults.memorySearch.sources '["memory"]' json false
-    set_cfg agents.defaults.memorySearch.experimental.sessionMemory false json false
+    set_cfg agents.defaults.memorySearch.sources '["memory"]' json true
+    set_cfg agents.defaults.memorySearch.experimental.sessionMemory false json true
+    if [[ "$MEMORY_ENABLE_SESSIONS" == "true" && "$backend" == "qmd" ]]; then
+      log_warn "Requested session memory source, but memory.backend=qmd is active; using memory-only source to match effective runtime behavior."
+    fi
   fi
 
   # Background sync + cache/vector acceleration.
@@ -290,28 +545,26 @@ configure_memory_search() {
 }
 
 configure_qmd_memory_boost() {
-  local backend
-  backend="$(openclaw config get memory.backend 2>/dev/null || true)"
-  backend="$(printf "%s" "$backend" | tr -d '"' | tr '[:upper:]' '[:lower:]')"
+  local backend="${1:-}"
   if [[ "$backend" != "qmd" ]]; then
     return 0
   fi
 
   log_info "Detected memory.backend=qmd; applying qmd-side tuning."
-  set_cfg memory.qmd.includeDefaultMemory true json false
-  # Disable QMD session indexing: session recall is handled by the built-in SQLite
-  # mechanism (memorySearch.sources includes "sessions"). Indexing session transcripts
-  # into a QMD collection causes them to flood search results and crowd out documentation.
-  set_cfg memory.qmd.sessions.enabled false json false
+  set_cfg memory.qmd.includeDefaultMemory true json true
+  # Keep session transcripts out of QMD. We intentionally route continuity/state recovery
+  # through Clawboard context/search, while QMD remains documentation/thinking-vault focused.
+  # This avoids session transcript chunks crowding out documentation recall.
+  set_cfg memory.qmd.sessions.enabled false json true
   set_cfg memory.qmd.update.interval "5m" string false
   set_cfg memory.qmd.update.debounceMs 15000 json false
   # Run the embed pass on the same cadence as the update pass so new files get
   # vector embeddings automatically. "0" disables automatic embedding — avoid it.
   set_cfg memory.qmd.update.embedInterval "5m" string false
   # 20 results gives enough headroom for documentation across 5 thinking vaults.
-  set_cfg memory.qmd.limits.maxResults 20 json false
+  set_cfg memory.qmd.limits.maxResults 20 json true
   # 8 s timeout gives QMD time to rank across large vaults without blocking chat.
-  set_cfg memory.qmd.limits.timeoutMs 8000 json false
+  set_cfg memory.qmd.limits.timeoutMs 8000 json true
   set_cfg memory.citations auto string false
 }
 
@@ -399,7 +652,41 @@ refresh_indexes() {
 
 print_status() {
   log_info "Current memory status:"
-  if ! openclaw memory status --json; then
+  local timeout_s="${OPENCLAW_MEMORY_STATUS_TIMEOUT_SEC:-20}"
+  local out_file err_file pid elapsed rc
+  out_file="$(mktemp "${OPENCLAW_HOME}/.memory-status.out.XXXXXX")"
+  err_file="$(mktemp "${OPENCLAW_HOME}/.memory-status.err.XXXXXX")"
+
+  openclaw memory status --json >"$out_file" 2>"$err_file" &
+  pid=$!
+  elapsed=0
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if [[ "$elapsed" -ge "$timeout_s" ]]; then
+      kill "$pid" >/dev/null 2>&1 || true
+      sleep 1
+      kill -9 "$pid" >/dev/null 2>&1 || true
+      log_warn "Timed out while querying memory status (>${timeout_s}s)."
+      rm -f "$out_file" "$err_file"
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+
+  if [[ -s "$out_file" ]]; then
+    cat "$out_file"
+  fi
+  if [[ -s "$err_file" ]]; then
+    cat "$err_file" >&2
+  fi
+  rm -f "$out_file" "$err_file"
+
+  if [[ "$rc" -ne 0 ]]; then
     log_warn "Failed to query memory status via openclaw memory status --json"
   fi
 }
@@ -459,31 +746,31 @@ PY
   [[ -n "$allow_agents_json" ]] || allow_agents_json='[]'
   MAIN_ALLOW_AGENTS_JSON="$allow_agents_json"
 
-  run_cfg_set "${base}.subagents.allowAgents" "$allow_agents_json" json false
+  run_cfg_set "${base}.subagents.allowAgents" "$allow_agents_json" json true
 
   # Explicit allow: delegation + memory + Clawboard ledger tools.
   # cron allows durable one-shot follow-up jobs per delegation.
   # clawboard_* tools allow reading/writing the external task ledger for restart-resilient state recovery.
   run_cfg_set "${base}.tools.allow" \
     '["sessions_spawn","sessions_list","sessions_history","sessions_send","session_status","memory_search","memory_get","cron","clawboard_search","clawboard_update_task","clawboard_context","clawboard_get_task"]' \
-    json false
+    json true
 
   # Deny filesystem, runtime, web, UI, gateway, nodes, messaging.
   # Note: group:automation (cron+gateway) is split — gateway denied, cron allowed above.
   run_cfg_set "${base}.tools.deny" \
     '["group:fs","group:runtime","group:web","group:ui","gateway","group:nodes","group:messaging","image"]' \
-    json false
+    json true
 
-  run_cfg_set "${base}.tools.elevated.enabled" false json false
+  run_cfg_set "${base}.tools.elevated.enabled" false json true
 
   # Heartbeat: 5m interval as a durable sweep. Per-delegation follow-up cadence is
   # model-driven via cron ladder (1m, 3m, 10m, 15m, 30m, 1h).
-  run_cfg_set "${base}.heartbeat.every" "5m" string false
-  run_cfg_set "${base}.heartbeat.target" "last" string false
+  run_cfg_set "${base}.heartbeat.every" "5m" string true
+  run_cfg_set "${base}.heartbeat.target" "last" string true
   run_cfg_set "${base}.heartbeat.prompt" \
     "Heartbeat: (1) read the Clawboard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call sessions_list; (3) call clawboard_search(\"delegating\") as a backup sweep; (4) enforce follow-up ladder 1m->3m->10m->15m->30m->1h (cap 1h): each in-flight delegation must have a one-shot cron follow-up and the next wait must come from this ladder; (5) if any run is still active beyond 5 minutes, send Chris a brief status update with next check ETA; (6) for any Clawboard task with status 'doing' and no matching active session: re-spawn and reset follow-up to +1m; (7) for any completed sub-agent session not yet surfaced: call sessions_history and relay the result to Chris. If nothing needs attention, reply HEARTBEAT_OK." \
-    string false
-  run_cfg_set "${base}.heartbeat.ackMaxChars" 300 json false
+    string true
+  run_cfg_set "${base}.heartbeat.ackMaxChars" 300 json true
 
   log_success "Main agent tool policy configured."
 }
@@ -561,15 +848,21 @@ PY
 }
 
 main() {
+  ensure_openclaw_config_file || die "OpenClaw config not found at: $OPENCLAW_CONFIG_PATH"
   log_info "Resolving agents/workspaces from $OPENCLAW_CONFIG_PATH..."
   discover_agents_and_workspaces
   ensure_memory_dirs
 
+  local backend
+  backend="$(read_memory_backend)"
+
   local model_path
   model_path="$(resolve_model_path)"
-  configure_memory_search "$model_path"
-  configure_qmd_memory_boost
+  configure_memory_search "$model_path" "$backend"
+  configure_qmd_memory_boost "$backend"
   configure_main_agent_tools
+  verify_cfg_txn
+  commit_cfg_txn
   # ensure_watchdog_cron is intentionally omitted: the main agent's built-in heartbeat
   # (heartbeat.every: 5m in openclaw.json) already runs the same watchdog sweep once per
   # tick. Adding a separate cron with payload.kind=systemEvent on a main-session target
@@ -584,7 +877,12 @@ main() {
   echo "Agent ids: ${AGENT_IDS[*]}"
   echo "Workspaces: ${WORKSPACES[*]}"
   echo "Model path: $model_path"
-  echo "Session memory source enabled: $MEMORY_ENABLE_SESSIONS"
+  echo "Session memory source requested: $MEMORY_ENABLE_SESSIONS"
+  if [[ "$backend" == "qmd" ]]; then
+    echo "Session memory source effective: false (memory.backend=qmd + memory.qmd.sessions.enabled=false)"
+  else
+    echo "Session memory source effective: $MEMORY_ENABLE_SESSIONS"
+  fi
   echo "Main allowAgents: $MAIN_ALLOW_AGENTS_JSON"
   echo ""
   echo "Delegation tools: sessions_spawn, sessions_list, sessions_history, sessions_send, cron"

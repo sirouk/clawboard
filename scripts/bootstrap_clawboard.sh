@@ -51,6 +51,255 @@ fi
 OPENCLAW_CONFIG_PATH="$OPENCLAW_HOME/openclaw.json"
 OPENCLAW_SKILLS_DIR="$OPENCLAW_HOME/skills"
 
+OPENCLAW_CFG_TXN_ACTIVE=false
+OPENCLAW_CFG_TXN_SNAPSHOT=""
+declare -a OPENCLAW_CFG_TXN_KEYS=()
+declare -a OPENCLAW_CFG_TXN_EXPECTED=()
+declare -a OPENCLAW_CFG_TXN_REQUIRED=()
+
+seed_minimal_openclaw_config() {
+  local workspace="${1:-}"
+  local tmp
+  tmp="$(mktemp "${OPENCLAW_CONFIG_PATH}.seed.XXXXXX")" || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    if ! python3 - "$tmp" "$workspace" <<'PY'; then
+import json
+import os
+import sys
+
+path = sys.argv[1]
+workspace = os.path.abspath(os.path.expanduser(sys.argv[2] or ""))
+if not workspace:
+    raise SystemExit(1)
+
+data = {
+    "agents": {
+        "defaults": {"workspace": workspace},
+        "list": [{"id": "main", "default": True, "workspace": workspace}],
+    }
+}
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+      rm -f "$tmp" >/dev/null 2>&1 || true
+      return 1
+    fi
+  else
+    printf '{\n  "agents": {\n    "defaults": {\n      "workspace": "%s"\n    },\n    "list": [\n      {\n        "id": "main",\n        "default": true,\n        "workspace": "%s"\n      }\n    ]\n  }\n}\n' "$workspace" "$workspace" >"$tmp" || {
+      rm -f "$tmp" >/dev/null 2>&1 || true
+      return 1
+    }
+  fi
+  mv -f "$tmp" "$OPENCLAW_CONFIG_PATH"
+}
+
+ensure_openclaw_config_file() {
+  if [ -f "$OPENCLAW_CONFIG_PATH" ]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$OPENCLAW_CONFIG_PATH")"
+
+  if command -v openclaw >/dev/null 2>&1; then
+    openclaw doctor --fix >/dev/null 2>&1 || true
+    if [ -f "$OPENCLAW_CONFIG_PATH" ]; then
+      log_info "Initialized OpenClaw config via openclaw doctor --fix."
+      return 0
+    fi
+    openclaw config get agents.defaults.workspace --json >/dev/null 2>&1 || true
+    if [ -f "$OPENCLAW_CONFIG_PATH" ]; then
+      log_info "Initialized OpenClaw config via openclaw config command."
+      return 0
+    fi
+  fi
+
+  local workspace="${OPENCLAW_WORKSPACE_DIR:-}"
+  if [ -z "$workspace" ]; then
+    workspace="$(resolve_default_openclaw_workspace_root)"
+  fi
+  workspace="${workspace/#\~/$HOME}"
+  mkdir -p "$workspace"
+  if seed_minimal_openclaw_config "$workspace"; then
+    log_warn "OpenClaw config was missing; wrote minimal bootstrap config at $OPENCLAW_CONFIG_PATH."
+    return 0
+  fi
+
+  return 1
+}
+
+openclaw_cfg_txn_record_expectation() {
+  local key="$1"
+  local expected_json="$2"
+  local required="$3"
+  local i
+  for i in "${!OPENCLAW_CFG_TXN_KEYS[@]}"; do
+    if [ "${OPENCLAW_CFG_TXN_KEYS[$i]}" = "$key" ]; then
+      OPENCLAW_CFG_TXN_EXPECTED[$i]="$expected_json"
+      if [ "$required" = true ]; then
+        OPENCLAW_CFG_TXN_REQUIRED[$i]="true"
+      fi
+      return 0
+    fi
+  done
+  OPENCLAW_CFG_TXN_KEYS+=("$key")
+  OPENCLAW_CFG_TXN_EXPECTED+=("$expected_json")
+  OPENCLAW_CFG_TXN_REQUIRED+=("$required")
+}
+
+openclaw_cfg_txn_begin() {
+  if [ "$OPENCLAW_CFG_TXN_ACTIVE" = true ]; then
+    return 0
+  fi
+  if ! ensure_openclaw_config_file; then
+    log_error "OpenClaw config not found: $OPENCLAW_CONFIG_PATH"
+  fi
+  OPENCLAW_CFG_TXN_SNAPSHOT="$(mktemp "${OPENCLAW_CONFIG_PATH}.txn.XXXXXX")"
+  cp "$OPENCLAW_CONFIG_PATH" "$OPENCLAW_CFG_TXN_SNAPSHOT"
+  OPENCLAW_CFG_TXN_ACTIVE=true
+  OPENCLAW_CFG_TXN_KEYS=()
+  OPENCLAW_CFG_TXN_EXPECTED=()
+  OPENCLAW_CFG_TXN_REQUIRED=()
+  log_info "Started OpenClaw bootstrap config transaction."
+}
+
+openclaw_cfg_txn_rollback() {
+  if [ "$OPENCLAW_CFG_TXN_ACTIVE" != true ]; then
+    return 0
+  fi
+  if [ -n "$OPENCLAW_CFG_TXN_SNAPSHOT" ] && [ -f "$OPENCLAW_CFG_TXN_SNAPSHOT" ]; then
+    cp "$OPENCLAW_CFG_TXN_SNAPSHOT" "$OPENCLAW_CONFIG_PATH"
+    log_warn "Rolled back OpenClaw bootstrap config transaction."
+  fi
+  OPENCLAW_CFG_TXN_ACTIVE=false
+  OPENCLAW_CFG_TXN_KEYS=()
+  OPENCLAW_CFG_TXN_EXPECTED=()
+  OPENCLAW_CFG_TXN_REQUIRED=()
+}
+
+openclaw_cfg_txn_commit() {
+  if [ "$OPENCLAW_CFG_TXN_ACTIVE" != true ]; then
+    return 0
+  fi
+  OPENCLAW_CFG_TXN_ACTIVE=false
+  if [ -n "$OPENCLAW_CFG_TXN_SNAPSHOT" ] && [ -f "$OPENCLAW_CFG_TXN_SNAPSHOT" ]; then
+    rm -f "$OPENCLAW_CFG_TXN_SNAPSHOT"
+  fi
+  OPENCLAW_CFG_TXN_SNAPSHOT=""
+  OPENCLAW_CFG_TXN_KEYS=()
+  OPENCLAW_CFG_TXN_EXPECTED=()
+  OPENCLAW_CFG_TXN_REQUIRED=()
+  log_success "Committed OpenClaw bootstrap config transaction."
+}
+
+openclaw_cfg_parse_json() {
+  local raw="${1:-}"
+  python3 - "$raw" <<'PY'
+import json
+import sys
+
+raw = sys.argv[1]
+if not raw.strip():
+    raise SystemExit(1)
+
+text = raw.strip()
+decoder = json.JSONDecoder()
+try:
+    obj = json.loads(text)
+except Exception:
+    obj = None
+    starts = "{[\"-0123456789tfn"
+    for idx, ch in enumerate(text):
+        if ch not in starts:
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text[idx:])
+            break
+        except Exception:
+            continue
+    if obj is None:
+        raise SystemExit(1)
+
+print(json.dumps(obj, separators=(",", ":"), sort_keys=True))
+PY
+}
+
+openclaw_cfg_get_json() {
+  local key="$1"
+  openclaw config get "$key" --json 2>/dev/null || true
+}
+
+openclaw_cfg_set_txn() {
+  local key="$1"
+  local value="$2"
+  local mode="${3:-string}"      # string | json
+  local required="${4:-true}"    # true | false
+  local expected_json=""
+  local cmd=(openclaw config set "$key" "$value")
+
+  openclaw_cfg_txn_begin
+  if [ "$mode" = "json" ]; then
+    cmd+=(--json)
+    expected_json="$value"
+  else
+    expected_json="$(python3 - "$value" <<'PY'
+import json
+import sys
+print(json.dumps(sys.argv[1]))
+PY
+)"
+  fi
+
+  if "${cmd[@]}" >/dev/null 2>&1; then
+    openclaw_cfg_txn_record_expectation "$key" "$expected_json" "$required"
+    return 0
+  fi
+
+  if [ "$required" = true ]; then
+    openclaw_cfg_txn_rollback
+    log_error "Failed required OpenClaw config write: $key"
+  fi
+  log_warn "Failed optional OpenClaw config write: $key"
+  return 1
+}
+
+openclaw_cfg_txn_verify_or_rollback() {
+  if [ "$OPENCLAW_CFG_TXN_ACTIVE" != true ]; then
+    return 0
+  fi
+  local i key expected required actual expected_norm actual_norm
+  for i in "${!OPENCLAW_CFG_TXN_KEYS[@]}"; do
+    key="${OPENCLAW_CFG_TXN_KEYS[$i]}"
+    expected="${OPENCLAW_CFG_TXN_EXPECTED[$i]}"
+    required="${OPENCLAW_CFG_TXN_REQUIRED[$i]}"
+    actual="$(openclaw_cfg_get_json "$key")"
+    expected_norm="$(openclaw_cfg_parse_json "$expected" 2>/dev/null || true)"
+    actual_norm="$(openclaw_cfg_parse_json "$actual" 2>/dev/null || true)"
+    if [ -n "$expected_norm" ] && [ -n "$actual_norm" ] && [ "$expected_norm" = "$actual_norm" ]; then
+      continue
+    fi
+    if [ "$required" = true ]; then
+      openclaw_cfg_txn_rollback
+      log_error "OpenClaw config verification failed for required key: $key"
+    fi
+    log_warn "OpenClaw config verification failed for optional key: $key"
+  done
+}
+
+openclaw_cfg_txn_cleanup_on_exit() {
+  local rc=$?
+  if [ "$OPENCLAW_CFG_TXN_ACTIVE" = true ]; then
+    openclaw_cfg_txn_rollback || true
+  fi
+  if [ -n "$OPENCLAW_CFG_TXN_SNAPSHOT" ] && [ -f "$OPENCLAW_CFG_TXN_SNAPSHOT" ]; then
+    rm -f "$OPENCLAW_CFG_TXN_SNAPSHOT" || true
+    OPENCLAW_CFG_TXN_SNAPSHOT=""
+  fi
+  return "$rc"
+}
+
+trap openclaw_cfg_txn_cleanup_on_exit EXIT
+
 # Atomic file deploy helper:
 # - returns 0 when deployed/updated
 # - returns 10 when destination is already up to date
@@ -1799,7 +2048,7 @@ maybe_run_local_memory_setup() {
   if MEMORY_FORCE_INDEX=true bash "$script_path"; then
     log_success "Local memory setup completed."
   else
-    log_warn "setup-openclaw-local-memory.sh did not complete successfully. Re-run: bash $script_path"
+    log_error "setup-openclaw-local-memory.sh failed. Bootstrap aborted to avoid partial agent/memory configuration. Re-run: bash $script_path"
   fi
 }
 
@@ -2720,72 +2969,62 @@ if [ "$SKIP_OPENCLAW" = false ]; then
     OPENCLAW_GATEWAY_RESTART_NEEDED=false
     report_openclaw_pending_device_approvals
 
+    openclaw_cfg_txn_begin
+
     log_info "Enabling OpenClaw OpenResponses endpoint (POST /v1/responses)..."
-    CURRENT_RESPONSES_ENABLED="$(openclaw config get gateway.http.endpoints.responses.enabled 2>/dev/null || true)"
+    CURRENT_RESPONSES_ENABLED="$(openclaw config get gateway.http.endpoints.responses.enabled --json 2>/dev/null || true)"
     CURRENT_RESPONSES_ENABLED="$(printf "%s" "$CURRENT_RESPONSES_ENABLED" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
     if [ "$CURRENT_RESPONSES_ENABLED" != "true" ]; then
-      if openclaw config set gateway.http.endpoints.responses.enabled --json true >/dev/null 2>&1; then
-        OPENCLAW_GATEWAY_RESTART_NEEDED=true
-        log_success "OpenResponses endpoint enabled."
-      else
-        log_warn "Failed to enable OpenResponses endpoint. You can run: openclaw config set gateway.http.endpoints.responses.enabled --json true"
-      fi
+      openclaw_cfg_set_txn gateway.http.endpoints.responses.enabled true json true
+      OPENCLAW_GATEWAY_RESTART_NEEDED=true
+      log_success "OpenResponses endpoint enabled."
     else
       log_success "OpenResponses endpoint already enabled."
     fi
 
     log_info "Ensuring OpenClaw cross-agent session visibility for delegated follow-ups..."
-    CURRENT_SESSIONS_VISIBILITY="$(openclaw config get tools.sessions.visibility 2>/dev/null || true)"
-    CURRENT_SESSIONS_VISIBILITY="$(printf "%s" "$CURRENT_SESSIONS_VISIBILITY" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    CURRENT_SESSIONS_VISIBILITY="$(openclaw config get tools.sessions.visibility --json 2>/dev/null || true)"
+    CURRENT_SESSIONS_VISIBILITY="$(printf "%s" "$CURRENT_SESSIONS_VISIBILITY" | tr -d '\r' | tail -n1 | tr -d '[:space:]\"')"
     if [ "$CURRENT_SESSIONS_VISIBILITY" != "all" ]; then
-      if openclaw config set tools.sessions.visibility all >/dev/null 2>&1; then
-        OPENCLAW_GATEWAY_RESTART_NEEDED=true
-        log_success "Set tools.sessions.visibility=all."
-      else
-        log_warn "Failed to set tools.sessions.visibility=all."
-      fi
+      openclaw_cfg_set_txn tools.sessions.visibility all string true
+      OPENCLAW_GATEWAY_RESTART_NEEDED=true
+      log_success "Set tools.sessions.visibility=all."
     else
       log_success "tools.sessions.visibility already set to all."
     fi
 
-    CURRENT_SANDBOX_SESSION_VISIBILITY="$(openclaw config get agents.defaults.sandbox.sessionToolsVisibility 2>/dev/null || true)"
-    CURRENT_SANDBOX_SESSION_VISIBILITY="$(printf "%s" "$CURRENT_SANDBOX_SESSION_VISIBILITY" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    CURRENT_SANDBOX_SESSION_VISIBILITY="$(openclaw config get agents.defaults.sandbox.sessionToolsVisibility --json 2>/dev/null || true)"
+    CURRENT_SANDBOX_SESSION_VISIBILITY="$(printf "%s" "$CURRENT_SANDBOX_SESSION_VISIBILITY" | tr -d '\r' | tail -n1 | tr -d '[:space:]\"')"
     if [ "$CURRENT_SANDBOX_SESSION_VISIBILITY" != "all" ]; then
-      if openclaw config set agents.defaults.sandbox.sessionToolsVisibility all >/dev/null 2>&1; then
-        OPENCLAW_GATEWAY_RESTART_NEEDED=true
-        log_success "Set agents.defaults.sandbox.sessionToolsVisibility=all."
-      else
-        log_warn "Failed to set agents.defaults.sandbox.sessionToolsVisibility=all."
-      fi
+      openclaw_cfg_set_txn agents.defaults.sandbox.sessionToolsVisibility all string true
+      OPENCLAW_GATEWAY_RESTART_NEEDED=true
+      log_success "Set agents.defaults.sandbox.sessionToolsVisibility=all."
     else
       log_success "agents.defaults.sandbox.sessionToolsVisibility already set to all."
     fi
 
-    CURRENT_AGENT_TO_AGENT_ENABLED="$(openclaw config get tools.agentToAgent.enabled 2>/dev/null || true)"
+    CURRENT_AGENT_TO_AGENT_ENABLED="$(openclaw config get tools.agentToAgent.enabled --json 2>/dev/null || true)"
     CURRENT_AGENT_TO_AGENT_ENABLED="$(printf "%s" "$CURRENT_AGENT_TO_AGENT_ENABLED" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
     if [ "$CURRENT_AGENT_TO_AGENT_ENABLED" != "true" ]; then
-      if openclaw config set tools.agentToAgent.enabled --json true >/dev/null 2>&1; then
-        OPENCLAW_GATEWAY_RESTART_NEEDED=true
-        log_success "Set tools.agentToAgent.enabled=true."
-      else
-        log_warn "Failed to set tools.agentToAgent.enabled=true."
-      fi
+      openclaw_cfg_set_txn tools.agentToAgent.enabled true json true
+      OPENCLAW_GATEWAY_RESTART_NEEDED=true
+      log_success "Set tools.agentToAgent.enabled=true."
     else
       log_success "tools.agentToAgent.enabled already true."
     fi
 
     log_info "Reconciling iMessage group allowlist config (prevents silent group drops + doctor warnings)..."
-    CURRENT_IMESSAGE_GROUP_POLICY="$(openclaw config get channels.imessage.groupPolicy 2>/dev/null || true)"
+    CURRENT_IMESSAGE_GROUP_POLICY="$(openclaw config get channels.imessage.groupPolicy --json 2>/dev/null || true)"
     CURRENT_IMESSAGE_GROUP_POLICY="$(printf "%s" "$CURRENT_IMESSAGE_GROUP_POLICY" | tr -d '\r' | tail -n1 | tr -d '[:space:]\"')"
-    CURRENT_IMESSAGE_GROUP_ALLOW_FROM="$(openclaw config get channels.imessage.groupAllowFrom 2>/dev/null || true)"
+    CURRENT_IMESSAGE_GROUP_ALLOW_FROM="$(openclaw config get channels.imessage.groupAllowFrom --json 2>/dev/null || true)"
     CURRENT_IMESSAGE_GROUP_ALLOW_FROM="$(printf "%s" "$CURRENT_IMESSAGE_GROUP_ALLOW_FROM" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
     if [ "$CURRENT_IMESSAGE_GROUP_POLICY" = "allowlist" ]; then
       if [ -z "$CURRENT_IMESSAGE_GROUP_ALLOW_FROM" ] || [ "$CURRENT_IMESSAGE_GROUP_ALLOW_FROM" = "[]" ] || [ "$CURRENT_IMESSAGE_GROUP_ALLOW_FROM" = "null" ]; then
-        if openclaw config set channels.imessage.groupAllowFrom --json '["*"]' >/dev/null 2>&1; then
+        if openclaw_cfg_set_txn channels.imessage.groupAllowFrom '["*"]' json false; then
           OPENCLAW_GATEWAY_RESTART_NEEDED=true
           log_success "Set channels.imessage.groupAllowFrom=[\"*\"] for allowlist policy."
         else
-          log_warn "Failed to set channels.imessage.groupAllowFrom. Run: openclaw config set channels.imessage.groupAllowFrom --json '[\"*\"]'"
+          log_warn "Failed to set channels.imessage.groupAllowFrom. Continuing."
         fi
       else
         log_success "channels.imessage.groupAllowFrom already set for allowlist policy."
@@ -2793,6 +3032,9 @@ if [ "$SKIP_OPENCLAW" = false ]; then
     else
       log_success "channels.imessage.groupPolicy is not allowlist; no groupAllowFrom patch needed."
     fi
+
+    openclaw_cfg_txn_verify_or_rollback
+    openclaw_cfg_txn_commit
 
     if [ "$SKIP_SKILL" = false ]; then
       log_info "Installing Clawboard skill (mode: $SKILL_INSTALL_MODE)..."
@@ -2970,8 +3212,11 @@ PY
       else
         CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextFetchRetries":%s,"contextFallbackModes":%s,"contextMaxChars":%s,"contextCacheTtlMs":%s,"contextCacheMaxEntries":%s,"contextUseCacheOnFailure":%s,"enableOpenClawMemorySearch":%s,"baseUrlFallbacks":["%s","%s"]}' "$API_URL" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_FETCH_RETRIES_VALUE" "$CONTEXT_FALLBACK_MODES_JSON" "$CONTEXT_MAX_CHARS_VALUE" "$CONTEXT_CACHE_TTL_MS_VALUE" "$CONTEXT_CACHE_MAX_ENTRIES_VALUE" "$CONTEXT_USE_CACHE_ON_FAILURE_JSON" "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON" "$_LOGGER_FALLBACK_1" "$_LOGGER_FALLBACK_2")
       fi
-      openclaw config set plugins.entries.clawboard-logger.config --json "$CONFIG_JSON" >/dev/null 2>&1 || true
-      openclaw config set plugins.entries.clawboard-logger.enabled --json true >/dev/null 2>&1 || true
+      openclaw_cfg_txn_begin
+      openclaw_cfg_set_txn plugins.entries.clawboard-logger.config "$CONFIG_JSON" json true
+      openclaw_cfg_set_txn plugins.entries.clawboard-logger.enabled true json true
+      openclaw_cfg_txn_verify_or_rollback
+      openclaw_cfg_txn_commit
       OPENCLAW_GATEWAY_RESTART_NEEDED=true
       log_success "Logger plugin installed and enabled."
       ensure_clawboard_logger_in_allow
@@ -2988,45 +3233,66 @@ PY
 
     maybe_run_local_memory_setup
 
-    # Enforce correct QMD settings after setup-openclaw-local-memory.sh runs.
-    # The skill script's configure_qmd_memory_boost() may write QMD config values;
-    # this block runs last and guarantees the correct values are always applied.
-    log_info "Enforcing QMD memory search settings (sessions off, maxResults=20, timeoutMs=8000)..."
-    CURRENT_QMD_SESSIONS_ENABLED="$(openclaw config get memory.qmd.sessions.enabled 2>/dev/null || true)"
-    CURRENT_QMD_SESSIONS_ENABLED="$(printf "%s" "$CURRENT_QMD_SESSIONS_ENABLED" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
-    if [ "$CURRENT_QMD_SESSIONS_ENABLED" != "false" ]; then
-      if openclaw config set memory.qmd.sessions.enabled --json false >/dev/null 2>&1; then
+    # Enforce QMD settings only when QMD is the active memory backend.
+    CURRENT_MEMORY_BACKEND="$(openclaw config get memory.backend --json 2>/dev/null || true)"
+    CURRENT_MEMORY_BACKEND="$(printf "%s" "$CURRENT_MEMORY_BACKEND" | tr -d '\r' | tail -n1 | tr -d '"' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    if [ "$CURRENT_MEMORY_BACKEND" = "qmd" ]; then
+      openclaw_cfg_txn_begin
+      # The skill script's configure_qmd_memory_boost() may write QMD config values;
+      # this block runs last and guarantees the correct values are always applied.
+      log_info "Enforcing QMD memory search settings (sessions off, memorySearch sources=memory, maxResults=20, timeoutMs=8000)..."
+      CURRENT_QMD_SESSIONS_ENABLED="$(openclaw config get memory.qmd.sessions.enabled --json 2>/dev/null || true)"
+      CURRENT_QMD_SESSIONS_ENABLED="$(printf "%s" "$CURRENT_QMD_SESSIONS_ENABLED" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+      if [ "$CURRENT_QMD_SESSIONS_ENABLED" != "false" ]; then
+        openclaw_cfg_set_txn memory.qmd.sessions.enabled false json true
         OPENCLAW_GATEWAY_RESTART_NEEDED=true
         log_success "Disabled QMD session indexing (memory.qmd.sessions.enabled=false)."
       else
-        log_warn "Failed to disable QMD session indexing. Run: openclaw config set memory.qmd.sessions.enabled --json false"
+        log_success "QMD session indexing already disabled."
       fi
-    else
-      log_success "QMD session indexing already disabled."
-    fi
 
-    CURRENT_QMD_MAX_RESULTS="$(openclaw config get memory.qmd.limits.maxResults 2>/dev/null || true)"
-    CURRENT_QMD_MAX_RESULTS="$(printf "%s" "$CURRENT_QMD_MAX_RESULTS" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
-    if [ -z "$CURRENT_QMD_MAX_RESULTS" ] || { [ -n "$CURRENT_QMD_MAX_RESULTS" ] && [ "$CURRENT_QMD_MAX_RESULTS" -lt 20 ] 2>/dev/null; }; then
-      if openclaw config set memory.qmd.limits.maxResults --json 20 >/dev/null 2>&1; then
+      CURRENT_MEMORY_SOURCES="$(openclaw config get agents.defaults.memorySearch.sources --json 2>/dev/null || true)"
+      CURRENT_MEMORY_SOURCES="$(printf "%s" "$CURRENT_MEMORY_SOURCES" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+      if [ "$CURRENT_MEMORY_SOURCES" != '["memory"]' ]; then
+        openclaw_cfg_set_txn agents.defaults.memorySearch.sources '["memory"]' json true
+        OPENCLAW_GATEWAY_RESTART_NEEDED=true
+        log_success "Aligned memorySearch sources for QMD backend (agents.defaults.memorySearch.sources=[\"memory\"])."
+      else
+        log_success "memorySearch sources already aligned for QMD backend."
+      fi
+
+      CURRENT_SESSION_MEMORY_FLAG="$(openclaw config get agents.defaults.memorySearch.experimental.sessionMemory --json 2>/dev/null || true)"
+      CURRENT_SESSION_MEMORY_FLAG="$(printf "%s" "$CURRENT_SESSION_MEMORY_FLAG" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+      if [ "$CURRENT_SESSION_MEMORY_FLAG" != "false" ]; then
+        openclaw_cfg_set_txn agents.defaults.memorySearch.experimental.sessionMemory false json true
+        OPENCLAW_GATEWAY_RESTART_NEEDED=true
+        log_success "Disabled memorySearch.experimental.sessionMemory under QMD backend."
+      else
+        log_success "sessionMemory flag already disabled for QMD backend."
+      fi
+
+      CURRENT_QMD_MAX_RESULTS="$(openclaw config get memory.qmd.limits.maxResults --json 2>/dev/null || true)"
+      CURRENT_QMD_MAX_RESULTS="$(printf "%s" "$CURRENT_QMD_MAX_RESULTS" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+      if [ -z "$CURRENT_QMD_MAX_RESULTS" ] || { [ -n "$CURRENT_QMD_MAX_RESULTS" ] && [ "$CURRENT_QMD_MAX_RESULTS" -lt 20 ] 2>/dev/null; }; then
+        openclaw_cfg_set_txn memory.qmd.limits.maxResults 20 json true
         log_success "Set memory.qmd.limits.maxResults=20."
       else
-        log_warn "Failed to set QMD max results. Run: openclaw config set memory.qmd.limits.maxResults --json 20"
+        log_success "QMD max results already set to $CURRENT_QMD_MAX_RESULTS (>=20)."
       fi
-    else
-      log_success "QMD max results already set to $CURRENT_QMD_MAX_RESULTS (>=20)."
-    fi
 
-    CURRENT_QMD_TIMEOUT="$(openclaw config get memory.qmd.limits.timeoutMs 2>/dev/null || true)"
-    CURRENT_QMD_TIMEOUT="$(printf "%s" "$CURRENT_QMD_TIMEOUT" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
-    if [ -z "$CURRENT_QMD_TIMEOUT" ] || { [ -n "$CURRENT_QMD_TIMEOUT" ] && [ "$CURRENT_QMD_TIMEOUT" -lt 8000 ] 2>/dev/null; }; then
-      if openclaw config set memory.qmd.limits.timeoutMs --json 8000 >/dev/null 2>&1; then
+      CURRENT_QMD_TIMEOUT="$(openclaw config get memory.qmd.limits.timeoutMs --json 2>/dev/null || true)"
+      CURRENT_QMD_TIMEOUT="$(printf "%s" "$CURRENT_QMD_TIMEOUT" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+      if [ -z "$CURRENT_QMD_TIMEOUT" ] || { [ -n "$CURRENT_QMD_TIMEOUT" ] && [ "$CURRENT_QMD_TIMEOUT" -lt 8000 ] 2>/dev/null; }; then
+        openclaw_cfg_set_txn memory.qmd.limits.timeoutMs 8000 json true
         log_success "Set memory.qmd.limits.timeoutMs=8000."
       else
-        log_warn "Failed to set QMD timeout. Run: openclaw config set memory.qmd.limits.timeoutMs --json 8000"
+        log_success "QMD timeout already set to ${CURRENT_QMD_TIMEOUT}ms (>=8000)."
       fi
+
+      openclaw_cfg_txn_verify_or_rollback
+      openclaw_cfg_txn_commit
     else
-      log_success "QMD timeout already set to ${CURRENT_QMD_TIMEOUT}ms (>=8000)."
+      log_info "Skipping QMD enforcement; memory.backend=${CURRENT_MEMORY_BACKEND:-unset}."
     fi
 
     log_info "Running openclaw doctor --fix to remove any config keys unrecognized by the current gateway version..."
