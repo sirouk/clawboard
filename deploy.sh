@@ -157,6 +157,8 @@ Commands:
                                        Remove unscoped OpenClaw control-plane tool traces from Logs
   reconcile-allocation-guardrails [--dry-run] [--yes]
                                        Reconcile control-plane/tool log allocation to match routing guardrails
+  verify-production-ready [--skip-tests] [--live-smoke] [--strict]
+                                       Run deployability audit with hard pass/fail summary
 
   token-show                           Show masked backend/frontend token values
   token-be [value|--generate]          Set CLAWBOARD_TOKEN in .env
@@ -1439,6 +1441,444 @@ PY
   fi
 }
 
+verify_production_ready() {
+  local run_tests=true
+  local run_live_smoke=false
+  local strict=false
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --skip-tests) run_tests=false ;;
+      --live-smoke) run_live_smoke=true ;;
+      --strict) strict=true ;;
+      *)
+        echo "error: unknown flag for verify-production-ready: $1" >&2
+        echo "usage: bash deploy.sh verify-production-ready [--skip-tests] [--live-smoke] [--strict]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  local pass_count=0
+  local warn_count=0
+  local fail_count=0
+
+  _verify_pass() {
+    pass_count=$((pass_count + 1))
+    echo "PASS  $1"
+  }
+
+  _verify_warn() {
+    warn_count=$((warn_count + 1))
+    echo "WARN  $1"
+  }
+
+  _verify_fail() {
+    fail_count=$((fail_count + 1))
+    echo "FAIL  $1"
+  }
+
+  echo "Production readiness audit"
+  echo "Root: $ROOT_DIR"
+  echo "Options: run_tests=$run_tests live_smoke=$run_live_smoke strict=$strict"
+  echo ""
+
+  # -------------------------------------------------------------------------
+  # Stack health
+  # -------------------------------------------------------------------------
+  local running_services=""
+  if running_services="$(compose ps --services --filter status=running 2>/dev/null)"; then
+    _verify_pass "Docker Compose is reachable."
+  else
+    _verify_fail "Docker Compose status query failed."
+    running_services=""
+  fi
+
+  local required_svc
+  for required_svc in api classifier db qdrant; do
+    if printf "%s\n" "$running_services" | grep -Fxq "$required_svc"; then
+      _verify_pass "Service running: $required_svc"
+    else
+      _verify_fail "Service not running: $required_svc"
+    fi
+  done
+  if printf "%s\n" "$running_services" | grep -Eq '^(web|web-dev)$'; then
+    _verify_pass "Web service running (web or web-dev)."
+  else
+    _verify_fail "No web service running (expected web or web-dev)."
+  fi
+
+  # -------------------------------------------------------------------------
+  # OpenClaw config + contract wiring checks
+  # -------------------------------------------------------------------------
+  if ! command -v openclaw >/dev/null 2>&1; then
+    _verify_fail "openclaw CLI is not available."
+  else
+    _verify_pass "openclaw CLI available."
+  fi
+
+  local cfg_path=""
+  cfg_path="$(_oc_config_path)"
+  if [ -z "$cfg_path" ] || [ ! -f "$cfg_path" ]; then
+    _verify_fail "OpenClaw config file not found."
+  else
+    _verify_pass "OpenClaw config file found at $cfg_path."
+    local cfg_checks=""
+    if cfg_checks="$(python3 - "$cfg_path" <<'PY'
+import json
+import os
+import sys
+
+cfg_path = sys.argv[1]
+rows = []
+
+def emit(level, name, detail):
+    detail = str(detail).replace("\t", " ").replace("\n", " ").strip()
+    rows.append(f"{level}\t{name}\t{detail}")
+
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+except Exception as exc:
+    emit("FAIL", "config.parse", f"unable to parse openclaw.json: {exc}")
+    print("\n".join(rows))
+    raise SystemExit(0)
+
+memory = cfg.get("memory") or {}
+agents = cfg.get("agents") or {}
+agent_list = agents.get("list") or []
+defaults = agents.get("defaults") or {}
+plugins = (cfg.get("plugins") or {}).get("entries") or {}
+logger = plugins.get("clawboard-logger") or {}
+
+backend = memory.get("backend")
+if backend == "qmd":
+    emit("PASS", "memory.backend", "qmd")
+else:
+    emit("FAIL", "memory.backend", f"expected qmd, got {backend!r}")
+
+qmd_sessions_enabled = ((memory.get("qmd") or {}).get("sessions") or {}).get("enabled")
+if qmd_sessions_enabled is False:
+    emit("PASS", "memory.qmd.sessions.enabled", "false")
+else:
+    emit("FAIL", "memory.qmd.sessions.enabled", f"expected false, got {qmd_sessions_enabled!r}")
+
+sources = ((defaults.get("memorySearch") or {}).get("sources") or [])
+if isinstance(sources, list) and sorted(set(str(v) for v in sources)) == ["memory"] and len(sources) == 1:
+    emit("PASS", "agents.defaults.memorySearch.sources", json.dumps(sources))
+else:
+    emit("FAIL", "agents.defaults.memorySearch.sources", f"expected ['memory'], got {json.dumps(sources)}")
+
+if logger.get("enabled") is True:
+    emit("PASS", "plugins.entries.clawboard-logger.enabled", "true")
+else:
+    emit("FAIL", "plugins.entries.clawboard-logger.enabled", f"expected true, got {logger.get('enabled')!r}")
+
+logger_cfg = logger.get("config")
+if not isinstance(logger_cfg, dict):
+    emit("FAIL", "plugins.entries.clawboard-logger.config", "missing config object")
+else:
+    base_url = logger_cfg.get("baseUrl")
+    if base_url:
+        emit("PASS", "plugins.entries.clawboard-logger.config.baseUrl", base_url)
+    else:
+        emit("FAIL", "plugins.entries.clawboard-logger.config.baseUrl", "missing")
+
+    context_mode = logger_cfg.get("contextMode")
+    if context_mode in {"full", "auto", "cheap", "patient"}:
+        emit("PASS", "plugins.entries.clawboard-logger.config.contextMode", context_mode)
+    else:
+        emit("FAIL", "plugins.entries.clawboard-logger.config.contextMode", f"invalid mode: {context_mode!r}")
+
+main_agent = None
+for item in agent_list:
+    if isinstance(item, dict) and str(item.get("id", "")).strip() == "main":
+        main_agent = item
+        break
+
+if main_agent is None:
+    emit("FAIL", "agents.main.exists", "main agent missing from agents.list")
+else:
+    emit("PASS", "agents.main.exists", "main agent present")
+    allow = set(str(v) for v in ((main_agent.get("subagents") or {}).get("allowAgents") or []))
+    needed_allow = {"coding", "web", "social", "docs"}
+    missing_allow = sorted(needed_allow - allow)
+    if missing_allow:
+        emit("FAIL", "agents.main.subagents.allowAgents", f"missing: {', '.join(missing_allow)}")
+    else:
+        emit("PASS", "agents.main.subagents.allowAgents", "coding,web,social,docs")
+
+    hb_every = ((main_agent.get("heartbeat") or {}).get("every"))
+    if hb_every == "5m":
+        emit("PASS", "agents.main.heartbeat.every", "5m")
+    else:
+        emit("FAIL", "agents.main.heartbeat.every", f"expected 5m, got {hb_every!r}")
+
+    tools_allow = set(str(v) for v in ((main_agent.get("tools") or {}).get("allow") or []))
+    needed_tools = {
+        "sessions_spawn",
+        "sessions_list",
+        "sessions_history",
+        "sessions_send",
+        "cron",
+        "clawboard_search",
+        "clawboard_update_task",
+        "clawboard_context",
+        "clawboard_get_task",
+    }
+    missing_tools = sorted(needed_tools - tools_allow)
+    if missing_tools:
+        emit("FAIL", "agents.main.tools.allow", f"missing: {', '.join(missing_tools)}")
+    else:
+        emit("PASS", "agents.main.tools.allow", "delegation + clawboard tools present")
+
+    main_workspace = str(main_agent.get("workspace", "")).strip()
+    if not main_workspace:
+        emit("FAIL", "agents.main.workspace", "missing workspace path")
+    else:
+        agents_md = os.path.join(os.path.abspath(os.path.expanduser(main_workspace)), "AGENTS.md")
+        if not os.path.isfile(agents_md):
+            emit("FAIL", "agents.main.workspace.AGENTS.md", f"missing at {agents_md}")
+        else:
+            try:
+                text = open(agents_md, "r", encoding="utf-8").read()
+            except Exception as exc:
+                emit("FAIL", "agents.main.workspace.AGENTS.md", f"unreadable: {exc}")
+            else:
+                markers = [
+                    "Main Agent Operating Contract",
+                    "BOARD SESSION RESPONSE GUARANTEE",
+                    "CLAWBOARD LEDGER RECOVERY",
+                ]
+                missing_markers = [m for m in markers if m not in text]
+                if missing_markers:
+                    emit("FAIL", "agents.main.workspace.AGENTS.md", f"missing markers: {', '.join(missing_markers)}")
+                else:
+                    emit("PASS", "agents.main.workspace.AGENTS.md", "contract markers present")
+
+print("\n".join(rows))
+PY
+)"; then
+      while IFS=$'\t' read -r level name detail; do
+        [ -n "${level:-}" ] || continue
+        case "$level" in
+          PASS) _verify_pass "$name :: $detail" ;;
+          WARN) _verify_warn "$name :: $detail" ;;
+          FAIL) _verify_fail "$name :: $detail" ;;
+          *) _verify_warn "$name :: $detail" ;;
+        esac
+      done <<< "$cfg_checks"
+    else
+      _verify_fail "Unable to run OpenClaw config audit checks."
+    fi
+  fi
+
+  # -------------------------------------------------------------------------
+  # Runtime memory/QMD checks
+  # -------------------------------------------------------------------------
+  if command -v openclaw >/dev/null 2>&1; then
+    local memory_status_raw=""
+    if memory_status_raw="$(openclaw memory status --json 2>/dev/null)"; then
+      local memory_checks=""
+      if memory_checks="$(python3 - "$memory_status_raw" <<'PY'
+import json
+import sys
+
+rows = []
+
+def emit(level, name, detail):
+    detail = str(detail).replace("\t", " ").replace("\n", " ").strip()
+    rows.append(f"{level}\t{name}\t{detail}")
+
+raw = sys.argv[1]
+try:
+    data = json.loads(raw)
+except Exception as exc:
+    emit("FAIL", "openclaw.memory.status", f"invalid JSON payload: {exc}")
+    print("\n".join(rows))
+    raise SystemExit(0)
+
+if not isinstance(data, list) or not data:
+    emit("FAIL", "openclaw.memory.status", "no agent status rows")
+    print("\n".join(rows))
+    raise SystemExit(0)
+
+emit("PASS", "openclaw.memory.status", f"rows={len(data)}")
+for row in data:
+    aid = str((row or {}).get("agentId", "")).strip() or "(unknown)"
+    st = (row or {}).get("status") or {}
+    backend = st.get("backend")
+    provider = st.get("provider")
+    dirty = st.get("dirty")
+    sources = st.get("sources") or []
+
+    if backend == "qmd" and provider == "qmd":
+        emit("PASS", f"memory.status.{aid}.backend_provider", "qmd/qmd")
+    else:
+        emit("FAIL", f"memory.status.{aid}.backend_provider", f"expected qmd/qmd, got {backend!r}/{provider!r}")
+
+    if dirty is False:
+        emit("PASS", f"memory.status.{aid}.dirty", "false")
+    else:
+        emit("FAIL", f"memory.status.{aid}.dirty", f"expected false, got {dirty!r}")
+
+    if isinstance(sources, list) and sorted(set(str(v) for v in sources)) == ["memory"]:
+        emit("PASS", f"memory.status.{aid}.sources", json.dumps(sources))
+    else:
+        emit("FAIL", f"memory.status.{aid}.sources", f"expected memory-only, got {json.dumps(sources)}")
+
+print("\n".join(rows))
+PY
+)"; then
+        while IFS=$'\t' read -r level name detail; do
+          [ -n "${level:-}" ] || continue
+          case "$level" in
+            PASS) _verify_pass "$name :: $detail" ;;
+            WARN) _verify_warn "$name :: $detail" ;;
+            FAIL) _verify_fail "$name :: $detail" ;;
+            *) _verify_warn "$name :: $detail" ;;
+          esac
+        done <<< "$memory_checks"
+      else
+        _verify_fail "Unable to parse openclaw memory status payload."
+      fi
+    else
+      _verify_fail "openclaw memory status query failed."
+    fi
+  fi
+
+  # -------------------------------------------------------------------------
+  # Logger ingestion + DB checks
+  # -------------------------------------------------------------------------
+  local db_metrics=""
+  if db_metrics="$(compose exec -T db psql -U clawboard -d clawboard -At -c "SELECT (SELECT COUNT(*) FROM logentry),(SELECT COUNT(*) FROM logentry WHERE \"classificationStatus\"='classified'),(SELECT COUNT(*) FROM logentry WHERE \"classificationStatus\"='failed'),(SELECT COUNT(*) FROM logentry WHERE \"classificationStatus\"='pending'),(SELECT COUNT(*) FROM logentry WHERE content LIKE '%[clawboard_context_begin]%'),(SELECT COUNT(*) FROM logentry WHERE content ILIKE '%clawboard_context%');" 2>/dev/null | tail -n1)"; then
+    _verify_pass "Database connectivity (logentry metrics query)."
+    local logs_total classified_total failed_total pending_total injected_block_rows context_tool_rows
+    IFS='|' read -r logs_total classified_total failed_total pending_total injected_block_rows context_tool_rows <<< "$db_metrics"
+    logs_total="${logs_total:-0}"
+    classified_total="${classified_total:-0}"
+    failed_total="${failed_total:-0}"
+    pending_total="${pending_total:-0}"
+    injected_block_rows="${injected_block_rows:-0}"
+    context_tool_rows="${context_tool_rows:-0}"
+
+    if [ "$logs_total" -gt 0 ]; then
+      _verify_pass "Logger ingestion rows present: logentry=$logs_total"
+    else
+      _verify_fail "No logentry rows found; logger ingestion appears inactive."
+    fi
+
+    if [ "$classified_total" -gt 0 ]; then
+      _verify_pass "Classified logs present: classified=$classified_total"
+    else
+      _verify_warn "No classified logs detected yet."
+    fi
+
+    if [ "$injected_block_rows" -eq 0 ]; then
+      _verify_pass "Context block sanitization verified ([clawboard_context_begin] persisted rows = 0)."
+    else
+      _verify_fail "Found persisted raw context block rows: $injected_block_rows"
+    fi
+
+    if [ "$context_tool_rows" -gt 0 ]; then
+      _verify_pass "Context tool trace rows present: clawboard_context references=$context_tool_rows"
+    else
+      _verify_warn "No clawboard_context tool traces found in current logentry set."
+    fi
+
+    if [ "$failed_total" -gt 0 ] || [ "$pending_total" -gt 0 ]; then
+      _verify_warn "classificationStatus mix: classified=$classified_total failed=$failed_total pending=$pending_total"
+    else
+      _verify_pass "classificationStatus mix: no failed/pending rows."
+    fi
+  else
+    _verify_fail "Database connectivity check failed (db container/psql unavailable)."
+  fi
+
+  # -------------------------------------------------------------------------
+  # Session history freshness snapshot (informational)
+  # -------------------------------------------------------------------------
+  local session_jsonl_count="0"
+  if session_jsonl_count="$(python3 - <<'PY'
+from pathlib import Path
+root = Path.home() / ".openclaw" / "agents"
+total = 0
+for sessions_dir in root.glob("*/sessions"):
+    total += sum(1 for _ in sessions_dir.glob("*.jsonl"))
+print(total)
+PY
+ 2>/dev/null)"; then
+    if [ "${session_jsonl_count:-0}" -eq 0 ]; then
+      _verify_pass "OpenClaw session history clean snapshot (0 *.jsonl files)."
+    else
+      _verify_warn "OpenClaw session history contains ${session_jsonl_count} *.jsonl file(s)."
+    fi
+  else
+    _verify_warn "Unable to inspect OpenClaw session history snapshot."
+  fi
+
+  # -------------------------------------------------------------------------
+  # Targeted tests
+  # -------------------------------------------------------------------------
+  if [ "$run_tests" = "true" ]; then
+    if (cd "$ROOT_DIR" && node --test tests/scripts/bootstrap-clawboard.test.mjs >/tmp/clawboard-verify-scripts.log 2>&1); then
+      _verify_pass "Script regression tests passed (tests/scripts/bootstrap-clawboard.test.mjs)."
+    else
+      _verify_fail "Script regression tests failed (see /tmp/clawboard-verify-scripts.log)."
+    fi
+
+    if (cd "$ROOT_DIR" && npm run test:logger >/tmp/clawboard-verify-logger.log 2>&1); then
+      _verify_pass "Logger test suite passed (npm run test:logger)."
+    else
+      _verify_fail "Logger test suite failed (see /tmp/clawboard-verify-logger.log)."
+    fi
+  else
+    _verify_warn "Skipped tests (--skip-tests)."
+  fi
+
+  if [ "$run_live_smoke" = "true" ]; then
+    local smoke_token=""
+    smoke_token="${PLAYWRIGHT_CLAWBOARD_TOKEN:-}"
+    if [ -z "$smoke_token" ]; then
+      smoke_token="$(read_env_value "CLAWBOARD_TOKEN" || true)"
+    fi
+    if [ -z "$smoke_token" ]; then
+      _verify_fail "Live smoke requested but no token available (PLAYWRIGHT_CLAWBOARD_TOKEN or CLAWBOARD_TOKEN)."
+    else
+      if (
+        cd "$ROOT_DIR" && \
+        PLAYWRIGHT_CLAWBOARD_TOKEN="$smoke_token" npm run test:e2e:live-smoke >/tmp/clawboard-verify-live-smoke.log 2>&1
+      ); then
+        _verify_pass "Live stack smoke test passed (npm run test:e2e:live-smoke)."
+      else
+        _verify_fail "Live stack smoke test failed (see /tmp/clawboard-verify-live-smoke.log)."
+      fi
+    fi
+  fi
+
+  # -------------------------------------------------------------------------
+  # Summary
+  # -------------------------------------------------------------------------
+  echo ""
+  echo "Audit summary"
+  echo "  PASS: $pass_count"
+  echo "  WARN: $warn_count"
+  echo "  FAIL: $fail_count"
+
+  if [ "$strict" = "true" ] && [ "$warn_count" -gt 0 ]; then
+    echo "STRICT mode: warnings are treated as failures."
+    fail_count=$((fail_count + warn_count))
+  fi
+
+  if [ "$fail_count" -gt 0 ]; then
+    echo "VERDICT: FAIL"
+    return 1
+  fi
+  echo "VERDICT: PASS"
+  return 0
+}
+
 status() {
   compose ps
 }
@@ -1643,7 +2083,8 @@ run_interactive() {
   echo "13) Reset all fresh (Clawboard data + OpenClaw sessions/memories/crons; keeps qmd indexes)"
   echo "14) Cleanup orphaned tool logs (control-plane noise)"
   echo "15) Reconcile allocation guardrails (control-plane + tool traces)"
-  echo "16) Quit"
+  echo "16) Verify production readiness"
+  echo "17) Quit"
   read -r -p "Select an option: " choice
 
   case "$choice" in
@@ -1662,7 +2103,8 @@ run_interactive() {
     13) reset_all_fresh ;;
     14) cleanup_orphan_tools ;;
     15) reconcile_allocation_guardrails ;;
-    16) exit 0 ;;
+    16) verify_production_ready ;;
+    17) exit 0 ;;
     *) echo "Invalid choice"; exit 1 ;;
   esac
 }
@@ -1687,6 +2129,7 @@ case "$cmd" in
   demo-clear) demo_clear ;;
   cleanup-orphan-tools|cleanup_orphan_tools) shift; cleanup_orphan_tools "$@" ;;
   reconcile-allocation-guardrails|reconcile_allocation_guardrails) shift; reconcile_allocation_guardrails "$@" ;;
+  verify-production-ready|verify_production_ready|verify) shift; verify_production_ready "$@" ;;
   token-show) token_show ;;
   token-be) shift; token_be "${1:-}" ;;
   token-fe) shift; token_fe "${1:-}" ;;

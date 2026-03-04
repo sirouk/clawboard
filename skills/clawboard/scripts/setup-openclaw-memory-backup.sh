@@ -553,12 +553,23 @@ case "$(lc "${CREATE_REPO:-}")" in
     ;;
 esac
 
-# Normalize GitHub HTTPS URL to end with .git (for preset or env URL that omitted it)
-if [[ "$REPO_URL" =~ ^https://github.com/[^/]+/[^/]+$ ]]; then
-  REPO_URL="${REPO_URL}.git"
+# Normalize GitHub remotes to a canonical single ".git" suffix.
+if [[ "$REPO_URL" =~ ^https://github.com/[^/]+/[^/]+(/|\.git)?$ ]]; then
+  REPO_URL="${REPO_URL%/}"
+  while [[ "$REPO_URL" == *.git.git ]]; do
+    REPO_URL="${REPO_URL%.git}"
+  done
+  REPO_URL="${REPO_URL%.git}.git"
 fi
 if [[ -z "$REPO_SSH_URL" && "$REPO_URL" =~ ^https://github.com/ ]]; then
   REPO_SSH_URL="${REPO_URL/https:\/\/github.com\//git@github.com:}"
+fi
+if [[ "$REPO_SSH_URL" =~ ^git@github.com:[^/]+/[^/]+(/|\.git)?$ ]]; then
+  REPO_SSH_URL="${REPO_SSH_URL%/}"
+  while [[ "$REPO_SSH_URL" == *.git.git ]]; do
+    REPO_SSH_URL="${REPO_SSH_URL%.git}"
+  done
+  REPO_SSH_URL="${REPO_SSH_URL%.git}.git"
 fi
 
 say ""

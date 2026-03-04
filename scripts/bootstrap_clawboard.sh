@@ -2341,9 +2341,16 @@ maybe_offer_obsidian_memory_setup() {
   fi
 
   log_info "Launching Obsidian thinking vault + qmd setup..."
-  if ! bash "$obsidian_script" "${obsidian_args[@]}"; then
-    rc=1
-    log_warn "setup_obsidian_brain.sh did not complete successfully."
+  if [ "${#obsidian_args[@]}" -gt 0 ]; then
+    if ! bash "$obsidian_script" "${obsidian_args[@]}"; then
+      rc=1
+      log_warn "setup_obsidian_brain.sh did not complete successfully."
+    fi
+  else
+    if ! bash "$obsidian_script"; then
+      rc=1
+      log_warn "setup_obsidian_brain.sh did not complete successfully."
+    fi
   fi
 
   if [ "$rc" -eq 0 ]; then
@@ -3383,6 +3390,10 @@ PY
           || log_warn "Plugin TypeScript compile failed; using existing index.js"
       fi
       PLUGIN_EXT_DIR="$OPENCLAW_HOME/extensions/clawboard-logger"
+      _PLUGIN_BASE_URL_INIT="${API_URL:-}"
+      if [ -z "$_PLUGIN_BASE_URL_INIT" ]; then
+        _PLUGIN_BASE_URL_INIT="http://127.0.0.1:8010"
+      fi
       if [ -e "$PLUGIN_EXT_DIR" ]; then
         rm -rf "$PLUGIN_EXT_DIR"
         log_info "Removed existing plugin at $PLUGIN_EXT_DIR for idempotent re-install."
@@ -3390,9 +3401,10 @@ PY
       # If plugin dir is missing, config may still reference it (e.g. from a previous run). Strip so openclaw commands succeed.
       if [ ! -e "$PLUGIN_EXT_DIR" ] && [ -f "$OPENCLAW_CONFIG_PATH" ] && command -v python3 >/dev/null 2>&1; then
         log_info "Removing stale clawboard-logger references from OpenClaw config so install can run..."
-        python3 - "$OPENCLAW_CONFIG_PATH" <<'PY' 2>/dev/null || true
+        python3 - "$OPENCLAW_CONFIG_PATH" "$_PLUGIN_BASE_URL_INIT" <<'PY' 2>/dev/null || true
 import json, sys
 path = sys.argv[1]
+base_url = (sys.argv[2] or "").strip() or "http://127.0.0.1:8010"
 try:
   with open(path, "r", encoding="utf-8") as f:
     data = json.load(f)
@@ -3414,11 +3426,32 @@ if isinstance(allow, list):
 for key in ("entries", "installs"):
   if isinstance(plug.get(key), dict) and "clawboard-logger" in plug[key]:
     del plug[key]["clawboard-logger"]
+# Pre-seed a minimal valid logger entry. Some OpenClaw builds validate required
+# plugin config fields during install and reject missing baseUrl.
+entries = plug.get("entries")
+if not isinstance(entries, dict):
+  entries = {}
+plug["entries"] = entries
+entry = entries.get("clawboard-logger")
+if not isinstance(entry, dict):
+  entry = {}
+entries["clawboard-logger"] = entry
+cfg = entry.get("config")
+if not isinstance(cfg, dict):
+  cfg = {}
+if not cfg.get("baseUrl"):
+  cfg["baseUrl"] = base_url
+entry["config"] = cfg
+if "enabled" not in entry:
+  entry["enabled"] = False
 data["plugins"] = plug
 with open(path, "w", encoding="utf-8") as f:
   json.dump(data, f, indent=2)
 PY
       fi
+      # Best-effort reinforcement via CLI for builds that re-validate at install.
+      openclaw config set plugins.entries.clawboard-logger.config "{\"baseUrl\":\"$_PLUGIN_BASE_URL_INIT\"}" --json >/dev/null 2>&1 || true
+      openclaw config set plugins.entries.clawboard-logger.enabled false >/dev/null 2>&1 || true
       openclaw plugins install -l "$INSTALL_DIR/extensions/clawboard-logger"
       openclaw plugins enable clawboard-logger
 
@@ -3450,7 +3483,14 @@ PY
         CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextFetchRetries":%s,"contextFallbackModes":%s,"contextMaxChars":%s,"contextCacheTtlMs":%s,"contextCacheMaxEntries":%s,"contextUseCacheOnFailure":%s,"enableOpenClawMemorySearch":%s,"baseUrlFallbacks":["%s","%s"]}' "$API_URL" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_FETCH_RETRIES_VALUE" "$CONTEXT_FALLBACK_MODES_JSON" "$CONTEXT_MAX_CHARS_VALUE" "$CONTEXT_CACHE_TTL_MS_VALUE" "$CONTEXT_CACHE_MAX_ENTRIES_VALUE" "$CONTEXT_USE_CACHE_ON_FAILURE_JSON" "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON" "$_LOGGER_FALLBACK_1" "$_LOGGER_FALLBACK_2")
       fi
       openclaw_cfg_txn_begin
-      openclaw_cfg_set_txn plugins.entries.clawboard-logger.config "$CONFIG_JSON" json true
+      # Some OpenClaw builds normalize/redact plugin config payloads (e.g., token field),
+      # so exact JSON verification can drift even when writes succeed.
+      openclaw_cfg_set_txn plugins.entries.clawboard-logger.config "$CONFIG_JSON" json false
+      _LOGGER_CFG_BASEURL="$(openclaw_cfg_get_scalar_normalized plugins.entries.clawboard-logger.config.baseUrl || true)"
+      if [ -z "$_LOGGER_CFG_BASEURL" ] || [ "$_LOGGER_CFG_BASEURL" = "null" ]; then
+        openclaw_cfg_txn_rollback
+        log_error "Logger plugin config missing required baseUrl after configuration write."
+      fi
       openclaw_cfg_set_txn plugins.entries.clawboard-logger.enabled true json true
       openclaw_cfg_txn_verify_or_rollback
       openclaw_cfg_txn_commit

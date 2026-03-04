@@ -1230,7 +1230,6 @@ export default function register(api) {
             ? uniqueSessionCandidates([normalizedSessionKey, ctxSessionKey, metaSessionKey].flatMap((candidate) => requestSessionKeys(candidate)))
             : [];
         const topicOnlyFromMeta = boardScopeTopicOnlyFromMeta(meta);
-
         // Direct board scope from any supplied session key always wins.
         for (const candidate of sessionCandidates) {
             const cached = candidate ? boardScopeBySession.get(candidate) : undefined;
@@ -1246,7 +1245,6 @@ export default function register(api) {
                     boardScope: cachedScope,
                 };
             }
-
             const direct = boardScopeFromSessionKey(candidate);
             if (!direct)
                 continue;
@@ -1319,9 +1317,39 @@ export default function register(api) {
                 };
             }
         }
+        const resolvedTopicId = await resolveTopicId(normalizedSessionKey);
+        const resolvedTaskId = resolveTaskId(normalizedSessionKey);
+        if (topicOnlyFromMeta && resolvedTopicId) {
+            const boardScope = {
+                kind: "topic_only",
+                topicId: resolvedTopicId,
+                sessionKey: normalizedSessionKey ?? "",
+                inherited: false,
+                topicOnly: true,
+                updatedAt: nowMs(),
+            };
+            return {
+                topicId: resolvedTopicId,
+                taskId: resolvedTaskId,
+                boardScope,
+            };
+        }
+        // Fallback routing when no board scope is found.
+        // Include topicOnly hint if present in meta.
+        const fallbackScope = topicOnlyFromMeta && resolvedTopicId
+            ? {
+                kind: "topic_only",
+                topicId: resolvedTopicId,
+                sessionKey: normalizedSessionKey ?? "",
+                inherited: false,
+                topicOnly: true,
+                updatedAt: nowMs(),
+            }
+            : undefined;
         return {
-            topicId: await resolveTopicId(normalizedSessionKey),
-            taskId: resolveTaskId(normalizedSessionKey),
+            topicId: resolvedTopicId,
+            taskId: resolvedTaskId,
+            boardScope: fallbackScope,
         };
     }
     // When Clawboard isn't reachable (common during local dev restarts and during purge),
@@ -2658,74 +2686,78 @@ export default function register(api) {
         }
         return row;
     };
-        const resolveSessionKey = (meta, ctx2) => {
-            const ctxSession = normalizeId(ctx2.sessionKey);
-            if (parseSubagentSession(ctxSession))
-                return ctxSession;
-            const metaSession = normalizeId(meta?.sessionKey);
-            if (parseSubagentSession(metaSession))
-                return metaSession;
-            const metaObj = meta ?? undefined;
-            return computeEffectiveSessionKey(metaObj, ctx2);
-        };
-
-        const parseMetaBoolean = (value) => {
-            if (typeof value === "boolean") return value;
-            if (typeof value === "number") return value === 1;
-            if (typeof value === "string") {
-                const normalized = value.trim().toLowerCase();
-                if (!normalized) return undefined;
-                if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") return true;
-                if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") return false;
-            }
-            return undefined;
-        };
-
-        const parseBoardScopeKindFromMeta = (meta) => {
-            const value =
-                typeof meta?.boardScopeKind === "string"
-                    ? meta.boardScopeKind
-                    : typeof meta?.boardScope_kind === "string"
-                        ? meta.boardScope_kind
-                        : undefined;
-            if (!value) return undefined;
+    const resolveSessionKey = (meta, ctx2) => {
+        const ctxSession = normalizeId(ctx2.sessionKey);
+        if (parseSubagentSession(ctxSession))
+            return ctxSession;
+        const metaSession = normalizeId(meta?.sessionKey);
+        if (parseSubagentSession(metaSession))
+            return metaSession;
+        const metaObj = meta ?? undefined;
+        return computeEffectiveSessionKey(metaObj, ctx2);
+    };
+    const parseMetaBoolean = (value) => {
+        if (typeof value === "boolean")
+            return value;
+        if (typeof value === "number")
+            return value === 1;
+        if (typeof value === "string") {
             const normalized = value.trim().toLowerCase();
-            if (normalized === "topic" || normalized === "task" || normalized === "topic_only") return normalized;
+            if (!normalized)
+                return undefined;
+            if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on")
+                return true;
+            if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off")
+                return false;
+        }
+        return undefined;
+    };
+    const parseBoardScopeKindFromMeta = (meta) => {
+        const value = typeof meta?.boardScopeKind === "string"
+            ? meta.boardScopeKind
+            : typeof meta?.boardScope_kind === "string"
+                ? meta.boardScope_kind
+                : undefined;
+        if (!value)
             return undefined;
+        const normalized = value.trim().toLowerCase();
+        if (normalized === "topic" || normalized === "task" || normalized === "topic_only")
+            return normalized;
+        return undefined;
+    };
+    function boardScopeTopicOnlyFromMeta(meta) {
+        const direct = parseMetaBoolean(meta?.boardScopeTopicOnly) ??
+            parseMetaBoolean(meta?.topicOnly) ??
+            parseMetaBoolean(meta?.topic_only);
+        if (direct !== undefined)
+            return direct;
+        return parseBoardScopeKindFromMeta(meta) === "topic_only";
+    }
+    function withBoardScopeTopicOnlyHint(scope, topicOnly) {
+        if (!scope)
+            return undefined;
+        if (!topicOnly || scope.kind !== "topic")
+            return scope;
+        return {
+            ...scope,
+            kind: "topic_only",
+            topicOnly: true,
         };
-
-        const boardScopeTopicOnlyFromMeta = (meta) => {
-            const direct =
-                parseMetaBoolean(meta?.boardScopeTopicOnly) ??
-                parseMetaBoolean(meta?.topicOnly) ??
-                parseMetaBoolean(meta?.topic_only);
-            if (direct !== undefined) return direct;
-            return parseBoardScopeKindFromMeta(meta) === "topic_only";
+    }
+    const normalizeEventMeta = (meta, topLevelSessionKey) => {
+        const merged = {
+            ...(meta && typeof meta === "object" ? meta : {}),
         };
-
-        const withBoardScopeTopicOnlyHint = (scope, topicOnly) => {
-            if (!scope || scope.kind !== "topic" || !topicOnly) return scope;
-            return {
-                ...scope,
-                kind: "topic_only",
-                topicOnly: true,
-            };
-        };
-
-        const normalizeEventMeta = (meta, topLevelSessionKey) => {
-            const merged = {
-                ...(meta && typeof meta === "object" ? meta : {}),
-            };
-            const top = typeof topLevelSessionKey === "string" ? topLevelSessionKey.trim() : "";
-            if (!top)
-                return merged;
-            const mergedSessionKey = typeof merged.sessionKey === "string" ? merged.sessionKey.trim() : "";
-            if (!mergedSessionKey || (isBoardSessionKey(top) && !isBoardSessionKey(mergedSessionKey))) {
-                merged.sessionKey = top;
-            }
+        const top = typeof topLevelSessionKey === "string" ? topLevelSessionKey.trim() : "";
+        if (!top)
             return merged;
-        };
-        api.on("message_received", async (event, ctx) => {
+        const mergedSessionKey = typeof merged.sessionKey === "string" ? merged.sessionKey.trim() : "";
+        if (!mergedSessionKey || (isBoardSessionKey(top) && !isBoardSessionKey(mergedSessionKey))) {
+            merged.sessionKey = top;
+        }
+        return merged;
+    };
+    api.on("message_received", async (event, ctx) => {
         const createdAt = new Date().toISOString();
         const raw = event.content ?? "";
         const cleanRaw = sanitizeMessageContent(raw);
@@ -2761,10 +2793,7 @@ export default function register(api) {
             // WebChat can echo it back with a different messageId; skip to avoid duplicate user rows.
             return;
         }
-        const directBoardScope = withBoardScopeTopicOnlyHint(
-            boardScopeFromSessionKey(effectiveSessionKey ?? ctx?.sessionKey),
-            boardScopeTopicOnlyFromMeta(meta),
-        );
+        const directBoardScope = withBoardScopeTopicOnlyHint(boardScopeFromSessionKey(effectiveSessionKey ?? ctx?.sessionKey), boardScopeTopicOnlyFromMeta(meta));
         if (directBoardScope) {
             rememberBoardScope(directBoardScope, {
                 sessionKeys: [effectiveSessionKey, ctx.sessionKey],
@@ -3299,7 +3328,7 @@ export default function register(api) {
         });
         if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
             return;
-        const routingResolved = await resolveRoutingScope(effectiveSessionKey, ctx, toolMeta);
+        const routingResolved = await resolveRoutingScope(effectiveSessionKey, ctx);
         const routing = hasToolRoutingAnchor(routingResolved) || !remembered?.routing ? routingResolved : remembered.routing;
         requestId = await resolveOpenclawRequestIdForBoardScope({
             requestId,
