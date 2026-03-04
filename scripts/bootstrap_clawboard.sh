@@ -31,6 +31,81 @@ log_success() { echo -e "${GREEN}success:${NC} $1"; }
 log_warn() { echo -e "${YELLOW}warning:${NC} $1"; }
 log_error() { echo -e "${RED}error:${NC} $1"; exit 1; }
 
+run_with_timeout_capture() {
+  local timeout_s="$1"
+  shift
+  local rc=0
+  local output=""
+
+  if command -v timeout >/dev/null 2>&1; then
+    set +e
+    output="$(timeout "${timeout_s}s" "$@" 2>&1)"
+    rc=$?
+    set -e
+  elif command -v gtimeout >/dev/null 2>&1; then
+    set +e
+    output="$(gtimeout "${timeout_s}s" "$@" 2>&1)"
+    rc=$?
+    set -e
+  elif command -v python3 >/dev/null 2>&1; then
+    set +e
+    output="$(python3 - "$timeout_s" "$@" <<'PY'
+import subprocess
+import sys
+
+timeout_s = float(sys.argv[1])
+cmd = sys.argv[2:]
+if not cmd:
+    raise SystemExit(1)
+
+try:
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    if proc.stdout:
+        sys.stdout.write(proc.stdout)
+    if proc.stderr:
+        sys.stdout.write(proc.stderr)
+    raise SystemExit(proc.returncode)
+except subprocess.TimeoutExpired as exc:
+    stdout = exc.stdout
+    stderr = exc.stderr
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", errors="replace")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    if stdout:
+        sys.stdout.write(stdout)
+    if stderr:
+        sys.stdout.write(stderr)
+    sys.stdout.write(f"error: command timed out after {int(timeout_s)}s: {' '.join(cmd)}\n")
+    raise SystemExit(124)
+PY
+)"
+    rc=$?
+    set -e
+  else
+    set +e
+    output="$("$@" 2>&1)"
+    rc=$?
+    set -e
+  fi
+
+  if [ -n "$output" ]; then
+    printf "%s\n" "$output"
+  fi
+  return "$rc"
+}
+
+memory_index_output_has_errors() {
+  local output="${1:-}"
+  if [ -z "$output" ]; then
+    return 1
+  fi
+  if printf "%s" "$output" | grep -Eqi 'qmd collection add failed|sqliteerror|sqlite_constraint'; then
+    return 0
+  fi
+  return 1
+}
+
 # Canonical docs copied into main workspace during bootstrap so shipped policy/docs stay
 # aligned with repo source of truth on every machine.
 CLAWBOARD_CONTRACT_DOCS=(
@@ -56,6 +131,7 @@ OPENCLAW_CFG_TXN_SNAPSHOT=""
 declare -a OPENCLAW_CFG_TXN_KEYS=()
 declare -a OPENCLAW_CFG_TXN_EXPECTED=()
 declare -a OPENCLAW_CFG_TXN_REQUIRED=()
+OPENCLAW_DOCTOR_FIX_ATTEMPTED=false
 
 seed_minimal_openclaw_config() {
   local workspace="${1:-}"
@@ -125,6 +201,18 @@ ensure_openclaw_config_file() {
     return 0
   fi
 
+  return 1
+}
+
+openclaw_doctor_fix_once() {
+  if [ "$OPENCLAW_DOCTOR_FIX_ATTEMPTED" = true ]; then
+    return 1
+  fi
+  OPENCLAW_DOCTOR_FIX_ATTEMPTED=true
+  if openclaw doctor --fix >/dev/null 2>&1; then
+    log_warn "Detected config schema drift; applied openclaw doctor --fix and retrying config writes."
+    return 0
+  fi
   return 1
 }
 
@@ -213,8 +301,8 @@ except Exception:
         if ch not in starts:
             continue
         try:
-            obj, _ = decoder.raw_decode(text[idx:])
-            break
+            candidate, _ = decoder.raw_decode(text[idx:])
+            obj = candidate
         except Exception:
             continue
     if obj is None:
@@ -229,13 +317,135 @@ openclaw_cfg_get_json() {
   openclaw config get "$key" --json 2>/dev/null || true
 }
 
+openclaw_cfg_get_scalar_normalized() {
+  local key="$1"
+  local raw parsed
+  raw="$(openclaw_cfg_get_json "$key")"
+  parsed="$(openclaw_cfg_parse_json "$raw" 2>/dev/null || true)"
+  if [ -z "$parsed" ] || [ "$parsed" = "null" ]; then
+    printf ""
+    return 0
+  fi
+  python3 - "$parsed" <<'PY'
+import json
+import sys
+
+v = json.loads(sys.argv[1])
+if v is None:
+    print("", end="")
+elif isinstance(v, bool):
+    print("true" if v else "false", end="")
+elif isinstance(v, (int, float)):
+    print(v, end="")
+elif isinstance(v, (list, dict)):
+    print(json.dumps(v, separators=(",", ":"), sort_keys=True), end="")
+else:
+    print(str(v), end="")
+PY
+}
+
+openclaw_cfg_file_fallback_enabled() {
+  local raw
+  raw="$(printf "%s" "${OPENCLAW_CONFIG_FILE_FALLBACK:-true}" | tr '[:upper:]' '[:lower:]')"
+  case "$raw" in
+    0|false|no|off) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+openclaw_cfg_set_file_fallback() {
+  local key="$1"
+  local value="$2"
+  local mode="${3:-string}" # string | json
+  python3 - "$OPENCLAW_CONFIG_PATH" "$key" "$value" "$mode" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+cfg_path, key, raw_value, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+parts = [p for p in key.split(".") if p]
+if not parts:
+    raise SystemExit(1)
+
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    data = {}
+
+if mode == "json":
+    value = json.loads(raw_value)
+else:
+    value = raw_value
+
+cur = data
+for idx, part in enumerate(parts):
+    is_last = idx == len(parts) - 1
+    next_part = parts[idx + 1] if not is_last else None
+    want_list = bool(next_part and next_part.isdigit())
+
+    if isinstance(cur, dict):
+        if is_last:
+            cur[part] = value
+            break
+        child = cur.get(part)
+        if want_list:
+            if not isinstance(child, list):
+                child = []
+                cur[part] = child
+        else:
+            if not isinstance(child, dict):
+                child = {}
+                cur[part] = child
+        cur = child
+        continue
+
+    if isinstance(cur, list):
+        if not part.isdigit():
+            raise SystemExit(1)
+        list_idx = int(part)
+        while len(cur) <= list_idx:
+            cur.append([] if want_list else {})
+        if is_last:
+            cur[list_idx] = value
+            break
+        child = cur[list_idx]
+        if want_list:
+            if not isinstance(child, list):
+                child = []
+                cur[list_idx] = child
+        else:
+            if not isinstance(child, dict):
+                child = {}
+                cur[list_idx] = child
+        cur = child
+        continue
+
+    raise SystemExit(1)
+
+cfg_dir = os.path.dirname(cfg_path) or "."
+fd, tmp_path = tempfile.mkstemp(prefix=".openclaw.json.tmp.", dir=cfg_dir, text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp_path, cfg_path)
+finally:
+    if os.path.exists(tmp_path):
+        os.unlink(tmp_path)
+PY
+}
+
 openclaw_cfg_set_txn() {
   local key="$1"
   local value="$2"
   local mode="${3:-string}"      # string | json
   local required="${4:-true}"    # true | false
+  local allow_file_fallback="${5:-true}" # true | false
   local expected_json=""
   local cmd=(openclaw config set "$key" "$value")
+  local attempt actual_raw expected_norm actual_norm cmd_output cmd_rc cmd_preview
 
   openclaw_cfg_txn_begin
   if [ "$mode" = "json" ]; then
@@ -250,7 +460,36 @@ PY
 )"
   fi
 
-  if "${cmd[@]}" >/dev/null 2>&1; then
+  for attempt in 1 2 3; do
+    set +e
+    cmd_output="$("${cmd[@]}" 2>&1)"
+    cmd_rc=$?
+    set -e
+    if [ "$cmd_rc" -eq 0 ]; then
+      openclaw_cfg_txn_record_expectation "$key" "$expected_json" "$required"
+      return 0
+    fi
+    cmd_preview="$(printf "%s" "$cmd_output" | tr '\r' '\n' | sed -n '1,3p' | paste -sd ' | ' -)"
+    log_warn "OpenClaw config set attempt $attempt failed for $key (rc=$cmd_rc): ${cmd_preview:-no output}"
+    if [ "$attempt" -eq 1 ]; then
+      openclaw_doctor_fix_once || true
+    fi
+    sleep 1
+  done
+
+  if [ "$allow_file_fallback" = true ] && openclaw_cfg_file_fallback_enabled && openclaw_cfg_set_file_fallback "$key" "$value" "$mode"; then
+    log_warn "Applied direct config file fallback for $key after CLI set failures."
+    openclaw_cfg_txn_record_expectation "$key" "$expected_json" "$required"
+    return 0
+  fi
+
+  # Some OpenClaw builds can return non-zero while still applying the value.
+  # If the desired value is already present, proceed idempotently.
+  actual_raw="$(openclaw_cfg_get_json "$key")"
+  expected_norm="$(openclaw_cfg_parse_json "$expected_json" 2>/dev/null || true)"
+  actual_norm="$(openclaw_cfg_parse_json "$actual_raw" 2>/dev/null || true)"
+  if [ -n "$expected_norm" ] && [ -n "$actual_norm" ] && [ "$expected_norm" = "$actual_norm" ]; then
+    log_warn "OpenClaw config set returned non-zero but desired value is already present: $key"
     openclaw_cfg_txn_record_expectation "$key" "$expected_json" "$required"
     return 0
   fi
@@ -2968,12 +3207,12 @@ if [ "$SKIP_OPENCLAW" = false ]; then
   else
     OPENCLAW_GATEWAY_RESTART_NEEDED=false
     report_openclaw_pending_device_approvals
+    openclaw_doctor_fix_once || true
 
     openclaw_cfg_txn_begin
 
     log_info "Enabling OpenClaw OpenResponses endpoint (POST /v1/responses)..."
-    CURRENT_RESPONSES_ENABLED="$(openclaw config get gateway.http.endpoints.responses.enabled --json 2>/dev/null || true)"
-    CURRENT_RESPONSES_ENABLED="$(printf "%s" "$CURRENT_RESPONSES_ENABLED" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    CURRENT_RESPONSES_ENABLED="$(openclaw_cfg_get_scalar_normalized gateway.http.endpoints.responses.enabled)"
     if [ "$CURRENT_RESPONSES_ENABLED" != "true" ]; then
       openclaw_cfg_set_txn gateway.http.endpoints.responses.enabled true json true
       OPENCLAW_GATEWAY_RESTART_NEEDED=true
@@ -2983,18 +3222,19 @@ if [ "$SKIP_OPENCLAW" = false ]; then
     fi
 
     log_info "Ensuring OpenClaw cross-agent session visibility for delegated follow-ups..."
-    CURRENT_SESSIONS_VISIBILITY="$(openclaw config get tools.sessions.visibility --json 2>/dev/null || true)"
-    CURRENT_SESSIONS_VISIBILITY="$(printf "%s" "$CURRENT_SESSIONS_VISIBILITY" | tr -d '\r' | tail -n1 | tr -d '[:space:]\"')"
+    CURRENT_SESSIONS_VISIBILITY="$(openclaw_cfg_get_scalar_normalized tools.sessions.visibility)"
     if [ "$CURRENT_SESSIONS_VISIBILITY" != "all" ]; then
-      openclaw_cfg_set_txn tools.sessions.visibility all string true
-      OPENCLAW_GATEWAY_RESTART_NEEDED=true
-      log_success "Set tools.sessions.visibility=all."
+      if openclaw_cfg_set_txn tools.sessions.visibility all string false false; then
+        OPENCLAW_GATEWAY_RESTART_NEEDED=true
+        log_success "Set tools.sessions.visibility=all."
+      else
+        log_warn "Skipping tools.sessions.visibility=all: unsupported by this OpenClaw config schema."
+      fi
     else
       log_success "tools.sessions.visibility already set to all."
     fi
 
-    CURRENT_SANDBOX_SESSION_VISIBILITY="$(openclaw config get agents.defaults.sandbox.sessionToolsVisibility --json 2>/dev/null || true)"
-    CURRENT_SANDBOX_SESSION_VISIBILITY="$(printf "%s" "$CURRENT_SANDBOX_SESSION_VISIBILITY" | tr -d '\r' | tail -n1 | tr -d '[:space:]\"')"
+    CURRENT_SANDBOX_SESSION_VISIBILITY="$(openclaw_cfg_get_scalar_normalized agents.defaults.sandbox.sessionToolsVisibility)"
     if [ "$CURRENT_SANDBOX_SESSION_VISIBILITY" != "all" ]; then
       openclaw_cfg_set_txn agents.defaults.sandbox.sessionToolsVisibility all string true
       OPENCLAW_GATEWAY_RESTART_NEEDED=true
@@ -3003,8 +3243,7 @@ if [ "$SKIP_OPENCLAW" = false ]; then
       log_success "agents.defaults.sandbox.sessionToolsVisibility already set to all."
     fi
 
-    CURRENT_AGENT_TO_AGENT_ENABLED="$(openclaw config get tools.agentToAgent.enabled --json 2>/dev/null || true)"
-    CURRENT_AGENT_TO_AGENT_ENABLED="$(printf "%s" "$CURRENT_AGENT_TO_AGENT_ENABLED" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    CURRENT_AGENT_TO_AGENT_ENABLED="$(openclaw_cfg_get_scalar_normalized tools.agentToAgent.enabled)"
     if [ "$CURRENT_AGENT_TO_AGENT_ENABLED" != "true" ]; then
       openclaw_cfg_set_txn tools.agentToAgent.enabled true json true
       OPENCLAW_GATEWAY_RESTART_NEEDED=true
@@ -3014,10 +3253,8 @@ if [ "$SKIP_OPENCLAW" = false ]; then
     fi
 
     log_info "Reconciling iMessage group allowlist config (prevents silent group drops + doctor warnings)..."
-    CURRENT_IMESSAGE_GROUP_POLICY="$(openclaw config get channels.imessage.groupPolicy --json 2>/dev/null || true)"
-    CURRENT_IMESSAGE_GROUP_POLICY="$(printf "%s" "$CURRENT_IMESSAGE_GROUP_POLICY" | tr -d '\r' | tail -n1 | tr -d '[:space:]\"')"
-    CURRENT_IMESSAGE_GROUP_ALLOW_FROM="$(openclaw config get channels.imessage.groupAllowFrom --json 2>/dev/null || true)"
-    CURRENT_IMESSAGE_GROUP_ALLOW_FROM="$(printf "%s" "$CURRENT_IMESSAGE_GROUP_ALLOW_FROM" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+    CURRENT_IMESSAGE_GROUP_POLICY="$(openclaw_cfg_get_scalar_normalized channels.imessage.groupPolicy)"
+    CURRENT_IMESSAGE_GROUP_ALLOW_FROM="$(openclaw_cfg_get_scalar_normalized channels.imessage.groupAllowFrom)"
     if [ "$CURRENT_IMESSAGE_GROUP_POLICY" = "allowlist" ]; then
       if [ -z "$CURRENT_IMESSAGE_GROUP_ALLOW_FROM" ] || [ "$CURRENT_IMESSAGE_GROUP_ALLOW_FROM" = "[]" ] || [ "$CURRENT_IMESSAGE_GROUP_ALLOW_FROM" = "null" ]; then
         if openclaw_cfg_set_txn channels.imessage.groupAllowFrom '["*"]' json false; then
@@ -3234,15 +3471,13 @@ PY
     maybe_run_local_memory_setup
 
     # Enforce QMD settings only when QMD is the active memory backend.
-    CURRENT_MEMORY_BACKEND="$(openclaw config get memory.backend --json 2>/dev/null || true)"
-    CURRENT_MEMORY_BACKEND="$(printf "%s" "$CURRENT_MEMORY_BACKEND" | tr -d '\r' | tail -n1 | tr -d '"' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    CURRENT_MEMORY_BACKEND="$(openclaw_cfg_get_scalar_normalized memory.backend | tr '[:upper:]' '[:lower:]')"
     if [ "$CURRENT_MEMORY_BACKEND" = "qmd" ]; then
       openclaw_cfg_txn_begin
       # The skill script's configure_qmd_memory_boost() may write QMD config values;
       # this block runs last and guarantees the correct values are always applied.
       log_info "Enforcing QMD memory search settings (sessions off, memorySearch sources=memory, maxResults=20, timeoutMs=8000)..."
-      CURRENT_QMD_SESSIONS_ENABLED="$(openclaw config get memory.qmd.sessions.enabled --json 2>/dev/null || true)"
-      CURRENT_QMD_SESSIONS_ENABLED="$(printf "%s" "$CURRENT_QMD_SESSIONS_ENABLED" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+      CURRENT_QMD_SESSIONS_ENABLED="$(openclaw_cfg_get_scalar_normalized memory.qmd.sessions.enabled)"
       if [ "$CURRENT_QMD_SESSIONS_ENABLED" != "false" ]; then
         openclaw_cfg_set_txn memory.qmd.sessions.enabled false json true
         OPENCLAW_GATEWAY_RESTART_NEEDED=true
@@ -3251,8 +3486,7 @@ PY
         log_success "QMD session indexing already disabled."
       fi
 
-      CURRENT_MEMORY_SOURCES="$(openclaw config get agents.defaults.memorySearch.sources --json 2>/dev/null || true)"
-      CURRENT_MEMORY_SOURCES="$(printf "%s" "$CURRENT_MEMORY_SOURCES" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+      CURRENT_MEMORY_SOURCES="$(openclaw_cfg_get_scalar_normalized agents.defaults.memorySearch.sources)"
       if [ "$CURRENT_MEMORY_SOURCES" != '["memory"]' ]; then
         openclaw_cfg_set_txn agents.defaults.memorySearch.sources '["memory"]' json true
         OPENCLAW_GATEWAY_RESTART_NEEDED=true
@@ -3261,8 +3495,7 @@ PY
         log_success "memorySearch sources already aligned for QMD backend."
       fi
 
-      CURRENT_SESSION_MEMORY_FLAG="$(openclaw config get agents.defaults.memorySearch.experimental.sessionMemory --json 2>/dev/null || true)"
-      CURRENT_SESSION_MEMORY_FLAG="$(printf "%s" "$CURRENT_SESSION_MEMORY_FLAG" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+      CURRENT_SESSION_MEMORY_FLAG="$(openclaw_cfg_get_scalar_normalized agents.defaults.memorySearch.experimental.sessionMemory)"
       if [ "$CURRENT_SESSION_MEMORY_FLAG" != "false" ]; then
         openclaw_cfg_set_txn agents.defaults.memorySearch.experimental.sessionMemory false json true
         OPENCLAW_GATEWAY_RESTART_NEEDED=true
@@ -3271,8 +3504,7 @@ PY
         log_success "sessionMemory flag already disabled for QMD backend."
       fi
 
-      CURRENT_QMD_MAX_RESULTS="$(openclaw config get memory.qmd.limits.maxResults --json 2>/dev/null || true)"
-      CURRENT_QMD_MAX_RESULTS="$(printf "%s" "$CURRENT_QMD_MAX_RESULTS" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+      CURRENT_QMD_MAX_RESULTS="$(openclaw_cfg_get_scalar_normalized memory.qmd.limits.maxResults)"
       if [ -z "$CURRENT_QMD_MAX_RESULTS" ] || { [ -n "$CURRENT_QMD_MAX_RESULTS" ] && [ "$CURRENT_QMD_MAX_RESULTS" -lt 20 ] 2>/dev/null; }; then
         openclaw_cfg_set_txn memory.qmd.limits.maxResults 20 json true
         log_success "Set memory.qmd.limits.maxResults=20."
@@ -3280,8 +3512,7 @@ PY
         log_success "QMD max results already set to $CURRENT_QMD_MAX_RESULTS (>=20)."
       fi
 
-      CURRENT_QMD_TIMEOUT="$(openclaw config get memory.qmd.limits.timeoutMs --json 2>/dev/null || true)"
-      CURRENT_QMD_TIMEOUT="$(printf "%s" "$CURRENT_QMD_TIMEOUT" | tr -d '\r' | tail -n1 | tr -d '[:space:]')"
+      CURRENT_QMD_TIMEOUT="$(openclaw_cfg_get_scalar_normalized memory.qmd.limits.timeoutMs)"
       if [ -z "$CURRENT_QMD_TIMEOUT" ] || { [ -n "$CURRENT_QMD_TIMEOUT" ] && [ "$CURRENT_QMD_TIMEOUT" -lt 8000 ] 2>/dev/null; }; then
         openclaw_cfg_set_txn memory.qmd.limits.timeoutMs 8000 json true
         log_success "Set memory.qmd.limits.timeoutMs=8000."
@@ -3338,6 +3569,7 @@ PY
     # To manually re-index at any time: openclaw memory index --agent <id> --force
     if command -v openclaw >/dev/null 2>&1; then
       log_info "Refreshing QMD memory indexes for all configured agents..."
+      _idx_timeout_s="${OPENCLAW_MEMORY_INDEX_TIMEOUT_SEC:-180}"
       _idx_agent_ids=()
       _idx_raw=""
       _idx_raw="$(python3 - "${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}" <<'PY'
@@ -3367,10 +3599,23 @@ PY
       _idx_failures=0
       for _aid in "${_idx_agent_ids[@]}"; do
         log_info "  openclaw memory index --agent $_aid --force"
-        if openclaw memory index --agent "$_aid" --force 2>&1; then
+        set +e
+        _idx_output="$(run_with_timeout_capture "$_idx_timeout_s" openclaw memory index --agent "$_aid" --force)"
+        _idx_rc=$?
+        set -e
+        if [[ -n "${_idx_output:-}" ]]; then
+          printf "%s\n" "$_idx_output"
+        fi
+        if [[ "$_idx_rc" -eq 0 ]] && ! memory_index_output_has_errors "${_idx_output:-}"; then
           log_success "  Agent '$_aid' memory index refreshed."
         else
-          log_warn "  Agent '$_aid' index refresh failed. Retry: openclaw memory index --agent $_aid --force"
+          if [[ "$_idx_rc" -eq 124 ]]; then
+            log_warn "  Agent '$_aid' index refresh timed out after ${_idx_timeout_s}s; continuing."
+          elif memory_index_output_has_errors "${_idx_output:-}"; then
+            log_warn "  Agent '$_aid' index output reported qmd/sqlite errors; retry: openclaw memory index --agent $_aid --force"
+          else
+            log_warn "  Agent '$_aid' index refresh failed. Retry: openclaw memory index --agent $_aid --force"
+          fi
           _idx_failures=$((_idx_failures + 1))
         fi
       done

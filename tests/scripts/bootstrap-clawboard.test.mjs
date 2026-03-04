@@ -429,6 +429,7 @@ test("setup-openclaw-local-memory.sh: rolls back config snapshot on required wri
     OPENCLAW_CONFIG_PATH: configPath,
     OPENCLAW_MEMORY_MODEL_PATH: modelPath,
     OPENCLAW_MEMORY_INDEX_SCOPE: "main",
+    OPENCLAW_CONFIG_FILE_FALLBACK: "0",
     OPENCLAW_STUB_FAIL_SET_KEY: "memory.qmd.limits.maxResults",
     PATH: `${binDir}:${process.env.PATH ?? ""}`,
   };

@@ -18,6 +18,7 @@ set -euo pipefail
 #   OPENCLAW_MEMORY_FORCE_INDEX           (true|false, default: false)
 #   OPENCLAW_MEMORY_INDEX_MAX_ATTEMPTS    (default: 3)
 #   OPENCLAW_MEMORY_INDEX_RETRY_DELAY_SEC (default: 10)
+#   OPENCLAW_MEMORY_INDEX_TIMEOUT_SEC     (default: 180)
 #   OPENCLAW_MEMORY_AGENT_ID              (optional override when scope=main)
 
 need_cmd() {
@@ -38,6 +39,79 @@ run_doctor_fix_once() {
   OPENCLAW_DOCTOR_FIX_ATTEMPTED=true
   if openclaw doctor --fix >/dev/null 2>&1; then
     log_warn "Detected config schema drift; applied openclaw doctor --fix and retrying config writes."
+    return 0
+  fi
+  return 1
+}
+
+run_with_timeout_capture() {
+  local timeout_s="$1"
+  shift
+  local output=""
+  local rc=0
+
+  if command -v timeout >/dev/null 2>&1; then
+    set +e
+    output="$(timeout "${timeout_s}s" "$@" 2>&1)"
+    rc=$?
+    set -e
+  elif command -v gtimeout >/dev/null 2>&1; then
+    set +e
+    output="$(gtimeout "${timeout_s}s" "$@" 2>&1)"
+    rc=$?
+    set -e
+  elif command -v python3 >/dev/null 2>&1; then
+    set +e
+    output="$(python3 - "$timeout_s" "$@" <<'PY'
+import subprocess
+import sys
+
+timeout_s = float(sys.argv[1])
+cmd = sys.argv[2:]
+if not cmd:
+    raise SystemExit(1)
+
+try:
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    if proc.stdout:
+        sys.stdout.write(proc.stdout)
+    if proc.stderr:
+        sys.stdout.write(proc.stderr)
+    raise SystemExit(proc.returncode)
+except subprocess.TimeoutExpired as exc:
+    stdout = exc.stdout
+    stderr = exc.stderr
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", errors="replace")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    if stdout:
+        sys.stdout.write(stdout)
+    if stderr:
+        sys.stdout.write(stderr)
+    sys.stdout.write(f"error: command timed out after {int(timeout_s)}s: {' '.join(cmd)}\n")
+    raise SystemExit(124)
+PY
+)"
+    rc=$?
+    set -e
+  else
+    set +e
+    output="$("$@" 2>&1)"
+    rc=$?
+    set -e
+  fi
+
+  printf "%s" "$output"
+  return "$rc"
+}
+
+memory_index_output_has_errors() {
+  local output="${1:-}"
+  if [[ -z "$output" ]]; then
+    return 1
+  fi
+  if printf "%s" "$output" | grep -Eqi 'qmd collection add failed|sqliteerror|sqlite_constraint'; then
     return 0
   fi
   return 1
@@ -152,8 +226,8 @@ except Exception:
         if ch not in starts:
             continue
         try:
-            obj, _ = decoder.raw_decode(text[idx:])
-            break
+            candidate, _ = decoder.raw_decode(text[idx:])
+            obj = candidate
         except Exception:
             continue
     if obj is None:
@@ -166,6 +240,99 @@ PY
 cfg_get_json() {
   local key="$1"
   openclaw config get "$key" --json 2>/dev/null || true
+}
+
+set_cfg_file_fallback() {
+  local key="$1"
+  local value="$2"
+  local mode="${3:-string}" # string | json
+  python3 - "$OPENCLAW_CONFIG_PATH" "$key" "$value" "$mode" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+cfg_path, key, raw_value, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+parts = [p for p in key.split(".") if p]
+if not parts:
+    raise SystemExit(1)
+
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    data = {}
+
+if mode == "json":
+    value = json.loads(raw_value)
+else:
+    value = raw_value
+
+cur = data
+for idx, part in enumerate(parts):
+    is_last = idx == len(parts) - 1
+    next_part = parts[idx + 1] if not is_last else None
+    want_list = bool(next_part and next_part.isdigit())
+
+    if isinstance(cur, dict):
+        if is_last:
+            cur[part] = value
+            break
+        child = cur.get(part)
+        if want_list:
+            if not isinstance(child, list):
+                child = []
+                cur[part] = child
+        else:
+            if not isinstance(child, dict):
+                child = {}
+                cur[part] = child
+        cur = child
+        continue
+
+    if isinstance(cur, list):
+        if not part.isdigit():
+            raise SystemExit(1)
+        list_idx = int(part)
+        while len(cur) <= list_idx:
+            cur.append([] if want_list else {})
+        if is_last:
+            cur[list_idx] = value
+            break
+        child = cur[list_idx]
+        if want_list:
+            if not isinstance(child, list):
+                child = []
+                cur[list_idx] = child
+        else:
+            if not isinstance(child, dict):
+                child = {}
+                cur[list_idx] = child
+        cur = child
+        continue
+
+    raise SystemExit(1)
+
+cfg_dir = os.path.dirname(cfg_path) or "."
+fd, tmp_path = tempfile.mkstemp(prefix=".openclaw.json.tmp.", dir=cfg_dir, text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp_path, cfg_path)
+finally:
+    if os.path.exists(tmp_path):
+        os.unlink(tmp_path)
+PY
+}
+
+cfg_file_fallback_enabled() {
+  local raw
+  raw="$(printf "%s" "${OPENCLAW_CONFIG_FILE_FALLBACK:-true}" | tr '[:upper:]' '[:lower:]')"
+  case "$raw" in
+    0|false|no|off) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 seed_minimal_openclaw_config() {
@@ -268,6 +435,7 @@ set_cfg() {
   local mode="${3:-string}"     # string | json
   local required="${4:-true}"   # true | false
   local expected_json=""
+  local actual_raw expected_norm actual_norm
   local cmd=(openclaw config set "$key" "$value")
   begin_cfg_txn
   if [[ "$mode" == "json" ]]; then
@@ -288,6 +456,20 @@ PY
   fi
   if run_doctor_fix_once && "${cmd[@]}" >/dev/null 2>&1; then
     log_info "set $key"
+    record_cfg_expectation "$key" "$expected_json" "$required"
+    return 0
+  fi
+  if cfg_file_fallback_enabled && set_cfg_file_fallback "$key" "$value" "$mode"; then
+    log_warn "set $key via direct config file fallback after CLI set failure."
+    record_cfg_expectation "$key" "$expected_json" "$required"
+    return 0
+  fi
+  # Some OpenClaw builds may return non-zero while still persisting the value.
+  actual_raw="$(cfg_get_json "$key")"
+  expected_norm="$(parse_json_payload "$expected_json" 2>/dev/null || true)"
+  actual_norm="$(parse_json_payload "$actual_raw" 2>/dev/null || true)"
+  if [[ -n "$expected_norm" && -n "$actual_norm" && "$expected_norm" == "$actual_norm" ]]; then
+    log_warn "set $key reported failure but desired value is already present; continuing."
     record_cfg_expectation "$key" "$expected_json" "$required"
     return 0
   fi
@@ -570,10 +752,11 @@ configure_qmd_memory_boost() {
 
 index_agent() {
   local agent_id="$1"
-  local max_attempts delay_s attempt rc output
+  local max_attempts delay_s attempt rc output timeout_s
   local -a cmd
   max_attempts="${OPENCLAW_MEMORY_INDEX_MAX_ATTEMPTS:-3}"
   delay_s="${OPENCLAW_MEMORY_INDEX_RETRY_DELAY_SEC:-10}"
+  timeout_s="${OPENCLAW_MEMORY_INDEX_TIMEOUT_SEC:-180}"
   attempt=1
 
   while [[ "$attempt" -le "$max_attempts" ]]; do
@@ -585,16 +768,36 @@ index_agent() {
       log_info "Running: openclaw memory index --agent $agent_id (attempt $attempt/$max_attempts)"
     fi
     set +e
-    output="$("${cmd[@]}" 2>&1)"
+    output="$(run_with_timeout_capture "$timeout_s" "${cmd[@]}")"
     rc=$?
     set -e
-    if [[ "$rc" -eq 0 ]]; then
+    if [[ "$rc" -eq 0 ]] && ! memory_index_output_has_errors "$output"; then
       [[ -n "$output" ]] && printf "%s\n" "$output"
       log_success "Memory index refreshed for agent '$agent_id'."
       return 0
     fi
 
     [[ -n "$output" ]] && printf "%s\n" "$output" >&2
+    if memory_index_output_has_errors "$output"; then
+      if [[ "$attempt" -lt "$max_attempts" ]]; then
+        log_warn "Indexer output reported qmd/sqlite errors for '$agent_id'. Retrying in ${delay_s}s..."
+        sleep "$delay_s"
+        delay_s=$((delay_s * 2))
+        attempt=$((attempt + 1))
+        continue
+      fi
+      break
+    fi
+    if [[ "$rc" -eq 124 ]]; then
+      if [[ "$attempt" -lt "$max_attempts" ]]; then
+        log_warn "Index refresh timed out for '$agent_id' after ${timeout_s}s. Retrying in ${delay_s}s..."
+        sleep "$delay_s"
+        delay_s=$((delay_s * 2))
+        attempt=$((attempt + 1))
+        continue
+      fi
+      break
+    fi
     if printf "%s" "$output" | grep -Eqi 'produced too much output'; then
       log_warn "Indexer output limit hit for '$agent_id'; continuing (QMD background sync may still complete)."
       return 0
