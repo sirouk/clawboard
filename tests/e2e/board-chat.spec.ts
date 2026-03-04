@@ -248,13 +248,14 @@ test("typed /abort in task composer cancels in-flight run as a /stop alias", asy
   const taskComposer = page.getByTestId(`task-chat-composer-${taskId}`);
   await expect(taskComposer).toBeVisible();
   const textbox = taskComposer.getByRole("textbox");
+  const sendButton = taskComposer.getByRole("button", { name: "Send" });
 
   await textbox.fill(`start-task-run-${suffix}`);
-  await textbox.press("Enter");
+  await sendButton.click();
   await expect.poll(() => postPayloads.length).toBe(1);
 
   await textbox.fill("/abort");
-  await taskComposer.getByRole("button", { name: "Send" }).click();
+  await sendButton.click();
   await expect.poll(() => deletePayloads.length).toBe(1);
 
   expect(postPayloads).toHaveLength(1);

@@ -5797,8 +5797,36 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (inFlightBoardSessionKeys.length === 1) {
       return { sessionKey: inFlightBoardSessionKeys[0], reason: "single" as const };
     }
+    if (inFlightBoardSessionKeys.length > 1) {
+      let freshestKey = "";
+      let freshestMs = Number.NEGATIVE_INFINITY;
+      for (const key of inFlightBoardSessionKeys) {
+        const signalMs = Math.max(
+          parseIsoMs(effectiveAwaitingAssistant[key]?.sentAt),
+          parseIsoMs(openclawTyping[key]?.updatedAt),
+          parseIsoMs(openclawThreadWork[key]?.updatedAt),
+          parseIsoMs(orchestrationThreadWorkBySession[key]?.updatedAt),
+          parseIsoMs(recentNonUserActivityBySession[key]?.updatedAt)
+        );
+        if (Number.isFinite(signalMs) && signalMs >= freshestMs) {
+          freshestMs = signalMs;
+          freshestKey = key;
+        }
+      }
+      if (!freshestKey) freshestKey = inFlightBoardSessionKeys[inFlightBoardSessionKeys.length - 1];
+      if (freshestKey) return { sessionKey: freshestKey, reason: "active" as const };
+    }
     return null;
-  }, [activeComposerSessionKey, inFlightBoardSessionKeys, selectedComposerSessionKey]);
+  }, [
+    activeComposerSessionKey,
+    effectiveAwaitingAssistant,
+    inFlightBoardSessionKeys,
+    openclawThreadWork,
+    openclawTyping,
+    orchestrationThreadWorkBySession,
+    recentNonUserActivityBySession,
+    selectedComposerSessionKey,
+  ]);
 
   const unifiedCancelTarget = useMemo(() => resolveUnifiedCancelTargetSession(), [resolveUnifiedCancelTargetSession]);
   const unifiedCancelTargetResponding = useMemo(() => {

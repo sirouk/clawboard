@@ -13,7 +13,7 @@ const BASE = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3010";
 test.describe("composer textarea height", () => {
   test("empty textarea has reduced min-height (~40px not 120px)", async ({ page }) => {
     await page.goto(`${BASE}/u`);
-    const textarea = page.getByTestId("unified-composer-textarea");
+    const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
     await expect(textarea).toBeVisible({ timeout: 15_000 });
 
     const box = await textarea.boundingBox();
@@ -28,7 +28,7 @@ test.describe("composer textarea height", () => {
 
   test("textarea grows as content is typed", async ({ page }) => {
     await page.goto(`${BASE}/u`);
-    const textarea = page.getByTestId("unified-composer-textarea");
+    const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
     await expect(textarea).toBeVisible({ timeout: 15_000 });
 
     const emptyHeight = (await textarea.boundingBox())!.height;

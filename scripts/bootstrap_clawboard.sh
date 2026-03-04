@@ -1456,6 +1456,70 @@ if "clawboard-logger" not in allow:
 PY
 }
 
+sanitize_clawboard_logger_stale_refs() {
+  local plugin_ext_dir="$OPENCLAW_HOME/extensions/clawboard-logger"
+  [ -e "$plugin_ext_dir" ] && return 0
+  [ -f "$OPENCLAW_CONFIG_PATH" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  local changed=""
+  changed="$(
+    python3 - "$OPENCLAW_CONFIG_PATH" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+path = sys.argv[1]
+try:
+  with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+except Exception:
+  print("0")
+  raise SystemExit(0)
+
+plug = data.get("plugins")
+if not isinstance(plug, dict):
+  print("0")
+  raise SystemExit(0)
+
+changed = False
+
+load_cfg = plug.get("load")
+if isinstance(load_cfg, dict):
+  paths = load_cfg.get("paths")
+  if isinstance(paths, list):
+    filtered = [p for p in paths if "clawboard-logger" not in str(p or "")]
+    if filtered != paths:
+      load_cfg["paths"] = filtered
+      changed = True
+
+allow = plug.get("allow")
+if isinstance(allow, list):
+  filtered = [a for a in allow if str(a or "") != "clawboard-logger"]
+  if filtered != allow:
+    plug["allow"] = filtered
+    changed = True
+
+for key in ("entries", "installs"):
+  bucket = plug.get(key)
+  if isinstance(bucket, dict) and "clawboard-logger" in bucket:
+    del bucket["clawboard-logger"]
+    changed = True
+
+if changed:
+  data["plugins"] = plug
+  with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+
+print("1" if changed else "0")
+PY
+  )"
+
+  if [ "${changed:-0}" = "1" ]; then
+    log_warn "Removed stale clawboard-logger config references before OpenClaw bootstrap."
+  fi
+}
+
 should_run_env_wizard() {
   case "${ENV_WIZARD_OVERRIDE:-}" in
     1|true|TRUE|yes|YES) return 0 ;;
@@ -3240,6 +3304,7 @@ if [ "$SKIP_OPENCLAW" = false ]; then
   else
     OPENCLAW_GATEWAY_RESTART_NEEDED=false
     report_openclaw_pending_device_approvals
+    sanitize_clawboard_logger_stale_refs
     openclaw_doctor_fix_once || true
 
     openclaw_cfg_txn_begin
@@ -3427,10 +3492,9 @@ PY
       # If plugin dir is missing, config may still reference it (e.g. from a previous run). Strip so openclaw commands succeed.
       if [ ! -e "$PLUGIN_EXT_DIR" ] && [ -f "$OPENCLAW_CONFIG_PATH" ] && command -v python3 >/dev/null 2>&1; then
         log_info "Removing stale clawboard-logger references from OpenClaw config so install can run..."
-        python3 - "$OPENCLAW_CONFIG_PATH" "$_PLUGIN_BASE_URL_INIT" <<'PY' 2>/dev/null || true
+        python3 - "$OPENCLAW_CONFIG_PATH" <<'PY' 2>/dev/null || true
 import json, sys
 path = sys.argv[1]
-base_url = (sys.argv[2] or "").strip() or "http://127.0.0.1:8010"
 try:
   with open(path, "r", encoding="utf-8") as f:
     data = json.load(f)
@@ -3452,32 +3516,14 @@ if isinstance(allow, list):
 for key in ("entries", "installs"):
   if isinstance(plug.get(key), dict) and "clawboard-logger" in plug[key]:
     del plug[key]["clawboard-logger"]
-# Pre-seed a minimal valid logger entry. Some OpenClaw builds validate required
-# plugin config fields during install and reject missing baseUrl.
-entries = plug.get("entries")
-if not isinstance(entries, dict):
-  entries = {}
-plug["entries"] = entries
-entry = entries.get("clawboard-logger")
-if not isinstance(entry, dict):
-  entry = {}
-entries["clawboard-logger"] = entry
-cfg = entry.get("config")
-if not isinstance(cfg, dict):
-  cfg = {}
-if not cfg.get("baseUrl"):
-  cfg["baseUrl"] = base_url
-entry["config"] = cfg
-if "enabled" not in entry:
-  entry["enabled"] = False
 data["plugins"] = plug
 with open(path, "w", encoding="utf-8") as f:
   json.dump(data, f, indent=2)
 PY
       fi
-      # Best-effort reinforcement via CLI for builds that re-validate at install.
-      openclaw config set plugins.entries.clawboard-logger.config "{\"baseUrl\":\"$_PLUGIN_BASE_URL_INIT\"}" --json >/dev/null 2>&1 || true
-      openclaw config set plugins.entries.clawboard-logger.enabled false >/dev/null 2>&1 || true
+      # Keep config valid before plugin install; some OpenClaw builds reject
+      # plugins.entries.<id> while the plugin is not yet installed.
+      openclaw_doctor_fix_safe >/dev/null 2>&1 || true
       openclaw plugins install -l "$INSTALL_DIR/extensions/clawboard-logger"
       openclaw plugins enable clawboard-logger
 

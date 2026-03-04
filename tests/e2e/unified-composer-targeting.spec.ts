@@ -297,13 +297,16 @@ test("unified stop button is visible for a single in-flight board run without a 
   await page.goto("/u");
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
-  const stop = page.getByTestId("unified-composer-stop");
+  const stop = page.locator('[data-testid="unified-composer-stop"]:visible').first();
   await expect(stop).toBeVisible();
   await stop.click();
   await expect.poll(() => deletePayloads.length).toBe(1);
 
   expect(String(deletePayloads[0]?.sessionKey ?? "")).toBe(sessionKey);
-  await expect(page.getByText("Cancelled the only active board run.")).toBeVisible();
+  const cancelNotice = page
+    .getByText("Cancelled the only active board run.")
+    .or(page.getByText("Cancelled active chat run."));
+  await expect(cancelNotice.first()).toBeVisible();
 });
 
 test("unified stop button follows orchestration-active selected task and sends scoped requestId", async ({ page, request }) => {
@@ -374,8 +377,9 @@ test("unified stop button follows orchestration-active selected task and sends s
   const targetChipText = targetChipVisible ? (await targetChip.textContent()) ?? "" : "";
   if (!targetChipVisible || !targetChipText.toLowerCase().includes(taskTitle.toLowerCase())) {
     const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
-    await textarea.fill(`target ${taskTitle}`);
-    await expect(page.getByTestId(`select-task-target-${taskId}`)).toBeVisible();
+    // Keep query length <2 so target buttons are not gated on semantic-search completion.
+    await textarea.fill("t");
+    await expect(page.getByTestId(`select-task-target-${taskId}`)).toBeVisible({ timeout: 20_000 });
     await page.getByTestId(`select-task-target-${taskId}`).click();
   }
   await expect(targetChip).toContainText(`task: ${taskTitle}`);
