@@ -2124,7 +2124,7 @@ def _resolver_clean_name(value: str | None, *, fallback: str, max_chars: int = 7
     text = _sanitize_log_text(value or "")
     if not text:
         return fallback
-    text = re.sub(r"[\\s\\-–—_:;|]+", " ", text).strip()
+    text = re.sub(r"[\s\-–—_:;|]+", " ", text).strip()
     if not text:
         return fallback
     if len(text) <= max_chars:
@@ -2150,7 +2150,7 @@ def _resolver_terms_from_message(message: str, *, limit: int = 10) -> list[str]:
         return []
     sentence = cleaned.split("\n", 1)[0]
     sentence = re.split(r"[.!?]", sentence, 1)[0]
-    sentence = re.sub(r"^[\\-*#>\\d\\.\\)\\(\\[\\]\\s]+", "", sentence).strip()
+    sentence = re.sub(r"^[\-*#>\d.()\[\]\s]+", "", sentence).strip()
     if not sentence:
         sentence = cleaned
     tokens = [

@@ -110,6 +110,44 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 session.delete(row)
             session.commit()
 
+    def test_resolver_name_helpers_normalize_markup_and_spacing(self):
+        terms = main_module._resolver_terms_from_message("- [ ] status report for openclaw cron entries", limit=6)
+        self.assertGreaterEqual(len(terms), 3)
+        self.assertEqual(terms[0], "status")
+        self.assertEqual(terms[1], "report")
+        cleaned = main_module._resolver_clean_name("status: sessions — tasks", fallback="fallback")
+        self.assertEqual(cleaned, "status sessions tasks")
+
+    def test_resolve_board_send_creates_task_session_for_empty_board(self):
+        published: list[dict] = []
+        message = (
+            "Have a look at openclaw for me and let me know any cron entries that are set up, "
+            "whether they are active or not, etc. give me the full rundown"
+        )
+        with patch.object(main_module.event_hub, "publish", side_effect=_publish_collector(published)):
+            res = self.client.post(
+                "/api/openclaw/resolve-board-send",
+                headers=self.auth_headers,
+                json={"message": message},
+            )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        topic_id = str(payload.get("topicId") or "")
+        task_id = str(payload.get("taskId") or "")
+        self.assertTrue(topic_id)
+        self.assertTrue(task_id)
+        self.assertEqual(payload.get("sessionKey"), f"clawboard:task:{topic_id}:{task_id}")
+        self.assertTrue(bool(str(payload.get("topicName") or "").strip()))
+        self.assertTrue(bool(str(payload.get("taskTitle") or "").strip()))
+        self.assertIn(payload.get("decisionSource"), {"heuristic", "selected_topic_fallback", "direct_selected_task"})
+
+        with get_session() as session:
+            topic = session.get(Topic, topic_id)
+            task = session.get(Task, task_id)
+            self.assertIsNotNone(topic)
+            self.assertIsNotNone(task)
+            self.assertEqual(task.topicId, topic.id)
+
     def test_ing_014_source_scope_metadata_is_normalized(self):
         created = now_iso()
         with get_session() as session:
