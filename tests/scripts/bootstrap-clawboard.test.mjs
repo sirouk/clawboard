@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, cp, lstat, readlink, access, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, cp, lstat, access, readFile, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -43,7 +43,36 @@ async function makeOpenClawStub(binDir) {
     `
 config_path="\${OPENCLAW_CONFIG_PATH:-\${OPENCLAW_HOME:-$HOME/.openclaw}/openclaw.json}"
 openclaw_home="\${OPENCLAW_HOME:-$HOME/.openclaw}"
+stub_log_file="\${OPENCLAW_STUB_LOG_FILE:-}"
 mkdir -p "$(dirname "$config_path")"
+
+log_stub_call() {
+  if [[ -n "$stub_log_file" ]]; then
+    mkdir -p "$(dirname "$stub_log_file")"
+    printf '%s\\n' "$*" >> "$stub_log_file"
+  fi
+}
+
+plugin_has_base_url() {
+  python3 - "$config_path" <<'PY'
+import json
+import sys
+
+cfg_path = sys.argv[1]
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    raise SystemExit(1)
+
+plugins = data.get("plugins") or {}
+entries = plugins.get("entries") if isinstance(plugins, dict) else {}
+entry = entries.get("clawboard-logger") if isinstance(entries, dict) else {}
+config = entry.get("config") if isinstance(entry, dict) else {}
+base_url = config.get("baseUrl") if isinstance(config, dict) else ""
+raise SystemExit(0 if str(base_url or "").strip() else 1)
+PY
+}
 
 python3 - "$config_path" "$openclaw_home" <<'PY' >/dev/null 2>&1 || true
 import json
@@ -229,6 +258,22 @@ PY
 fi
 
 if [[ "$#" -ge 2 && "$1" == "plugins" ]]; then
+  log_stub_call "$*"
+  if [[ "$2" == "install" && "$#" -ge 4 && "$3" == "-l" ]]; then
+    plugin_src="$4"
+    plugin_dest="$openclaw_home/extensions/clawboard-logger"
+    rm -rf "$plugin_dest"
+    mkdir -p "$(dirname "$plugin_dest")"
+    cp -R "$plugin_src" "$plugin_dest"
+    exit 0
+  fi
+  if [[ "$2" == "enable" && "\${OPENCLAW_STUB_FAIL_PLUGIN_ENABLE_MISSING_BASEURL:-0}" == "1" ]]; then
+    if ! plugin_has_base_url; then
+      echo "[plugins] clawboard-logger invalid config: baseUrl: must have required property 'baseUrl'" >&2
+      echo "[openclaw] Failed to start CLI: Error: Config validation failed: plugins.entries.clawboard-logger.config.baseUrl: invalid config: must have required property 'baseUrl'" >&2
+      exit 1
+    fi
+  fi
   exit 0
 fi
 
@@ -246,6 +291,115 @@ fi
 exit 0
 `
   );
+}
+
+async function makeTokenAwareCurlStub(binDir) {
+  return makeStub(
+    binDir,
+    "curl",
+    `
+expected_token="\${CURL_STUB_EXPECTED_TOKEN:-}"
+api_base="\${CURL_STUB_API_BASE:-http://localhost:8010}"
+web_base="\${CURL_STUB_WEB_BASE:-http://localhost:3010}"
+log_file="\${CURL_STUB_LOG_FILE:-}"
+url=""
+method="GET"
+data=""
+declare -a headers=()
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -H|--header)
+      headers+=("$2")
+      shift 2
+      ;;
+    -X|--request)
+      method="$2"
+      shift 2
+      ;;
+    -d|--data|--data-raw|--data-binary)
+      data="$2"
+      shift 2
+      ;;
+    -o|-w|--output|--write-out|--connect-timeout|--max-time|--retry|--retry-delay|--user-agent)
+      shift 2
+      ;;
+    -f|-s|-S|-k|--fail|--silent|--show-error)
+      shift
+      ;;
+    http://*|https://*)
+      url="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+token_ok="0"
+for header in "\${headers[@]}"; do
+  if [[ "$header" == "X-Clawboard-Token: $expected_token" ]]; then
+    token_ok="1"
+    break
+  fi
+done
+
+if [[ -n "$log_file" ]]; then
+  mkdir -p "$(dirname "$log_file")"
+  printf 'method=%s url=%s token=%s data=%s\\n' "$method" "$url" "$token_ok" "$data" >> "$log_file"
+fi
+
+if [[ "$url" == "$api_base/api/health" || "$url" == "$api_base/api/config" ]]; then
+  if [[ "$token_ok" == "1" ]]; then
+    exit 0
+  fi
+  exit 22
+fi
+
+if [[ "$url" == "$web_base" ]]; then
+  exit 0
+fi
+
+exit 0
+`
+  );
+}
+
+async function seedBootstrapInstallTree(installDir, { includePlugin = true } = {}) {
+  await mkdir(path.join(installDir, ".git"), { recursive: true });
+  await mkdir(path.join(installDir, "skills", "clawboard"), { recursive: true });
+  await writeFile(path.join(installDir, "skills", "clawboard", "SKILL.md"), "name: clawboard\n");
+  await mkdir(path.join(installDir, "agent-templates", "main"), { recursive: true });
+
+  if (includePlugin) {
+    await mkdir(path.join(installDir, "extensions", "clawboard-logger"), { recursive: true });
+    await writeFile(path.join(installDir, "extensions", "clawboard-logger", "index.js"), "export default {};\n");
+    await writeFile(
+      path.join(installDir, "extensions", "clawboard-logger", "openclaw.plugin.json"),
+      '{ "id": "clawboard-logger", "schema": { "type": "object" } }\n'
+    );
+  }
+
+  const templateFiles = ["AGENTS.md", "SOUL.md", "HEARTBEAT.md", "BOOTSTRAP.md"];
+  for (const fileName of templateFiles) {
+    await writeFile(path.join(installDir, "agent-templates", "main", fileName), `${fileName} from install source\n`);
+  }
+
+  const contractDocs = [
+    "ANATOMY.md",
+    "CONTEXT.md",
+    "CLASSIFICATION.md",
+    "CONTEXT_SPEC.md",
+    "CLASSIFICATION_TEST_MATRIX.md",
+    "OPENCLAW_CLAWBOARD_UML.md",
+    "TESTING.md",
+  ];
+  for (const doc of contractDocs) {
+    await writeFile(path.join(installDir, doc), `${doc} from install source\n`);
+  }
+
+  return { templateFiles, contractDocs };
 }
 
 test("bootstrap_openclaw.sh: wrapper delegates to bootstrap_clawboard.sh help", async () => {
@@ -281,30 +435,7 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   await mkdir(homeDir, { recursive: true });
   await mkdir(binDir, { recursive: true });
   await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
-
-  await mkdir(path.join(installDir, ".git"), { recursive: true });
-  await mkdir(path.join(installDir, "skills", "clawboard"), { recursive: true });
-  await writeFile(path.join(installDir, "skills", "clawboard", "SKILL.md"), "name: clawboard\n");
-  await mkdir(path.join(installDir, "extensions", "clawboard-logger"), { recursive: true });
-  await mkdir(path.join(installDir, "agent-templates", "main"), { recursive: true });
-
-  const templateFiles = ["AGENTS.md", "SOUL.md", "HEARTBEAT.md"];
-  for (const fileName of templateFiles) {
-    await writeFile(path.join(installDir, "agent-templates", "main", fileName), `${fileName} from install source\n`);
-  }
-
-  const contractDocs = [
-    "ANATOMY.md",
-    "CONTEXT.md",
-    "CLASSIFICATION.md",
-    "CONTEXT_SPEC.md",
-    "CLASSIFICATION_TEST_MATRIX.md",
-    "OPENCLAW_CLAWBOARD_UML.md",
-    "TESTING.md",
-  ];
-  for (const doc of contractDocs) {
-    await writeFile(path.join(installDir, doc), `${doc} from install source\n`);
-  }
+  const { templateFiles, contractDocs } = await seedBootstrapInstallTree(installDir);
 
   await makeOpenClawStub(binDir);
   await makeStub(binDir, "curl", "exit 0");
@@ -365,7 +496,7 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   const installedSkill = path.join(openclawHome, "skills", "clawboard");
   const skillStats = await lstat(installedSkill);
   assert.equal(skillStats.isSymbolicLink(), true, "expected clawboard skill install to be a symlink");
-  assert.equal(await readlink(installedSkill), path.join(installDir, "skills", "clawboard"));
+  assert.equal(await realpath(installedSkill), await realpath(path.join(installDir, "skills", "clawboard")));
 
   const legacySkillPath = path.join(homeDir, ".openclaw", "skills", "clawboard");
   await assert.rejects(access(legacySkillPath));
@@ -387,6 +518,136 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
     const count = envLines.filter((line) => line.startsWith(`${key}=`)).length;
     assert.equal(count, 1, `expected ${key} to be written exactly once after rerun, found ${count}`);
   }
+});
+
+test("bootstrap_clawboard.sh: uses CLAWBOARD_TOKEN for API health and config writes", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-auth-"));
+  const repoRoot = path.join(tmp, "repo");
+  const installDir = path.join(tmp, "install");
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const binDir = path.join(tmp, "bin");
+  const curlLogPath = path.join(tmp, "curl.log");
+
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
+  await seedBootstrapInstallTree(installDir, { includePlugin: false });
+
+  await makeOpenClawStub(binDir);
+  await makeTokenAwareCurlStub(binDir);
+
+  const bootstrapPath = path.join(repoRoot, "scripts");
+  await mkdir(bootstrapPath, { recursive: true });
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), path.join(bootstrapPath, "bootstrap_clawboard.sh"));
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_openclaw.sh"), path.join(bootstrapPath, "bootstrap_openclaw.sh"));
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    CLAWBOARD_TOKEN: "auth-token",
+    CURL_STUB_EXPECTED_TOKEN: "auth-token",
+    CURL_STUB_LOG_FILE: curlLogPath,
+  };
+
+  const res = await run(
+    [
+      "bash",
+      path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+      "--dir",
+      installDir,
+      "--skip-docker",
+      "--skip-plugin",
+      "--skip-memory-backup-setup",
+      "--no-access-url-prompt",
+      "--no-color",
+      "--integration-level",
+      "write",
+    ],
+    { cwd: repoRoot, env }
+  );
+
+  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  assert.match(res.stdout, /Clawboard API is reachable at http:\/\/localhost:8010\/api\/health/);
+  assert.match(res.stdout, /Clawboard config set: title=Clawboard, integrationLevel=write\./);
+  assert.doesNotMatch(res.stdout, /Skipping \/api\/config update until API is reachable/);
+
+  const curlLog = await readFile(curlLogPath, "utf8");
+  assert.match(curlLog, /url=http:\/\/localhost:8010\/api\/health token=1/);
+  assert.match(curlLog, /method=POST url=http:\/\/localhost:8010\/api\/config token=1/);
+});
+
+test("bootstrap_clawboard.sh: installs logger plugin before activation so required baseUrl config can be written", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-plugin-"));
+  const repoRoot = path.join(tmp, "repo");
+  const installDir = path.join(tmp, "install");
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const binDir = path.join(tmp, "bin");
+  const configPath = path.join(openclawHome, "openclaw.json");
+  const openclawLogPath = path.join(tmp, "openclaw.log");
+
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
+  await seedBootstrapInstallTree(installDir, { includePlugin: true });
+
+  await makeOpenClawStub(binDir);
+  await makeStub(binDir, "curl", "exit 0");
+
+  const bootstrapPath = path.join(repoRoot, "scripts");
+  await mkdir(bootstrapPath, { recursive: true });
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), path.join(bootstrapPath, "bootstrap_clawboard.sh"));
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_openclaw.sh"), path.join(bootstrapPath, "bootstrap_openclaw.sh"));
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    OPENCLAW_CONFIG_PATH: configPath,
+    OPENCLAW_STUB_FAIL_PLUGIN_ENABLE_MISSING_BASEURL: "1",
+    OPENCLAW_STUB_LOG_FILE: openclawLogPath,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    CLAWBOARD_TOKEN: "plugin-token",
+  };
+
+  const res = await run(
+    [
+      "bash",
+      path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+      "--dir",
+      installDir,
+      "--skip-docker",
+      "--skip-memory-backup-setup",
+      "--no-access-url-prompt",
+      "--no-color",
+      "--integration-level",
+      "write",
+    ],
+    { cwd: repoRoot, env }
+  );
+
+  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  assert.doesNotMatch(res.stdout, /Failed installing clawboard-logger plugin atomically/);
+  assert.match(res.stdout, /Logger plugin installed and enabled\./);
+
+  const openclawLog = await readFile(openclawLogPath, "utf8");
+  assert.match(openclawLog, /plugins install -l/);
+  assert.doesNotMatch(openclawLog, /plugins enable clawboard-logger/);
+
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(config.plugins.entries["clawboard-logger"].enabled, true);
+  assert.equal(config.plugins.entries["clawboard-logger"].config.baseUrl, "http://localhost:8010");
+
+  const installedPluginPath = path.join(openclawHome, "extensions", "clawboard-logger");
+  const installedPluginStats = await lstat(installedPluginPath);
+  assert.equal(installedPluginStats.isDirectory(), true, "expected logger plugin directory to be installed");
 });
 
 test("setup-openclaw-local-memory.sh: rolls back config snapshot on required write failure", async () => {

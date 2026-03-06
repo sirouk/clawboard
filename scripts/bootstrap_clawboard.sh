@@ -870,12 +870,11 @@ discard_backup_path() {
 install_clawboard_logger_plugin_transactional() {
   local plugin_src="$1"
   local plugin_ext_dir="$2"
-  local cfg_snapshot ext_backup install_output enable_output preview rc
+  local cfg_snapshot ext_backup install_output preview rc
 
   cfg_snapshot=""
   ext_backup=""
   install_output=""
-  enable_output=""
 
   ensure_openclaw_config_file || return 1
   cfg_snapshot="$(snapshot_existing_file "$OPENCLAW_CONFIG_PATH")" || return 1
@@ -891,20 +890,17 @@ install_clawboard_logger_plugin_transactional() {
   sanitize_clawboard_logger_stale_refs
   openclaw_doctor_fix_safe >/dev/null 2>&1 || true
 
+  # Activation waits for the later config transaction so required plugin fields exist first.
   set +e
   install_output="$(openclaw plugins install -l "$plugin_src" 2>&1)"
   rc=$?
-  if [ "$rc" -eq 0 ]; then
-    enable_output="$(openclaw plugins enable clawboard-logger 2>&1)"
-    rc=$?
-  fi
   set -e
 
   if [ "$rc" -ne 0 ]; then
     restore_file_snapshot "$cfg_snapshot" "$OPENCLAW_CONFIG_PATH" >/dev/null 2>&1 || true
     restore_backup_path "$ext_backup" "$plugin_ext_dir" >/dev/null 2>&1 || true
     cleanup_file_snapshot "$cfg_snapshot"
-    preview="$(printf "%s\n%s" "$install_output" "$enable_output" | tr '\r' '\n' | sed -n '1,4p' | paste -sd ' | ' -)"
+    preview="$(printf "%s" "$install_output" | tr '\r' '\n' | sed -n '1,4p' | paste -sd ' | ' -)"
     log_warn "Rolled back logger plugin install after failure: ${preview:-no output}"
     return 1
   fi
@@ -2147,12 +2143,18 @@ wait_for_api_health() {
   local health_url="${API_URL%/}/api/health"
   local max_attempts=60
   local attempt=1
+  local -a curl_args
   if ! command -v curl >/dev/null 2>&1; then
     log_warn "curl not found. Skipping API readiness check."
     return 1
   fi
   while [ "$attempt" -le "$max_attempts" ]; do
-    if curl -fsS "$health_url" >/dev/null 2>&1; then
+    curl_args=(-fsS)
+    if [ -n "$TOKEN" ]; then
+      curl_args+=(-H "X-Clawboard-Token: $TOKEN")
+    fi
+    curl_args+=("$health_url")
+    if curl "${curl_args[@]}" >/dev/null 2>&1; then
       log_success "Clawboard API is reachable at $health_url."
       return 0
     fi
