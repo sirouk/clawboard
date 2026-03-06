@@ -581,7 +581,7 @@ test("bootstrap_clawboard.sh: uses CLAWBOARD_TOKEN for API health and config wri
   assert.match(curlLog, /method=POST url=http:\/\/localhost:8010\/api\/config token=1/);
 });
 
-test("bootstrap_clawboard.sh: installs logger plugin before activation so required baseUrl config can be written", async () => {
+test("bootstrap_clawboard.sh: deploys logger plugin directly so required baseUrl config can be written before activation", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-plugin-"));
   const repoRoot = path.join(tmp, "repo");
   const installDir = path.join(tmp, "install");
@@ -637,8 +637,13 @@ test("bootstrap_clawboard.sh: installs logger plugin before activation so requir
   assert.doesNotMatch(res.stdout, /Failed installing clawboard-logger plugin atomically/);
   assert.match(res.stdout, /Logger plugin installed and enabled\./);
 
-  const openclawLog = await readFile(openclawLogPath, "utf8");
-  assert.match(openclawLog, /plugins install -l/);
+  let openclawLog = "";
+  try {
+    openclawLog = await readFile(openclawLogPath, "utf8");
+  } catch (error) {
+    assert.equal(error && typeof error === "object" && "code" in error ? error.code : "", "ENOENT");
+  }
+  assert.doesNotMatch(openclawLog, /plugins install -l/);
   assert.doesNotMatch(openclawLog, /plugins enable clawboard-logger/);
 
   const config = JSON.parse(await readFile(configPath, "utf8"));

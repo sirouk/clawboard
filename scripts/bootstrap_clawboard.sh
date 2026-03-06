@@ -870,11 +870,12 @@ discard_backup_path() {
 install_clawboard_logger_plugin_transactional() {
   local plugin_src="$1"
   local plugin_ext_dir="$2"
-  local cfg_snapshot ext_backup install_output preview rc
+  local cfg_snapshot ext_backup stage_root staged_dir preview
 
   cfg_snapshot=""
   ext_backup=""
-  install_output=""
+  stage_root=""
+  staged_dir=""
 
   ensure_openclaw_config_file || return 1
   cfg_snapshot="$(snapshot_existing_file "$OPENCLAW_CONFIG_PATH")" || return 1
@@ -888,23 +889,40 @@ install_clawboard_logger_plugin_transactional() {
   fi
 
   sanitize_clawboard_logger_stale_refs
-  openclaw_doctor_fix_safe >/dev/null 2>&1 || true
 
-  # Activation waits for the later config transaction so required plugin fields exist first.
-  set +e
-  install_output="$(openclaw plugins install -l "$plugin_src" 2>&1)"
-  rc=$?
-  set -e
-
-  if [ "$rc" -ne 0 ]; then
+  mkdir -p "$(dirname "$plugin_ext_dir")"
+  stage_root="$(mktemp -d "$(dirname "$plugin_ext_dir")/.clawboard-logger.tmp.XXXXXX")" || {
     restore_file_snapshot "$cfg_snapshot" "$OPENCLAW_CONFIG_PATH" >/dev/null 2>&1 || true
     restore_backup_path "$ext_backup" "$plugin_ext_dir" >/dev/null 2>&1 || true
     cleanup_file_snapshot "$cfg_snapshot"
-    preview="$(printf "%s" "$install_output" | tr '\r' '\n' | sed -n '1,4p' | paste -sd ' | ' -)"
+    return 1
+  }
+  staged_dir="$stage_root/clawboard-logger"
+
+  # Install directly into the global extensions directory. OpenClaw auto-discovers
+  # ~/.openclaw/extensions/*, while `openclaw plugins install` currently writes
+  # an enabled entry before required plugin config exists.
+  if ! cp -R "$plugin_src" "$staged_dir"; then
+    restore_file_snapshot "$cfg_snapshot" "$OPENCLAW_CONFIG_PATH" >/dev/null 2>&1 || true
+    restore_backup_path "$ext_backup" "$plugin_ext_dir" >/dev/null 2>&1 || true
+    rm -rf "$stage_root" >/dev/null 2>&1 || true
+    cleanup_file_snapshot "$cfg_snapshot"
+    preview="copy failed for $plugin_src"
     log_warn "Rolled back logger plugin install after failure: ${preview:-no output}"
     return 1
   fi
 
+  if ! mv "$staged_dir" "$plugin_ext_dir"; then
+    restore_file_snapshot "$cfg_snapshot" "$OPENCLAW_CONFIG_PATH" >/dev/null 2>&1 || true
+    restore_backup_path "$ext_backup" "$plugin_ext_dir" >/dev/null 2>&1 || true
+    rm -rf "$stage_root" >/dev/null 2>&1 || true
+    cleanup_file_snapshot "$cfg_snapshot"
+    preview="atomic move failed for $plugin_ext_dir"
+    log_warn "Rolled back logger plugin install after failure: ${preview:-no output}"
+    return 1
+  fi
+
+  rm -rf "$stage_root" >/dev/null 2>&1 || true
   discard_backup_path "$ext_backup"
   cleanup_file_snapshot "$cfg_snapshot"
   return 0
