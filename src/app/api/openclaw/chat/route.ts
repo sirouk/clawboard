@@ -8,7 +8,6 @@ export const runtime = "nodejs";
 const ChatRequestSchema = z.object({
   sessionKey: z.string().min(1),
   message: z.string().min(1),
-  topicId: z.string().optional().nullable(),
   spaceId: z.string().optional(),
   agentId: z.string().optional(),
   attachmentIds: z.array(z.string()).optional(),

@@ -20,7 +20,7 @@ How does Clawboard work end-to-end, including every major user path, every scope
 ## Acceptance Criteria
 
 Functional:
-- Every high-impact user feature (board chat, topic/task lifecycle, search, context injection, graph, settings) is mapped to concrete frontend and backend code paths.
+- Every high-impact user feature (task chat, topic/task lifecycle, search, context injection, graph, settings) is mapped to concrete frontend and backend code paths.
 - Space visibility semantics explicitly document that runtime access uses explicit connectivity edges only, while `defaultVisible` is seed policy.
 - Topic/task/log scope behavior and invariants are explicit and testable.
 - Search/context/graph scoping is shown as one coherent contract.
@@ -260,7 +260,7 @@ Primary code:
 - `backend/app/openclaw_gateway.py`
 
 Flow:
-1. User sends board chat message in topic/task pane.
+1. User sends task chat message in the unified board UI.
 2. Optional upload through `/api/attachments`.
 3. `/api/openclaw/chat` persists user log first (fail-closed).
 4. API enqueues durable dispatch work in `OpenClawChatDispatchQueue` and worker threads execute gateway `chat.send`.
@@ -268,7 +268,7 @@ Flow:
    - `openclaw.typing` (`typing=true/false`)
    - `openclaw.thread_work` (`active=true/false`, optional `reason`, request-scoped where available)
 6. Worker retry/backoff, stale-processing recovery, and optional auto-quarantine keep queue forward-progress under failures/restarts.
-7. Optional in-flight probe logic (`OPENCLAW_CHAT_IN_FLIGHT_*`) can abort/retry long-stalled sends; when global probe is `0`, board topic/task sessions can still use `OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS` fallback for fast stall recovery.
+7. Optional in-flight probe logic (`OPENCLAW_CHAT_IN_FLIGHT_*`) can abort/retry long-stalled sends; when global probe is `0`, board task sessions can still use `OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS` fallback for fast stall recovery.
 8. OpenClaw logger plugin returns assistant/tool rows through normal ingest path.
 9. Watchdog and history-sync backfill paths log warnings/recover when assistant output is delayed/missing.
 10. Stop/cancel path (`DELETE /api/openclaw/chat`) immediately emits `openclaw.typing:false` and `openclaw.thread_work:false`, marks matching queue rows failed (`user_cancelled`), and cancels matching orchestration runs.
@@ -516,10 +516,10 @@ Operational guarantees:
 | Queue ingest row | plugin queue mode | `POST /api/ingest` | enqueue for async ingest drain | eventual append |
 | Patch log/classification | classifier/manual ops | `PATCH /api/log/{id}` | guarded patch + retry + sanitize | `log.upserted` SSE |
 | Delete one log | moderation/manual cleanup | `DELETE /api/log/{id}` | delete + note cleanup | `log.deleted` SSE |
-| Read chat-entry counts | board unread badges | `GET /api/log/chat-counts` | aggregate topic/task log counts without full payloads | badge refresh |
+| Read chat-entry counts | board unread badges | `GET /api/log/chat-counts` | aggregate task chat log counts without full payloads | badge refresh |
 | Delete all unassigned tasks | ops/admin cleanup | `DELETE /api/tasks/unassigned/empty` | bulk delete topicId-null tasks, detach their logs | task rows removed |
-| Send board chat | `src/components/board-chat-composer.tsx` (mounted by `src/components/unified-view.tsx`) | `POST /api/openclaw/chat` | persist-first + gateway dispatch + typing/thread-work events + request-scope promotion backfill | queued response + SSE + focused active pane |
-| Cancel board chat | Stop button or `/stop`/`/abort` in board/unified composers | `DELETE /api/openclaw/chat` | immediate typing/thread-work stop signals + queue/orchestration cancel + linked-session `chat.abort` fan-out | thread-scoped stop with fast UI responding-state clear |
+| Send task chat | `src/components/board-chat-composer.tsx` (mounted by `src/components/unified-view.tsx`) | `POST /api/openclaw/chat` | persist-first + gateway dispatch + typing/thread-work events + request-scope promotion backfill | queued response + SSE + focused active pane |
+| Cancel task chat | Stop button or `/stop`/`/abort` in board/unified composers | `DELETE /api/openclaw/chat` | immediate typing/thread-work stop signals + queue/orchestration cancel + linked-session `chat.abort` fan-out | thread-scoped stop with fast UI responding-state clear |
 | Discover OpenClaw skills | board/composer helper | `GET /api/openclaw/skills` | gateway capability passthrough | skill metadata |
 | Attachment validation | composer preflight | `GET /api/attachments/policy` | policy payload | client-side guardrails |
 | Upload files | composer attachments | `POST /api/attachments` | mime/size validation + storage + metadata | attachment IDs for chat |
@@ -711,7 +711,7 @@ If you are debugging a live issue:
 | `CLASSIFICATION.md` | classifier lifecycle, forcing, guardrails, replay | `classifier/classifier.py`, `/api/log` patch paths, replay endpoints |
 | `CLASSIFICATION.md` section 16 | scenario coverage commitments | `backend/tests/*`, `classifier/tests/*`, `tests/e2e/classification.spec.ts` |
 | `CLASSIFICATION.md` section 17 | scenario-to-implementation trace | `classifier/classifier.py`, `backend/app/main.py` route/function mappings |
-| `OPENCLAW_CLAWBOARD_UML.md` | sequence and component topology | ingest path, board chat path, context/search/classifier sequences |
+| `OPENCLAW_CLAWBOARD_UML.md` | sequence and component topology | ingest path, task-chat path, context/search/classifier sequences |
 | `TESTING.md` | validation command surface | npm scripts + pytest suites in repo |
 | `SEED.md` | bootstrap/auth and seed checks | `backend/app/db.py`, `/api/config`, `/api/spaces*` |
 | `DESIGN_RULES.md` | UX operating rules | `src/components/unified-view.tsx`, `src/components/app-shell.tsx`, `src/components/data-provider.tsx` |

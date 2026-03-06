@@ -15,12 +15,6 @@ export default async function ChatThreadRedirect({ params }: { params: MaybeProm
   const resolved = await params;
   const threadId = safeDecode(String(resolved?.threadId ?? "")).trim();
 
-  if (threadId.startsWith("topic:")) {
-    const topicId = threadId.slice("topic:".length).trim();
-    if (topicId) redirect(`/u/topic/${encodeURIComponent(topicId)}`);
-    redirect("/u");
-  }
-
   if (threadId.startsWith("task:")) {
     const rest = threadId.slice("task:".length).trim();
     const [topicId, taskId] = rest.split(":");

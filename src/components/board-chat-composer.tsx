@@ -119,7 +119,6 @@ export type BoardChatComposerSendEvent =
 
 type BoardChatComposerProps = {
   sessionKey: string;
-  topicId?: string | null;
   spaceId?: string;
   disabled?: boolean;
   placeholder?: string;
@@ -197,7 +196,6 @@ function SendIcon({ className }: { className?: string }) {
 export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatComposerProps>(function BoardChatComposer(
   {
     sessionKey,
-    topicId,
     spaceId,
     disabled,
     placeholder,
@@ -709,7 +707,6 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
             sessionKey,
             spaceId: String(spaceId ?? "").trim() || undefined,
             message,
-            topicId: String(topicId ?? "").trim() || null,
             agentId,
             attachmentIds,
           }),

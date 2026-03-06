@@ -600,6 +600,320 @@ deploy_file_atomic_if_changed() {
   return 0
 }
 
+canonical_path_or_empty() {
+  local raw="${1:-}"
+  python3 - "$raw" <<'PY'
+import os
+import sys
+
+raw = sys.argv[1] if len(sys.argv) > 1 else ""
+if not raw:
+    print("", end="")
+    raise SystemExit(0)
+
+print(os.path.realpath(os.path.abspath(os.path.expanduser(raw))), end="")
+PY
+}
+
+path_is_within_dir() {
+  local parent="$1"
+  local candidate="$2"
+  python3 - "$parent" "$candidate" <<'PY'
+import os
+import sys
+
+parent = os.path.realpath(os.path.abspath(os.path.expanduser(sys.argv[1])))
+candidate = os.path.realpath(os.path.abspath(os.path.expanduser(sys.argv[2])))
+try:
+    common = os.path.commonpath([parent, candidate])
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if common == parent else 1)
+PY
+}
+
+path_is_symlink_to() {
+  local path="$1"
+  local target="$2"
+  [ -L "$path" ] || return 1
+  local actual expected
+  actual="$(canonical_path_or_empty "$path" 2>/dev/null || true)"
+  expected="$(canonical_path_or_empty "$target" 2>/dev/null || true)"
+  [ -n "$actual" ] && [ -n "$expected" ] && [ "$actual" = "$expected" ]
+}
+
+compute_directory_digest() {
+  local src="$1"
+  python3 - "$src" <<'PY'
+import hashlib
+import os
+import sys
+
+root = os.path.realpath(os.path.abspath(os.path.expanduser(sys.argv[1])))
+h = hashlib.sha256()
+
+for base, dirs, files in os.walk(root):
+    dirs.sort()
+    files.sort()
+    rel_base = os.path.relpath(base, root)
+    h.update(f"D {rel_base}\n".encode("utf-8"))
+    for name in files:
+        path = os.path.join(base, name)
+        rel_path = os.path.relpath(path, root)
+        st = os.lstat(path)
+        h.update(f"F {rel_path}\n".encode("utf-8"))
+        if os.path.islink(path):
+            h.update(b"LINK\n")
+            h.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+            h.update(b"\n")
+            continue
+        h.update(f"{st.st_mode}:{st.st_size}\n".encode("utf-8"))
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(65536)
+                if not chunk:
+                    break
+                h.update(chunk)
+
+print(h.hexdigest()[:16], end="")
+PY
+}
+
+prepare_managed_skill_copy() {
+  local src="$1"
+  local managed_root="$2"
+  local skill_name="$3"
+  [ -d "$src" ] || return 11
+
+  mkdir -p "$managed_root"
+
+  local digest desired_dir tmp_root staged_dir
+  digest="$(compute_directory_digest "$src")" || return 12
+  desired_dir="$managed_root/${skill_name}-${digest}"
+
+  if [ -d "$desired_dir" ]; then
+    printf "%s" "$desired_dir"
+    return 0
+  fi
+
+  tmp_root="$(mktemp -d "$managed_root/.${skill_name}.tmp.XXXXXX")" || return 12
+  staged_dir="$tmp_root/payload"
+  if ! cp -R "$src" "$staged_dir"; then
+    rm -rf "$tmp_root" >/dev/null 2>&1 || true
+    return 12
+  fi
+  if [ -e "$desired_dir" ]; then
+    rm -rf "$tmp_root" >/dev/null 2>&1 || true
+    printf "%s" "$desired_dir"
+    return 0
+  fi
+  if ! mv "$staged_dir" "$desired_dir"; then
+    rm -rf "$tmp_root" >/dev/null 2>&1 || true
+    return 12
+  fi
+  rm -rf "$tmp_root" >/dev/null 2>&1 || true
+  printf "%s" "$desired_dir"
+}
+
+atomic_symlink_swap() {
+  local target="$1"
+  local dst="$2"
+  local dst_dir base tmp_link backup_path
+
+  dst_dir="$(dirname "$dst")"
+  base="$(basename "$dst")"
+  mkdir -p "$dst_dir"
+
+  tmp_link="$(mktemp "$dst_dir/.${base}.link.XXXXXX")" || return 12
+  rm -f "$tmp_link" >/dev/null 2>&1 || true
+  if ! ln -s "$target" "$tmp_link"; then
+    rm -f "$tmp_link" >/dev/null 2>&1 || true
+    return 12
+  fi
+
+  if [ -d "$dst" ] && [ ! -L "$dst" ]; then
+    backup_path="$dst_dir/.${base}.bootstrap-backup.$$.$RANDOM"
+    while [ -e "$backup_path" ]; do
+      backup_path="$dst_dir/.${base}.bootstrap-backup.$$.$RANDOM"
+    done
+    if ! mv "$dst" "$backup_path"; then
+      rm -f "$tmp_link" >/dev/null 2>&1 || true
+      return 12
+    fi
+    if ! python3 - "$tmp_link" "$dst" <<'PY'; then
+import os
+import sys
+
+os.replace(sys.argv[1], sys.argv[2])
+PY
+      rm -f "$tmp_link" >/dev/null 2>&1 || true
+      mv "$backup_path" "$dst" >/dev/null 2>&1 || true
+      return 12
+    fi
+    rm -rf "$backup_path" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if ! python3 - "$tmp_link" "$dst" <<'PY'; then
+import os
+import sys
+
+os.replace(sys.argv[1], sys.argv[2])
+PY
+    rm -f "$tmp_link" >/dev/null 2>&1 || true
+    return 12
+  fi
+  return 0
+}
+
+install_skill_directory_atomic() {
+  local src="$1"
+  local dst="$2"
+  local mode="$3"
+  local managed_root="$4"
+  local skill_name="$5"
+  [ -d "$src" ] || return 11
+
+  local desired_target old_target=""
+  if [ "$mode" = "copy" ]; then
+    desired_target="$(prepare_managed_skill_copy "$src" "$managed_root" "$skill_name")" || return $?
+  else
+    desired_target="$(canonical_path_or_empty "$src")" || return 12
+  fi
+
+  [ -n "$desired_target" ] && [ -d "$desired_target" ] || return 12
+
+  if path_is_symlink_to "$dst" "$desired_target"; then
+    return 10
+  fi
+
+  if [ -L "$dst" ]; then
+    old_target="$(canonical_path_or_empty "$dst" 2>/dev/null || true)"
+  fi
+
+  atomic_symlink_swap "$desired_target" "$dst" || return $?
+
+  if [ "$mode" = "copy" ] && [ -n "$old_target" ] && [ "$old_target" != "$desired_target" ]; then
+    if path_is_within_dir "$managed_root" "$old_target"; then
+      rm -rf "$old_target" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  return 0
+}
+
+snapshot_existing_file() {
+  local file_path="$1"
+  [ -f "$file_path" ] || {
+    printf ""
+    return 0
+  }
+
+  local snapshot
+  snapshot="$(mktemp "${file_path}.snapshot.XXXXXX")" || return 1
+  if ! cp "$file_path" "$snapshot"; then
+    rm -f "$snapshot" >/dev/null 2>&1 || true
+    return 1
+  fi
+  printf "%s" "$snapshot"
+}
+
+restore_file_snapshot() {
+  local snapshot="$1"
+  local file_path="$2"
+  [ -n "$snapshot" ] || return 0
+  [ -f "$snapshot" ] || return 0
+  cp "$snapshot" "$file_path"
+}
+
+cleanup_file_snapshot() {
+  local snapshot="$1"
+  [ -n "$snapshot" ] || return 0
+  rm -f "$snapshot" >/dev/null 2>&1 || true
+}
+
+backup_existing_path() {
+  local path="$1"
+  [ -e "$path" ] || {
+    printf ""
+    return 0
+  }
+
+  local dir base backup
+  dir="$(dirname "$path")"
+  base="$(basename "$path")"
+  backup="$dir/.${base}.bootstrap-backup.$$.$RANDOM"
+  while [ -e "$backup" ]; do
+    backup="$dir/.${base}.bootstrap-backup.$$.$RANDOM"
+  done
+  if ! mv "$path" "$backup"; then
+    return 1
+  fi
+  printf "%s" "$backup"
+}
+
+restore_backup_path() {
+  local backup="$1"
+  local path="$2"
+  [ -n "$backup" ] || return 0
+  [ -e "$backup" ] || return 0
+  rm -rf "$path" >/dev/null 2>&1 || true
+  mv "$backup" "$path"
+}
+
+discard_backup_path() {
+  local backup="$1"
+  [ -n "$backup" ] || return 0
+  rm -rf "$backup" >/dev/null 2>&1 || true
+}
+
+install_clawboard_logger_plugin_transactional() {
+  local plugin_src="$1"
+  local plugin_ext_dir="$2"
+  local cfg_snapshot ext_backup install_output enable_output preview rc
+
+  cfg_snapshot=""
+  ext_backup=""
+  install_output=""
+  enable_output=""
+
+  ensure_openclaw_config_file || return 1
+  cfg_snapshot="$(snapshot_existing_file "$OPENCLAW_CONFIG_PATH")" || return 1
+
+  if [ -e "$plugin_ext_dir" ]; then
+    ext_backup="$(backup_existing_path "$plugin_ext_dir")" || {
+      cleanup_file_snapshot "$cfg_snapshot"
+      return 1
+    }
+    log_info "Staged existing logger plugin payload at $ext_backup."
+  fi
+
+  sanitize_clawboard_logger_stale_refs
+  openclaw_doctor_fix_safe >/dev/null 2>&1 || true
+
+  set +e
+  install_output="$(openclaw plugins install -l "$plugin_src" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    enable_output="$(openclaw plugins enable clawboard-logger 2>&1)"
+    rc=$?
+  fi
+  set -e
+
+  if [ "$rc" -ne 0 ]; then
+    restore_file_snapshot "$cfg_snapshot" "$OPENCLAW_CONFIG_PATH" >/dev/null 2>&1 || true
+    restore_backup_path "$ext_backup" "$plugin_ext_dir" >/dev/null 2>&1 || true
+    cleanup_file_snapshot "$cfg_snapshot"
+    preview="$(printf "%s\n%s" "$install_output" "$enable_output" | tr '\r' '\n' | sed -n '1,4p' | paste -sd ' | ' -)"
+    log_warn "Rolled back logger plugin install after failure: ${preview:-no output}"
+    return 1
+  fi
+
+  discard_backup_path "$ext_backup"
+  cleanup_file_snapshot "$cfg_snapshot"
+  return 0
+}
+
 # Where to clone Clawboard.
 #
 # Back-compat: if ~/clawboard already exists, we stick with it.
@@ -2104,7 +2418,7 @@ resolve_local_memory_setup_script() {
   printf "%s" "$LOCAL_MEMORY_SETUP_SCRIPT"
 }
 
-# Deploy main agent templates (AGENTS.md, SOUL.md, HEARTBEAT.md) from the Clawboard repo.
+# Deploy main agent templates (AGENTS.md, SOUL.md, HEARTBEAT.md, BOOTSTRAP.md) from the Clawboard repo.
 # Source of truth: INSTALL_DIR/agent-templates/main/ (repo). No policy text is hardcoded in this script.
 # Copies into the main agent workspace with atomic per-file updates only when content changed.
 # Call after skill/plugin install, before gateway restart.
@@ -2128,7 +2442,7 @@ maybe_deploy_agent_templates() {
   local rc=0
   local src=""
   local dst=""
-  for f in AGENTS.md SOUL.md HEARTBEAT.md; do
+  for f in AGENTS.md SOUL.md HEARTBEAT.md BOOTSTRAP.md; do
     src="$templates_dir/$f"
     dst="$workspace_root/$f"
     if deploy_file_atomic_if_changed "$src" "$dst"; then
@@ -2157,6 +2471,175 @@ maybe_deploy_agent_templates() {
   elif [ "$unchanged" -gt 0 ]; then
     log_success "Agent templates already up to date in main workspace."
   fi
+}
+
+audit_openclaw_bootstrap_budget() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    log_warn "python3 not found; skipping bootstrap prompt-budget audit."
+    return 0
+  fi
+
+  local audit_output rc line
+  set +e
+  audit_output="$(
+    python3 - "$OPENCLAW_HOME" "$OPENCLAW_CONFIG_PATH" "${OPENCLAW_PROFILE:-}" <<'PY'
+import glob
+import json
+import os
+import re
+import sys
+
+openclaw_home = os.path.abspath(os.path.expanduser(sys.argv[1]))
+config_path = os.path.abspath(os.path.expanduser(sys.argv[2]))
+profile = (sys.argv[3] or "").strip()
+
+DEFAULT_BOOTSTRAP_MAX_CHARS = 20_000
+DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS = 150_000
+WARN_RATIO = 0.85
+BOOTSTRAP_FILES = [
+    "AGENTS.md",
+    "SOUL.md",
+    "TOOLS.md",
+    "IDENTITY.md",
+    "USER.md",
+    "HEARTBEAT.md",
+    "BOOTSTRAP.md",
+    "MEMORY.md",
+    "memory.md",
+]
+
+
+def normalize_path(value: str) -> str:
+    if not value:
+        return ""
+    return os.path.realpath(os.path.abspath(os.path.expanduser(str(value).strip())))
+
+
+def profile_workspace(base_dir: str, profile_name: str) -> str:
+    raw = (profile_name or "").strip()
+    if not raw or raw.lower() == "default":
+        return os.path.join(base_dir, "workspace")
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-")
+    if not safe:
+        return os.path.join(base_dir, "workspace")
+    return os.path.join(base_dir, f"workspace-{safe}")
+
+
+config = {}
+try:
+    with open(config_path, "r", encoding="utf-8") as fh:
+        loaded = json.load(fh)
+    if isinstance(loaded, dict):
+        config = loaded
+except Exception:
+    config = {}
+
+agents_cfg = config.get("agents") or {}
+defaults_cfg = agents_cfg.get("defaults") or {}
+max_chars = defaults_cfg.get("bootstrapMaxChars")
+total_max_chars = defaults_cfg.get("bootstrapTotalMaxChars")
+if not isinstance(max_chars, (int, float)) or max_chars <= 0:
+    max_chars = DEFAULT_BOOTSTRAP_MAX_CHARS
+if not isinstance(total_max_chars, (int, float)) or total_max_chars <= 0:
+    total_max_chars = DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS
+max_chars = int(max_chars)
+total_max_chars = int(total_max_chars)
+
+workspaces = []
+seen = set()
+
+def add_workspace(value: str) -> None:
+    normalized = normalize_path(value)
+    if not normalized or normalized in seen:
+        return
+    seen.add(normalized)
+    workspaces.append(normalized)
+
+
+fallback_workspace = profile_workspace(openclaw_home, profile)
+add_workspace(fallback_workspace)
+add_workspace(defaults_cfg.get("workspace") or "")
+add_workspace((config.get("agent") or {}).get("workspace") if isinstance(config.get("agent"), dict) else "")
+add_workspace(config.get("workspace") or "")
+
+for entry in agents_cfg.get("list") or []:
+    if isinstance(entry, dict):
+        add_workspace(entry.get("workspace") or "")
+
+for candidate in sorted(glob.glob(os.path.join(openclaw_home, "workspace*"))):
+    add_workspace(candidate)
+
+had_any = False
+for workspace in workspaces:
+    if not os.path.isdir(workspace):
+        continue
+    file_sizes = []
+    total_chars = 0
+    for name in BOOTSTRAP_FILES:
+        path = os.path.join(workspace, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            content = open(path, "r", encoding="utf-8").read()
+        except Exception:
+            continue
+        size = len(content)
+        total_chars += size
+        file_sizes.append((name, path, size))
+    if not file_sizes:
+        continue
+
+    had_any = True
+    for name, path, size in file_sizes:
+        if size > max_chars:
+            print(
+                f"ERROR\tBootstrap file exceeds OpenClaw per-file limit: {path} is {size}/{max_chars} chars.",
+            )
+        elif size >= int(max_chars * WARN_RATIO):
+            pct = int(round((size / max_chars) * 100))
+            print(
+                f"WARN\tBootstrap file near OpenClaw per-file limit: {path} is {size}/{max_chars} chars ({pct}%).",
+            )
+
+    if total_chars > total_max_chars:
+        print(
+            f"ERROR\tWorkspace bootstrap payload exceeds total limit: {workspace} is {total_chars}/{total_max_chars} chars.",
+        )
+    elif total_chars >= int(total_max_chars * WARN_RATIO):
+        pct = int(round((total_chars / total_max_chars) * 100))
+        print(
+            f"WARN\tWorkspace bootstrap payload near total limit: {workspace} is {total_chars}/{total_max_chars} chars ({pct}%).",
+        )
+
+    largest_name, _, largest_size = max(file_sizes, key=lambda item: item[2])
+    print(
+        f"OK\tBootstrap budget: {workspace} total={total_chars}/{total_max_chars}, largest={largest_name}:{largest_size}/{max_chars}.",
+    )
+
+if not had_any:
+    print("INFO\tNo bootstrap files found yet; skipped budget checks.")
+PY
+  )"
+  rc=$?
+  set -e
+
+  if [ "$rc" -ne 0 ]; then
+    log_warn "Bootstrap prompt-budget audit failed unexpectedly."
+    return 0
+  fi
+
+  while IFS= read -r line; do
+    [ -n "${line:-}" ] || continue
+    if [[ "$line" == $'ERROR\t'* ]]; then
+      log_error "${line#ERROR	}"
+    elif [[ "$line" == $'WARN\t'* ]]; then
+      log_warn "${line#WARN	}"
+    elif [[ "$line" == $'OK\t'* ]]; then
+      log_info "${line#OK	}"
+    elif [[ "$line" == $'INFO\t'* ]]; then
+      log_info "${line#INFO	}"
+    fi
+  done <<< "$audit_output"
 }
 
 # Copy canonical Clawboard contract docs into the main workspace so AGENTS.md references
@@ -2230,6 +2713,7 @@ verify_agent_contract_alignment() {
   local agents_path="$workspace_root/AGENTS.md"
   local soul_path="$workspace_root/SOUL.md"
   local heartbeat_path="$workspace_root/HEARTBEAT.md"
+  local bootstrap_path="$workspace_root/BOOTSTRAP.md"
   local all_ok=true
 
   verify_marker() {
@@ -2253,6 +2737,7 @@ verify_agent_contract_alignment() {
   verify_marker "$agents_path" "(1m[[:space:]]*(->|=>|-|=)>?[[:space:]]*3m[[:space:]]*(->|=>|-|=)>?[[:space:]]*10m[[:space:]]*(->|=>|-|=)>?[[:space:]]*15m[[:space:]]*(->|=>|-|=)>?[[:space:]]*30m[[:space:]]*(->|=>|-|=)>?[[:space:]]*1h|\[[[:space:]]*1m[[:space:]]*,[[:space:]]*3m[[:space:]]*,[[:space:]]*10m[[:space:]]*,[[:space:]]*15m[[:space:]]*,[[:space:]]*30m[[:space:]]*,[[:space:]]*1h[[:space:]]*\])" "delegation ladder"
   verify_marker "$soul_path" "sessions_spawn" "sessions_spawn contract"
   verify_marker "$heartbeat_path" "(1m[[:space:]]*(->|=>|-|=)>?[[:space:]]*3m[[:space:]]*(->|=>|-|=)>?[[:space:]]*10m[[:space:]]*(->|=>|-|=)>?[[:space:]]*15m[[:space:]]*(->|=>|-|=)>?[[:space:]]*30m[[:space:]]*(->|=>|-|=)>?[[:space:]]*1h|\[[[:space:]]*1m[[:space:]]*,[[:space:]]*3m[[:space:]]*,[[:space:]]*10m[[:space:]]*,[[:space:]]*15m[[:space:]]*,[[:space:]]*30m[[:space:]]*,[[:space:]]*1h[[:space:]]*\])" "heartbeat ladder"
+  verify_marker "$bootstrap_path" "clawboard_update_task|cron.add" "bootstrap delegation rails"
 
   local doc=""
   for doc in "${CLAWBOARD_CONTRACT_DOCS[@]}"; do
@@ -3395,33 +3880,38 @@ if [ "$SKIP_OPENCLAW" = false ]; then
       SKILL_OPENCLAW_DST="$OPENCLAW_SKILLS_DIR/clawboard"
       LOGGER_SKILL_REPO_SRC="$INSTALL_DIR/skills/clawboard-logger"
       LOGGER_SKILL_OPENCLAW_DST="$OPENCLAW_SKILLS_DIR/clawboard-logger"
+      SKILL_MANAGED_COPY_ROOT="$OPENCLAW_HOME/.clawboard/skill-copies"
 
       if [ ! -d "$SKILL_REPO_SRC" ]; then
         log_warn "Repo skill directory not found: $SKILL_REPO_SRC"
       else
         mkdir -p "$OPENCLAW_SKILLS_DIR"
-        rm -rf "$SKILL_OPENCLAW_DST"
-        if [ "$SKILL_INSTALL_MODE" = "symlink" ]; then
-          ln -s "$SKILL_REPO_SRC" "$SKILL_OPENCLAW_DST"
-          log_success "Skill linked: $SKILL_OPENCLAW_DST -> $SKILL_REPO_SRC"
+        if install_skill_directory_atomic "$SKILL_REPO_SRC" "$SKILL_OPENCLAW_DST" "$SKILL_INSTALL_MODE" "$SKILL_MANAGED_COPY_ROOT" "clawboard"; then
+          log_success "Skill installed: $SKILL_OPENCLAW_DST"
         else
-          cp -R "$SKILL_REPO_SRC" "$SKILL_OPENCLAW_DST"
-          log_success "Skill installed to $SKILL_OPENCLAW_DST."
+          rc=$?
+          if [ "$rc" -eq 10 ]; then
+            log_success "Skill already up to date: $SKILL_OPENCLAW_DST"
+          else
+            log_error "Failed installing skill to $SKILL_OPENCLAW_DST"
+          fi
         fi
       fi
 
       if [ "$SKILL_INSTALL_MODE" = "copy" ]; then
-        log_warn "Using copy mode for skills. Repo edits will not appear in OpenClaw until synced/copied again."
+        log_warn "Using copy mode for skills. Repo edits will not appear in OpenClaw until bootstrap is rerun; OpenClaw skill paths are swapped atomically to managed copies."
       fi
 
       if [ -d "$LOGGER_SKILL_REPO_SRC" ]; then
-        rm -rf "$LOGGER_SKILL_OPENCLAW_DST"
-        if [ "$SKILL_INSTALL_MODE" = "symlink" ]; then
-          ln -s "$LOGGER_SKILL_REPO_SRC" "$LOGGER_SKILL_OPENCLAW_DST"
-          log_success "Logger skill linked: $LOGGER_SKILL_OPENCLAW_DST -> $LOGGER_SKILL_REPO_SRC"
+        if install_skill_directory_atomic "$LOGGER_SKILL_REPO_SRC" "$LOGGER_SKILL_OPENCLAW_DST" "$SKILL_INSTALL_MODE" "$SKILL_MANAGED_COPY_ROOT" "clawboard-logger"; then
+          log_success "Logger skill installed: $LOGGER_SKILL_OPENCLAW_DST"
         else
-          cp -R "$LOGGER_SKILL_REPO_SRC" "$LOGGER_SKILL_OPENCLAW_DST"
-          log_success "Logger skill installed to $LOGGER_SKILL_OPENCLAW_DST."
+          rc=$?
+          if [ "$rc" -eq 10 ]; then
+            log_success "Logger skill already up to date: $LOGGER_SKILL_OPENCLAW_DST"
+          else
+            log_error "Failed installing logger skill to $LOGGER_SKILL_OPENCLAW_DST"
+          fi
         fi
       elif [ -e "$LOGGER_SKILL_OPENCLAW_DST" ]; then
         log_warn "Found $LOGGER_SKILL_OPENCLAW_DST, but repo copy is missing at $LOGGER_SKILL_REPO_SRC (left unchanged)."
@@ -3503,47 +3993,9 @@ PY
       if [ -z "$_PLUGIN_BASE_URL_INIT" ]; then
         _PLUGIN_BASE_URL_INIT="http://127.0.0.1:8010"
       fi
-      if [ -e "$PLUGIN_EXT_DIR" ]; then
-        rm -rf "$PLUGIN_EXT_DIR"
-        log_info "Removed existing plugin at $PLUGIN_EXT_DIR for idempotent re-install."
+      if ! install_clawboard_logger_plugin_transactional "$INSTALL_DIR/extensions/clawboard-logger" "$PLUGIN_EXT_DIR"; then
+        log_error "Failed installing clawboard-logger plugin atomically."
       fi
-      # If plugin dir is missing, config may still reference it (e.g. from a previous run). Strip so openclaw commands succeed.
-      if [ ! -e "$PLUGIN_EXT_DIR" ] && [ -f "$OPENCLAW_CONFIG_PATH" ] && command -v python3 >/dev/null 2>&1; then
-        log_info "Removing stale clawboard-logger references from OpenClaw config so install can run..."
-        python3 - "$OPENCLAW_CONFIG_PATH" <<'PY' 2>/dev/null || true
-import json, sys
-path = sys.argv[1]
-try:
-  with open(path, "r", encoding="utf-8") as f:
-    data = json.load(f)
-except Exception:
-  sys.exit(0)
-plug = data.get("plugins") or {}
-# Remove from load.paths
-paths = (plug.get("load") or {}).get("paths") or []
-if isinstance(paths, list):
-  paths[:] = [p for p in paths if "clawboard-logger" not in (p or "")]
-  if plug.get("load") is not None:
-    plug["load"]["paths"] = paths
-# Remove from allow
-allow = plug.get("allow") or []
-if isinstance(allow, list):
-  allow[:] = [a for a in allow if a != "clawboard-logger"]
-  plug["allow"] = allow
-# Remove entries and installs
-for key in ("entries", "installs"):
-  if isinstance(plug.get(key), dict) and "clawboard-logger" in plug[key]:
-    del plug[key]["clawboard-logger"]
-data["plugins"] = plug
-with open(path, "w", encoding="utf-8") as f:
-  json.dump(data, f, indent=2)
-PY
-      fi
-      # Keep config valid before plugin install; some OpenClaw builds reject
-      # plugins.entries.<id> while the plugin is not yet installed.
-      openclaw_doctor_fix_safe >/dev/null 2>&1 || true
-      openclaw plugins install -l "$INSTALL_DIR/extensions/clawboard-logger"
-      openclaw plugins enable clawboard-logger
 
       log_info "Configuring logger plugin..."
       LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON=false
@@ -3596,6 +4048,7 @@ PY
 
     maybe_offer_agentic_team_setup
     maybe_apply_agent_directives
+    audit_openclaw_bootstrap_budget
     verify_agent_contract_alignment
 
     maybe_run_local_memory_setup

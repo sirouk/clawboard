@@ -5,14 +5,12 @@ import { useCallback, useReducer, type SetStateAction } from "react";
 export type UnifiedMobileLayer = "board" | "chat";
 
 export type UnifiedMobileChatTarget =
-  | { kind: "topic"; topicId: string }
-  | { kind: "task"; topicId: string; taskId: string }
+  | { topicId: string; taskId: string }
   | null;
 
 type UnifiedExpansionState = {
   expandedTopics: Set<string>;
   expandedTasks: Set<string>;
-  expandedTopicChats: Set<string>;
   mobileLayer: UnifiedMobileLayer;
   mobileChatTarget: UnifiedMobileChatTarget;
 };
@@ -20,7 +18,6 @@ type UnifiedExpansionState = {
 type UnifiedExpansionAction =
   | { type: "setExpandedTopics"; next: SetStateAction<Set<string>> }
   | { type: "setExpandedTasks"; next: SetStateAction<Set<string>> }
-  | { type: "setExpandedTopicChats"; next: SetStateAction<Set<string>> }
   | { type: "setMobileLayer"; next: SetStateAction<UnifiedMobileLayer> }
   | { type: "setMobileChatTarget"; next: SetStateAction<UnifiedMobileChatTarget> };
 
@@ -37,8 +34,6 @@ function unifiedExpansionReducer(state: UnifiedExpansionState, action: UnifiedEx
       return { ...state, expandedTopics: resolveSetState(action.next, state.expandedTopics) };
     case "setExpandedTasks":
       return { ...state, expandedTasks: resolveSetState(action.next, state.expandedTasks) };
-    case "setExpandedTopicChats":
-      return { ...state, expandedTopicChats: resolveSetState(action.next, state.expandedTopicChats) };
     case "setMobileLayer":
       return { ...state, mobileLayer: resolveSetState(action.next, state.mobileLayer) };
     case "setMobileChatTarget":
@@ -55,8 +50,6 @@ export function useUnifiedExpansionState(initialTopics: string[], initialTasks: 
     (init: { initialTopics: string[]; initialTasks: string[] }): UnifiedExpansionState => ({
       expandedTopics: new Set(init.initialTopics),
       expandedTasks: new Set(init.initialTasks),
-      // Topic chat visibility is independent from topic expansion.
-      expandedTopicChats: new Set(),
       mobileLayer: "board",
       mobileChatTarget: null,
     })
@@ -68,10 +61,6 @@ export function useUnifiedExpansionState(initialTopics: string[], initialTasks: 
 
   const setExpandedTasks = useCallback((next: SetStateAction<Set<string>>) => {
     dispatch({ type: "setExpandedTasks", next });
-  }, []);
-
-  const setExpandedTopicChats = useCallback((next: SetStateAction<Set<string>>) => {
-    dispatch({ type: "setExpandedTopicChats", next });
   }, []);
 
   const setMobileLayer = useCallback((next: SetStateAction<UnifiedMobileLayer>) => {
@@ -86,7 +75,6 @@ export function useUnifiedExpansionState(initialTopics: string[], initialTasks: 
     state,
     setExpandedTopics,
     setExpandedTasks,
-    setExpandedTopicChats,
     setMobileLayer,
     setMobileChatTarget,
   };

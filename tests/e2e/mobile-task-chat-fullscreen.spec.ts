@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 test.describe("mobile task chat fullscreen", () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
-  test("task chat is available on mobile and topic chat controls are absent", async ({ page, request }) => {
+  test("task chat is available on mobile without legacy inline chat controls", async ({ page, request }) => {
     const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
     const suffix = Date.now();
     const topicId = `mobile-task-chat-${suffix}`;

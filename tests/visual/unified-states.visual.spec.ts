@@ -27,7 +27,7 @@ test("unified state: task expanded with chat visible", async ({ page }) => {
   await expect(page).toHaveScreenshot("state-task-chat-visible.png");
 });
 
-test("unified state: topic chat controls absent", async ({ page }) => {
+test("unified state: legacy inline chat controls absent", async ({ page }) => {
   await gotoPath(page, "/u");
   await page.getByPlaceholder("Search topics, tasks, or messages").waitFor();
   await openTopic(page, TOPIC_NAME);

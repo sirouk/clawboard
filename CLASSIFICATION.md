@@ -8,12 +8,12 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 
 - OpenClaw runtime produces user, assistant, and tool events.
 - `extensions/clawboard-logger` sanitizes events, resolves continuity/session scope, and writes logs to Clawboard.
-- Clawboard API (`backend/app/main.py`) persists state, publishes SSE, serves context/search, and bridges board chat to OpenClaw gateway.
+- Clawboard API (`backend/app/main.py`) persists state, publishes SSE, serves context/search, and bridges task chat to the OpenClaw gateway.
 - Classifier worker (`classifier/classifier.py`) classifies pending conversation bundles into topic/task/summary assignments.
 - Embedding backends:
   - Search runtime: `backend/app/vector_search.py` (Qdrant-backed vectors in core runtime).
   - Classifier runtime: `classifier/embeddings_store.py` (Qdrant-backed vectors in core runtime).
-- Clawboard UI consumes SSE + `/api/changes`, queries `/api/search`, and sends board chat through `/api/openclaw/chat`.
+- Clawboard UI consumes SSE + `/api/changes`, queries `/api/search`, and sends task chat through `/api/openclaw/chat`.
 
 ## 2) End-to-End Content Lifecycle
 
@@ -551,11 +551,11 @@ This catalog enumerates the complete engineered scenario surface at the methodol
 | SRCH-011 | unified default view | non-classified logs hidden by default | `src/components/unified-view.tsx` visibleLogs |
 | SRCH-012 | `?raw=1` diagnostics view | pending/failed/non-semantic logs visible | `src/components/unified-view.tsx` showRaw |
 
-### 14.6 OpenClaw Board Chat Bridge Scenarios
+### 14.6 OpenClaw Task Chat Bridge Scenarios
 
 | ID | Scenario | Expected Outcome | Primary Code Paths |
 |---|---|---|---|
-| CHAT-001 | board chat send | user message persisted before gateway dispatch | `backend/app/main.py` `/api/openclaw/chat` |
+| CHAT-001 | task chat send | user message persisted before gateway dispatch | `backend/app/main.py` `/api/openclaw/chat` |
 | CHAT-002 | attachment upload + send | validated and bound to log; gateway payload includes bytes | `backend/app/main.py` `/api/attachments`, `_run_openclaw_chat` |
 | CHAT-003 | gateway send in-flight | `openclaw.typing=true` published | `backend/app/main.py` `_run_openclaw_chat` |
 | CHAT-004 | gateway returns or fails | failure emits `openclaw.typing=false`; success clears typing on terminal ingest (assistant/system terminal) | `backend/app/main.py` `_run_openclaw_chat`, `append_log_entry` |
@@ -732,7 +732,7 @@ Automated behavior full-coverage gate status: `MET` (`84/84` covered).
 
 | ID | Expected Behavior | Automated Evidence | Status |
 |---|---|---|---|
-| CHAT-001 | board chat persists user log before/with gateway dispatch | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_001_persists_user_log_before_background_dispatch` | Covered |
+| CHAT-001 | task chat persists user log before/with gateway dispatch | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_001_persists_user_log_before_background_dispatch` | Covered |
 | CHAT-002 | attachment upload/validation + binding into chat payload | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_002_attachment_payload_is_bound_into_gateway_call`; `backend/tests/test_attachments.py::test_upload_and_download_roundtrip` | Covered |
 | CHAT-003 | gateway in-flight publishes `openclaw.typing=true` | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_003_run_openclaw_chat_emits_typing_start_without_forced_stop_on_success` | Covered |
 | CHAT-004 | failures publish `openclaw.typing=false`; successful sends clear on terminal ingest | `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_chat_004_gateway_failure_still_emits_typing_false`; `backend/tests/test_openclaw_chat_watchdog_and_ingest.py::test_ing_020_assistant_append_publishes_typing_false` | Covered |
@@ -850,7 +850,7 @@ Trace-level coverage means each scenario maps to existing implementation files (
 | SRCH-010 | stream replay window missed | `backend/app/main.py` | Traced | OK |
 | SRCH-011 | unified default view | `src/components/unified-view.tsx` | Traced | OK |
 | SRCH-012 | `?raw=1` diagnostics view | `src/components/unified-view.tsx` | Traced | OK |
-| CHAT-001 | board chat send | `backend/app/main.py` | Traced | OK |
+| CHAT-001 | task chat send | `backend/app/main.py` | Traced | OK |
 | CHAT-002 | attachment upload + send | `backend/app/main.py` | Traced | OK |
 | CHAT-003 | gateway send in-flight | `backend/app/main.py` | Traced | OK |
 | CHAT-004 | gateway returns or fails | `backend/app/main.py` | Traced | OK |

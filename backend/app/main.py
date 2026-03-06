@@ -3989,10 +3989,9 @@ def _validated_scope_candidate(
     if task_candidate:
         task_row = session.get(Task, task_candidate)
         if not task_row:
-            # Keep topic fallback when a stale task reference is present in memory.
-            # This can happen after task deletion or promotion churn; routing should still
-            # preserve topic-level continuity instead of dropping scope entirely.
-            task_candidate = ""
+            # Task Chat is the only valid board scope. If the task anchor is stale, drop the
+            # candidate instead of degrading the session to a partial scope.
+            return (None, None, None)
         else:
             task_candidate = str(getattr(task_row, "id", "") or "").strip()
             topic_candidate = str(getattr(task_row, "topicId", "") or "").strip()
@@ -4207,7 +4206,7 @@ def _infer_subagent_scope_from_recent_anchors(
     anchor_rows = session.exec(anchor_query).all()
     for row in anchor_rows:
         scope_space, scope_topic, scope_task = _scope_from_anchor_log_row(session, row)
-        if scope_topic or scope_task:
+        if scope_topic and scope_task:
             return (scope_space, scope_topic, scope_task)
 
     # Secondary fallback: session-level continuity memory for this subagent session key.
@@ -4232,7 +4231,7 @@ def _infer_subagent_scope_from_recent_anchors(
                 task_id=str(item.get("taskId") or "").strip(),
                 space_id=None,
             )
-            if scope_topic or scope_task:
+            if scope_topic and scope_task:
                 return (scope_space, scope_topic, scope_task)
 
     # Final fallback: prior rows from this exact subagent session that already carry explicit
@@ -4253,7 +4252,7 @@ def _infer_subagent_scope_from_recent_anchors(
             session,
             row.source if isinstance(row.source, dict) else {},
         )
-        if scope_topic or scope_task:
+        if scope_topic and scope_task:
             return (scope_space, scope_topic, scope_task)
 
     return (None, None, None)
@@ -4279,7 +4278,7 @@ def _retro_scope_subagent_unanchored_tool_activity(
         task_id=task_id,
         space_id=space_id,
     )
-    if not canonical_topic and not canonical_task:
+    if not canonical_topic or not canonical_task:
         return []
 
     lookback_seconds = _subagent_scope_inference_lookback_seconds()
@@ -4385,113 +4384,6 @@ def _retro_scope_subagent_unanchored_tool_activity(
             if persisted:
                 refreshed.append(persisted)
     return refreshed
-
-
-def _retro_scope_board_topic_request_activity(
-    session: Any,
-    *,
-    session_key: str,
-    request_id: str | None,
-    created_at: str,
-    space_id: str | None,
-    topic_id: str | None,
-    task_id: str | None,
-    anchor_log_id: str | None = None,
-    stamp: str | None = None,
-) -> list[LogEntry]:
-    """Backfill same-request topic rows into the promoted task scope for board topic sessions."""
-    base_key = _base_session_key(session_key)
-    if not base_key or _is_subagent_session_key(base_key):
-        return []
-
-    parsed_topic, parsed_task = _parse_board_session_key(base_key)
-    if not parsed_topic or parsed_task:
-        return []
-
-    canonical_space, canonical_topic, canonical_task = _validated_scope_candidate(
-        session,
-        topic_id=topic_id,
-        task_id=task_id,
-        space_id=space_id,
-    )
-    if not canonical_topic or not canonical_task:
-        return []
-    if parsed_topic and canonical_topic != parsed_topic:
-        return []
-
-    request_base = _openclaw_request_id_base(request_id)
-    if not request_base:
-        return []
-
-    lookback_seconds = _subagent_scope_inference_lookback_seconds()
-    created_ts = _iso_to_timestamp(created_at)
-    lower_bound: str | None = None
-    if created_ts is not None:
-        lower_dt = datetime.fromtimestamp(max(0.0, created_ts - lookback_seconds), tz=timezone.utc)
-        lower_bound = lower_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-    query = (
-        select(LogEntry)
-        .where(LogEntry.topicId == canonical_topic)
-        .where(LogEntry.taskId.is_(None))
-        .where(LogEntry.createdAt <= created_at)
-    )
-    if lower_bound:
-        query = query.where(LogEntry.createdAt >= lower_bound)
-
-    rows = session.exec(
-        query.order_by(
-            LogEntry.createdAt.asc(),
-            (text("rowid ASC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.asc()),
-        ).limit(420)
-    ).all()
-    if not rows:
-        return []
-
-    patched: list[LogEntry] = []
-    update_stamp = str(stamp or now_iso())
-    anchor_id = str(anchor_log_id or "").strip()
-    for row in rows:
-        if anchor_id and str(getattr(row, "id", "") or "").strip() == anchor_id:
-            continue
-        if not _log_matches_session(row, base_key):
-            continue
-
-        source_map = row.source.copy() if isinstance(row.source, dict) else {}
-        row_request = _openclaw_request_id_base_from_source(source_map)
-        if not row_request or row_request != request_base:
-            continue
-
-        row.topicId = canonical_topic
-        row.taskId = canonical_task
-        if canonical_space:
-            row.spaceId = canonical_space
-        elif not _normalize_space_id(getattr(row, "spaceId", None)):
-            row.spaceId = DEFAULT_SPACE_ID
-        row.classificationStatus = "classified"
-        row.classificationAttempts = max(1, int(getattr(row, "classificationAttempts", 0) or 0))
-        if _is_memory_action_text(getattr(row, "content", None), getattr(row, "summary", None), getattr(row, "raw", None)):
-            row.classificationError = "filtered_memory_action"
-        elif _is_tool_call_log(row):
-            row.classificationError = "filtered_tool_activity"
-        elif str(getattr(row, "type", "") or "").strip().lower() in {"system", "import"}:
-            row.classificationError = "filtered_non_semantic"
-        else:
-            row.classificationError = None
-        row.updatedAt = update_stamp
-
-        if canonical_space:
-            source_map["boardScopeSpaceId"] = canonical_space
-        source_map["boardScopeTopicId"] = canonical_topic
-        source_map["boardScopeTaskId"] = canonical_task
-        source_map["boardScopeKind"] = "task"
-        source_map["boardScopeLock"] = True
-        row.source = source_map or None
-
-        session.add(row)
-        patched.append(row)
-
-    return patched
 
 
 def _canonical_openclaw_assistant_idempotency_key(
@@ -5450,6 +5342,9 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 source_scope_task_id = inferred_task
                 scope_lock = True
 
+        if source_scope_topic_id and not source_scope_task_id:
+            source_scope_topic_id = None
+
         # Clawboard routing: if a sender only provides source-scoped metadata (common for nested
         # OpenClaw sessions), derive topic/task so thread affinity remains stable.
         if source_scope_task_id and (scope_lock or not task_id):
@@ -5470,19 +5365,6 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             source_scope_task_id = route_task
             topic_id = route_topic
             task_id = route_task
-            scope_lock = True
-        elif route_topic:
-            if route_space and not source_scope_space_id:
-                source_scope_space_id = route_space
-                if not space_id:
-                    space_id = route_space
-            source_scope_topic_id = route_topic
-            source_scope_task_id = None
-            topic_id = route_topic
-            if task_id:
-                task_row_for_route = session.get(Task, task_id)
-                if not task_row_for_route or str(getattr(task_row_for_route, "topicId", "") or "").strip() != route_topic:
-                    task_id = None
             scope_lock = True
 
     source_channel = ""
@@ -5689,25 +5571,6 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         )
         if _route_row is not None:
             request_route_row = _route_row
-    if request_route_id and request_route_row is not None and source_meta is not None:
-        route_space, route_topic, route_task = _openclaw_request_route_scope(session, route=request_route_row)
-        source_session_key = str(source_meta.get("sessionKey") or "").strip()
-        source_topic, source_task = _parse_board_session_key(source_session_key)
-        if route_topic and route_task and source_topic and not source_task:
-            try:
-                board_route_retro_scoped_rows = _retro_scope_board_topic_request_activity(
-                    session,
-                    session_key=source_session_key,
-                    request_id=request_route_id,
-                    created_at=created_at,
-                    space_id=route_space or str(space_id or "").strip() or None,
-                    topic_id=route_topic,
-                    task_id=route_task,
-                    anchor_log_id=str(entry.id or "").strip() or None,
-                    stamp=updated_at,
-                )
-            except Exception:
-                board_route_retro_scoped_rows = []
     session.add(entry)
     try:
         if ingest_event_id:
@@ -14159,7 +14022,7 @@ def get_log_chat_counts(
     spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
     allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
 ):
-    """Return aggregate topic/task chat entry counts without loading full log payloads."""
+    """Return aggregate task chat entry counts without loading full log payloads."""
     with get_session() as session:
         allowed_space_ids = _resolve_allowed_space_ids(
             session,
@@ -14388,7 +14251,6 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
             entry.source = source_map or None
 
         stamp = now_iso()
-        retro_scoped_rows: list[LogEntry] = []
         request_route_event: dict[str, Any] | None = None
         source_session_key = str(source_map.get("sessionKey") or "").strip() if source_map else ""
         source_request_id = _canonical_openclaw_request_id_from_source(source_map)
@@ -14402,21 +14264,6 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
                 task_id=str(entry.taskId or "").strip() or None,
                 source_log_id=str(entry.id or "").strip() or None,
             )
-        if entry.taskId and not previous_task_id and source_session_key:
-            try:
-                retro_scoped_rows = _retro_scope_board_topic_request_activity(
-                    session,
-                    session_key=source_session_key,
-                    request_id=source_request_id,
-                    created_at=str(getattr(entry, "createdAt", "") or stamp),
-                    space_id=str(entry.spaceId or "").strip() or None,
-                    topic_id=str(entry.topicId or "").strip() or None,
-                    task_id=str(entry.taskId or "").strip() or None,
-                    anchor_log_id=str(entry.id or "").strip(),
-                    stamp=stamp,
-                )
-            except Exception:
-                retro_scoped_rows = []
 
         # Best-effort: if a conversation is routed into a snoozed/archived topic or task,
         # revive it so it surfaces again in the Unified view.
@@ -14473,14 +14320,6 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
         session.refresh(entry)
         event_hub.publish({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
         _enqueue_log_reindex(entry)
-        for row in retro_scoped_rows:
-            try:
-                session.refresh(row)
-                patched_row = row
-            except Exception:
-                patched_row = session.get(LogEntry, row.id) or row
-            event_hub.publish({"type": "log.patched", "data": patched_row.model_dump(exclude={"raw"}), "eventTs": patched_row.updatedAt})
-            _enqueue_log_reindex(patched_row)
         if revived_topic:
             event_hub.publish({"type": "topic.upserted", "data": revived_topic.model_dump(), "eventTs": revived_topic.updatedAt})
         if revived_task:
@@ -14544,7 +14383,7 @@ def purge_log_forward(log_id: str):
         topic_id = str(getattr(anchor, "topicId", "") or "").strip()
         task_id = getattr(anchor, "taskId", None)
         if not topic_id:
-            raise HTTPException(status_code=400, detail="Anchor log has no topicId; purge forward requires a board chat entry")
+            raise HTTPException(status_code=400, detail="Anchor log has no topicId; purge forward requires a task chat entry")
         if task_id is None:
             raise HTTPException(status_code=400, detail="Anchor log must belong to Task Chat")
 

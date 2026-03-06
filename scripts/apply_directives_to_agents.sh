@@ -1182,19 +1182,16 @@ lines.append("## Team Roster")
 lines.append("")
 lines.append("This section is maintained by `scripts/apply_directives_to_agents.sh`.")
 lines.append("Main agent guidance:")
-lines.append("- Treat this roster as your delegation map and accountability list for subagent work.")
-lines.append("- When tasks are delegated, assign intentionally, monitor follow-through, and avoid dropped work.")
-lines.append("- Before execution delegation, confirm intent confidence (high/medium/low); clarify or run intent-poll huddles when needed.")
-lines.append("- Check in frequently at first, then moderately, then periodically as work stabilizes.")
-lines.append("- Keep the user up to speed with concise updates on what each subagent is doing, progress made, risks, and blockers.")
+lines.append("- Use this roster as the routing map: delegate early, supervise actively, and keep Chris updated.")
+lines.append("- Run the intent-confidence gate before execution delegation; clarify or huddle when confidence is not high.")
 if normalize_bool(updated_main_directives.get("forbidMainDoingSubagentJobs"), False):
-    lines.append("- Directive (Main): Do not do specialist subagent work directly when a capable subagent exists; delegate first, then synthesize.")
+    lines.append("- Directive (Main): Prefer specialists whenever a capable subagent exists.")
 else:
-    lines.append("- Directive (Main): Delegation is preferred, but main may execute specialist work directly when necessary.")
+    lines.append("- Directive (Main): Delegation is preferred, but main may execute directly when necessary.")
 if normalize_bool(updated_main_directives.get("preferHuddleMode"), False):
-    lines.append("- Directive (Main): Use Huddle Mode often for deep/perplexing questions to generate a federated team response.")
+    lines.append("- Directive (Main): Use huddles often for deep or ambiguous work.")
 else:
-    lines.append("- Directive (Main): Huddle Mode is optional; use when higher confidence or wider perspective is needed.")
+    lines.append("- Directive (Main): Use huddles when wider perspective materially improves confidence.")
 lines.append(f"{meta_prefix} {meta_json} {meta_suffix}")
 lines.append("")
 
@@ -1205,13 +1202,7 @@ else:
         agent_id = str(agent.get("id") or "").strip()
         name = str(agent.get("name") or agent_id).strip() or agent_id
         workspace = os.path.abspath(os.path.expanduser(str(agent.get("workspace") or "").strip() or ""))
-        model = str(agent.get("model") or "").strip()
         tools_profile = str(agent.get("toolsProfile") or "").strip()
-
-        identity_text = read_text(os.path.join(workspace, "IDENTITY.md")) if workspace else ""
-        soul_text = read_text(os.path.join(workspace, "SOUL.md")) if workspace else ""
-        agents_text = read_text(os.path.join(workspace, "AGENTS.md")) if workspace else ""
-        identity = parse_identity(identity_text)
 
         memory_dir = os.path.join(workspace, "memory") if workspace else ""
         memory_md_count = 0
@@ -1227,40 +1218,31 @@ else:
         team_summary = compact(profile.get("summary", ""), 400)
         team_soul_summary = compact(profile.get("soulSummary", ""), 400)
         team_description = compact(profile.get("description", ""), 400)
-
-        lines.append(f"### {name} (`{agent_id}`)")
-        lines.append(f"- Workspace: `{workspace or '(unset)'}`")
-        if model:
-            lines.append(f"- Model: `{model}`")
+        workspace_label = os.path.basename(workspace.rstrip(os.sep)) if workspace else "(unset)"
+        descriptor_parts = []
+        if allowed_hint == "yes":
+            descriptor_parts.append("delegation-ready")
+        elif allowed_hint == "no":
+            descriptor_parts.append("not in main allowAgents")
         if tools_profile:
-            lines.append(f"- Tools profile: `{tools_profile}`")
-        lines.append(f"- Delegated by main `allowAgents`: `{allowed_hint}`")
+            descriptor_parts.append(f"tools `{tools_profile}`")
+        if workspace_label:
+            descriptor_parts.append(f"workspace `{workspace_label}`")
+        if memory_md_count > 0:
+            descriptor_parts.append(f"{memory_md_count} memory file(s)")
 
-        identity_parts = []
-        for key in ("name", "creature", "vibe", "emoji"):
-            value = compact(identity.get(key, ""), 120)
-            if value:
-                identity_parts.append(f"{key}: {value}")
-        if identity_parts:
-            lines.append(f"- Identity: {'; '.join(identity_parts)}")
-        if team_heading:
-            lines.append(f"- Team heading: {team_heading}")
-        else:
-            lines.append("- Team heading: _(none)_")
-        if team_summary:
-            lines.append(f"- Team summary: {team_summary}")
-        else:
-            lines.append("- Team summary: _(none)_")
-        if team_soul_summary:
-            lines.append(f"- Team soul summary: {team_soul_summary}")
-        else:
-            lines.append("- Team soul summary: _(none)_")
-        lines.append(f"- Memory files (`memory/*.md`): `{memory_md_count}`")
-        if team_description:
-            lines.append(f"- Team description: {team_description}")
-        else:
-            lines.append("- Team description: _(none)_")
-        lines.append("")
+        focus_parts = []
+        for value in (team_heading, team_summary, team_soul_summary, team_description):
+            value = compact(value, 220)
+            if value and value not in focus_parts:
+                focus_parts.append(value)
+
+        line = f"- `{agent_id}` ({name})"
+        if descriptor_parts:
+            line += ": " + "; ".join(descriptor_parts)
+        if focus_parts:
+            line += ". Focus: " + " / ".join(focus_parts)
+        lines.append(line)
 
 lines.append(end_marker)
 new_section = "\n".join(lines).rstrip() + "\n"

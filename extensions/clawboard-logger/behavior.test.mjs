@@ -5,15 +5,22 @@ import path from "node:path";
 
 import register from "./index.js";
 
+let apiInstanceCounter = 0;
+
 function makeApi(config = {}) {
   const handlers = new Map();
   const registeredTools = [];
+  const defaultQueuePath = path.join(
+    os.tmpdir(),
+    `clawboard-logger-test-${process.pid}-${Date.now()}-${apiInstanceCounter++}.sqlite`
+  );
   const api = {
     pluginConfig: {
       baseUrl: "http://clawboard.test",
       token: "test-token",
       enabled: true,
       autoTopicBySession: false,
+      queuePath: defaultQueuePath,
       ...config,
     },
     logger: {

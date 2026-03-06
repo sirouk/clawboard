@@ -155,12 +155,13 @@ This can configure token + URLs, install skill/plugin, and wire logger behavior 
 Bootstrap characteristics (current):
 
 - idempotent reruns (safe to run repeatedly)
-- atomic per-file deployment of shipped docs/templates
-- deploys main-agent templates (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`) into the resolved OpenClaw main workspace
+- atomic per-file deployment of shipped docs/templates plus atomic skill/plugin swaps during OpenClaw install
+- deploys main-agent templates (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`, `BOOTSTRAP.md`) into the resolved OpenClaw main workspace
 - deploys Clawboard contract docs (`ANATOMY.md`, `CONTEXT.md`, `CLASSIFICATION.md`, etc.) into the same workspace
-- applies scope-aware directive reconciliation (`directives/all/*` + `directives/<agent-id>/*`) with in-place updates and stale-block pruning
+- applies scope-aware directive reconciliation (`directives/all/*` + `directives/<agent-id>/*`) with in-place updates, stale-block pruning, and a locally regenerated team roster
 - keeps main-agent execution lanes (main-only direct, single-specialist, multi-specialist/huddle) aligned with repository contracts
 - syncs main `subagents.allowAgents` from configured non-main agents for elastic delegation pool growth without manual list drift
+- audits injected bootstrap file sizes against OpenClaw `bootstrapMaxChars` / `bootstrapTotalMaxChars` limits and fails fast before prompt truncation
 - migrates legacy `CLAWBOARD_LOGGER_DISABLE_OPENCLAW_MEMORY_SEARCH` to `CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH`
 
 If OpenClaw is not installed and you want Chutes first:

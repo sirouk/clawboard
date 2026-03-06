@@ -30,12 +30,12 @@ Net effect: the agent can "remember" what happened across Topics/Tasks/logs/note
 
 ---
 
-### Board chat routing contract (UI -> OpenClaw)
-- Board chat sends from Clawboard go through `POST /api/openclaw/chat` with a task board session key (`clawboard:task:*:*`).
+### Task chat routing contract (UI -> OpenClaw)
+- Task chat sends from Clawboard go through `POST /api/openclaw/chat` with a task board session key (`clawboard:task:*:*`).
 - Task sessions are still main-mediated orchestration lanes: main receives the turn, then delegates as needed.
-- `agentId` on board chat requests is advisory metadata for dispatch bookkeeping; it does not force direct subagent ownership of a task chat.
+- `agentId` on task chat requests is advisory metadata for dispatch bookkeeping; it does not force direct subagent ownership of a task chat.
 - Thread-scoped cancel uses `DELETE /api/openclaw/chat` (`sessionKey`, optional `requestId`) and can fan out to linked child sessions when lineage is resolvable.
-- UI responding state is driven by `openclaw.typing` + `openclaw.thread_work` events (plus orchestration activity fallbacks) per board session.
+- UI responding state is driven by `openclaw.typing` + `openclaw.thread_work` events (plus orchestration activity fallbacks) per task board session.
 
 ---
 
@@ -185,7 +185,7 @@ The injected block is not "everything"; it is a ranked shortlist built from:
 - Ranking happens server-side in `/api/context`.
 - `/api/context` and `/api/search` apply ranking only after allowed-space filtering when a source space is resolved.
 - The resulting block combines:
-  - active board location (when in board chat)
+  - active board location (when in a board task session)
   - working set topics/tasks
   - routing memory
   - recent timeline
@@ -269,13 +269,13 @@ Clawboard supports short digests on Topics and Tasks:
 Clawboard uses `source.sessionKey` as the main continuity bucket across channels and UIs.
 
 The plugin computes an "effective session key" in `computeEffectiveSessionKey(...)` (`extensions/clawboard-logger/session-key.ts`):
-- If the session is a **Clawboard board chat**, it uses reserved task session keys:
+- If the session is a **Clawboard board task session**, it uses reserved task session keys:
   - `clawboard:task:<topicId>:<taskId>`
   These keys intentionally win over provider conversation ids to prevent mis-attribution.
 - Otherwise it prefers the provider's `conversationId`, and optionally appends `|thread:<threadId>` to avoid collisions.
 - If nothing else exists, it falls back to `channel:<channelId>` (broad bucket).
 
-Important: to avoid double-logging Clawboard UI chat, the plugin explicitly skips logging `message_received` when the effective session key parses as a board session (`parseBoardSessionKey(...)`), because Clawboard's own backend persists those messages immediately via its board chat endpoint.
+Important: to avoid double-logging Clawboard UI chat, the plugin explicitly skips logging `message_received` when the effective session key parses as a board session (`parseBoardSessionKey(...)`), because Clawboard's own backend persists those messages immediately via its task-chat endpoint.
 
 During ingest, Clawboard normalizes source scope metadata (`boardScopeTopicId`, `boardScopeTaskId`, `boardScopeSpaceId`) so later context/search calls can infer the correct source space from session continuity.
 

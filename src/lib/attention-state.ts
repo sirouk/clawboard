@@ -8,11 +8,6 @@ export const UNSNOOZED_TOPICS_KEY = "clawboard.unified.unsnoozedTopics";
 export const UNSNOOZED_TASKS_KEY = "clawboard.unified.unsnoozedTasks";
 export const CHAT_SEEN_AT_KEY = "clawboard.unified.chatSeenAt";
 
-export function chatKeyForTopic(topicId: string) {
-  const id = String(topicId ?? "").trim();
-  return id ? `topic:${id}` : "";
-}
-
 export function chatKeyForTask(taskId: string) {
   const id = String(taskId ?? "").trim();
   return id ? `task:${id}` : "";

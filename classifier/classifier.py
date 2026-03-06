@@ -4597,7 +4597,7 @@ def classify_session(session_key: str):
                 mark_window_failure(fallback_error)
                 return
 
-            # Patch this bundle scope directly (topic-only, no tasks) and return.
+            # Patch this bundle scope directly (topic-scoped, no task) and return.
             for entry in scope_logs:
                 if (entry.get("classificationStatus") or "pending") != "pending":
                     continue

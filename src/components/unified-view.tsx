@@ -34,11 +34,9 @@ import {
   BOARD_TASK_SESSION_PREFIX,
   normalizeBoardSessionKey,
   taskSessionKey,
-  topicSessionKey,
 } from "@/lib/board-session";
 import {
   chatKeyForTask,
-  chatKeyForTopic,
 } from "@/lib/attention-state";
 import { Markdown } from "@/components/markdown";
 import { AttachmentStrip, type AttachmentLike } from "@/components/attachments";
@@ -191,7 +189,6 @@ function inferMimeTypeFromName(fileName: string) {
 }
 
 const TASK_TIMELINE_LIMIT = 2;
-const TOPIC_TIMELINE_LIMIT = 4;
 type MessageDensity = "comfortable" | "compact";
 const TOPIC_FALLBACK_COLORS = [
   "#FF1744",
@@ -425,7 +422,6 @@ type UnifiedSearchPlan = {
 };
 
 type LogChatCountsPayload = {
-  topicChatCounts?: Record<string, number>;
   taskChatCounts?: Record<string, number>;
 };
 
@@ -1959,11 +1955,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     state: expansionState,
     setExpandedTopics,
     setExpandedTasks,
-    setExpandedTopicChats,
     setMobileLayer,
     setMobileChatTarget,
   } = useUnifiedExpansionState(initialUrlState.topics, initialUrlState.tasks);
-  const { expandedTopics, expandedTasks, expandedTopicChats, mobileLayer, mobileChatTarget } = expansionState;
+  const { expandedTopics, expandedTasks, mobileLayer, mobileChatTarget } = expansionState;
   const showTwoColumns = twoColumn && mdUp;
   const [showRaw, setShowRaw] = useState(initialUrlState.raw);
   const [messageDensity, setMessageDensity] = useState<MessageDensity>(initialUrlState.density);
@@ -2075,7 +2070,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   }, [allowedSpaceSet, selectedSpaceId, storeTasks, storeTopicById]);
 
   const logs = storeLogs;
-  const [topicChatCountById, setTopicChatCountById] = useState<Record<string, number>>({});
   const [taskChatCountById, setTaskChatCountById] = useState<Record<string, number>>({});
   const [chatCountsHydrated, setChatCountsHydrated] = useState(false);
   const chatCountsRequestSeqRef = useRef(0);
@@ -2103,7 +2097,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (!response.ok) return;
       const payload = (await response.json().catch(() => null)) as LogChatCountsPayload | null;
       if (requestSeq !== chatCountsRequestSeqRef.current) return;
-      setTopicChatCountById(normalizeCountMap(payload?.topicChatCounts));
       setTaskChatCountById(normalizeCountMap(payload?.taskChatCounts));
       setChatCountsHydrated(true);
     } catch {
@@ -2113,7 +2106,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   useEffect(() => {
     setChatCountsHydrated(false);
-    setTopicChatCountById({});
     setTaskChatCountById({});
   }, [selectedSpaceId]);
 
@@ -2449,13 +2441,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const mobileDoneCollapseTaskIdRef = useRef<string | null>(null);
   const patchedTopicColorsRef = useRef<Set<string>>(new Set());
   const patchedTaskColorsRef = useRef<Set<string>>(new Set());
-  const [activeComposer, setActiveComposer] = useState<
-    | { kind: "topic"; topicId: string }
-    | { kind: "task"; topicId: string; taskId: string }
-    | null
-  >(null);
+  const [activeComposer, setActiveComposer] = useState<{ kind: "task"; topicId: string; taskId: string } | null>(null);
   const [autoFocusTask, setAutoFocusTask] = useState<{ topicId: string; taskId: string } | null>(null);
-  const [autoFocusTopicId, setAutoFocusTopicId] = useState<string | null>(null);
   const [chatMetaExpandEpoch, setChatMetaExpandEpoch] = useState(0);
   const [chatMetaCollapseEpoch, setChatMetaCollapseEpoch] = useState(1);
   const prevTaskByLogId = useRef<Map<string, string | null>>(new Map());
@@ -2486,8 +2473,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const chatLastScrollTopRef = useRef<Map<string, number>>(new Map());
   const taskLogHydratedRef = useRef<Set<string>>(new Set());
   const taskLogHydratingRef = useRef<Set<string>>(new Set());
-  const topicLogHydratedRef = useRef<Set<string>>(new Set());
-  const topicLogHydratingRef = useRef<Set<string>>(new Set());
 
   const CHAT_AUTO_SCROLL_THRESHOLD_PX = 24;
   const CHAT_STICKY_PIN_INTERVAL_MS = 140;
@@ -2870,7 +2855,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   );
 
   const prevExpandedTaskIdsRef = useRef<Set<string>>(new Set());
-  const prevExpandedTopicChatIdsRef = useRef<Set<string>>(new Set());
 
   const [draggingTopicId, setDraggingTopicId] = useState<string | null>(null);
   const [topicDropTargetId, setTopicDropTargetId] = useState<string | null>(null);
@@ -3028,11 +3012,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   }, []);
 
   useEffect(() => {
-    const nextKey = !activeComposer
-      ? null
-      : activeComposer.kind === "topic"
-        ? `topic:${activeComposer.topicId}`
-        : `task:${activeComposer.taskId}`;
+    const nextKey = activeComposer ? `task:${activeComposer.taskId}` : null;
     activeChatKeyRef.current = nextKey;
     updateActiveChatAtBottom();
   }, [activeComposer, updateActiveChatAtBottom]);
@@ -3165,29 +3145,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return new Set([...expandedTasks].filter((id) => taskIds.has(id)));
   }, [expandedTasks, tasks]);
 
-  const expandedTopicChatsSafe = useMemo(() => {
-    const topicIds = new Set(topics.map((topic) => topic.id));
-    return new Set([...expandedTopicChats].filter((id) => topicIds.has(id) && id !== "unassigned"));
-  }, [expandedTopicChats, topics]);
-
-  // Topic chat is always visible whenever its parent topic is expanded.
-  useEffect(() => {
-    setExpandedTopicChats((prev) => {
-      const next = new Set(Array.from(expandedTopicsSafe).filter((id) => id !== "unassigned"));
-      if (next.size === prev.size) {
-        let same = true;
-        for (const id of next) {
-          if (!prev.has(id)) {
-            same = false;
-            break;
-          }
-        }
-        if (same) return prev;
-      }
-      return next;
-    });
-  }, [expandedTopicsSafe, setExpandedTopicChats]);
-
   const taskTopicById = useMemo(() => {
     const map = new Map<string, string>();
     for (const task of tasks) {
@@ -3305,14 +3262,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return map;
   }, [logs, showRaw]);
 
-  const topicRootLogsByTopic = useMemo(() => {
-    const map = new Map<string, LogEntry[]>();
-    for (const [topicId, rows] of logsByTopicAll.entries()) {
-      map.set(topicId, rows.filter((entry) => !entry.taskId));
-    }
-    return map;
-  }, [logsByTopicAll]);
-
   const markVisibleChatSeen = useCallback(
     (chatKey: string) => {
       const key = String(chatKey ?? "").trim();
@@ -3323,15 +3272,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         const taskId = key.slice("task:".length).trim();
         const rows = taskId ? logsByTaskAll.get(taskId) ?? [] : [];
         seenAt = rows.length > 0 ? String(rows[rows.length - 1]?.createdAt ?? "").trim() : "";
-      } else if (key.startsWith("topic:")) {
-        const topicId = key.slice("topic:".length).trim();
-        const rows = topicId ? topicRootLogsByTopic.get(topicId) ?? [] : [];
-        seenAt = rows.length > 0 ? String(rows[rows.length - 1]?.createdAt ?? "").trim() : "";
       }
 
       markChatSeenInStore(key, seenAt || undefined);
     },
-    [logsByTaskAll, markChatSeenInStore, topicRootLogsByTopic]
+    [logsByTaskAll, markChatSeenInStore]
   );
 
   useEffect(() => {
@@ -3340,17 +3285,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const key = chatKeyForTask(taskId);
       if (key) visibleChatKeys.add(key);
     }
-    for (const topicId of expandedTopicChatsSafe) {
-      const key = chatKeyForTopic(topicId);
-      if (key) visibleChatKeys.add(key);
-    }
 
     if (!mdUp && mobileLayer === "chat") {
-      if (mobileChatTarget?.kind === "task") {
+      if (mobileChatTarget?.taskId) {
         const key = chatKeyForTask(mobileChatTarget.taskId);
-        if (key) visibleChatKeys.add(key);
-      } else if (mobileChatTarget?.kind === "topic") {
-        const key = chatKeyForTopic(mobileChatTarget.topicId);
         if (key) visibleChatKeys.add(key);
       }
     }
@@ -3358,7 +3296,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     for (const key of visibleChatKeys) {
       markVisibleChatSeen(key);
     }
-  }, [expandedTasksSafe, expandedTopicChatsSafe, markVisibleChatSeen, mdUp, mobileChatTarget, mobileLayer]);
+  }, [expandedTasksSafe, markVisibleChatSeen, mdUp, mobileChatTarget, mobileLayer]);
 
   const hydrateTaskLogs = useCallback(
     async (taskId: string) => {
@@ -3396,47 +3334,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         taskLogHydratedRef.current.add(id);
       } finally {
         taskLogHydratingRef.current.delete(id);
-      }
-    },
-    [selectedSpaceId, setLogs, token]
-  );
-
-  const hydrateTopicLogs = useCallback(
-    async (topicId: string) => {
-      const id = String(topicId || "").trim();
-      if (!id || id === "unassigned") return;
-      if (topicLogHydratedRef.current.has(id)) return;
-      if (topicLogHydratingRef.current.has(id)) return;
-      topicLogHydratingRef.current.add(id);
-      try {
-        const merged: LogEntry[] = [];
-        const pageSize = 400;
-        let offset = 0;
-        while (true) {
-          const params = new URLSearchParams({
-            topicId: id,
-            limit: String(pageSize),
-            offset: String(offset),
-          });
-          if (selectedSpaceId) params.set("spaceId", selectedSpaceId);
-          const res = await apiFetch(
-            `/api/log?${params.toString()}`,
-            { cache: "no-store" },
-            token
-          );
-          if (!res.ok) break;
-          const rows = (await res.json().catch(() => [])) as LogEntry[];
-          if (!Array.isArray(rows) || rows.length === 0) break;
-          merged.push(...rows);
-          if (rows.length < pageSize) break;
-          offset += rows.length;
-        }
-        if (merged.length > 0) {
-          setLogs((prev) => mergeLogs(prev, merged));
-        }
-        topicLogHydratedRef.current.add(id);
-      } finally {
-        topicLogHydratingRef.current.delete(id);
       }
     },
     [selectedSpaceId, setLogs, token]
@@ -3545,16 +3442,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         const last = rows.length > 0 ? rows[rows.length - 1] : null;
         return last?.id ?? "";
       }
-      if (trimmed.startsWith("topic:")) {
-        const topicId = trimmed.slice("topic:".length).trim();
-        if (!topicId) return "";
-        const rows = topicRootLogsByTopic.get(topicId) ?? [];
-        const last = rows.length > 0 ? rows[rows.length - 1] : null;
-        return last?.id ?? "";
-      }
       return "";
     },
-    [logsByTaskAll, topicRootLogsByTopic]
+    [logsByTaskAll]
   );
 
   useEffect(() => {
@@ -3687,7 +3577,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   useEffect(() => {
     taskLogHydratedRef.current.clear();
-    topicLogHydratedRef.current.clear();
   }, [selectedSpaceId, spaceVisibilityRevision]);
 
   useEffect(() => {
@@ -3695,34 +3584,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     for (const taskId of expandedTasksSafe) {
       if (taskId) targets.add(taskId);
     }
-    if (mobileLayer === "chat" && mobileChatTarget?.kind === "task" && mobileChatTarget.taskId) {
+    if (mobileLayer === "chat" && mobileChatTarget?.taskId) {
       targets.add(mobileChatTarget.taskId);
     }
-    const topicTargets = new Set<string>();
     for (const taskId of targets) {
       void hydrateTaskLogs(taskId);
-      const topicId = taskTopicById.get(taskId);
-      if (topicId && topicId !== "unassigned") {
-        topicTargets.add(topicId);
-      }
     }
-    for (const topicId of topicTargets) {
-      void hydrateTopicLogs(topicId);
-    }
-  }, [expandedTasksSafe, hydrateTaskLogs, hydrateTopicLogs, mobileChatTarget, mobileLayer, taskTopicById]);
-
-  useEffect(() => {
-    const targets = new Set<string>();
-    for (const topicId of expandedTopicChatsSafe) {
-      if (topicId && topicId !== "unassigned") targets.add(topicId);
-    }
-    if (mobileLayer === "chat" && mobileChatTarget?.kind === "topic" && mobileChatTarget.topicId && mobileChatTarget.topicId !== "unassigned") {
-      targets.add(mobileChatTarget.topicId);
-    }
-    for (const topicId of targets) {
-      void hydrateTopicLogs(topicId);
-    }
-  }, [expandedTopicChatsSafe, hydrateTopicLogs, mobileChatTarget, mobileLayer]);
+  }, [expandedTasksSafe, hydrateTaskLogs, mobileChatTarget, mobileLayer]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -3747,12 +3615,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (files.length === 0) return;
 
       const active = activeComposer;
-      const session =
-        active?.kind === "topic"
-          ? ""
-          : active?.kind === "task"
-            ? taskSessionKey(active.topicId, active.taskId)
-            : "";
+      const session = active ? taskSessionKey(active.topicId, active.taskId) : "";
       const handle = session ? composerHandlesRef.current.get(session) : null;
       if (handle) {
         handle.addFiles(files);
@@ -3936,14 +3799,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     return byTask;
   }, [logsByTaskAll, matchesLogSearchChat, normalizedSearch, tasks]);
-
-  const topicChatLogsByTopic = useMemo(() => {
-    const map = new Map<string, LogEntry[]>();
-    for (const [topicId, rows] of topicRootLogsByTopic.entries()) {
-      map.set(topicId, normalizedSearch ? rows.filter(matchesLogSearchChat) : rows);
-    }
-    return map;
-  }, [matchesLogSearchChat, normalizedSearch, topicRootLogsByTopic]);
 
   const hiddenToolCallCountBySession = useMemo(() => {
     const map = new Map<string, number>();
@@ -4304,7 +4159,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         next.delete(taskId);
         return next;
       });
-      if (mobileLayer === "chat" && mobileChatTarget?.kind === "task" && mobileChatTarget.taskId === taskId) {
+      if (mobileLayer === "chat" && mobileChatTarget?.taskId === taskId) {
         setMobileLayer("board");
         setMobileChatTarget(null);
       }
@@ -5050,11 +4905,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       );
       const nextTopics = Array.from(expandedTopicsSafe).filter((id) => id !== topic.id);
       setExpandedTopics(new Set(nextTopics));
-      setExpandedTopicChats((prev) => {
-        const next = new Set(prev);
-        next.delete(topic.id);
-        return next;
-      });
       pushUrl({ topics: nextTopics }, "replace");
       setEditingTopicId(null);
       setTopicNameDraft("");
@@ -5104,16 +4954,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const collapseAll = () => {
     setExpandedTopics(new Set());
     setExpandedTasks(new Set());
-    setExpandedTopicChats(new Set());
     setChatMetaCollapseEpoch((prev) => prev + 1);
   };
 
   const allTopicIds = useMemo(() => orderedTopics.map((topic) => topic.id), [orderedTopics]);
   const allTaskIds = useMemo(() => tasks.map((task) => task.id), [tasks]);
-  const chatEligibleTopicIds = useMemo(
-    () => allTopicIds.filter((topicId) => topicId !== "unassigned"),
-    [allTopicIds]
-  );
   const hasAnyExpandable = allTopicIds.length > 0 || allTaskIds.length > 0;
   const isEverythingExpanded = useMemo(() => {
     if (!hasAnyExpandable) return false;
@@ -5123,19 +4968,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     for (const taskId of allTaskIds) {
       if (!expandedTasksSafe.has(taskId)) return false;
     }
-    for (const topicId of chatEligibleTopicIds) {
-      if (!expandedTopicChatsSafe.has(topicId)) return false;
-    }
     return true;
-  }, [allTaskIds, allTopicIds, chatEligibleTopicIds, expandedTasksSafe, expandedTopicChatsSafe, expandedTopicsSafe, hasAnyExpandable]);
+  }, [allTaskIds, allTopicIds, expandedTasksSafe, expandedTopicsSafe, hasAnyExpandable]);
 
   const toggleTopicExpanded = (topicId: string) => {
     const next = new Set(expandedTopicsSafe);
-    const nextChats = new Set(expandedTopicChatsSafe);
     let nextTasks = new Set(expandedTasksSafe);
     if (next.has(topicId)) {
       next.delete(topicId);
-      nextChats.delete(topicId);
       setChatMetaCollapseEpoch((prev) => prev + 1);
       // Auto-collapse child tasks when parent topic collapses.
       const topicTaskIds = new Set((tasksByTopic.get(topicId) ?? []).map((task) => task.id));
@@ -5144,19 +4984,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       }
     } else {
       next.add(topicId);
-      if (topicId !== "unassigned") {
-        nextChats.add(topicId);
-      }
     }
     setExpandedTopics(next);
-    setExpandedTopicChats(nextChats);
     setExpandedTasks(nextTasks);
     pushUrl({ topics: Array.from(next), tasks: Array.from(nextTasks) });
   };
 
   const openMobileTaskChat = useCallback(
     (topicId: string, taskId: string) => {
-      setMobileChatTarget({ kind: "task", topicId, taskId });
+      setMobileChatTarget({ topicId, taskId });
       setMobileLayer("chat");
       setExpandedTopics((prev) => {
         if (prev.has(topicId)) return prev;
@@ -5175,54 +5011,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     [scheduleScrollChatToBottom, setExpandedTasks, setExpandedTopics, setMobileChatTarget, setMobileLayer]
   );
 
-  const openMobileTopicChat = useCallback(
-    (topicId: string) => {
-      // Topic chat open does not currently mutate the URL, so create an explicit history frame.
-      // That way the mobile browser back gesture can cleanly close fullscreen chat (like ✕)
-      // without navigating away from the board.
-      if (typeof window !== "undefined") {
-        window.history.pushState({ clawboard: true, mobileLayer: "chat" }, "", window.location.href);
-      }
-
-      setMobileChatTarget({ kind: "topic", topicId });
-      setMobileLayer("chat");
-      setExpandedTopics((prev) => {
-        if (prev.has(topicId)) return prev;
-        const next = new Set(prev);
-        next.add(topicId);
-        return next;
-      });
-      setExpandedTopicChats((prev) => {
-        if (prev.has(topicId)) return prev;
-        const next = new Set(prev);
-        next.add(topicId);
-        return next;
-      });
-      scheduleScrollChatToBottom(`topic:${topicId}`);
-    },
-    [scheduleScrollChatToBottom, setExpandedTopicChats, setExpandedTopics, setMobileChatTarget, setMobileLayer]
-  );
-
   const closeMobileChatLayer = useCallback(() => {
     const target = mobileChatTarget;
-    if (target?.kind === "task") {
+    if (target?.taskId) {
       setExpandedTasks((prev) => {
         if (!prev.has(target.taskId)) return prev;
         const next = new Set(prev);
         next.delete(target.taskId);
-        return next;
-      });
-    } else if (target?.kind === "topic") {
-      setExpandedTopicChats((prev) => {
-        if (!prev.has(target.topicId)) return prev;
-        const next = new Set(prev);
-        next.delete(target.topicId);
-        return next;
-      });
-      setExpandedTopics((prev) => {
-        if (!prev.has(target.topicId)) return prev;
-        const next = new Set(prev);
-        next.delete(target.topicId);
         return next;
       });
     }
@@ -5233,8 +5028,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     mobileChatTarget,
     setChatMetaCollapseEpoch,
     setExpandedTasks,
-    setExpandedTopicChats,
-    setExpandedTopics,
     setMobileChatTarget,
     setMobileLayer,
   ]);
@@ -5245,13 +5038,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (!mobileChatTarget) return;
 
     const topicVisible = orderedTopics.some((topic) => topic.id === mobileChatTarget.topicId);
-    if (mobileChatTarget.kind === "topic") {
-      if (!topicVisible) {
-        closeMobileChatLayer();
-      }
-      return;
-    }
-
     const activeTask = tasks.find((task) => task.id === mobileChatTarget.taskId);
     const taskVisible =
       !!activeTask &&
@@ -5276,8 +5062,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const toggleTaskExpanded = (topicId: string, taskId: string) => {
     if (!mdUp) {
-      const isTaskTarget =
-        mobileLayer === "chat" && mobileChatTarget?.kind === "task" && mobileChatTarget.taskId === taskId;
+      const isTaskTarget = mobileLayer === "chat" && mobileChatTarget?.taskId === taskId;
       if (!isTaskTarget) {
         setExpandedTopics((prev) => {
           if (prev.has(topicId)) return prev;
@@ -5360,7 +5145,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     setExpandedTopics(new Set(allTopicIds));
     setExpandedTasks(new Set(allTaskIds));
-    setExpandedTopicChats(new Set(chatEligibleTopicIds));
     setChatMetaExpandEpoch((prev) => prev + 1);
     pushUrl({ topics: allTopicIds, tasks: allTaskIds });
   };
@@ -5441,8 +5225,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setPage(parsedState.page);
     setExpandedTopics(new Set(nextTopics));
     setExpandedTasks(new Set(nextTasks));
-    // Topic chat lives inline in expanded topics.
-    setExpandedTopicChats(new Set(nextTopics.filter((id) => id !== "unassigned")));
 
     if (restoreScrollOnNextSyncRef.current) {
       restoreScrollOnNextSyncRef.current = false;
@@ -5454,7 +5236,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         });
       }
     }
-  }, [basePath, resolveTaskId, resolveTopicId, setExpandedTasks, setExpandedTopicChats, setExpandedTopics, taskTopicById]);
+  }, [basePath, resolveTaskId, resolveTopicId, setExpandedTasks, setExpandedTopics, taskTopicById]);
 
   useEffect(() => {
     const handlePop = () => {
@@ -5512,14 +5294,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   }, [expandedTasksSafe, scheduleScrollChatToBottom]);
 
   useEffect(() => {
-    const prevTopics = prevExpandedTopicChatIdsRef.current;
-    for (const topicId of expandedTopicChatsSafe) {
-      if (!prevTopics.has(topicId)) scheduleScrollChatToBottom(`topic:${topicId}`);
-    }
-    prevExpandedTopicChatIdsRef.current = new Set(expandedTopicChatsSafe);
-  }, [expandedTopicChatsSafe, scheduleScrollChatToBottom]);
-
-  useEffect(() => {
     if (!hydrated) return;
     // Initialize per-chat history windows once we have the initial snapshot so the
     // "loaded messages" window doesn't slide forward as new logs append.
@@ -5535,19 +5309,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         next[key] = start;
         changed = true;
       }
-      for (const topicId of expandedTopicChatsSafe) {
-        if (topicId === "unassigned") continue;
-        const key = chatKeyForTopic(topicId);
-        if (Object.prototype.hasOwnProperty.call(prev, key)) continue;
-        const all = topicRootLogsByTopic.get(topicId) ?? [];
-        const start = computeDefaultChatStart(all, TOPIC_TIMELINE_LIMIT);
-        if (start <= 0) continue;
-        next[key] = start;
-        changed = true;
-      }
       return changed ? next : prev;
     });
-  }, [expandedTasksSafe, expandedTopicChatsSafe, hydrated, logsByTaskAll, topicRootLogsByTopic]);
+  }, [expandedTasksSafe, hydrated, logsByTaskAll]);
 
   const pushUrl = useCallback(
     (
@@ -5664,7 +5428,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   }, [selectedComposerTarget]);
   const activeComposerSessionKey = useMemo(() => {
     if (!activeComposer) return "";
-    if (activeComposer.kind === "topic") return "";
     const topicId = String(activeComposer.topicId ?? "").trim();
     const taskId = String(activeComposer.taskId ?? "").trim();
     if (!topicId || !taskId) return "";
@@ -6428,62 +6191,36 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const isUnassigned = topicId === "unassigned";
           const deleteKey = `topic:${topic.id}`;
           const taskList = tasksByTopic.get(topicId) ?? [];
-          const topicSelectedForSend = selectedComposerTarget?.kind === "topic" && selectedComposerTarget.topic.id === topicId;
-          const selectedTaskIdForSend = selectedComposerTarget?.kind === "task" ? selectedComposerTarget.task.id : "";
-          const openCount = taskList.filter((task) => task.status !== "done").length;
-          const doingCount = taskList.filter((task) => task.status === "doing").length;
+	          const topicSelectedForSend = selectedComposerTarget?.kind === "topic" && selectedComposerTarget.topic.id === topicId;
+	          const selectedTaskIdForSend = selectedComposerTarget?.kind === "task" ? selectedComposerTarget.task.id : "";
+	          const openCount = taskList.filter((task) => task.status !== "done").length;
+	          const doingCount = taskList.filter((task) => task.status === "doing").length;
 	          const blockedCount = taskList.filter((task) => task.status === "blocked").length;
 	          const lastActivity = logsByTopic.get(topicId)?.[0]?.createdAt ?? topic.updatedAt;
-          const hasUnsnoozedBadge = Object.prototype.hasOwnProperty.call(unsnoozedTopicBadges, topicId);
-          const topicChatAllLogs = topicChatLogsByTopic.get(topicId) ?? [];
-          const topicChatVisibleCount = countVisibleChatLogEntries(topicChatAllLogs, showToolCalls);
-          const topicChatEntryCountLabel = formatChatEntryCountLabel(
-            showToolCalls ? topicChatCountById[topicId] : undefined,
-            showToolCalls ? topicChatAllLogs.length : topicChatVisibleCount,
-            showToolCalls ? chatCountsHydrated : true
-          );
-          const topicToolingOrSystemCallCount =
-            countToolingOrSystemChatLogEntries(topicChatAllLogs) +
-            taskList.reduce(
-              (sum, task) => sum + countToolingOrSystemChatLogEntries(taskChatLogsByTask.get(task.id) ?? []),
-              0
-            );
-          const topicToolingOrSystemCallCountLabel = formatToolingOrSystemCallCountLabel(topicToolingOrSystemCallCount);
-          const topicChatMetricsLabel = `${topicChatEntryCountLabel} · ${topicToolingOrSystemCallCountLabel}`;
+	          const hasUnsnoozedBadge = Object.prototype.hasOwnProperty.call(unsnoozedTopicBadges, topicId);
+	          const topicTaskChatLogs = taskList.flatMap((task) => taskChatLogsByTask.get(task.id) ?? []);
+	          const topicChatVisibleCount = countVisibleChatLogEntries(topicTaskChatLogs, showToolCalls);
+	          const topicKnownChatCount = taskList.reduce((sum, task) => sum + (taskChatCountById[task.id] ?? 0), 0);
+	          const topicChatEntryCountLabel = formatChatEntryCountLabel(
+	            showToolCalls && topicKnownChatCount > 0 ? topicKnownChatCount : undefined,
+	            showToolCalls ? topicTaskChatLogs.length : topicChatVisibleCount,
+	            showToolCalls ? chatCountsHydrated : true
+	          );
+	          const topicToolingOrSystemCallCount = taskList.reduce(
+	            (sum, task) => sum + countToolingOrSystemChatLogEntries(taskChatLogsByTask.get(task.id) ?? []),
+	            0
+	          );
+	          const topicToolingOrSystemCallCountLabel = formatToolingOrSystemCallCountLabel(topicToolingOrSystemCallCount);
+	          const topicChatMetricsLabel = `${topicChatEntryCountLabel} · ${topicToolingOrSystemCallCountLabel}`;
 	          const topicMatchesSearch =
 	            normalizedSearch.length > 0 &&
 	            matchesSearchText(`${topic.name} ${topic.description ?? ""}`, searchPlan);
-	          const topicChatBlurb = deriveChatHeaderBlurb(topicChatAllLogs);
 	          const showTasks = true;
 	          const isExpanded = expandedTopicsSafe.has(topicId);
-	          const topicChatKey = chatKeyForTopic(topicId);
-          const topicChatSessionKey = topicSessionKey(topicId);
-          const topicHiddenToolCallCount = hiddenToolCallCountForSession(topicChatSessionKey);
-	          const topicChatFullscreen =
-	            !mdUp &&
-	            mobileLayer === "chat" &&
-	            mobileChatTarget?.kind === "topic" &&
-	            mobileChatTarget.topicId === topicId;
-	          const mobileChatTopicId =
-	            mobileLayer === "chat"
-              ? mobileChatTarget?.kind === "task"
-                ? mobileChatTarget.topicId
-                : mobileChatTarget?.topicId
-              : null;
-          if (!mdUp && mobileLayer === "chat" && mobileChatTopicId && mobileChatTopicId !== topicId) {
-            return null;
-          }
-          const topicChatStart = normalizedSearch
-            ? 0
-            : computeChatStart(
-                chatHistoryStarts,
-                topicChatKey,
-                topicChatAllLogs.length,
-                TOPIC_TIMELINE_LIMIT,
-                topicChatAllLogs
-              );
-          const topicChatLogs = topicChatAllLogs.slice(topicChatStart);
-	          const topicChatTruncated = !normalizedSearch && topicChatStart > 0;
+	          const mobileChatTopicId = mobileLayer === "chat" ? mobileChatTarget?.topicId ?? null : null;
+	          if (!mdUp && mobileLayer === "chat" && mobileChatTopicId && mobileChatTopicId !== topicId) {
+	            return null;
+	          }
 	          const topicColor =
 	            topicDisplayColors.get(topicId) ??
 	            normalizeHexColor(topic.color) ??
@@ -6591,39 +6328,36 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             </>
           );
 
-          const card = (
-            <div
+	          const card = (
+	            <div
               key={topicId}
               data-topic-card-id={topicId}
-              className={cn(
-                "border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300 md:p-5",
-                topicChatFullscreen
-                  ? "fixed inset-0 z-[1400] m-0 flex h-[var(--claw-mobile-vh)] flex-col overflow-hidden rounded-none border-0 bg-[rgb(10,12,16)] p-0"
-                  : "relative rounded-[var(--radius-lg)]",
-                // Sticky section-header behavior is handled by the inner header row — not the outer card.
-                // The outer card must remain non-sticky so the browser can use it as the sticky boundary
-                // (header sticks until the card's bottom edge passes the top threshold).
-                draggingTopicId && topicDropTargetId === topicId ? "border-[rgba(255,90,45,0.55)]" : "",
-                topicSelectedForSend ? "ring-2 ring-[rgba(77,171,158,0.55)]" : ""
-              )}
-              style={topicChatFullscreen ? mobileOverlaySurfaceStyle(topicColor) : topicGlowStyle(topicColor, topicIndex, isExpanded)}
-            >
-              <div
+	              className={cn(
+	                "border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300 md:p-5",
+	                "relative rounded-[var(--radius-lg)]",
+	                // Sticky section-header behavior is handled by the inner header row — not the outer card.
+	                // The outer card must remain non-sticky so the browser can use it as the sticky boundary
+	                // (header sticks until the card's bottom edge passes the top threshold).
+	                draggingTopicId && topicDropTargetId === topicId ? "border-[rgba(255,90,45,0.55)]" : "",
+	                topicSelectedForSend ? "ring-2 ring-[rgba(77,171,158,0.55)]" : ""
+	              )}
+	              style={topicGlowStyle(topicColor, topicIndex, isExpanded)}
+	            >
+	              <div
                 role="button"
                 tabIndex={0}
-                className={cn(
-                  "flex items-start justify-between gap-3 text-left",
-                  topicChatFullscreen ? "hidden" : "",
-                  editingTopicId === topic.id ? "flex-wrap" : "flex-nowrap",
-                  isExpanded && !topicChatFullscreen
-                    ? "sticky z-10 -mx-4 -mt-4 min-h-[76px] rounded-t-[calc(var(--radius-lg)-1px)] px-4 py-2 md:-mx-5 md:-mt-5 md:px-5"
-                    : ""
-                )}
-                style={
-                  isExpanded && !topicChatFullscreen
-                    ? { top: stickyBarHeight, ...stickyTopicHeaderStyle(topicColor, topicIndex) }
-                    : undefined
-                }
+	                className={cn(
+	                  "flex items-start justify-between gap-3 text-left",
+	                  editingTopicId === topic.id ? "flex-wrap" : "flex-nowrap",
+	                  isExpanded
+	                    ? "sticky z-10 -mx-4 -mt-4 min-h-[76px] rounded-t-[calc(var(--radius-lg)-1px)] px-4 py-2 md:-mx-5 md:-mt-5 md:px-5"
+	                    : ""
+	                )}
+	                style={
+	                  isExpanded
+	                    ? { top: stickyBarHeight, ...stickyTopicHeaderStyle(topicColor, topicIndex) }
+	                    : undefined
+	                }
                 onClick={(event) => {
                   if (!allowToggle(event.target as HTMLElement)) return;
                   toggleTopicExpanded(topicId);
@@ -6979,77 +6713,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                    )}
 	                  </div>
 	                </div>
-                  {false && !isUnassigned ? (
-                    <button
-                      type="button"
-                      data-testid={`toggle-topic-chat-${topicId}`}
-                      data-no-swipe="true"
-                      aria-label={
-                        !mdUp
-                          ? topicChatFullscreen
-                            ? `Collapse chat ${topic.name}`
-                            : `Expand chat ${topic.name}`
-                          : isExpanded
-                            ? `Chat open for ${topic.name}`
-                            : `Expand chat ${topic.name}`
-                      }
-                      title={
-                        !mdUp
-                          ? topicChatFullscreen
-                            ? "Close chat"
-                            : "Open chat"
-                          : isExpanded
-                            ? "Chat open"
-                            : "Expand chat"
-                      }
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (!mdUp) {
-                          if (topicChatFullscreen) {
-                            closeMobileChatLayer();
-                            return;
-                          }
-                          openMobileTopicChat(topicId);
-                          return;
-                        }
-                        if (!isExpanded) {
-                          toggleTopicExpanded(topicId);
-                          return;
-                        }
-                        setExpandedTopicChats((prev) => {
-                          if (prev.has(topicId)) return prev;
-                          const next = new Set(prev);
-                          next.add(topicId);
-                          return next;
-                        });
-                        setAutoFocusTopicId(topicId);
-                        activeChatAtBottomRef.current = true;
-                        scheduleScrollChatToBottom(`topic:${topicId}`);
-                      }}
-                      className={cn(
-                        "flex h-8 w-8 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-sm text-[rgb(var(--claw-muted))] transition",
-                        "hover:border-[rgba(255,90,45,0.3)] hover:text-[rgb(var(--claw-text))]"
-                      )}
-                    >
-                      {topicChatFullscreen ? (
-                        "✕"
-                      ) : (
-                        <svg
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.7"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          className="h-4 w-4"
-                          aria-hidden
-                        >
-                          <path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H8l-5 3V11.5A8.5 8.5 0 0 1 11.5 3h1A8.5 8.5 0 0 1 21 11.5Z" />
-                        </svg>
-                      )}
-                    </button>
-                  ) : null}
-	                <button
+		                <button
 	                  type="button"
 	                  aria-label={isExpanded ? `Collapse topic ${topic.name}` : `Expand topic ${topic.name}`}
 	                  title={isExpanded ? "Collapse" : "Expand"}
@@ -7069,14 +6733,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		              {isExpanded && showTasks && (
 		                <div
                       data-testid={`topic-expanded-body-${topicId}`}
-	                      className={cn(
-		                        topicChatFullscreen
-                              ? "mt-0 flex min-h-0 flex-1 flex-col"
-                              : "mt-3 space-y-3 max-md:pb-2"
-		                      )}
+	                      className="mt-3 space-y-3 max-md:pb-2"
 	                    >
-                      {!topicChatFullscreen ? (
-                        <>
                       {topic.description ? (
                         <p className="text-xs text-[rgb(var(--claw-muted))]">{topic.description}</p>
                       ) : null}
@@ -7134,19 +6792,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                      return matchesTaskSearch(task);
 	                    })
 	                    .map((task, taskIndex) => {
+                      const mobileTaskId = mobileChatTarget?.taskId ?? "";
                       if (
                         !mdUp &&
                         mobileLayer === "chat" &&
-                        mobileChatTarget?.kind === "task" &&
-                        mobileChatTarget.taskId !== task.id
+                        mobileTaskId &&
+                        mobileTaskId !== task.id
                       ) {
                         return null;
                       }
 	                      const taskChatFullscreen =
 	                        !mdUp &&
 	                        mobileLayer === "chat" &&
-                        mobileChatTarget?.kind === "task" &&
-                        mobileChatTarget.taskId === task.id;
+                        mobileTaskId === task.id;
                       const taskExpanded = taskChatFullscreen || expandedTasksSafe.has(task.id);
 	                      const taskColor =
 	                        taskDisplayColors.get(task.id) ??
@@ -8104,15 +7762,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                                </div>
 					                              {/* Load more moved into the chat header (top-right). */}
 					                              {!isUnassigned && (
-					                                <>
 					                                <BoardChatComposer
 	                                      ref={(node) => {
 	                                        const key = taskSessionKey(topicId, task.id);
 	                                        if (node) composerHandlesRef.current.set(key, node);
-                                        else composerHandlesRef.current.delete(key);
-                                      }}
+			                                  else composerHandlesRef.current.delete(key);
+			                                }}
 			                                  sessionKey={taskSessionKey(topicId, task.id)}
-			                                  topicId={topicId}
 			                                  spaceId={selectedSpaceId || undefined}
 			                                  className={cn(
                                         "mt-4",
@@ -8159,382 +7815,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                  }}
 			                                  testId={`task-chat-composer-${task.id}`}
 				                                />
-				                                </>
-				                              )}
-			                          </div>
-			                        )}
-			                      </div>
-                          </SwipeRevealRow>
-	                    );
-	                    })}
-		                  {/* Intentionally omit "No tasks match your filters." to keep topic cards visually tight. */}
-                        </>
-                      ) : null}
+					                              )}
+				                          </div>
+				                        )}
+				                      </div>
+				                          </SwipeRevealRow>
+				                    );
+				                    })}
+			                  {/* Intentionally omit "No tasks match your filters." to keep topic cards visually tight. */}
 
-	                  {false && !isUnassigned && (
-	                    <div
-	                      className={cn(
-                          topicChatFullscreen
-                            ? "flex min-h-0 flex-1 flex-col overflow-hidden overscroll-none px-4 pb-5 pt-[calc(env(safe-area-inset-top)+2.7rem)]"
-                            : "mt-3 border-t border-[rgba(255,255,255,0.06)] pt-3"
-                        )}
-	                      style={topicChatFullscreen ? mobileOverlaySurfaceStyle(topicColor) : undefined}
-	                    >
-                      <div
-		                        className={cn(
-                          "flex items-center justify-between gap-2.5 text-left",
-                          !mdUp && mobileLayer === "chat" ? "max-md:hidden" : ""
-                        )}
-	                      >
-			                        <div className="min-w-0">
-			                          <div className="flex min-w-0 items-center gap-2">
-			                            <div className="shrink-0 text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">
-			                              TOPIC CHAT
-			                            </div>
-			                            {isSessionResponding(topicSessionKey(topicId)) ? <TypingDots /> : null}
-			                            {topicChatBlurb ? (
-			                              <>
-			                                <span className="text-xs text-[rgba(var(--claw-muted),0.55)]">·</span>
-				                                <div
-				                                  className="min-w-0 max-w-[56ch] truncate text-xs text-[rgba(var(--claw-muted),0.9)]"
-				                                  title={topicChatBlurb?.full ?? ""}
-				                                >
-				                                  {topicChatBlurb?.clipped ?? ""}
-				                                </div>
-			                              </>
-			                            ) : null}
-			                          </div>
-			                          <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topicChatMetricsLabel}</div>
-			                        </div>
-		                      </div>
-		                        <div
-                              className={cn(
-                                topicChatFullscreen
-                                  ? "mt-0 flex min-h-0 flex-1 flex-col"
-                                  : "mt-2.5 pt-2"
-                              )}
-                              style={topicChatFullscreen ? mobileOverlaySurfaceStyle(topicColor) : undefined}
-                            >
-                              {topicChatFullscreen ? (
-                                <div className="absolute left-3 top-[calc(env(safe-area-inset-top)+0.5rem)] z-20 flex items-center gap-2">
-                                  <button
-                                    type="button"
-                                    className="inline-flex h-8 w-8 items-center justify-center rounded-full border text-base text-[rgb(var(--claw-text))] backdrop-blur"
-                                    style={mobileOverlayCloseButtonStyle(topicColor)}
-                                    onClick={(event) => {
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      closeMobileChatLayer();
-                                    }}
-                                    aria-label="Close chat"
-                                    title="Close chat"
-                                  >
-                                    ✕
-                                  </button>
-                                  {!readOnly && topic.id !== "unassigned" ? (
-                                    <button
-                                      type="button"
-                                      className="inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] backdrop-blur"
-                                      style={mobileOverlayCloseButtonStyle(topicColor)}
-                                      onClick={(event) => {
-                                        event.preventDefault();
-                                        event.stopPropagation();
-                                        closeMobileChatLayer();
-                                        setEditingTaskId(null);
-                                        setTaskNameDraft("");
-                                        setTaskColorDraft(TASK_FALLBACK_COLORS[0]);
-                                        setEditingTopicId(topic.id);
-                                        setTopicNameDraft(topic.name);
-                                        setTopicColorDraft(topicColor);
-                                        setTopicTagsDraft(formatTags(topic.tags));
-                                        setActiveTopicTagField(null);
-                                        setDeleteArmedKey(null);
-                                        setRenameError(`topic:${topicId}`);
-                                      }}
-                                      aria-label="Edit topic"
-                                      title="Edit topic"
-                                    >
-                                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
-                                        <path d="M12 20h9" />
-                                        <path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-                                      </svg>
-                                    </button>
-                                  ) : null}
-                                </div>
-                              ) : null}
-						                        <div className={cn("mb-2", topicChatFullscreen ? "space-y-1" : "flex items-center justify-end gap-2")}>
-                                      {topicChatFullscreen ? (
-                                        <div data-testid={`topic-chat-context-${topicId}`} className="pr-10">
-                                          <div className="flex min-w-0 items-center gap-1.5">
-                                            <div className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
-                                              TOPIC CHAT
-                                            </div>
-                                            {isSessionResponding(topicSessionKey(topicId)) ? <TypingDots /> : null}
-                                          </div>
-                                          <nav
-                                            aria-label="Topic chat context"
-                                            data-testid={`topic-chat-breadcrumb-${topicId}`}
-                                            className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-[rgb(var(--claw-muted))]"
-                                          >
-                                            <span className="shrink-0 uppercase tracking-[0.14em]">Topic</span>
-                                            <span className="min-w-0 max-w-[62vw] truncate font-medium text-[rgb(var(--claw-text))]">
-                                              {topic.name}
-                                            </span>
-                                          </nav>
-                                        </div>
-                                      ) : null}
-                                      <div
-                                        data-testid={`topic-chat-controls-${topicId}`}
-                                        className={cn(
-                                          "flex flex-nowrap items-center gap-2",
-                                          topicChatFullscreen ? "w-full justify-end" : "justify-end"
-                                        )}
-                                      >
-                                        <span
-                                          data-testid={`topic-chat-entries-${topicId}`}
-                                          className="shrink-0 whitespace-nowrap text-xs text-[rgb(var(--claw-muted))]"
-                                        >
-                                          {topicChatMetricsLabel}
-                                        </span>
-                                        {topicChatTruncated ? (
-                                          <Button
-                                            size="sm"
-                                            variant="secondary"
-                                            className="order-last shrink-0 whitespace-nowrap"
-                                            onClick={(event) => {
-                                              event.stopPropagation();
-                                              event.preventDefault();
-                                              loadOlderChat(topicChatKey, TOPIC_TIMELINE_LIMIT, topicChatAllLogs.length, TOPIC_TIMELINE_LIMIT);
-                                            }}
-                                          >
-                                            Load older
-                                          </Button>
-                                        ) : null}
-                                      </div>
-					                        </div>
-			                          {topicChatAllLogs.length === 0 &&
-                              findPendingMessagesBySession(topicSessionKey(topicId)).length === 0 &&
-                              !isSessionResponding(topicSessionKey(topicId)) ? (
-			                            <p className="mb-3 text-sm text-[rgb(var(--claw-muted))]">No messages yet.</p>
-			                          ) : null}
-			                          <div className={cn("relative", topicChatFullscreen ? "min-h-0 flex flex-1 flex-col" : "")}>
-			                            <div
-			                              className={cn(
-			                                // Subtle iMessage-style fade when there is scroll content above/below.
-			                                "pointer-events-none absolute left-0 right-0 top-0 z-10 h-8 bg-[linear-gradient(to_bottom,rgb(var(--claw-panel)/0.78),rgb(var(--claw-panel)/0.38)_52%,rgb(var(--claw-panel)/0.0))] shadow-[0_14px_18px_rgba(0,0,0,0.22)] transition-opacity duration-200 ease-out",
-			                                chatTopFade[`topic:${topicId}`] ? "opacity-100" : "opacity-0"
-			                              )}
-			                            />
-			                            {chatJumpToBottom[`topic:${topicId}`] ? (
-			                              <button
-			                                type="button"
-			                                className={cn(
-			                                  "absolute bottom-2 left-1/2 z-20 -translate-x-1/2",
-			                                  "rounded-full border border-[rgba(255,255,255,0.14)] bg-[rgba(14,17,22,0.72)] px-3 py-1.5",
-			                                  "text-[11px] font-semibold uppercase tracking-[0.18em] text-[rgba(148,163,184,0.95)]",
-			                                  "shadow-[0_12px_26px_rgba(0,0,0,0.28)] backdrop-blur",
-			                                  "transition hover:border-[rgba(255,90,45,0.38)] hover:text-[rgb(var(--claw-text))]"
-			                                )}
-			                                onClick={(event) => {
-			                                  event.preventDefault();
-			                                  event.stopPropagation();
-			                                  const chatKey = `topic:${topicId}`;
-			                                  activeChatAtBottomRef.current = true;
-			                                  scheduleScrollChatToBottom(chatKey);
-			                                }}
-			                                aria-label="Jump to latest messages"
-			                                title="Jump to latest"
-			                              >
-			                                Jump to latest ↓
-			                              </button>
-			                            ) : null}
-				                            <div
-				                              data-testid={`topic-chat-scroll-${topicId}`}
-		                              ref={getChatScrollerRef(`topic:${topicId}`)}
-				                              onScroll={(event) => {
-				                                const key = `topic:${topicId}`;
-				                                const node = event.currentTarget;
-				                                const showTop = node.scrollTop > 2;
-			                                const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
-			                                const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
-			                                chatAtBottomRef.current.set(key, atBottom);
-
-			                                  const prevTop = chatLastScrollTopRef.current.get(key) ?? node.scrollTop;
-			                                  const delta = node.scrollTop - prevTop;
-			                                  chatLastScrollTopRef.current.set(key, node.scrollTop);
-    			                                // UX: hide the jump-to-latest button while the user scrolls UP (reading history).
-			                                // Only show it again when scrolling DOWN and not at bottom.
-			                                const shouldShowJump = !atBottom && delta > 0;
-			                                setChatJumpToBottom((prev) =>
-			                                  prev[key] === shouldShowJump ? prev : { ...prev, [key]: shouldShowJump }
-			                                );
-			                                setChatTopFade((prev) =>
-			                                  prev[key] === showTop ? prev : { ...prev, [key]: showTop }
-			                                );
-			                                if (activeChatKeyRef.current === key) updateActiveChatAtBottom();
-		                              }}
-		                              className={cn(
-		                                "overflow-y-auto pr-1",
-		                                topicChatFullscreen
-		                                  ? "min-h-0 flex-1 overflow-y-auto overscroll-contain"
-		                                  : ""
-		                              )}
-		                              style={
-		                                topicChatFullscreen
-		                                  ? undefined
-		                                  : {
-			                                      maxHeight: "max(240px, calc(100dvh - var(--claw-header-h, 0px) - 280px))",
-			                                    }
-			                              }
-			                            >
-		                              <LogList
-		                                logs={topicChatLogs}
-		                                topics={topics}
-		                                tasks={tasks}
-		                                scopeTopicId={topicId}
-		                                scopeTaskId={null}
-		                                showFilters={false}
-		                                showRawToggle={false}
-		                                showDensityToggle={false}
-		                                showRawAll={showRaw}
-			                                messageDensity={messageDensity}
-		                                allowNotes
-		                                metaDefaultCollapsed={true}
-		                                metaExpandEpoch={chatMetaExpandEpoch}
-		                                metaCollapseEpoch={chatMetaCollapseEpoch}
-			                                variant="chat"
-                                hideToolCallsInChat={!showToolCalls}
-			                                enableNavigation={false}
-			                              />
-                                      {pendingMessages
-                                        .filter((pending) =>
-                                          normalizeBoardSessionKey(pending.sessionKey) === normalizeBoardSessionKey(topicSessionKey(topicId))
-                                        )
-                                        .map((pending) => (
-                                          <div key={pending.localId} className="py-1">
-                                            <div className="flex justify-end">
-                                              <div className="w-full max-w-[78%]">
-                                                <div
-                                                  className={cn(
-                                                    "rounded-[20px] border px-4 py-3 text-sm leading-relaxed",
-                                                    pending.status === "failed" ? "opacity-90" : "",
-                                                    "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
-                                                  )}
-                                                >
-                                                  {pending.attachments && pending.attachments.length > 0 ? (
-                                                    <AttachmentStrip attachments={pending.attachments} className="mt-0 mb-3" />
-                                                  ) : null}
-                                                  <Markdown highlightCommands={true}>{
-                                                    pending.message
-                                                  }</Markdown>
-                                                </div>
-                                                <div className="mt-1 flex items-center justify-end gap-2 text-[10px] text-[rgba(148,163,184,0.9)]">
-                                                  <button
-                                                    type="button"
-                                                    className="rounded-full border border-[rgba(255,255,255,0.10)] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[rgba(148,163,184,0.9)] transition hover:border-[rgba(255,90,45,0.35)] hover:text-[rgb(var(--claw-text))]"
-                                                    onClick={(event) => {
-                                                      event.preventDefault();
-                                                      event.stopPropagation();
-                                                      void navigator.clipboard?.writeText?.(pending.message ?? "");
-                                                    }}
-                                                    title="Copy message"
-                                                  >
-                                                    Copy
-                                                  </button>
-                                                  <span>
-                                                    {pending.status === "sending"
-                                                      ? "Sending…"
-                                                      : pending.status === "sent"
-                                                        ? sseConnected ? "Delivered" : "Delivered · reconnecting"
-                                                        : pending.error
-                                                          ? pending.error
-                                                          : "Failed to send."}
-                                                  </span>
-                                                  {pending.debugHint ? (
-                                                    <span className="ml-2 text-[10px] text-[rgba(148,163,184,0.65)]">{pending.debugHint}</span>
-                                                  ) : null}
-                                                </div>
-                                              </div>
-                                            </div>
-                                          </div>
-                                        ))}
-                                      {isSessionResponding(topicChatSessionKey) ? (
-                                        <div className="py-1">
-                                          <div className="flex justify-start">
-                                            <div className="w-full max-w-[78%] px-4 py-2" title="OpenClaw responding">
-                                              <TypingDots />
-                                              {topicHiddenToolCallCount > 0 ? (
-                                                <span
-                                                  data-testid={`topic-chat-hidden-tool-count-${topicId}`}
-                                                  className="ml-2 text-[11px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.9)]"
-                                                >
-                                                  {topicHiddenToolCallCount} hidden tool{topicHiddenToolCallCount === 1 ? " call" : " calls"}
-                                                </span>
-                                              ) : null}
-                                            </div>
-                                          </div>
-                                        </div>
-                                      ) : null}
-                                      {/* Keep a small tail spacer for chat breathing room without wasting viewport height. */}
-                                      <div aria-hidden className={topicChatFullscreen ? "h-2" : "h-12"} />
-			                            </div>
-			                          </div>
-			                          {/* Load more moved into the chat header (top-right). */}
-			                          <BoardChatComposer
-			                                ref={(node) => {
-			                                  const key = topicSessionKey(topicId);
-                                  if (node) composerHandlesRef.current.set(key, node);
-                                  else composerHandlesRef.current.delete(key);
-                                }}
-			                            sessionKey={topicSessionKey(topicId)}
-			                            topicId={topicId}
-			                            spaceId={selectedSpaceId || undefined}
-		                            className={cn(
-                                "mt-4",
-                                topicChatFullscreen
-                                  ? "max-md:mt-0.5 max-md:shrink-0 max-md:border-t max-md:border-[rgba(255,255,255,0.08)] max-md:bg-[rgba(11,13,18,0.86)] max-md:px-1 max-md:pb-0 max-md:pt-1 max-md:backdrop-blur"
-                                  : ""
-                              )}
-		                            variant="seamless"
-		                            dense={topicChatFullscreen}
-		                            placeholder={`Message ${topic.name}…`}
-		                            onFocus={() => {
-		                              setActiveComposer({ kind: "topic", topicId });
-		                              if (!topicChatFullscreen) {
-		                                const chatKey = `topic:${topicId}`;
-		                                activeChatAtBottomRef.current = true;
-		                                scheduleScrollChatToBottom(chatKey);
-		                                setChatJumpToBottom((prev) =>
-		                                  prev[chatKey] === false ? prev : { ...prev, [chatKey]: false }
-		                                );
-		                              }
-		                            }}
-		                            onBlur={() =>
-		                              setActiveComposer((prev) =>
-		                                prev?.kind === "topic" && prev.topicId === topicId ? null : prev
-		                              )
-		                            }
-		                            onSendUpdate={handleComposerSendUpdate}
-		                            waiting={isSessionResponding(topicSessionKey(topicId))}
-		                            waitingRequestId={requestIdForSession(topicSessionKey(topicId))}
-		                            onCancel={() => {
-		                              const sk = topicSessionKey(topicId);
-		                              setAwaitingAssistant((prev) => {
-		                                if (!Object.prototype.hasOwnProperty.call(prev, sk)) return prev;
-		                                const next = { ...prev };
-		                                delete next[sk];
-		                                return next;
-		                              });
-		                            }}
-		                            autoFocus={autoFocusTopicId === topicId}
-		                            onAutoFocusApplied={() =>
-		                              setAutoFocusTopicId((prev) => (prev === topicId ? null : prev))
-		                            }
-			                            testId={`topic-chat-composer-${topicId}`}
-			                          />
-			                        </div>
-			                    </div>
-		                  )}
                 </div>
 	              )}
 	            </div>

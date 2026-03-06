@@ -605,20 +605,20 @@ class AppendLogEntryTests(unittest.TestCase):
         )
         self.assertEqual(scoped_res.status_code, 200, scoped_res.text)
         scoped_payload = scoped_res.json()
-        self.assertEqual(scoped_payload.get("topicId"), "topic-a")
+        self.assertIsNone(scoped_payload.get("topicId"))
         self.assertIsNone(scoped_payload.get("taskId"))
 
         with get_session() as session:
             patched = session.get(LogEntry, first_id)
             self.assertIsNotNone(patched)
             assert patched is not None
-            self.assertEqual(patched.topicId, "topic-a")
+            self.assertIsNone(patched.topicId)
             self.assertIsNone(patched.taskId)
-            self.assertEqual(patched.classificationStatus, "classified")
-            self.assertEqual(patched.classificationError, "filtered_tool_activity")
+            self.assertEqual(patched.classificationStatus, "failed")
+            self.assertEqual(patched.classificationError, "filtered_unanchored_tool_activity")
             source = patched.source if isinstance(patched.source, dict) else {}
-            self.assertEqual(source.get("boardScopeTopicId"), "topic-a")
-            self.assertEqual(source.get("boardScopeKind"), "topic")
+            self.assertNotIn("boardScopeTopicId", source)
+            self.assertNotIn("boardScopeKind", source)
 
     def test_append_log_recovers_subagent_scope_from_routing_memory_with_stale_task(self):
         base_dt = datetime.now(timezone.utc)
@@ -1306,9 +1306,9 @@ class AppendLogEntryTests(unittest.TestCase):
             route = session.get(OpenClawRequestRoute, "occhat-route-seed-1")
             self.assertIsNotNone(route)
             assert route is not None
-            self.assertEqual(route.topicId, "topic-a")
+            self.assertIsNone(route.topicId)
             self.assertIsNone(route.taskId)
-            self.assertEqual(route.routeKind, "topic")
+            self.assertEqual(route.routeKind, "detached")
             self.assertFalse(route.routeLocked)
 
     def test_append_log_creates_request_route_from_occhat_message_id_when_request_id_is_non_occhat(self):
@@ -1356,9 +1356,9 @@ class AppendLogEntryTests(unittest.TestCase):
             route = session.get(OpenClawRequestRoute, "occhat-route-seed-message-1")
             self.assertIsNotNone(route)
             assert route is not None
-            self.assertEqual(route.topicId, "topic-a")
+            self.assertIsNone(route.topicId)
             self.assertIsNone(route.taskId)
-            self.assertEqual(route.routeKind, "topic")
+            self.assertEqual(route.routeKind, "detached")
 
     def test_append_log_request_route_overrides_mismatched_scope_for_same_request(self):
         ts = now_iso()
