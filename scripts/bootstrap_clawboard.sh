@@ -100,7 +100,7 @@ memory_index_output_has_errors() {
   if [ -z "$output" ]; then
     return 1
   fi
-  if printf "%s" "$output" | grep -Eqi 'qmd collection add failed|sqliteerror|sqlite_constraint'; then
+  if grep -Eqi 'qmd collection add failed|sqliteerror|sqlite_constraint|constraint failed' <<<"$output"; then
     return 0
   fi
   return 1
@@ -2877,7 +2877,8 @@ maybe_apply_agent_directives() {
 }
 
 # Run setup-openclaw-local-memory.sh unconditionally (no user prompt). Tool policy + watchdog
-# are always applied. Call before the Obsidian prompt. Handles missing openclaw/script gracefully.
+# are always applied. Call before the Obsidian prompt. Bootstrap defers any full memory reindex
+# so the overall flow only does one QMD refresh pass. Handles missing openclaw/script gracefully.
 maybe_run_local_memory_setup() {
   local script_path=""
   if ! script_path="$(resolve_local_memory_setup_script 2>/dev/null)"; then
@@ -2889,10 +2890,7 @@ maybe_run_local_memory_setup() {
     return 0
   fi
   log_info "Running local memory setup (tool allow list, heartbeat, watchdog)..."
-  # Force a full reindex so that Obsidian vault collections (added to memory.qmd.paths) are
-  # guaranteed to be populated even on existing installations where the incremental index
-  # would otherwise skip new/empty QMD collections.
-  if MEMORY_FORCE_INDEX=true bash "$script_path"; then
+  if OPENCLAW_MEMORY_SKIP_INDEX=true bash "$script_path"; then
     log_success "Local memory setup completed."
   else
     log_error "setup-openclaw-local-memory.sh failed. Bootstrap aborted to avoid partial agent/memory configuration. Re-run: bash $script_path"
@@ -4136,41 +4134,19 @@ PY
       log_warn "openclaw doctor --fix returned non-zero (may be safe to ignore)."
     fi
 
-    if [ "$OPENCLAW_GATEWAY_RESTART_NEEDED" = true ]; then
-      log_info "Restarting OpenClaw gateway to apply configuration..."
-      if openclaw gateway restart >/dev/null 2>&1; then
-        log_success "OpenClaw gateway restarted."
-      elif openclaw gateway start >/dev/null 2>&1; then
-        log_success "OpenClaw gateway started."
-      else
-        log_warn "Unable to restart OpenClaw gateway automatically. Run: openclaw gateway restart"
-      fi
-    fi
-
     maybe_offer_obsidian_memory_setup "$OBSIDIAN_MEMORY_SETUP_MODE"
-    if [ "$OBSIDIAN_MEMORY_SETUP_STATUS" = "configured" ]; then
-      ensure_clawboard_logger_in_allow
-      log_info "Restarting OpenClaw gateway after Obsidian/memory setup..."
-      if openclaw gateway restart >/dev/null 2>&1; then
-        log_success "OpenClaw gateway restarted."
-      elif openclaw gateway start >/dev/null 2>&1; then
-        log_success "OpenClaw gateway started."
-      else
-        log_warn "Unable to restart OpenClaw gateway automatically. Run: openclaw gateway restart"
-      fi
-    fi
-
     maybe_offer_memory_backup_setup "$MEMORY_BACKUP_SETUP_MODE"
 
 
-    # Force a full QMD memory index for every agent after all vault paths are registered.
-    # This runs after setup_obsidian_brain.sh adds the per-agent thinking-vault paths, so
-    # any markdown files already on disk are immediately searchable rather than waiting
-    # up to 5m for qmd's background update.interval to fire.
+    # Run at most one bootstrap-managed QMD refresh pass. setup_obsidian_brain.sh already
+    # performs its own full refresh after registering vault paths, so skip the duplicate
+    # bootstrap sweep when that setup completed successfully.
     # Ongoing re-indexing of new files is handled automatically by qmd's built-in
     # update.interval: "5m" — no cron job is needed for normal operation.
     # To manually re-index at any time: openclaw memory index --agent <id> --force
-    if command -v openclaw >/dev/null 2>&1; then
+    if [ "$OBSIDIAN_MEMORY_SETUP_STATUS" = "configured" ]; then
+      log_info "Skipping bootstrap QMD refresh because setup_obsidian_brain.sh already refreshed indexes."
+    elif command -v openclaw >/dev/null 2>&1; then
       log_info "Refreshing QMD memory indexes for all configured agents..."
       _idx_timeout_s="${OPENCLAW_MEMORY_INDEX_TIMEOUT_SEC:-180}"
       _idx_agent_ids=()
@@ -4229,6 +4205,24 @@ PY
       fi
     else
       log_warn "openclaw CLI not found; skipping QMD index refresh."
+    fi
+
+    if [ "$OBSIDIAN_MEMORY_SETUP_STATUS" = "configured" ]; then
+      ensure_clawboard_logger_in_allow
+    fi
+    if [ "$OPENCLAW_GATEWAY_RESTART_NEEDED" = true ] || [ "$OBSIDIAN_MEMORY_SETUP_STATUS" = "configured" ]; then
+      if [ "$OBSIDIAN_MEMORY_SETUP_STATUS" = "configured" ]; then
+        log_info "Restarting OpenClaw gateway after bootstrap memory configuration..."
+      else
+        log_info "Restarting OpenClaw gateway to apply configuration..."
+      fi
+      if openclaw gateway restart >/dev/null 2>&1; then
+        log_success "OpenClaw gateway restarted."
+      elif openclaw gateway start >/dev/null 2>&1; then
+        log_success "OpenClaw gateway started."
+      else
+        log_warn "Unable to restart OpenClaw gateway automatically. Run: openclaw gateway restart"
+      fi
     fi
     ensure_clawboard_logger_in_allow
   fi

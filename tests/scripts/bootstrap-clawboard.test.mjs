@@ -128,8 +128,13 @@ if [[ "$#" -ge 3 && "$1" == "cron" && "$2" == "list" && "$3" == "--json" ]]; the
 fi
 
 if [[ "$#" -ge 2 && "$1" == "memory" && "$2" == "index" ]]; then
-  echo "Memory index updated."
-  exit 0
+  log_stub_call "$*"
+  if [[ -n "\${OPENCLAW_STUB_MEMORY_INDEX_OUTPUT:-}" ]]; then
+    printf '%s\n' "$OPENCLAW_STUB_MEMORY_INDEX_OUTPUT"
+  else
+    echo "Memory index updated."
+  fi
+  exit "\${OPENCLAW_STUB_MEMORY_INDEX_RC:-0}"
 fi
 
 if [[ "$#" -ge 2 && "$1" == "memory" && "$2" == "status" ]]; then
@@ -581,6 +586,63 @@ test("bootstrap_clawboard.sh: uses CLAWBOARD_TOKEN for API health and config wri
   assert.match(curlLog, /method=POST url=http:\/\/localhost:8010\/api\/config token=1/);
 });
 
+test("bootstrap_clawboard.sh: does not report memory index success when qmd/sqlite errors appear in output", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-index-errors-"));
+  const repoRoot = path.join(tmp, "repo");
+  const installDir = path.join(tmp, "install");
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const binDir = path.join(tmp, "bin");
+
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
+  await seedBootstrapInstallTree(installDir, { includePlugin: false });
+
+  await makeOpenClawStub(binDir);
+  await makeStub(binDir, "curl", "exit 0");
+
+  const bootstrapPath = path.join(repoRoot, "scripts");
+  await mkdir(bootstrapPath, { recursive: true });
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), path.join(bootstrapPath, "bootstrap_clawboard.sh"));
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_openclaw.sh"), path.join(bootstrapPath, "bootstrap_openclaw.sh"));
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    CLAWBOARD_TOKEN: "index-token",
+    OPENCLAW_STUB_MEMORY_INDEX_OUTPUT:
+      "SqliteError: constraint failed\ncode: SQLITE_CONSTRAINT_PRIMARYKEY\nNode.js v25.5.0",
+    OPENCLAW_STUB_MEMORY_INDEX_RC: "0",
+  };
+
+  const res = await run(
+    [
+      "bash",
+      path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+      "--dir",
+      installDir,
+      "--skip-docker",
+      "--skip-plugin",
+      "--skip-memory-backup-setup",
+      "--no-access-url-prompt",
+      "--no-color",
+      "--integration-level",
+      "write",
+    ],
+    { cwd: repoRoot, env }
+  );
+
+  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  assert.doesNotMatch(res.stdout, /Agent 'main' memory index refreshed\./);
+  assert.match(res.stdout, /Agent 'main' index output reported qmd\/sqlite errors/);
+  assert.match(res.stdout, /QMD memory index refresh completed with 1 warning\(s\)\./);
+});
+
 test("bootstrap_clawboard.sh: deploys logger plugin directly so required baseUrl config can be written before activation", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-plugin-"));
   const repoRoot = path.join(tmp, "repo");
@@ -653,6 +715,101 @@ test("bootstrap_clawboard.sh: deploys logger plugin directly so required baseUrl
   const installedPluginPath = path.join(openclawHome, "extensions", "clawboard-logger");
   const installedPluginStats = await lstat(installedPluginPath);
   assert.equal(installedPluginStats.isDirectory(), true, "expected logger plugin directory to be installed");
+});
+
+test("bootstrap_clawboard.sh: avoids duplicate memory reindex after Obsidian setup", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-obsidian-index-"));
+  const repoRoot = path.join(tmp, "repo");
+  const installDir = path.join(tmp, "install");
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const binDir = path.join(tmp, "bin");
+  const openclawLogPath = path.join(tmp, "openclaw.log");
+  const localMemoryLogPath = path.join(tmp, "local-memory.log");
+  const obsidianLogPath = path.join(tmp, "obsidian.log");
+
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
+  await seedBootstrapInstallTree(installDir, { includePlugin: false });
+
+  await mkdir(path.join(installDir, "skills", "clawboard", "scripts"), { recursive: true });
+  await writeFile(
+    path.join(installDir, "skills", "clawboard", "scripts", "setup-openclaw-local-memory.sh"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "skip=\${OPENCLAW_MEMORY_SKIP_INDEX:-}" >> "\${LOCAL_MEMORY_SETUP_LOG_FILE}"
+`,
+    { mode: 0o755 }
+  );
+
+  await mkdir(path.join(installDir, "scripts"), { recursive: true });
+  await writeFile(
+    path.join(installDir, "scripts", "setup_obsidian_brain.sh"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "obsidian-ran" >> "\${OBSIDIAN_SETUP_LOG_FILE}"
+openclaw memory index --agent main --force
+`,
+    { mode: 0o755 }
+  );
+
+  await makeOpenClawStub(binDir);
+  await makeStub(binDir, "curl", "exit 0");
+
+  const bootstrapPath = path.join(repoRoot, "scripts");
+  await mkdir(bootstrapPath, { recursive: true });
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), path.join(bootstrapPath, "bootstrap_clawboard.sh"));
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_openclaw.sh"), path.join(bootstrapPath, "bootstrap_openclaw.sh"));
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    OPENCLAW_STUB_LOG_FILE: openclawLogPath,
+    LOCAL_MEMORY_SETUP_LOG_FILE: localMemoryLogPath,
+    OBSIDIAN_SETUP_LOG_FILE: obsidianLogPath,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    CLAWBOARD_TOKEN: "obsidian-token",
+  };
+
+  const res = await run(
+    [
+      "bash",
+      path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+      "--dir",
+      installDir,
+      "--skip-docker",
+      "--skip-plugin",
+      "--skip-memory-backup-setup",
+      "--setup-obsidian-memory",
+      "--no-access-url-prompt",
+      "--no-color",
+      "--integration-level",
+      "write",
+    ],
+    { cwd: repoRoot, env }
+  );
+
+  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  assert.match(
+    res.stdout,
+    /Skipping bootstrap QMD refresh because setup_obsidian_brain\.sh already refreshed indexes\./
+  );
+
+  const localMemoryLog = await readFile(localMemoryLogPath, "utf8");
+  assert.match(localMemoryLog, /skip=true/);
+
+  const obsidianLog = await readFile(obsidianLogPath, "utf8");
+  assert.match(obsidianLog, /obsidian-ran/);
+
+  const openclawLog = await readFile(openclawLogPath, "utf8");
+  const memoryIndexCalls = openclawLog
+    .split("\n")
+    .filter((line) => line.trim() === "memory index --agent main --force");
+  assert.equal(memoryIndexCalls.length, 1, `expected one memory index call, saw:\n${openclawLog}`);
 });
 
 test("setup-openclaw-local-memory.sh: rolls back config snapshot on required write failure", async () => {

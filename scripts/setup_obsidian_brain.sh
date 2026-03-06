@@ -38,6 +38,12 @@ log_warn() { echo -e "${YELLOW}warning:${NC} $1"; }
 log_error() { echo -e "${RED}error:${NC} $1"; }
 die() { log_error "$1"; exit 1; }
 
+memory_index_output_has_errors() {
+  local output="${1:-}"
+  [[ -n "$output" ]] || return 1
+  grep -Eqi 'qmd collection add failed|sqliteerror|sqlite_constraint|constraint failed' <<<"$output"
+}
+
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 need_cmd() { has_cmd "$1" || die "Missing required command: $1"; }
 
@@ -1080,11 +1086,18 @@ refresh_memory_indexes() {
 
   log_info "Refreshing OpenClaw memory index for: ${ordered_ids[*]} (scope=${scope}, force=true)"
   for agent_id in "${ordered_ids[@]}"; do
+    local output=""
     [ -n "$agent_id" ] || continue
     log_info "Running: openclaw memory index --agent $agent_id --force"
-    if openclaw memory index --agent "$agent_id" --force; then
-      log_success "Memory index refreshed for agent '$agent_id'."
+    if output="$(openclaw memory index --agent "$agent_id" --force 2>&1)"; then
+      [[ -n "$output" ]] && printf "%s\n" "$output"
+      if memory_index_output_has_errors "$output"; then
+        log_warn "Memory index output reported qmd/sqlite errors for agent '$agent_id'. Retry manually: openclaw memory index --agent $agent_id --force"
+      else
+        log_success "Memory index refreshed for agent '$agent_id'."
+      fi
     else
+      [[ -n "$output" ]] && printf "%s\n" "$output"
       log_warn "Memory index refresh failed for agent '$agent_id'. Retry manually: openclaw memory index --agent $agent_id --force"
     fi
   done

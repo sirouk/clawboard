@@ -14,6 +14,7 @@ set -euo pipefail
 #   OPENCLAW_MEMORY_MODEL_PATH            (absolute path to existing model; skip download)
 #   OPENCLAW_MEMORY_ENABLE_SESSIONS       (default: true)
 #   OPENCLAW_MEMORY_FALLBACK              (default: none)
+#   OPENCLAW_MEMORY_SKIP_INDEX            (true|false, default: false)
 #   OPENCLAW_MEMORY_INDEX_SCOPE           (all|main, default: all)
 #   OPENCLAW_MEMORY_FORCE_INDEX           (true|false, default: false)
 #   OPENCLAW_MEMORY_INDEX_MAX_ATTEMPTS    (default: 3)
@@ -124,7 +125,7 @@ memory_index_output_has_errors() {
   if [[ -z "$output" ]]; then
     return 1
   fi
-  if printf "%s" "$output" | grep -Eqi 'qmd collection add failed|sqliteerror|sqlite_constraint'; then
+  if grep -Eqi 'qmd collection add failed|sqliteerror|sqlite_constraint|constraint failed' <<<"$output"; then
     return 0
   fi
   return 1
@@ -741,6 +742,7 @@ MODEL_URL="${OPENCLAW_MEMORY_MODEL_URL:-$MODEL_URL_DEFAULT}"
 MODEL_PATH_OVERRIDE="${OPENCLAW_MEMORY_MODEL_PATH:-}"
 MEMORY_ENABLE_SESSIONS="$(as_bool "${OPENCLAW_MEMORY_ENABLE_SESSIONS:-true}" "true")"
 MEMORY_FALLBACK="${OPENCLAW_MEMORY_FALLBACK:-none}"
+MEMORY_SKIP_INDEX="$(as_bool "${OPENCLAW_MEMORY_SKIP_INDEX:-false}" "false")"
 MEMORY_FORCE_INDEX="$(as_bool "${OPENCLAW_MEMORY_FORCE_INDEX:-false}" "false")"
 
 resolve_model_path() {
@@ -1208,7 +1210,11 @@ main() {
   # tick. Adding a separate cron with payload.kind=systemEvent on a main-session target
   # causes triple-delivery per tick (systemEvent injects twice + heartbeat once), generating
   # unnecessary background noise without any additional recovery coverage.
-  refresh_indexes
+  if [[ "$MEMORY_SKIP_INDEX" == "true" ]]; then
+    log_info "Skipping memory index refresh (OPENCLAW_MEMORY_SKIP_INDEX=true)."
+  else
+    refresh_indexes
+  fi
   print_status
 
   echo ""

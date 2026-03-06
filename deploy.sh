@@ -20,6 +20,12 @@ compose() {
   "${COMPOSE_CMD[@]}" "$@"
 }
 
+memory_index_output_has_errors() {
+  local output="${1:-}"
+  [ -n "$output" ] || return 1
+  grep -Eqi 'qmd collection add failed|sqliteerror|sqlite_constraint|constraint failed' <<<"$output"
+}
+
 ensure_env_file() {
   if [ -f "$ENV_FILE" ]; then
     return
@@ -584,11 +590,20 @@ _reindex_openclaw_memory() {
   local id
   local attempts=0
   local failures=0
+  local output
   for id in "${agent_ids[@]}"; do
     attempts=$((attempts + 1))
-    if openclaw memory index --agent "$id" --force; then
-      echo "  [$id] memory index refreshed."
+    output=""
+    if output="$(openclaw memory index --agent "$id" --force 2>&1)"; then
+      [ -n "$output" ] && printf "%s\n" "$output"
+      if memory_index_output_has_errors "$output"; then
+        echo "  [$id] memory index reported qmd/sqlite errors; continuing."
+        failures=$((failures + 1))
+      else
+        echo "  [$id] memory index refreshed."
+      fi
     else
+      [ -n "$output" ] && printf "%s\n" "$output"
       echo "  [$id] memory index failed; continuing."
       failures=$((failures + 1))
     fi
