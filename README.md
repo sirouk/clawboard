@@ -147,7 +147,7 @@ docker compose up -d --build
 Recommended bootstrap:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/scripts/bootstrap_openclaw.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/scripts/bootstrap_clawboard.sh | bash
 ```
 
 This can configure token + URLs, install skill/plugin, and wire logger behavior for end-to-end flow.
