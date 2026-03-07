@@ -1,12 +1,49 @@
 from __future__ import annotations
 
 from typing import Optional, List, Dict, Any, Literal
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.config import ConfigDict
 
 
 class ModelBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
+
+def _normalize_utf8_text(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    text = text.replace("\x00", "")
+    try:
+        return text.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+    except Exception:
+        return text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+
+
+def _normalize_utf8_list(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, set)):
+        return [_normalize_utf8_text(item) for item in value]
+    return value
+
+
+def _normalize_utf8_jsonish(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, (str, bytes)):
+        return _normalize_utf8_text(value)
+    if isinstance(value, dict):
+        normalized: Dict[str, Any] = {}
+        for key, item in value.items():
+            normalized[str(_normalize_utf8_text(key) or "")] = _normalize_utf8_jsonish(item)
+        return normalized
+    if isinstance(value, (list, tuple, set)):
+        return [_normalize_utf8_jsonish(item) for item in value]
+    return _normalize_utf8_text(value)
 
 
 class AttachmentRef(BaseModel):
@@ -16,6 +53,11 @@ class AttachmentRef(BaseModel):
     fileName: str = Field(description="Original filename.", examples=["design-notes.pdf"])
     mimeType: str = Field(description="MIME type.", examples=["application/pdf"])
     sizeBytes: int = Field(description="Size in bytes.", examples=[12345])
+
+    @field_validator("id", "fileName", "mimeType", mode="before")
+    @classmethod
+    def _normalize_text_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_text(value)
 
 
 class AttachmentOut(ModelBase):
@@ -76,6 +118,11 @@ class InstanceUpdate(BaseModel):
         examples=["manual"],
     )
 
+    @field_validator("title", mode="before")
+    @classmethod
+    def _normalize_text_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_text(value)
+
 
 class InstanceResponse(BaseModel):
     instance: InstanceOut = Field(description="Instance configuration object.")
@@ -118,6 +165,11 @@ class SpaceUpsert(BaseModel):
     id: Optional[str] = Field(default=None, description="Space ID (omit to create).", examples=["space-work"])
     name: str = Field(description="Space name.", examples=["Work"])
     color: Optional[str] = Field(default=None, description="Optional space color #RRGGBB.", examples=["#4EA1FF"])
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _normalize_text_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_text(value)
 
 
 class SpaceConnectivityPatch(BaseModel):
@@ -309,6 +361,16 @@ class TopicUpsert(BaseModel):
     parentId: Optional[str] = Field(default=None, description="Parent topic ID.", examples=["topic-1"])
     pinned: Optional[bool] = Field(default=None, description="Pin topic to top.", examples=[True])
 
+    @field_validator("name", "description", "priority", "status", "parentId", mode="before")
+    @classmethod
+    def _normalize_text_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_text(value)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _normalize_tag_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_list(value)
+
 
 class TaskUpsert(BaseModel):
     model_config = ConfigDict(
@@ -341,6 +403,16 @@ class TaskUpsert(BaseModel):
         examples=["2026-02-09T18:00:00.000Z"],
     )
     tags: Optional[List[str]] = Field(default=None, description="Tags list.", examples=[["ops", "follow-up"]])
+
+    @field_validator("title", "status", "priority", mode="before")
+    @classmethod
+    def _normalize_text_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_text(value)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _normalize_tag_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_list(value)
 
 
 class TopicReorderRequest(BaseModel):
@@ -432,6 +504,26 @@ class LogAppend(BaseModel):
         description="Optional attachments metadata embedded on the log entry.",
     )
 
+    @field_validator(
+        "idempotencyKey",
+        "classificationStatus",
+        "type",
+        "content",
+        "summary",
+        "raw",
+        "agentId",
+        "agentLabel",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_text_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_text(value)
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _normalize_source_field(cls, value: Any) -> Any:
+        return _normalize_utf8_jsonish(value)
+
 
 class LogPatch(BaseModel):
     """Patch fields on an existing log entry (idempotent reclassification)."""
@@ -446,6 +538,11 @@ class LogPatch(BaseModel):
     classificationStatus: Optional[str] = Field(default=None, description="pending|classified|failed")
     classificationAttempts: Optional[int] = Field(default=None, description="Attempt count")
     classificationError: Optional[str] = Field(default=None, description="Last error")
+
+    @field_validator("content", "summary", "raw", "classificationStatus", "classificationError", mode="before")
+    @classmethod
+    def _normalize_text_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_text(value)
 
 
 class TopicPatch(BaseModel):
@@ -464,6 +561,16 @@ class TopicPatch(BaseModel):
     digest: Optional[str] = Field(default=None, description="Durable digest text (system-managed).")
     digestUpdatedAt: Optional[str] = Field(default=None, description="Digest updated timestamp (ISO).")
 
+    @field_validator("name", "description", "priority", "status", "parentId", "digest", mode="before")
+    @classmethod
+    def _normalize_text_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_text(value)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _normalize_tag_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_list(value)
+
 
 class TaskPatch(BaseModel):
     """Patch fields on an existing task (partial update)."""
@@ -480,6 +587,16 @@ class TaskPatch(BaseModel):
     topicId: Optional[str] = Field(default=None, description="Parent topic id (nullable).")
     digest: Optional[str] = Field(default=None, description="Durable digest text (system-managed).")
     digestUpdatedAt: Optional[str] = Field(default=None, description="Digest updated timestamp (ISO).")
+
+    @field_validator("title", "status", "priority", "digest", mode="before")
+    @classmethod
+    def _normalize_text_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_text(value)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _normalize_tag_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_list(value)
 
 
 class ContextResponse(BaseModel):
@@ -510,6 +627,11 @@ class DraftUpsert(BaseModel):
         description="Draft value (may be empty to clear).",
         examples=["Working on the onboarding flow..."],
     )
+
+    @field_validator("key", "value", mode="before")
+    @classmethod
+    def _normalize_text_fields(cls, value: Any) -> Any:
+        return _normalize_utf8_text(value)
 
 
 class DraftOut(ModelBase):

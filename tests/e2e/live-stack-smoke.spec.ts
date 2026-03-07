@@ -57,6 +57,7 @@ test.describe("live stack smoke", () => {
         } else {
           window.localStorage.removeItem("clawboard.token");
         }
+        window.localStorage.removeItem("draft:unified:composer");
       },
       [apiBase, token]
     );
@@ -64,13 +65,19 @@ test.describe("live stack smoke", () => {
     await page.goto(`/u/topic/${topicId}/task/${taskId}`);
     await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
-    const taskCard = page.locator(`[data-task-card-id="${taskId}"]`).first();
-    await expect(taskCard).toBeVisible();
-    const composer = taskCard.locator('textarea[placeholder^="Message "]').first();
+    const composer = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
     await expect(composer).toBeVisible();
+    const targetChip = page.getByTestId("unified-composer-target-chip");
+    const chipText = (await targetChip.textContent().catch(() => "")) ?? "";
+    if (!chipText.includes(taskTitle)) {
+      await composer.fill(taskTitle);
+      await expect(page.getByTestId(`select-task-target-${taskId}`)).toBeVisible();
+      await page.getByTestId(`select-task-target-${taskId}`).click();
+    }
+    await expect(page.getByTestId("unified-composer-target-chip")).toContainText(taskTitle);
 
     await composer.fill(message);
-    const sendButton = taskCard.getByRole("button", { name: "Send", exact: true }).first();
+    const sendButton = page.getByTestId("unified-composer-send");
     await expect(sendButton).toBeVisible();
     const sendRes = await Promise.all([
       page.waitForResponse((resp) => resp.url().includes("/api/openclaw/chat") && resp.request().method() === "POST"),

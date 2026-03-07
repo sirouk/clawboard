@@ -17,6 +17,7 @@ os.environ["CLAWBOARD_TOKEN"] = "test-token"
 
 try:
     from fastapi.testclient import TestClient
+    from sqlalchemy.exc import DataError
     from sqlmodel import select
 
     from app.db import get_session, init_db  # noqa: E402
@@ -33,6 +34,11 @@ except Exception:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def has_surrogates(value: str | None) -> bool:
+    text = str(value or "")
+    return any(0xD800 <= ord(ch) <= 0xDFFF for ch in text)
 
 
 @unittest.skipUnless(_API_TESTS_AVAILABLE, "FastAPI/SQLModel test dependencies are not installed.")
@@ -58,6 +64,131 @@ class SearchEndpointTests(unittest.TestCase):
                 main_module._SEARCH_RESULT_CACHE.clear()
         except Exception:
             pass
+
+    def test_exec_search_rows_resilient_skips_malformed_utf8_rows(self):
+        exc = DataError("SELECT 1", {}, Exception('invalid byte sequence for encoding "UTF8": 0xe2'))
+
+        class FakeResult:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def all(self):
+                return list(self._rows)
+
+        class FakeSession:
+            def __init__(self, outcomes):
+                self._outcomes = outcomes
+                self.rollback_calls = 0
+
+            def exec(self, query):
+                ids = list(query)
+                outcome = self._outcomes[tuple(ids)]
+                if outcome == "error":
+                    raise exc
+                return FakeResult(outcome)
+
+            def rollback(self):
+                self.rollback_calls += 1
+
+        class FakeSessionContext:
+            def __init__(self, session):
+                self._session = session
+
+            def __enter__(self):
+                return self._session
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        root_session = FakeSession({
+            ("bad-1", "good-1", "bad-2"): "error",
+        })
+        retry_sessions = iter(
+            [
+                FakeSession({("bad-1",): "error"}),
+                FakeSession({("good-1", "bad-2"): "error"}),
+                FakeSession({("good-1",): [("good-1", "head", "tail")]}),
+                FakeSession({("bad-2",): "error"}),
+            ]
+        )
+
+        with patch.object(main_module, "get_session", side_effect=lambda: FakeSessionContext(next(retry_sessions))) as patched_get_session:
+            rows = main_module._exec_search_rows_resilient(
+                root_session,
+                ["bad-1", "good-1", "bad-2"],
+                lambda ids: tuple(ids),
+                label="test-preview",
+            )
+
+        self.assertEqual(rows, [("good-1", "head", "tail")])
+        self.assertEqual(root_session.rollback_calls, 1)
+        self.assertEqual(patched_get_session.call_count, 4)
+
+    def test_log_append_normalizes_unsafe_text_before_persisting(self):
+        payload = main_module.LogAppend.model_validate(
+            {
+                "type": "conversation",
+                "content": "hello\udce2\x00world",
+                "summary": "summary\udce2\x00",
+                "raw": "raw\udce2\x00",
+                "agentId": "user",
+                "agentLabel": "User\udce2\x00",
+                "source": {
+                    "channel": "webchat",
+                    "messageId": "msg\udce2\x00",
+                    "nested": {"reply": b"ok\xff"},
+                },
+            }
+        )
+
+        with get_session() as session:
+            entry = main_module.append_log_entry(session, payload)
+            stored = session.get(LogEntry, entry.id)
+
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertNotIn("\x00", stored.content)
+        self.assertNotIn("\x00", stored.summary or "")
+        self.assertNotIn("\x00", stored.raw or "")
+        self.assertNotIn("\x00", stored.agentLabel or "")
+        self.assertFalse(has_surrogates(stored.content))
+        self.assertFalse(has_surrogates(stored.summary))
+        self.assertFalse(has_surrogates(stored.raw))
+        self.assertFalse(has_surrogates(stored.agentLabel))
+        self.assertEqual((stored.source or {}).get("nested", {}).get("reply"), "ok�")
+        self.assertFalse(has_surrogates((stored.source or {}).get("messageId")))
+
+    def test_topic_and_task_payloads_normalize_unsafe_text(self):
+        topic_payload = main_module.TopicUpsert.model_validate(
+            {
+                "name": "Topic\udce2\x00 Name",
+                "description": "Desc\udce2\x00",
+                "tags": ["ops\udce2\x00"],
+            }
+        )
+        task_payload = main_module.TaskUpsert.model_validate(
+            {
+                "title": "Task\udce2\x00 Title",
+                "status": "doing",
+                "tags": ["ship\udce2\x00"],
+            }
+        )
+
+        self.assertNotIn("\x00", topic_payload.name)
+        self.assertNotIn("\x00", topic_payload.description or "")
+        self.assertFalse(has_surrogates(topic_payload.name))
+        self.assertFalse(has_surrogates(topic_payload.description))
+        self.assertEqual(len(topic_payload.tags or []), 1)
+        self.assertNotIn("\x00", (topic_payload.tags or [""])[0])
+        self.assertFalse(has_surrogates((topic_payload.tags or [""])[0]))
+        self.assertIn("ops", (topic_payload.tags or [""])[0])
+
+        self.assertNotIn("\x00", task_payload.title)
+        self.assertFalse(has_surrogates(task_payload.title))
+        self.assertEqual(len(task_payload.tags or []), 1)
+        self.assertNotIn("\x00", (task_payload.tags or [""])[0])
+        self.assertFalse(has_surrogates((task_payload.tags or [""])[0]))
+        self.assertIn("ship", (task_payload.tags or [""])[0])
 
     def test_search_busy_falls_back_to_degraded_mode(self):
         read_headers = {"Host": "localhost:8010"}

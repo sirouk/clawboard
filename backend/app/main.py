@@ -7,6 +7,7 @@ import hashlib
 import base64
 import heapq
 import queue
+import logging
 from io import BytesIO
 import colorsys
 import asyncio
@@ -26,8 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from typing import List, Any, Iterable, Callable
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, text, or_, and_, exists, case, inspect as sa_inspect, literal_column
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 from sqlalchemy.orm import defer, aliased
 from sqlmodel import select
 
@@ -100,6 +100,8 @@ from .openclaw_gateway import gateway_rpc
 from .events import event_hub
 from .clawgraph import build_clawgraph
 from .vector_search import dense_candidate_ids, semantic_search
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Clawboard API",
@@ -1628,11 +1630,42 @@ def _is_injected_clawboard_context_artifact(value: str | None) -> bool:
     return False
 
 
+def _coerce_safe_text(value: Any | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    if not text:
+        return ""
+    text = text.replace("\x00", "")
+    try:
+        return text.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+    except Exception:
+        return text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+
+
+def _sanitize_json_textish(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, (str, bytes)):
+        return _coerce_safe_text(value)
+    if isinstance(value, dict):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized[str(_coerce_safe_text(key) or "")] = _sanitize_json_textish(item)
+        return normalized
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_json_textish(item) for item in value]
+    return _coerce_safe_text(value)
+
+
 def _sanitize_log_text(value: str | None) -> str:
     """Sanitize text for search indexing and summaries. Collapses whitespace."""
     if not value:
         return ""
-    text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = _coerce_safe_text(value).replace("\r\n", "\n").replace("\r", "\n").strip()
     _, text = _extract_openclaw_untrusted_metadata_wrapper(text)
     text = _CLAWBOARD_CONTEXT_BLOCK_RE.sub(" ", text)
     text = _CLAWBOARD_CONTEXT_HEURISTIC_RE.sub(" ", text)
@@ -1657,7 +1690,7 @@ def _preserve_markdown_text(value: str | None) -> str:
     """
     if not value:
         return ""
-    text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = _coerce_safe_text(value).replace("\r\n", "\n").replace("\r", "\n").strip()
     _, text = _extract_openclaw_untrusted_metadata_wrapper(text)
     text = _CLAWBOARD_CONTEXT_BLOCK_RE.sub("\n", text)  # Preserve line breaks
     text = _CLAWBOARD_CONTEXT_HEURISTIC_RE.sub("\n", text)  # Preserve line breaks
@@ -1747,7 +1780,7 @@ def _safe_log_attr_text(entry: LogEntry, field: str) -> str:
     except Exception:
         pass
     try:
-        return str(getattr(entry, name) or "")
+        return _coerce_safe_text(getattr(entry, name) or "")
     except Exception:
         return ""
 
@@ -1788,6 +1821,43 @@ def _chunked_values(values: list[str], chunk_size: int) -> Iterable[list[str]]:
         chunk = values[index : index + size]
         if chunk:
             yield chunk
+
+
+def _is_search_row_encoding_error(exc: Exception) -> bool:
+    lowered = str(exc or "").lower()
+    return "invalid byte sequence" in lowered or "characternotinrepertoire" in lowered
+
+
+def _exec_search_rows_resilient(
+    session: Any,
+    ids: list[str],
+    build_query: Callable[[list[str]], Any],
+    *,
+    label: str,
+) -> list[Any]:
+    clean_ids = [str(item or "").strip() for item in ids if str(item or "").strip()]
+    if not clean_ids:
+        return []
+    try:
+        return list(session.exec(build_query(clean_ids)).all())
+    except DataError as exc:
+        if not _is_search_row_encoding_error(exc):
+            raise
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        if len(clean_ids) == 1:
+            logger.warning("search skipping malformed UTF-8 row during %s fetch: %s", label, clean_ids[0])
+            return []
+        midpoint = max(1, len(clean_ids) // 2)
+        rows: list[Any] = []
+        for retry_ids in (clean_ids[:midpoint], clean_ids[midpoint:]):
+            if not retry_ids:
+                continue
+            with get_session() as retry_session:
+                rows.extend(_exec_search_rows_resilient(retry_session, retry_ids, build_query, label=label))
+        return rows
 
 
 def _combined_log_text(content: str | None, summary: str | None, raw: str | None) -> str:
@@ -4688,32 +4758,32 @@ def _maybe_upgrade_existing_duplicate_log(
         return existing
 
     changed = False
-    incoming_content = str(payload.content or "")
-    existing_content = str(getattr(existing, "content", None) or "")
+    incoming_content = _coerce_safe_text(payload.content)
+    existing_content = _coerce_safe_text(getattr(existing, "content", None) or "")
     if _assistant_duplicate_markdown_score(incoming_content) > _assistant_duplicate_markdown_score(existing_content):
-        existing.content = payload.content
+        existing.content = incoming_content
         changed = True
 
-    incoming_summary = str(payload.summary or "")
-    existing_summary = str(getattr(existing, "summary", None) or "")
+    incoming_summary = _coerce_safe_text(payload.summary)
+    existing_summary = _coerce_safe_text(getattr(existing, "summary", None) or "")
     if len(_sanitize_log_text(incoming_summary)) > len(_sanitize_log_text(existing_summary)):
-        existing.summary = payload.summary
+        existing.summary = incoming_summary or None
         changed = True
 
-    incoming_raw = str(payload.raw or "")
-    existing_raw = str(getattr(existing, "raw", None) or "")
+    incoming_raw = _coerce_safe_text(payload.raw)
+    existing_raw = _coerce_safe_text(getattr(existing, "raw", None) or "")
     if _assistant_duplicate_markdown_score(incoming_raw) > _assistant_duplicate_markdown_score(existing_raw):
-        existing.raw = payload.raw
+        existing.raw = incoming_raw or None
         changed = True
 
-    current_source = existing.source.copy() if isinstance(existing.source, dict) else {}
-    incoming_source = source_meta if isinstance(source_meta, dict) else {}
+    current_source = _sanitize_json_textish(existing.source.copy()) if isinstance(existing.source, dict) else {}
+    incoming_source = _sanitize_json_textish(source_meta) if isinstance(source_meta, dict) else {}
     merged_source = current_source.copy()
     for key, value in incoming_source.items():
-        value_text = str(value or "").strip()
+        value_text = _coerce_safe_text(value).strip()
         if not value_text:
             continue
-        current_text = str(merged_source.get(key) or "").strip()
+        current_text = _coerce_safe_text(merged_source.get(key) or "").strip()
         if current_text:
             continue
         merged_source[key] = value
@@ -5182,8 +5252,14 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     # Use ingest time for updatedAt to guarantee stable ordering even when a source provides
     # identical/low-precision createdAt values.
     updated_at = now_iso()
+    idempotency_key = _coerce_safe_text(idempotency_key).strip() or None
+    content_text = _coerce_safe_text(payload.content)
+    summary_text = _coerce_safe_text(payload.summary) or None
+    raw_text = _coerce_safe_text(payload.raw) or None
+    agent_id = _coerce_safe_text(payload.agentId).strip() or None
+    agent_label = _coerce_safe_text(payload.agentLabel).strip() or None
 
-    source_meta = payload.source.copy() if isinstance(payload.source, dict) else None
+    source_meta = _sanitize_json_textish(payload.source.copy()) if isinstance(payload.source, dict) else None
     ingest_path = "live"
     if isinstance(source_meta, dict):
         raw_ingest_path = str(source_meta.pop("_ingestPath", "live") or "live").strip().lower()
@@ -5698,11 +5774,11 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         attachments = []
         for item in payload.attachments:
             if hasattr(item, "model_dump"):
-                attachments.append(item.model_dump())
+                attachments.append(_sanitize_json_textish(item.model_dump()))
             elif isinstance(item, dict):
-                attachments.append(item)
+                attachments.append(_sanitize_json_textish(item))
             else:
-                attachments.append({"value": str(item)})
+                attachments.append({"value": _coerce_safe_text(item)})
 
     _ensure_default_space(session)
     if not space_id:
@@ -5718,19 +5794,19 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         relatedLogId=payload.relatedLogId,
         idempotencyKey=idempotency_key,
         sourceIdentityKey=source_identity_key,
-        type=payload.type,
-        content=payload.content,
-        summary=payload.summary,
-        raw=payload.raw,
+        type=_coerce_safe_text(payload.type),
+        content=content_text,
+        summary=summary_text,
+        raw=raw_text,
         createdAt=created_at,
         updatedAt=updated_at,
-        agentId=payload.agentId,
-        agentLabel=payload.agentLabel,
+        agentId=agent_id,
+        agentLabel=agent_label,
         source=source_meta,
         attachments=attachments,
         classificationStatus=classification_status,
         classificationAttempts=classification_attempts,
-        classificationError=classification_error,
+        classificationError=_coerce_safe_text(classification_error) or None,
     )
     if request_route_id:
         route_seed_space, route_seed_topic, route_seed_task = _validated_scope_candidate(
@@ -14880,17 +14956,17 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
         if "relatedLogId" in fields:
             entry.relatedLogId = payload.relatedLogId
         if "content" in fields:
-            entry.content = payload.content or ""
+            entry.content = _coerce_safe_text(payload.content or "")
         if "summary" in fields:
-            entry.summary = payload.summary
+            entry.summary = _coerce_safe_text(payload.summary) or None
         if "raw" in fields:
-            entry.raw = payload.raw
+            entry.raw = _coerce_safe_text(payload.raw) or None
         if "classificationStatus" in fields:
             entry.classificationStatus = payload.classificationStatus
         if "classificationAttempts" in fields:
             entry.classificationAttempts = payload.classificationAttempts
         if "classificationError" in fields:
-            entry.classificationError = payload.classificationError
+            entry.classificationError = _coerce_safe_text(payload.classificationError) or None
 
         # If only topicId changed (taskId not explicitly provided), drop taskId if it no longer matches.
         if "topicId" in fields and "taskId" not in fields and entry.taskId:
@@ -16236,12 +16312,14 @@ def _search_impl(
         snippet_tail_chars = max(220, SEARCH_LOG_CONTENT_SNIPPET_CHARS // 2)
         content_expr = func.coalesce(LogEntry.content, "")
         for id_chunk in _chunked_values(preview_scan_ids, SEARCH_LOG_CONTENT_ID_CHUNK_SIZE):
-            content_query = select(
-                LogEntry.id,
-                func.substr(content_expr, 1, snippet_head_chars).label("contentHead"),
-                func.substr(content_expr, func.length(content_expr) - snippet_tail_chars + 1, snippet_tail_chars).label("contentTail"),
-            ).where(LogEntry.id.in_(id_chunk))
-            for row in session.exec(content_query).all():
+            def _build_content_query(chunk_ids: list[str]):
+                return select(
+                    LogEntry.id,
+                    func.substr(content_expr, 1, snippet_head_chars).label("contentHead"),
+                    func.substr(content_expr, func.length(content_expr) - snippet_tail_chars + 1, snippet_tail_chars).label("contentTail"),
+                ).where(LogEntry.id.in_(chunk_ids))
+
+            for row in _exec_search_rows_resilient(session, id_chunk, _build_content_query, label="content-preview"):
                 try:
                     log_id = str(row[0] or "").strip()
                     head_raw = str(row[1] or "")
@@ -16279,11 +16357,13 @@ def _search_impl(
             content_clip_chars = max(1000, int(SEARCH_LOG_CONTENT_MATCH_CLIP_CHARS))
             content_expr = func.coalesce(LogEntry.content, "")
             for id_chunk in _chunked_values(match_scan_ids, SEARCH_LOG_CONTENT_ID_CHUNK_SIZE):
-                content_match_query = select(
-                    LogEntry.id,
-                    func.substr(content_expr, 1, content_clip_chars).label("contentClip"),
-                ).where(LogEntry.id.in_(id_chunk))
-                for row in session.exec(content_match_query).all():
+                def _build_content_match_query(chunk_ids: list[str]):
+                    return select(
+                        LogEntry.id,
+                        func.substr(content_expr, 1, content_clip_chars).label("contentClip"),
+                    ).where(LogEntry.id.in_(chunk_ids))
+
+                for row in _exec_search_rows_resilient(session, id_chunk, _build_content_match_query, label="content-match"):
                     try:
                         log_id = str(row[0] or "").strip()
                         content_raw = str(row[1] or "")
