@@ -30,9 +30,96 @@ log_info() { echo -e "${BLUE}info:${NC} $1"; }
 log_success() { echo -e "${GREEN}success:${NC} $1"; }
 log_warn() { echo -e "${YELLOW}warning:${NC} $1"; }
 log_error() { echo -e "${RED}error:${NC} $1"; exit 1; }
+close_tty_fd() {
+  exec 3<&- 3>&- 2>/dev/null || true
+}
+
+sync_main_agent_auth() {
+  local token="$1"
+  local auth_path="$HOME/.openclaw/agents/main/agent/auth-profiles.json"
+
+  mkdir -p "$(dirname "$auth_path")"
+
+  CHUTES_MAIN_AGENT_TOKEN="$token" CHUTES_MAIN_AGENT_AUTH_PATH="$auth_path" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["CHUTES_MAIN_AGENT_AUTH_PATH"])
+token = os.environ["CHUTES_MAIN_AGENT_TOKEN"]
+
+data = {
+    "version": 1,
+    "profiles": {},
+    "lastGood": {},
+    "usageStats": {},
+}
+
+if path.exists():
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        pass
+
+data.setdefault("version", 1)
+profiles = data.setdefault("profiles", {})
+profiles["chutes:default"] = {
+    "provider": "chutes",
+    "type": "api_key",
+    "key": token,
+}
+profiles["chutes:manual"] = {
+    "provider": "chutes",
+    "type": "api_key",
+    "key": token,
+}
+data.setdefault("lastGood", {})["chutes"] = "chutes:default"
+data.setdefault("usageStats", {})
+
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+
+  log_success "Main agent auth synced."
+}
+
+resolve_default_model_ref() {
+  MODELS_JSON="$1" \
+  CHUTES_DEFAULT_MODEL_ID="${CHUTES_DEFAULT_MODEL_ID:-}" \
+  CHUTES_DEFAULT_MODEL_REF="${CHUTES_DEFAULT_MODEL_REF:-}" \
+  node - <<'NODE'
+const models = JSON.parse(process.env.MODELS_JSON || '[]');
+const explicitRef = (process.env.CHUTES_DEFAULT_MODEL_REF || '').trim();
+if (explicitRef) {
+  console.log(explicitRef.startsWith('chutes/') ? explicitRef : `chutes/${explicitRef}`);
+  process.exit(0);
+}
+
+const ids = new Set(models.map((model) => model.id));
+const preferred = [
+  (process.env.CHUTES_DEFAULT_MODEL_ID || '').trim(),
+  'zai-org/GLM-4.7-TEE',
+  'Qwen/Qwen3-Coder-Next-TEE',
+  'moonshotai/Kimi-K2.5-TEE',
+  'zai-org/GLM-5-TEE',
+  'Qwen/Qwen3-32B',
+].filter(Boolean);
+
+for (const modelId of preferred) {
+  if (ids.has(modelId)) {
+    console.log(`chutes/${modelId}`);
+    process.exit(0);
+  }
+}
+
+const firstModel = models[0]?.id || 'zai-org/GLM-4.7-TEE';
+console.log(`chutes/${firstModel}`);
+NODE
+}
 
 CHUTES_BASE_URL="${CHUTES_BASE_URL:-https://llm.chutes.ai/v1}"
-CHUTES_DEFAULT_MODEL_REF="${CHUTES_DEFAULT_MODEL_REF:-chutes/zai-org/GLM-4.7-Flash}"
+CHUTES_DEFAULT_MODEL_ID="${CHUTES_DEFAULT_MODEL_ID:-}"
+CHUTES_DEFAULT_MODEL_REF="${CHUTES_DEFAULT_MODEL_REF:-}"
+CHUTES_AUTH_TOKEN=""
 
 check_node_version() {
 
@@ -145,8 +232,8 @@ add_chutes_auth() {
     if [ -z "${env_token//[[:space:]]/}" ]; then
       log_error "CHUTES_USE_ENV_TOKEN=1 but CHUTES_API_KEY is empty."
     fi
-    printf "%s" "$env_token" | openclaw models auth paste-token --provider chutes >/dev/null 2>&1 \
-      || log_error "Failed to store Chutes token from CHUTES_API_KEY."
+    CHUTES_AUTH_TOKEN="$env_token"
+    sync_main_agent_auth "$env_token"
     log_success "Chutes auth stored (from env)."
     return 0
   fi
@@ -155,31 +242,32 @@ add_chutes_auth() {
     log_info "CHUTES_API_KEY detected; prompting interactively (set CHUTES_USE_ENV_TOKEN=1 to use env token)."
   fi
 
-  if [ ! -r /dev/tty ]; then
+  if ! [ -t 2 ] || ! exec 3<>/dev/tty 2>/dev/null; then
     log_error "CHUTES_API_KEY is not set and no interactive TTY is available for token input."
   fi
 
   token=""
   echo ""
-  printf "Paste token for Chutes: " > /dev/tty
+  printf "Paste token for Chutes: " >&3
   # Read from /dev/tty so this works when script is executed via curl|bash.
   local restore_echo=false
-  if stty -echo < /dev/tty 2>/dev/null; then
+  if stty -echo <&3 2>/dev/null; then
     restore_echo=true
   fi
-  IFS= read -r token < /dev/tty
+  IFS= read -r token <&3
   if [ "$restore_echo" = true ]; then
-    stty echo < /dev/tty 2>/dev/null || true
+    stty echo <&3 2>/dev/null || true
   fi
-  printf "\n" > /dev/tty
+  printf "\n" >&3
+  close_tty_fd
 
   token="${token//$'\r'/}"
   if [ -z "${token//[[:space:]]/}" ]; then
     log_error "Chutes token cannot be empty."
   fi
 
-  printf "%s" "$token" | openclaw models auth paste-token --provider chutes >/dev/null 2>&1 \
-    || log_error "Failed to store Chutes token."
+  CHUTES_AUTH_TOKEN="$token"
+  sync_main_agent_auth "$token"
   log_success "Chutes auth stored."
 }
 
@@ -217,10 +305,12 @@ run();' 2>/dev/null || echo "")
 
   if [ -z "$MODELS_JSON" ]; then
     log_warn "Failed to fetch dynamic model list. Using fallback default."
-    MODELS_JSON='[{"id":"zai-org/GLM-4.7-Flash","name":"GLM 4.7 Flash","reasoning":false,"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":128000,"maxTokens":4096}]'
+    MODELS_JSON='[{"id":"zai-org/GLM-4.7-TEE","name":"zai-org/GLM-4.7-TEE","reasoning":true,"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":128000,"maxTokens":4096}]'
   else
     log_success "Fetched $(echo "$MODELS_JSON" | grep -o 'id' | wc -l) models from Chutes."
   fi
+
+  CHUTES_DEFAULT_MODEL_REF="$(resolve_default_model_ref "$MODELS_JSON")"
 
   log_info "Adding Chutes provider config..."
   
@@ -229,6 +319,7 @@ run();' 2>/dev/null || echo "")
       baseUrl: '$CHUTES_BASE_URL',
       api: 'openai-completions',
       auth: 'api-key',
+      apiKey: '$CHUTES_AUTH_TOKEN',
       models: $MODELS_JSON
     };
     console.log(JSON.stringify(config));
@@ -288,12 +379,13 @@ run();' 2>/dev/null || echo "")
   chmod +x "$UPDATE_SCRIPT"
 
   if command -v crontab >/dev/null 2>&1; then
-    if [ -r /dev/tty ]; then
+    if [ -t 2 ] && exec 3<>/dev/tty 2>/dev/null; then
       echo ""
       echo "There's a helper script to refresh Chutes models update_chutes_models.sh added to your openclaw workspace."
-      printf "Would you like to schedule it to run every 4 hours? [N/y] : " > /dev/tty
+      printf "Would you like to schedule it to run every 4 hours? [N/y] : " >&3
       SCHEDULE_CHUTES=""
-      IFS= read -r SCHEDULE_CHUTES < /dev/tty
+      IFS= read -r SCHEDULE_CHUTES <&3 || true
+      close_tty_fd
       SCHEDULE_CHUTES="${SCHEDULE_CHUTES//$'\r'/}"
       if [[ "$SCHEDULE_CHUTES" =~ ^[yY]$ ]]; then
         crontab -l 2>/dev/null | grep -v "update_chutes_models.sh" | crontab - 2>/dev/null || true
@@ -342,7 +434,46 @@ verify() {
   fi
 
   log_info "Running a quick test completion..."
-  if openclaw agent --agent main --message "Say hello in one sentence." >/dev/null 2>&1; then
+  local verify_output verify_reply
+  if verify_output="$(openclaw agent --agent main --session-id chutes-bootstrap-verify --message "Reply with exactly: OK" --json --timeout 120 2>/dev/null)" \
+    && verify_reply="$(CHUTES_VERIFY_OUTPUT="$verify_output" python3 - <<'PY'
+import json
+import os
+import sys
+
+raw = os.environ.get("CHUTES_VERIFY_OUTPUT", "").strip()
+if not raw:
+    raise SystemExit(1)
+
+data = json.loads(raw)
+texts = []
+
+targets = [data]
+if isinstance(data, dict) and isinstance(data.get("result"), dict):
+    targets.append(data["result"])
+
+for target in targets:
+    if not isinstance(target, dict):
+        continue
+    reply = target.get("reply")
+    if isinstance(reply, dict):
+        for key in ("text", "message"):
+            value = reply.get(key)
+            if isinstance(value, str) and value.strip():
+                texts.append(value.strip())
+    for payload in target.get("payloads") or []:
+        if isinstance(payload, dict):
+            text = payload.get("text")
+            if isinstance(text, str) and text.strip():
+                texts.append(text.strip())
+
+joined = "\n".join(texts).strip()
+if "OK" not in joined:
+    raise SystemExit(1)
+
+print(joined.splitlines()[0])
+PY
+)"; then
     VERSION=$(openclaw --version 2>/dev/null || echo "unknown")
     
     echo ""
@@ -356,6 +487,7 @@ verify() {
     echo "   Control UI:        openclaw dashboard"
     echo "   Active Provider:   Chutes AI"
     echo "   Primary Model:     $CHUTES_DEFAULT_MODEL_REF"
+    echo "   Smoke Reply:       $verify_reply"
     echo "----------------------------------------------------------------------"
     echo "   Next Steps:"
     echo "   1. Chat with Agent:  openclaw agent -m \"Hello!\" --agent main"
@@ -365,6 +497,7 @@ verify() {
     echo "----------------------------------------------------------------------"
   else
     log_warn "Agent test failed. Check: openclaw models status --json and your token/provider config."
+    log_warn "Smoke output: ${verify_output:-<empty>}"
     log_warn "Gateway log: ~/.openclaw/gateway.log"
   fi
 }

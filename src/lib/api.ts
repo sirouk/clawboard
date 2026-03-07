@@ -31,13 +31,19 @@ function coerceBrowserBase(value: string) {
   return normalizeBase(`${window.location.protocol}//${trimmed}`);
 }
 
+function getExplicitBrowserBase() {
+  if (typeof window === "undefined") return "";
+  const runtimeBase =
+    (window as unknown as { __CLAWBOARD_API_BASE?: string }).__CLAWBOARD_API_BASE ||
+    window.localStorage.getItem("clawboard.apiBase");
+  return runtimeBase && runtimeBase.trim().length > 0 ? coerceBrowserBase(runtimeBase) : "";
+}
+
 export function getApiBase() {
   if (typeof window !== "undefined") {
-    const runtimeBase =
-      (window as unknown as { __CLAWBOARD_API_BASE?: string }).__CLAWBOARD_API_BASE ||
-      window.localStorage.getItem("clawboard.apiBase");
-    if (runtimeBase && runtimeBase.trim().length > 0) {
-      return coerceBrowserBase(runtimeBase);
+    const explicitBase = getExplicitBrowserBase();
+    if (explicitBase) {
+      return explicitBase;
     }
   }
 
@@ -64,6 +70,16 @@ export function getApiBase() {
   }
 
   return envBaseRaw;
+}
+
+export function apiRequestUrl(path: string) {
+  if (typeof window !== "undefined" && path.startsWith("/api")) {
+    const explicitBase = getExplicitBrowserBase();
+    if (!explicitBase) {
+      return path;
+    }
+  }
+  return apiUrl(path);
 }
 
 export function setApiBase(value: string) {
@@ -116,7 +132,7 @@ function withTokenHeader(headers: HeadersInit | undefined, token: string): Heade
 
 export function apiFetch(path: string, init: RequestInit = {}, tokenOverride?: string) {
   const token = (tokenOverride ?? getApiToken()).trim();
-  return fetch(apiUrl(path), {
+  return fetch(apiRequestUrl(path), {
     ...init,
     headers: withTokenHeader(init.headers, token),
   });
@@ -125,5 +141,5 @@ export function apiFetch(path: string, init: RequestInit = {}, tokenOverride?: s
 export function apiUrlWithToken(path: string, tokenOverride?: string) {
   void tokenOverride;
   // Header-only auth: URL query tokens are intentionally not used.
-  return apiUrl(path);
+  return apiRequestUrl(path);
 }

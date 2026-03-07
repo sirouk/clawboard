@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { apiUrl, getApiBase, getApiToken } from "@/lib/api";
+import { apiRequestUrl, getApiBase, getApiToken } from "@/lib/api";
 import { useLocalStorageItem } from "@/lib/local-storage";
 import type { LiveEvent } from "@/lib/live-utils";
 
@@ -55,7 +55,7 @@ export function useLiveUpdates(options: {
       lastSseId.current = undefined;
     }
     lastBase.current = base;
-    const streamUrl = apiUrl("/api/stream");
+    const streamUrl = apiRequestUrl("/api/stream");
     if (!base && !streamUrl.startsWith("/")) return;
 
     let closed = false;

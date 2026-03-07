@@ -84,3 +84,72 @@ test("instance title updates live after config changes", async ({ page, request 
 
   await expect(page.getByText(nextTitle).first()).toBeVisible();
 });
+
+test("browser API calls use same-origin proxy by default, including unified board send", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const directApiOrigin = new URL(apiBase).origin;
+  const suffix = Date.now();
+  const topicId = `topic-proxy-send-${suffix}`;
+  const topicName = `Proxy Send ${suffix}`;
+  const taskId = `task-proxy-send-${suffix}`;
+  const taskTitle = `Proxy Task ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
+  const message = `Proxy send ${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "doing", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  let directApiHits = 0;
+  await page.route(`${directApiOrigin}/**`, async (route) => {
+    directApiHits += 1;
+    await route.abort();
+  });
+
+  let sendPayload: Record<string, unknown> | null = null;
+  await page.route("**/api/openclaw/chat", async (route) => {
+    sendPayload = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ queued: true, requestId: `req-proxy-send-${suffix}` }),
+    });
+  });
+
+  await page.goto(`http://127.0.0.1:3050/u/topic/${topicId}/task/${taskId}?reveal=1`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const composer = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
+  await expect(composer).toBeVisible();
+
+  const topicHeader = page.locator(`[data-topic-card-id="${topicId}"] > div[role="button"]`).first();
+  await expect(topicHeader).toBeVisible();
+  if ((await topicHeader.getAttribute("aria-expanded")) !== "true") {
+    await topicHeader.click();
+  }
+
+  const taskHeader = page.locator(`[data-task-card-id="${taskId}"] > div[role="button"]`).first();
+  await expect(taskHeader).toBeVisible();
+  const selectTarget = page.getByTestId(`select-task-target-${taskId}`);
+  await expect(selectTarget).toBeVisible();
+  await selectTarget.click();
+  await expect(page.getByTestId("unified-composer-target-chip")).toContainText(`task: ${taskTitle}`);
+
+  await composer.fill(message);
+  await page.getByTestId("unified-composer-send").click();
+
+  await expect
+    .poll(() => sendPayload)
+    .toMatchObject({
+      sessionKey,
+      message,
+    });
+  expect(directApiHits).toBe(0);
+  await expect(page.getByText("Failed to fetch")).toHaveCount(0);
+});
