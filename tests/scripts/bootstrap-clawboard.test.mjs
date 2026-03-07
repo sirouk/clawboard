@@ -1442,3 +1442,21 @@ test("main-agent orchestration contract documents runtime model, specialist map,
   assert.match(readmeText, /setup-agentic-team/i);
   assert.match(readmeText, /CLAWBOARD_AGENTIC_TEAM_SETUP=always/i);
 });
+
+test("bootstrap_clawboard.sh: interactive agentic team and backup setup both prompt through /dev/tty", async () => {
+  const root = process.cwd();
+  const bootstrapPath = path.join(root, "scripts", "bootstrap_clawboard.sh");
+  const bootstrapText = await readFile(bootstrapPath, "utf8");
+
+  const agenticSetupBlock = bootstrapText.match(/maybe_offer_agentic_team_setup\(\) \{[\s\S]*?\n\}/);
+  const backupSetupBlock = bootstrapText.match(/maybe_offer_memory_backup_setup\(\) \{[\s\S]*?\n\}/);
+
+  assert.ok(agenticSetupBlock, "expected maybe_offer_agentic_team_setup() block");
+  assert.ok(backupSetupBlock, "expected maybe_offer_memory_backup_setup() block");
+
+  assert.match(agenticSetupBlock[0], /prompt_yes_no_tty/);
+  assert.match(backupSetupBlock[0], /prompt_yes_no_tty/);
+  assert.doesNotMatch(backupSetupBlock[0], /\[\s*!\s*-t 0\s*\]/);
+  assert.match(bootstrapText, /CLAWBOARD_AGENTIC_TEAM_SETUP=<ask\|always\|never>/);
+  assert.match(bootstrapText, /CLAWBOARD_MEMORY_BACKUP_SETUP=<ask\|always\|never>/);
+});

@@ -3502,8 +3502,8 @@ resolve_memory_backup_setup_script() {
 maybe_offer_memory_backup_setup() {
   local mode="${1:-ask}"
   local setup_script=""
-  local answer=""
   local should_run=false
+  local prompt_rc=0
 
   case "$mode" in
     never)
@@ -3512,17 +3512,22 @@ maybe_offer_memory_backup_setup() {
       ;;
     always) should_run=true ;;
     ask)
-      if [ ! -t 0 ]; then
-        MEMORY_BACKUP_SETUP_STATUS="skipped-no-tty"
-        return 0
+      printf "\nBackups are strongly recommended for continuity + Clawboard state safety.\n" > /dev/tty 2>/dev/null || true
+      if prompt_yes_no_tty "Set up automated continuity + Clawboard backups now?" "y"; then
+        should_run=true
+      else
+        prompt_rc=$?
+        case "$prompt_rc" in
+          2)
+            MEMORY_BACKUP_SETUP_STATUS="skipped-no-tty"
+            log_info "No interactive TTY available for the backup prompt. Re-run with --setup-memory-backup or CLAWBOARD_MEMORY_BACKUP_SETUP=always to configure backups automatically."
+            return 0
+            ;;
+          *)
+            should_run=false
+            ;;
+        esac
       fi
-      printf "\nBackups are strongly recommended for continuity + Clawboard state safety.\n"
-      printf "Set up automated continuity + Clawboard backups now? [Y/n]: "
-      read -r answer
-      case "$(printf "%s" "$answer" | tr '[:upper:]' '[:lower:]')" in
-        ""|y|yes) should_run=true ;;
-        *) should_run=false ;;
-      esac
       ;;
     *)
       MEMORY_BACKUP_SETUP_STATUS="skipped-invalid-mode"
