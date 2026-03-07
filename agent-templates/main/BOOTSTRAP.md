@@ -27,8 +27,8 @@ After `sessions_spawn(...)`:
 
 When a follow-up fires:
 1. If a board `taskId` exists, check the task first. If it is already done, stop.
-2. Call `sessions_history(childSessionKey)`.
-3. If the specialist completed successfully:
+2. Call `session_status(sessionKey=childSessionKey)`.
+3. If a queued subagent completion message is present:
    - relay the result to the user,
    - clear the delegation tags,
    - mark the task done when appropriate,
@@ -37,7 +37,7 @@ When a follow-up fires:
    - send a progress update when elapsed time is greater than 5 minutes,
    - schedule the next rung on the ladder,
    - never extend beyond `1h`.
-5. If the specialist session was lost or never produced a usable result:
+5. If `session_status` cannot find the specialist session, or the run is terminal and no queued completion was relayed:
    - re-spawn the same specialist with the same task goal,
    - update the Clawboard task tags with the new `session:<childSessionKey>`,
    - reset the ladder back to `1m`.
@@ -45,6 +45,10 @@ When a follow-up fires:
    - report the failure to the user,
    - clear delegation tags,
    - do not silently retry forever.
+7. If the specialist is blocked on a real user decision:
+   - surface the blocker immediately,
+   - present the smallest decision needed next,
+   - keep ownership of the follow-up after the user answers.
 
 ## Recovery Triggers
 

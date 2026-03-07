@@ -11,16 +11,17 @@
 ## Required heartbeat response
 When the heartbeat fires:
 1. **Read the Clawboard context already injected at the top of this prompt.** Any task with `status: "doing"` and a tag like `"session:<childSessionKey>"` is an in-flight delegation. Record its `taskId`, `childSessionKey`, and `agentId` (from `"agent:<id>"` tag) before calling any tools.
-2. Call `sessions_list` to check for any active or recently completed sub-agent sessions.
-3. For each session found:
-   - If still running: report status, estimated completion, blockers, and the next check ETA from the ladder.
-   - If completed but result not yet relayed: call `sessions_history` to get the result, then summarize it to the user.
-   - If completed and result delivered: no action needed.
+2. For each recorded `childSessionKey`, call `session_status`.
+3. For each delegated run:
+   - If `session_status` shows it is still running: report status, blockers, and the next check ETA from the ladder.
+   - If a queued subagent completion message is present: summarize it to the user immediately.
+   - If the run is already completed and you have already relayed the result: no action needed.
 4. Call `clawboard_search("delegating")` as a backup sweep for any in-flight delegation not already found in the injected context.
 5. For each in-flight delegation, ensure a one-shot `cron.add` follow-up exists using the ladder `1m/3m/10m/15m/30m/1h` (reset to `1m` after respawn).
-6. For each "doing" task with a `"session:<key>"` tag not matched in `sessions_list`: the delegation was lost. Call `clawboard_get_task(taskId)` to get the originalTask from the title, re-spawn with `sessions_spawn(agentId, originalTask)`, update Clawboard tags with the new session key, and `cron.add` a new follow-up at `+1m`.
+6. For each "doing" task with a `"session:<key>"` tag whose `session_status` lookup is missing, failed, or clearly terminal without a relayed result: the delegation was lost. Call `clawboard_get_task(taskId)` to get the originalTask from the title, re-spawn with `sessions_spawn(agentId, originalTask)`, update Clawboard tags with the new session key, and `cron.add` a new follow-up at `+1m`.
 7. If a delegated run has elapsed more than 5 minutes and is still running, send an explicit user-facing progress update now.
-8. If nothing is active or pending: reply exactly `HEARTBEAT_OK`.
+8. If a delegated run is blocked on missing constraints or a real user decision, surface that blocker immediately instead of waiting for another heartbeat.
+9. If nothing is active or pending: reply exactly `HEARTBEAT_OK`.
 
 **Never skip the injected context check (step 1). It is the fastest, zero-tool-call recovery signal and works even after a gateway restart.**
 
@@ -28,6 +29,7 @@ When the heartbeat fires:
 - If a sub-agent was spawned and its result has not been delivered yet, surface it now.
 - Do not wait for the user to ask again. If work is done, report it.
 - If the sub-agent is still running and it has been more than 5 minutes, send a brief "still in progress" update and include the next ladder check ETA.
+- If the sub-agent needs a user decision to proceed, ask for that decision now.
 
 ## Active recurring checks
 - PR watch: `https://github.com/openclaw/openclaw/pull/4504`

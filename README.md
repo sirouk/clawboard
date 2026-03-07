@@ -166,6 +166,8 @@ Bootstrap characteristics (current):
 - idempotent reruns (safe to run repeatedly)
 - atomic per-file deployment of shipped docs/templates plus atomic skill/plugin swaps during OpenClaw install
 - deploys main-agent templates (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`, `BOOTSTRAP.md`) into the resolved OpenClaw main workspace
+- provisions specialist workspaces (`coding`, `docs`, `web`, `social`) and, by default, asks to enroll them so main can delegate through a real team
+- supports non-interactive specialist enrollment with `--setup-agentic-team` or `CLAWBOARD_AGENTIC_TEAM_SETUP=always`
 - deploys Clawboard contract docs (`ANATOMY.md`, `CONTEXT.md`, `CLASSIFICATION.md`, etc.) into the same workspace
 - applies scope-aware directive reconciliation (`directives/all/*` + `directives/<agent-id>/*`) with in-place updates, stale-block pruning, and a locally regenerated team roster
 - keeps main-agent execution lanes (main-only direct, single-specialist, multi-specialist/huddle) aligned with repository contracts

@@ -1108,7 +1108,7 @@ PY
   run_cfg_set "${base}.heartbeat.every" "5m" string true
   run_cfg_set "${base}.heartbeat.target" "last" string true
   run_cfg_set "${base}.heartbeat.prompt" \
-    "Heartbeat: (1) read the Clawboard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call sessions_list; (3) call clawboard_search(\"delegating\") as a backup sweep; (4) enforce follow-up ladder 1m->3m->10m->15m->30m->1h (cap 1h): each in-flight delegation must have a one-shot cron follow-up and the next wait must come from this ladder; (5) if any run is still active beyond 5 minutes, send the user a brief status update with next check ETA; (6) for any Clawboard task with status 'doing' and no matching active session: re-spawn and reset follow-up to +1m; (7) for any completed sub-agent session not yet surfaced: call sessions_history and relay the result to the user. If nothing needs attention, reply HEARTBEAT_OK." \
+    "Heartbeat: (1) read the Clawboard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call clawboard_search(\"delegating\") as a backup sweep; (3) for each tagged child session key, call session_status(sessionKey=<childSessionKey>); (4) enforce follow-up ladder 1m->3m->10m->15m->30m->1h (cap 1h): each in-flight delegation must have a one-shot cron follow-up and the next wait must come from this ladder; (5) if any queued sub-agent completion message is present, relay it to the user now; (6) if any tagged run is missing or terminal without a relayed result: re-spawn and reset follow-up to +1m; (7) if any run is still active beyond 5 minutes, send the user a brief status update with next check ETA. If nothing needs attention, reply HEARTBEAT_OK." \
     string true
   run_cfg_set "${base}.heartbeat.ackMaxChars" 300 json true
 
@@ -1117,8 +1117,9 @@ PY
 
 ensure_watchdog_cron() {
   # Upsert a persistent sub-agent watchdog cron job in ~/.openclaw/cron/jobs.json.
-  # This job fires every 5 minutes in the main session. It checks both sessions_list
-  # AND clawboard_search("delegating") so it can recover lost delegations even after
+  # This job fires every 5 minutes in the main session. It checks tagged child
+  # session keys with session_status plus clawboard_search("delegating") so it can
+  # recover lost delegations even after
   # a gateway restart — pure infrastructure, survives inference failures.
   # Idempotent: removes any existing watchdog and writes the current version.
   local cron_dir="${OPENCLAW_HOME}/cron"
@@ -1150,17 +1151,15 @@ jobs[:] = [j for j in jobs if "watchdog" not in j.get("name", "").lower()]
 now_ms = int(time.time() * 1000)
 watchdog_text = (
     "WATCHDOG RECOVERY:\n"
-    "1. Call sessions_list to check for sub-agent sessions from the last 15 minutes.\n"
-    "2. Call clawboard_search(\"delegating\") to find all tasks tagged \"delegating\" in Clawboard.\n"
-    "3. For each Clawboard task with status \"doing\": extract childSessionKey from tag starting with \"session:\", "
-    "extract agentId from tag starting with \"agent:\". Call sessions_history(childSessionKey). "
-    "COMPLETE: clawboard_update_task(taskId, { status: \"done\", tags: [] }), deliver result to the user. "
+    "1. Call clawboard_search(\"delegating\") to find all tasks tagged \"delegating\" in Clawboard.\n"
+    "2. For each Clawboard task with status \"doing\": extract childSessionKey from tag starting with \"session:\", "
+    "extract agentId from tag starting with \"agent:\". Call session_status(childSessionKey). "
+    "COMPLETE (queued sub-agent result already arrived): clawboard_update_task(taskId, { status: \"done\", tags: [] }), deliver result to the user. "
     "STILL RUNNING: send brief status if >5 minutes and include next check ETA from ladder [1,3,10,15,30,60] minutes. "
-    "LOST (no session, no output): sessions_spawn(agentId, originalTask), "
+    "LOST (session missing or terminal without relayed output): sessions_spawn(agentId, originalTask), "
     "clawboard_update_task(taskId, { tags: [\"delegating\",\"agent:<agentId>\",\"session:<newKey>\"] }), "
     "cron.add new follow-up at +1 minute and continue ladder progression.\n"
-    "4. For sessions in step 1 not covered by step 3: COMPLETED not delivered: relay result. "
-    "INCOMPLETE: re-spawn and cron.add follow-up at +1 minute.\n"
+    "3. If a queued sub-agent completion message is present at wake-up, relay it immediately and clear delegation tags.\n"
     "If nothing needs attention, reply HEARTBEAT_OK."
 )
 jobs.append({
@@ -1231,7 +1230,7 @@ main() {
   fi
   echo "Main allowAgents: $MAIN_ALLOW_AGENTS_JSON"
   echo ""
-  echo "Delegation tools: sessions_spawn, sessions_list, sessions_history, sessions_send, cron"
+  echo "Delegation tools: sessions_spawn, session_status, sessions_list, sessions_history, sessions_send, cron"
   echo "Clawboard ledger tools: clawboard_search, clawboard_update_task, clawboard_context, clawboard_get_task"
   echo "Delegation check-in cadence: 1m -> 3m -> 10m -> 15m -> 30m -> 1h (cap 1h; >5m user updates)"
   echo "Follow-up guarantee: heartbeat watchdog + session-start clawboard_search + delegation cron ladder"

@@ -1260,6 +1260,9 @@ CONTEXT_USE_CACHE_ON_FAILURE_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_F
 SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="${CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS:-}"
 VECTOR_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="${CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS:-}"
 SKILL_INSTALL_MODE="${CLAWBOARD_SKILL_INSTALL_MODE:-symlink}"
+AGENTIC_TEAM_SETUP_MODE="${CLAWBOARD_AGENTIC_TEAM_SETUP:-ask}"
+AGENTIC_TEAM_SETUP_STATUS="not-run"
+AGENTIC_TEAM_AGENT_IDS=""
 MEMORY_BACKUP_SETUP_MODE="${CLAWBOARD_MEMORY_BACKUP_SETUP:-ask}"
 MEMORY_BACKUP_SETUP_STATUS="not-run"
 MEMORY_BACKUP_SETUP_SCRIPT=""
@@ -1378,6 +1381,8 @@ while [ $# -gt 0 ]; do
       ;;
     --include-tool-call-logs) SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="1"; shift ;;
     --exclude-tool-call-logs) SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="0"; shift ;;
+    --setup-agentic-team) AGENTIC_TEAM_SETUP_MODE="always"; shift ;;
+    --skip-agentic-team-setup) AGENTIC_TEAM_SETUP_MODE="never"; shift ;;
     --setup-memory-backup) MEMORY_BACKUP_SETUP_MODE="always"; shift ;;
     --skip-memory-backup-setup) MEMORY_BACKUP_SETUP_MODE="never"; shift ;;
     --setup-obsidian-memory) OBSIDIAN_MEMORY_SETUP_MODE="always"; shift ;;
@@ -1418,6 +1423,8 @@ Environment overrides:
   OPENCLAW_HOME=<path>        OpenClaw home directory (default: ~/.openclaw)
   CLAWBOARD_SKILL_INSTALL_MODE=<copy|symlink>
                               Skill install strategy for \$OPENCLAW_HOME/skills (default: symlink)
+  CLAWBOARD_AGENTIC_TEAM_SETUP=<ask|always|never>
+                              Offer/run specialist team enrollment during bootstrap (default: ask)
   CLAWBOARD_MEMORY_BACKUP_SETUP=<ask|always|never>
                               Offer/run memory+Clawboard backup setup during bootstrap (default: ask)
   CLAWBOARD_OBSIDIAN_MEMORY_SETUP=<ask|always|never>
@@ -1475,6 +1482,10 @@ Environment overrides:
   --exclude-tool-call-logs
                        Exclude tool call/result/error action logs from semantic indexing + retrieval
                        (writes CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS=0; default)
+  --setup-agentic-team
+                      Enroll coding/docs/web/social specialists during bootstrap
+  --skip-agentic-team-setup
+                      Skip specialist enrollment prompt/setup
   --setup-memory-backup
                       Run memory+Clawboard backup setup at the end of bootstrap (interactive)
   --skip-memory-backup-setup
@@ -1546,6 +1557,14 @@ case "$(printf "%s" "$MEMORY_BACKUP_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" i
   *)
     log_warn "Invalid memory backup setup mode: $MEMORY_BACKUP_SETUP_MODE (expected ask|always|never). Using ask."
     MEMORY_BACKUP_SETUP_MODE="ask"
+    ;;
+esac
+
+case "$(printf "%s" "$AGENTIC_TEAM_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" in
+  ask|always|never) AGENTIC_TEAM_SETUP_MODE="$(printf "%s" "$AGENTIC_TEAM_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" ;;
+  *)
+    log_warn "Invalid agentic team setup mode: $AGENTIC_TEAM_SETUP_MODE (expected ask|always|never). Using ask."
+    AGENTIC_TEAM_SETUP_MODE="ask"
     ;;
 esac
 
@@ -1721,6 +1740,40 @@ prompt_with_default_tty() {
   printf "%s" "$input"
 }
 
+prompt_yes_no_tty() {
+  local prompt="$1"
+  local default_answer="${2:-y}"
+  local input=""
+  local suffix="[Y/n]"
+
+  case "$(printf "%s" "$default_answer" | tr '[:upper:]' '[:lower:]')" in
+    n|no)
+      default_answer="n"
+      suffix="[y/N]"
+      ;;
+    *)
+      default_answer="y"
+      suffix="[Y/n]"
+      ;;
+  esac
+
+  if [ ! -r /dev/tty ]; then
+    return 2
+  fi
+
+  printf "\n%s %s: " "$prompt" "$suffix" > /dev/tty
+  read -r input < /dev/tty || input=""
+  input="$(trim_whitespace "$input")"
+  input="$(printf "%s" "$input" | tr '[:upper:]' '[:lower:]')"
+  case "$input" in
+    "") input="$default_answer" ;;
+    y|yes) input="y" ;;
+    n|no) input="n" ;;
+    *) input="$default_answer" ;;
+  esac
+  [ "$input" = "y" ]
+}
+
 ensure_env_file() {
   local repo_dir="$1"
   local env_file="$repo_dir/.env"
@@ -1889,6 +1942,92 @@ PY
 
   if [ "${changed:-0}" = "1" ]; then
     log_warn "Removed stale clawboard-logger config references before OpenClaw bootstrap."
+  fi
+}
+
+reconcile_openclaw_gateway_launchagent_token() {
+  local service_plist="$HOME/Library/LaunchAgents/ai.openclaw.gateway.plist"
+  local gateway_token=""
+  local plist_state=""
+  local launchd_domain=""
+
+  if [ "$(uname -s)" != "Darwin" ]; then
+    return 0
+  fi
+  if [ ! -f "$service_plist" ]; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    log_warn "python3 not found; skipping macOS OpenClaw gateway LaunchAgent token reconciliation."
+    return 0
+  fi
+
+  gateway_token="$(openclaw_cfg_get_scalar_normalized gateway.auth.token || true)"
+  if [ -z "$gateway_token" ]; then
+    log_warn "OpenClaw gateway auth token is missing; skipping macOS LaunchAgent token reconciliation."
+    return 0
+  fi
+
+  plist_state="$(
+    python3 - "$service_plist" "$gateway_token" <<'PY' 2>/dev/null || true
+import plistlib
+import sys
+from pathlib import Path
+
+plist_path = Path(sys.argv[1])
+expected_token = sys.argv[2]
+
+try:
+    with plist_path.open("rb") as f:
+        data = plistlib.load(f)
+except Exception:
+    print("error")
+    raise SystemExit(0)
+
+env = data.get("EnvironmentVariables")
+if not isinstance(env, dict):
+    env = {}
+    data["EnvironmentVariables"] = env
+
+current_token = str(env.get("OPENCLAW_GATEWAY_TOKEN") or "")
+if current_token == expected_token:
+    print("unchanged")
+    raise SystemExit(0)
+
+env["OPENCLAW_GATEWAY_TOKEN"] = expected_token
+with plist_path.open("wb") as f:
+    plistlib.dump(data, f, sort_keys=False)
+
+print("updated")
+PY
+  )"
+
+  case "$plist_state" in
+    unchanged)
+      log_success "OpenClaw gateway LaunchAgent token already matches current config."
+      return 0
+      ;;
+    updated)
+      log_warn "Updated macOS OpenClaw gateway LaunchAgent token to match current config."
+      ;;
+    *)
+      log_warn "Could not inspect/update macOS OpenClaw gateway LaunchAgent token automatically."
+      return 0
+      ;;
+  esac
+
+  if ! command -v launchctl >/dev/null 2>&1; then
+    log_warn "launchctl not found; LaunchAgent token was updated on disk but not reloaded."
+    return 0
+  fi
+
+  launchd_domain="gui/$(id -u)"
+  launchctl bootout "$launchd_domain" "$service_plist" >/dev/null 2>&1 || true
+  if launchctl bootstrap "$launchd_domain" "$service_plist" >/dev/null 2>&1; then
+    launchctl kickstart -k "$launchd_domain/ai.openclaw.gateway" >/dev/null 2>&1 || true
+    log_success "Reloaded macOS OpenClaw gateway LaunchAgent after token reconciliation."
+  else
+    log_warn "Updated macOS LaunchAgent token but could not reload it automatically. Run: launchctl bootout $launchd_domain $service_plist && launchctl bootstrap $launchd_domain $service_plist"
   fi
 }
 
@@ -2785,9 +2924,13 @@ verify_agent_contract_alignment() {
   verify_marker "$agents_path" "main-only direct|trivial and faster than delegation|only execute directly" "main direct lane"
   verify_marker "$agents_path" "single-specialist|single specialist" "single-specialist lane"
   verify_marker "$agents_path" "multi-specialist|huddle|federated" "multi-specialist lane"
+  verify_marker "$agents_path" "ECOSYSTEM MODEL|operating surface" "ecosystem model"
+  verify_marker "$agents_path" "SPECIALIST CAPABILITY MAP|specialist map" "specialist capability map"
   verify_marker "$agents_path" "(1m[[:space:]]*(->|=>|-|=)>?[[:space:]]*3m[[:space:]]*(->|=>|-|=)>?[[:space:]]*10m[[:space:]]*(->|=>|-|=)>?[[:space:]]*15m[[:space:]]*(->|=>|-|=)>?[[:space:]]*30m[[:space:]]*(->|=>|-|=)>?[[:space:]]*1h|\[[[:space:]]*1m[[:space:]]*,[[:space:]]*3m[[:space:]]*,[[:space:]]*10m[[:space:]]*,[[:space:]]*15m[[:space:]]*,[[:space:]]*30m[[:space:]]*,[[:space:]]*1h[[:space:]]*\])" "delegation ladder"
   verify_marker "$soul_path" "sessions_spawn" "sessions_spawn contract"
+  verify_marker "$soul_path" "OpenClaw is the runtime|OpenClaw is where sessions" "runtime/ledger model"
   verify_marker "$heartbeat_path" "(1m[[:space:]]*(->|=>|-|=)>?[[:space:]]*3m[[:space:]]*(->|=>|-|=)>?[[:space:]]*10m[[:space:]]*(->|=>|-|=)>?[[:space:]]*15m[[:space:]]*(->|=>|-|=)>?[[:space:]]*30m[[:space:]]*(->|=>|-|=)>?[[:space:]]*1h|\[[[:space:]]*1m[[:space:]]*,[[:space:]]*3m[[:space:]]*,[[:space:]]*10m[[:space:]]*,[[:space:]]*15m[[:space:]]*,[[:space:]]*30m[[:space:]]*,[[:space:]]*1h[[:space:]]*\])" "heartbeat ladder"
+  verify_marker "$heartbeat_path" "user decision" "decision escalation"
   verify_marker "$bootstrap_path" "clawboard_update_task|cron.add" "bootstrap delegation rails"
 
   local doc=""
@@ -2817,34 +2960,57 @@ setup_specialist_agents() {
   bash "$INSTALL_DIR/scripts/setup_specialist_agents.sh"
 }
 
-# Optionally ask the user to add specialist agents (coding, docs, web, social) to openclaw.json
-# so the main agent can delegate. Uses `openclaw agents add` when the user agrees. Idempotent.
+# Optionally add specialist agents (coding, docs, web, social) to openclaw.json
+# so the main agent can delegate. Uses `openclaw agents add` when enabled. Idempotent.
 maybe_offer_agentic_team_setup() {
-  local answer=""
+  local mode="${1:-ask}"
   local existing_ids=""
   local raw=""
   local id=""
   local ws_path=""
   local added=0
+  local missing_workspaces=0
+  local prompt_rc=0
   local specialist_ids="coding docs web social"
 
-  if [ ! -t 0 ]; then
-    log_info "No TTY; skipping agentic team prompt. Add specialists later with: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"
-    return 0
-  fi
   if ! command -v openclaw >/dev/null 2>&1; then
+    AGENTIC_TEAM_SETUP_STATUS="openclaw-missing"
     log_warn "openclaw not in PATH; skipping agentic team setup. Install OpenClaw and run: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"
     return 0
   fi
 
-  printf "\nSet up the agentic team (main + coding, docs, web, social) so the main agent can delegate to specialists? [Y/n]: "
-  read -r answer
-  case "$(printf "%s" "$answer" | tr '[:upper:]' '[:lower:]')" in
-    n|no) log_info "Skipped. You can add specialists later: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"; return 0 ;;
-    *) ;;
+  case "$mode" in
+    never)
+      AGENTIC_TEAM_SETUP_STATUS="skipped-mode-never"
+      return 0
+      ;;
+    always) ;;
+    ask)
+      if prompt_yes_no_tty "Set up the agentic team (main + coding, docs, web, social) so the main agent can delegate to specialists?" "y"; then
+        :
+      else
+        prompt_rc=$?
+        case "$prompt_rc" in
+          2)
+            AGENTIC_TEAM_SETUP_STATUS="skipped-no-tty"
+            log_info "No interactive TTY available for the agentic team prompt. Re-run with --setup-agentic-team or CLAWBOARD_AGENTIC_TEAM_SETUP=always to enroll specialists automatically."
+            return 0
+            ;;
+          *)
+            AGENTIC_TEAM_SETUP_STATUS="skipped-by-user"
+            log_info "Skipped agentic team setup. Add specialists later with: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"
+            return 0
+            ;;
+        esac
+      fi
+      ;;
+    *)
+      AGENTIC_TEAM_SETUP_STATUS="skipped-invalid-mode"
+      return 0
+      ;;
   esac
 
-  if raw="$(OPENCLAW_HOME="$OPENCLAW_HOME" openclaw config get agents.list 2>/dev/null)"; then
+  if raw="$(OPENCLAW_HOME="$OPENCLAW_HOME" openclaw config get agents.list --json 2>/dev/null)"; then
     if command -v jq >/dev/null 2>&1; then
       existing_ids=$(printf '%s' "$raw" | jq -r '.[].id' 2>/dev/null | tr '\n' ' ')
     elif command -v python3 >/dev/null 2>&1; then
@@ -2862,6 +3028,7 @@ maybe_offer_agentic_team_setup() {
       ws_path="$OPENCLAW_HOME/workspace-$id"
     fi
     if [ ! -d "$ws_path" ]; then
+      missing_workspaces=$((missing_workspaces + 1))
       log_warn "Workspace $ws_path missing; run setup_specialist_agents first. Skipping agent $id."
       continue
     fi
@@ -2874,8 +3041,113 @@ maybe_offer_agentic_team_setup() {
   done
 
   if [ "$added" -gt 0 ]; then
+    AGENTIC_TEAM_SETUP_STATUS="configured"
     OPENCLAW_GATEWAY_RESTART_NEEDED=true
     log_success "Added $added specialist agent(s) to config. Gateway will restart to apply."
+    return 0
+  fi
+
+  if [ "$missing_workspaces" -gt 0 ]; then
+    AGENTIC_TEAM_SETUP_STATUS="incomplete"
+    log_warn "Agentic team setup could not enroll every specialist because $missing_workspaces workspace(s) were missing."
+    return 0
+  fi
+
+  AGENTIC_TEAM_SETUP_STATUS="already-configured"
+  log_success "Agentic team already present in OpenClaw config."
+}
+
+sync_main_subagent_allow_agents() {
+  local payload=""
+  local main_idx=""
+  local allow_agents_json=""
+  local allow_agents_display=""
+  local current_allow=""
+
+  if [ ! -f "$OPENCLAW_CONFIG_PATH" ]; then
+    log_warn "OpenClaw config not found at $OPENCLAW_CONFIG_PATH; skipping main subagents.allowAgents sync."
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    log_warn "python3 not found; skipping main subagents.allowAgents sync."
+    return 0
+  fi
+
+  payload="$(
+    python3 - "$OPENCLAW_CONFIG_PATH" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+cfg_path = sys.argv[1]
+
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    data = {}
+
+agents = [entry for entry in ((data.get("agents") or {}).get("list") or []) if isinstance(entry, dict)]
+main_idx = None
+for idx, entry in enumerate(agents):
+    if str(entry.get("id") or "").strip().lower() == "main":
+        main_idx = idx
+        break
+if main_idx is None:
+    for idx, entry in enumerate(agents):
+        if entry.get("default") is True:
+            main_idx = idx
+            break
+
+allow = []
+seen = set()
+for entry in agents:
+    agent_id = str(entry.get("id") or "").strip().lower()
+    if not agent_id or agent_id == "main" or agent_id in seen:
+        continue
+    seen.add(agent_id)
+    allow.append(agent_id)
+
+display = ", ".join(allow)
+main_part = "" if main_idx is None else str(main_idx)
+print("\t".join([main_part, json.dumps(allow, separators=(",", ":")), display]), end="")
+PY
+  )"
+  payload="${payload//$'\r'/}"
+  if [ -z "$payload" ]; then
+    log_warn "Could not inspect OpenClaw config for main subagents.allowAgents sync."
+    return 0
+  fi
+
+  main_idx="${payload%%$'\t'*}"
+  payload="${payload#*$'\t'}"
+  allow_agents_json="${payload%%$'\t'*}"
+  allow_agents_display="${payload#*$'\t'}"
+  if [ -z "$main_idx" ]; then
+    log_warn "Could not find main agent entry in OpenClaw config; skipping main subagents.allowAgents sync."
+    return 0
+  fi
+  if [ -z "$allow_agents_json" ]; then
+    allow_agents_json='[]'
+  fi
+
+  AGENTIC_TEAM_AGENT_IDS="${allow_agents_display:-none}"
+
+  if command -v openclaw >/dev/null 2>&1; then
+    current_allow="$(openclaw_cfg_get_scalar_normalized "agents.list.${main_idx}.subagents.allowAgents" || true)"
+    if [ "$current_allow" = "$allow_agents_json" ]; then
+      log_success "Main subagents.allowAgents already aligned with configured specialists (${AGENTIC_TEAM_AGENT_IDS})."
+      return 0
+    fi
+  fi
+
+  openclaw_cfg_txn_begin
+  if openclaw_cfg_set_txn "agents.list.${main_idx}.subagents.allowAgents" "$allow_agents_json" json false true; then
+    openclaw_cfg_txn_commit
+    OPENCLAW_GATEWAY_RESTART_NEEDED=true
+    log_success "Synced main subagents.allowAgents to configured specialists (${AGENTIC_TEAM_AGENT_IDS})."
+  else
+    openclaw_cfg_txn_rollback
+    log_warn "Failed syncing main subagents.allowAgents from configured specialists."
   fi
 }
 
@@ -3875,18 +4147,7 @@ if [ "$SKIP_OPENCLAW" = false ]; then
       log_success "OpenResponses endpoint already enabled."
     fi
 
-    log_info "Ensuring OpenClaw cross-agent session visibility for delegated follow-ups..."
-    CURRENT_SESSIONS_VISIBILITY="$(openclaw_cfg_get_scalar_normalized tools.sessions.visibility)"
-    if [ "$CURRENT_SESSIONS_VISIBILITY" != "all" ]; then
-      if openclaw_cfg_set_txn tools.sessions.visibility all string false false; then
-        OPENCLAW_GATEWAY_RESTART_NEEDED=true
-        log_success "Set tools.sessions.visibility=all."
-      else
-        log_warn "Skipping tools.sessions.visibility=all: unsupported by this OpenClaw config schema."
-      fi
-    else
-      log_success "tools.sessions.visibility already set to all."
-    fi
+    log_info "Cross-agent follow-up checks will use session_status + queued subagent announces (no tools.sessions.visibility override)."
 
     CURRENT_SANDBOX_SESSION_VISIBILITY="$(openclaw_cfg_get_scalar_normalized agents.defaults.sandbox.sessionToolsVisibility)"
     if [ "$CURRENT_SANDBOX_SESSION_VISIBILITY" != "all" ]; then
@@ -4091,7 +4352,8 @@ PY
 
     setup_specialist_agents
 
-    maybe_offer_agentic_team_setup
+    maybe_offer_agentic_team_setup "$AGENTIC_TEAM_SETUP_MODE"
+    sync_main_subagent_allow_agents
     maybe_apply_agent_directives
     audit_openclaw_bootstrap_budget
     verify_agent_contract_alignment
@@ -4160,6 +4422,8 @@ PY
     else
       log_warn "openclaw doctor --fix returned non-zero (may be safe to ignore)."
     fi
+
+    reconcile_openclaw_gateway_launchagent_token
 
     maybe_offer_obsidian_memory_setup "$OBSIDIAN_MEMORY_SETUP_MODE"
     maybe_offer_memory_backup_setup "$MEMORY_BACKUP_SETUP_MODE"
@@ -4276,6 +4540,28 @@ if [ -n "${TOKEN:-}" ]; then
   fi
 fi
 echo "Token:         $MASKED_TOKEN"
+case "$AGENTIC_TEAM_SETUP_STATUS" in
+  configured|already-configured)
+    echo "Agentic team:  configured (${AGENTIC_TEAM_AGENT_IDS:-none})"
+    ;;
+  incomplete)
+    echo "Agentic team:  setup attempted but some specialist workspaces were missing"
+    echo "               Current delegation pool: ${AGENTIC_TEAM_AGENT_IDS:-none}"
+    echo "               Re-run: bash $INSTALL_DIR/scripts/setup_specialist_agents.sh"
+    ;;
+  openclaw-missing)
+    echo "Agentic team:  openclaw not found on PATH during bootstrap"
+    echo "               Add later: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"
+    ;;
+  skipped-mode-never|skipped-by-user|skipped-no-tty|skipped-invalid-mode|not-run)
+    if [ -n "${AGENTIC_TEAM_AGENT_IDS:-}" ] && [ "$AGENTIC_TEAM_AGENT_IDS" != "none" ]; then
+      echo "Agentic team:  current delegation pool = ${AGENTIC_TEAM_AGENT_IDS}"
+    else
+      echo "Agentic team:  not configured in this run"
+      echo "               Use --setup-agentic-team or CLAWBOARD_AGENTIC_TEAM_SETUP=always to enroll specialists"
+    fi
+    ;;
+esac
 BACKUP_SETUP_HINT="$OPENCLAW_SKILLS_DIR/clawboard/scripts/setup-openclaw-memory-backup.sh"
 if backup_setup_path="$(resolve_memory_backup_setup_script 2>/dev/null)"; then
   BACKUP_SETUP_HINT="$backup_setup_path"

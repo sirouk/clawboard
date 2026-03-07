@@ -280,6 +280,63 @@ PY
   exit 0
 fi
 
+if [[ "$#" -ge 3 && "$1" == "agents" && "$2" == "add" ]]; then
+  agent_id="$3"
+  shift 3
+  workspace=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --workspace)
+        workspace="$2"
+        shift 2
+        ;;
+      --non-interactive|--yes)
+        shift
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  python3 - "$config_path" "$agent_id" "$workspace" <<'PY'
+import json
+import sys
+
+cfg_path, agent_id, workspace = sys.argv[1], sys.argv[2], sys.argv[3]
+
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    data = {}
+
+agents = data.setdefault("agents", {})
+agent_list = agents.setdefault("list", [])
+if not isinstance(agent_list, list):
+    agent_list = []
+    agents["list"] = agent_list
+
+existing = None
+for entry in agent_list:
+    if isinstance(entry, dict) and str(entry.get("id") or "").strip().lower() == agent_id.strip().lower():
+        existing = entry
+        break
+
+if existing is None:
+    existing = {"id": agent_id}
+    agent_list.append(existing)
+
+if workspace:
+    existing["workspace"] = workspace
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\\n")
+PY
+  log_stub_call "agents add $agent_id --workspace $workspace"
+  exit 0
+fi
+
 if [[ "$#" -ge 2 && "$1" == "plugins" ]]; then
   log_stub_call "$*"
   if [[ "$2" == "install" && "$#" -ge 4 && "$3" == "-l" ]]; then
@@ -389,7 +446,7 @@ exit 0
   );
 }
 
-async function seedBootstrapInstallTree(installDir, { includePlugin = true } = {}) {
+async function seedBootstrapInstallTree(installDir, { includePlugin = true, includeSpecialists = false } = {}) {
   await mkdir(path.join(installDir, ".git"), { recursive: true });
   await mkdir(path.join(installDir, "skills", "clawboard"), { recursive: true });
   await writeFile(path.join(installDir, "skills", "clawboard", "SKILL.md"), "name: clawboard\n");
@@ -407,6 +464,20 @@ async function seedBootstrapInstallTree(installDir, { includePlugin = true } = {
   const templateFiles = ["AGENTS.md", "SOUL.md", "HEARTBEAT.md", "BOOTSTRAP.md"];
   for (const fileName of templateFiles) {
     await writeFile(path.join(installDir, "agent-templates", "main", fileName), `${fileName} from install source\n`);
+  }
+
+  if (includeSpecialists) {
+    await mkdir(path.join(installDir, "scripts"), { recursive: true });
+    await cp(
+      path.join(process.cwd(), "scripts", "setup_specialist_agents.sh"),
+      path.join(installDir, "scripts", "setup_specialist_agents.sh")
+    );
+    for (const agentId of ["coding", "docs", "web", "social"]) {
+      const templateDir = path.join(installDir, "agent-templates", agentId);
+      await mkdir(templateDir, { recursive: true });
+      await writeFile(path.join(templateDir, "AGENTS.md"), `# ${agentId} AGENTS\n`);
+      await writeFile(path.join(templateDir, "SOUL.md"), `# ${agentId} SOUL\n`);
+    }
   }
 
   const contractDocs = [
@@ -492,7 +563,10 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
     env,
   });
   assert.equal(firstRun.code, 0, `exit=${firstRun.code}\nstdout:\n${firstRun.stdout}\nstderr:\n${firstRun.stderr}`);
-  assert.match(firstRun.stdout, /tools\.sessions\.visibility=all/i);
+  assert.match(
+    firstRun.stdout,
+    /Cross-agent follow-up checks will use session_status \+ queued subagent announces \(no tools\.sessions\.visibility override\)\./
+  );
   assert.match(firstRun.stdout, /agents\.defaults\.sandbox\.sessionToolsVisibility=all/i);
   assert.match(firstRun.stdout, /tools\.agentToAgent\.enabled=true/i);
 
@@ -914,6 +988,286 @@ printf '%s\\n' "local-memory-ran" >> "\${LOCAL_MEMORY_SETUP_LOG_FILE}"
   assert.doesNotMatch(openclawLog, /memory index --agent/);
 });
 
+test("bootstrap_clawboard.sh: setup-agentic-team enrolls specialists and syncs main allowAgents without local-memory setup", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-agentic-team-"));
+  const repoRoot = path.join(tmp, "repo");
+  const installDir = path.join(tmp, "install");
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const binDir = path.join(tmp, "bin");
+  const configPath = path.join(openclawHome, "openclaw.json");
+  const openclawLogPath = path.join(tmp, "openclaw.log");
+
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
+  await seedBootstrapInstallTree(installDir, { includePlugin: false, includeSpecialists: true });
+
+  await makeOpenClawStub(binDir);
+  await makeStub(binDir, "curl", "exit 0");
+
+  const bootstrapPath = path.join(repoRoot, "scripts");
+  await mkdir(bootstrapPath, { recursive: true });
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), path.join(bootstrapPath, "bootstrap_clawboard.sh"));
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_openclaw.sh"), path.join(bootstrapPath, "bootstrap_openclaw.sh"));
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    OPENCLAW_CONFIG_PATH: configPath,
+    OPENCLAW_STUB_LOG_FILE: openclawLogPath,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    CLAWBOARD_TOKEN: "agentic-team-token",
+  };
+
+  const res = await run(
+    [
+      "bash",
+      path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+      "--dir",
+      installDir,
+      "--skip-docker",
+      "--skip-plugin",
+      "--skip-local-memory-setup",
+      "--skip-memory-backup-setup",
+      "--skip-obsidian-memory-setup",
+      "--skip-openclaw-heap-setup",
+      "--skip-agent-directives",
+      "--setup-agentic-team",
+      "--no-access-url-prompt",
+      "--no-color",
+      "--integration-level",
+      "write",
+    ],
+    { cwd: repoRoot, env }
+  );
+
+  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  assert.match(res.stdout, /Added 4 specialist agent\(s\) to config/);
+  assert.match(res.stdout, /Synced main subagents\.allowAgents to configured specialists \(coding, docs, web, social\)\./);
+  assert.match(res.stdout, /Agentic team:\s+configured \(coding, docs, web, social\)/);
+
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  const agentIds = config.agents.list.map((entry) => entry.id);
+  assert.deepEqual(agentIds, ["main", "coding", "docs", "web", "social"]);
+  assert.deepEqual(config.agents.list[0].subagents.allowAgents, ["coding", "docs", "web", "social"]);
+
+  for (const agentId of ["coding", "docs", "web", "social"]) {
+    const workspacePath = path.join(openclawHome, `workspace-${agentId}`);
+    const agentsText = await readFile(path.join(workspacePath, "AGENTS.md"), "utf8");
+    const soulText = await readFile(path.join(workspacePath, "SOUL.md"), "utf8");
+    assert.equal(agentsText, `# ${agentId} AGENTS\n`);
+    assert.equal(soulText, `# ${agentId} SOUL\n`);
+  }
+
+  const openclawLog = await readFile(openclawLogPath, "utf8");
+  assert.match(openclawLog, /agents add coding --workspace/);
+  assert.match(openclawLog, /agents add docs --workspace/);
+  assert.match(openclawLog, /agents add web --workspace/);
+  assert.match(openclawLog, /agents add social --workspace/);
+});
+
+test("bootstrap_clawboard.sh: does not write unsupported tools.sessions.visibility config", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-session-visibility-"));
+  const repoRoot = path.join(tmp, "repo");
+  const installDir = path.join(tmp, "install");
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const binDir = path.join(tmp, "bin");
+  const configPath = path.join(openclawHome, "openclaw.json");
+
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
+  await seedBootstrapInstallTree(installDir, { includePlugin: false });
+
+  await writeFile(
+    configPath,
+    `${JSON.stringify(
+      {
+        gateway: { auth: { token: "bootstrap-session-visibility-token" } },
+        agents: {
+          defaults: { workspace: path.join(openclawHome, "workspace") },
+          list: [{ id: "main", default: true, workspace: path.join(openclawHome, "workspace") }],
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  await makeOpenClawStub(binDir);
+  await makeStub(binDir, "curl", "exit 0");
+
+  const bootstrapPath = path.join(repoRoot, "scripts");
+  await mkdir(bootstrapPath, { recursive: true });
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), path.join(bootstrapPath, "bootstrap_clawboard.sh"));
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_openclaw.sh"), path.join(bootstrapPath, "bootstrap_openclaw.sh"));
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    OPENCLAW_CONFIG_PATH: configPath,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    CLAWBOARD_TOKEN: "session-visibility-token",
+  };
+
+  const res = await run(
+    [
+      "bash",
+      path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+      "--dir",
+      installDir,
+      "--skip-docker",
+      "--skip-plugin",
+      "--skip-local-memory-setup",
+      "--skip-memory-backup-setup",
+      "--skip-obsidian-memory-setup",
+      "--skip-openclaw-heap-setup",
+      "--skip-agent-directives",
+      "--no-access-url-prompt",
+      "--no-color",
+      "--integration-level",
+      "write",
+    ],
+    { cwd: repoRoot, env }
+  );
+
+  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  assert.match(
+    res.stdout,
+    /Cross-agent follow-up checks will use session_status \+ queued subagent announces \(no tools\.sessions\.visibility override\)\./
+  );
+
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.ok(!("sessions" in (config.tools ?? {})), "bootstrap should not persist tools.sessions in config");
+});
+
+test("bootstrap_clawboard.sh: reconciles macOS LaunchAgent gateway token drift from OpenClaw config", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-launchagent-"));
+  const repoRoot = path.join(tmp, "repo");
+  const installDir = path.join(tmp, "install");
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const binDir = path.join(tmp, "bin");
+  const configPath = path.join(openclawHome, "openclaw.json");
+  const launchctlLogPath = path.join(tmp, "launchctl.log");
+  const launchAgentDir = path.join(homeDir, "Library", "LaunchAgents");
+  const launchAgentPath = path.join(launchAgentDir, "ai.openclaw.gateway.plist");
+  const expectedToken = "fresh-openclaw-gateway-token";
+
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
+  await mkdir(launchAgentDir, { recursive: true });
+  await seedBootstrapInstallTree(installDir, { includePlugin: false });
+
+  await writeFile(
+    configPath,
+    `${JSON.stringify(
+      {
+        gateway: { auth: { token: expectedToken } },
+        agents: {
+          defaults: { workspace: path.join(openclawHome, "workspace") },
+          list: [{ id: "main", default: true, workspace: path.join(openclawHome, "workspace") }],
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  await writeFile(
+    launchAgentPath,
+    `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.openclaw.gateway</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OPENCLAW_GATEWAY_TOKEN</key>
+    <string>__OPENCLAW_REDACTED__</string>
+  </dict>
+</dict>
+</plist>
+`
+  );
+
+  await makeOpenClawStub(binDir);
+  await makeStub(binDir, "curl", "exit 0");
+  await makeStub(binDir, "uname", 'printf "Darwin\\n"');
+  await makeStub(
+    binDir,
+    "launchctl",
+    `
+log_file="\${LAUNCHCTL_STUB_LOG_FILE:-}"
+if [[ -n "$log_file" ]]; then
+  printf '%s\\n' "$*" >> "$log_file"
+fi
+exit 0
+`
+  );
+
+  const bootstrapPath = path.join(repoRoot, "scripts");
+  await mkdir(bootstrapPath, { recursive: true });
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), path.join(bootstrapPath, "bootstrap_clawboard.sh"));
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_openclaw.sh"), path.join(bootstrapPath, "bootstrap_openclaw.sh"));
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    OPENCLAW_CONFIG_PATH: configPath,
+    LAUNCHCTL_STUB_LOG_FILE: launchctlLogPath,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    CLAWBOARD_TOKEN: "launchagent-token",
+  };
+
+  const res = await run(
+    [
+      "bash",
+      path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+      "--dir",
+      installDir,
+      "--skip-docker",
+      "--skip-plugin",
+      "--skip-local-memory-setup",
+      "--skip-memory-backup-setup",
+      "--skip-obsidian-memory-setup",
+      "--skip-openclaw-heap-setup",
+      "--skip-agent-directives",
+      "--no-access-url-prompt",
+      "--no-color",
+      "--integration-level",
+      "write",
+    ],
+    { cwd: repoRoot, env }
+  );
+
+  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  assert.match(res.stdout, /Updated macOS OpenClaw gateway LaunchAgent token to match current config\./);
+  assert.match(res.stdout, /Reloaded macOS OpenClaw gateway LaunchAgent after token reconciliation\./);
+
+  const launchAgentText = await readFile(launchAgentPath, "utf8");
+  assert.match(launchAgentText, new RegExp(expectedToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(launchAgentText, /__OPENCLAW_REDACTED__/);
+
+  const launchctlLog = await readFile(launchctlLogPath, "utf8");
+  assert.match(launchctlLog, /bootout/);
+  assert.match(launchctlLog, /bootstrap/);
+  assert.match(launchctlLog, /kickstart/);
+});
+
 test("setup-openclaw-local-memory.sh: rolls back config snapshot on required write failure", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-memory-txn-"));
   const homeDir = path.join(tmp, "home");
@@ -1001,6 +1355,8 @@ test("delegation supervision cadence stays aligned across templates and setup sc
 
   assert.match(setupText, /heartbeat\.every"\s*"5m"/i);
   assert.match(setupText, /still active beyond 5 minutes/i);
+  assert.match(setupText, /session_status/i);
+  assert.match(setupText, /queued sub-agent completion|queued sub-agent result/i);
   assert.match(setupText, /memoryFlush\.enabled true json false/i);
   assert.match(setupText, /memory\.backend=qmd.*memory-only source/i);
   assert.match(setupText, /memory\.qmd\.sessions\.enabled false json true/i);
@@ -1043,4 +1399,46 @@ test("main-agent execution lanes stay aligned across template, soul, and directi
   assert.match(agentsText, /sessions_spawn/i);
   assert.match(soulText, /sessions_spawn/i);
   assert.match(readmeText, /orchestration/i);
+});
+
+test("main-agent orchestration contract documents runtime model, specialist map, and decision escalation", async () => {
+  const root = process.cwd();
+  const agentsPath = path.join(root, "agent-templates", "main", "AGENTS.md");
+  const soulPath = path.join(root, "agent-templates", "main", "SOUL.md");
+  const heartbeatPath = path.join(root, "agent-templates", "main", "HEARTBEAT.md");
+  const bootstrapPath = path.join(root, "agent-templates", "main", "BOOTSTRAP.md");
+  const directivePath = path.join(root, "directives", "main", "GENERAL_CONTRACTOR.md");
+  const readmePath = path.join(root, "README.md");
+
+  const [agentsText, soulText, heartbeatText, bootstrapText, directiveText, readmeText] = await Promise.all([
+    readFile(agentsPath, "utf8"),
+    readFile(soulPath, "utf8"),
+    readFile(heartbeatPath, "utf8"),
+    readFile(bootstrapPath, "utf8"),
+    readFile(directivePath, "utf8"),
+    readFile(readmePath, "utf8"),
+  ]);
+
+  assert.match(agentsText, /OpenClaw.*runtime/i);
+  assert.match(agentsText, /Clawboard.*durable ledger/i);
+  assert.match(agentsText, /coding.*docs.*web.*social/is);
+  assert.match(agentsText, /user decision|missing constraints|blocked/i);
+  assert.match(agentsText, /session_status/i);
+  assert.match(agentsText, /queued auto-announces|queued completion/i);
+
+  assert.match(soulText, /OpenClaw.*sessions.*cron/i);
+  assert.match(soulText, /Clawboard.*durable external ledger/i);
+  assert.match(soulText, /coding.*docs.*web.*social/is);
+  assert.match(soulText, /blocker requires a user decision/i);
+
+  assert.match(heartbeatText, /user decision/i);
+  assert.match(heartbeatText, /session_status/i);
+  assert.match(heartbeatText, /queued subagent completion|queued completion/i);
+  assert.match(bootstrapText, /blocked on a real user decision/i);
+  assert.match(bootstrapText, /session_status/i);
+  assert.match(directiveText, /OpenClaw is the runtime/i);
+  assert.match(directiveText, /Clawboard is the durable ledger/i);
+  assert.match(directiveText, /user decision/i);
+  assert.match(readmeText, /setup-agentic-team/i);
+  assert.match(readmeText, /CLAWBOARD_AGENTIC_TEAM_SETUP=always/i);
 });
