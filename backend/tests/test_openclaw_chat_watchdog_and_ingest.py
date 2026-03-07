@@ -148,6 +148,107 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertIsNotNone(task)
             self.assertEqual(task.topicId, topic.id)
 
+    def test_resolve_board_send_force_new_topic_and_task_ignores_existing_matches(self):
+        created = now_iso()
+        with get_session() as session:
+            topic = Topic(
+                id="topic-existing-force-new",
+                name="Force New Topic",
+                color="#FF8A4A",
+                description="existing topic",
+                priority="medium",
+                status="active",
+                tags=[],
+                parentId=None,
+                pinned=False,
+                createdAt=created,
+                updatedAt=created,
+            )
+            session.add(topic)
+            session.commit()
+            task = Task(
+                id="task-existing-force-new",
+                topicId=topic.id,
+                title="Existing Force New Task",
+                status="todo",
+                pinned=False,
+                priority="medium",
+                createdAt=created,
+                updatedAt=created,
+            )
+            session.add(task)
+            session.commit()
+
+        res = self.client.post(
+            "/api/openclaw/resolve-board-send",
+            headers=self.auth_headers,
+            json={
+                "message": "Force new topic for openclaw rollout prep",
+                "forceNewTopic": True,
+                "forceNewTask": True,
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertEqual(payload.get("decisionSource"), "direct_new_topic")
+        self.assertTrue(payload.get("topicCreated"))
+        self.assertTrue(payload.get("taskCreated"))
+        self.assertNotEqual(payload.get("topicId"), "topic-existing-force-new")
+        self.assertNotEqual(payload.get("taskId"), "task-existing-force-new")
+
+    def test_resolve_board_send_selected_topic_creates_new_task_when_requested(self):
+        created = now_iso()
+        with get_session() as session:
+            topic = Topic(
+                id="topic-force-task",
+                name="Force Task Topic",
+                color="#FF8A4A",
+                description="existing topic",
+                priority="medium",
+                status="active",
+                tags=[],
+                parentId=None,
+                pinned=False,
+                createdAt=created,
+                updatedAt=created,
+            )
+            session.add(topic)
+            session.commit()
+            existing_task = Task(
+                id="task-force-task-existing",
+                topicId=topic.id,
+                title="Existing task in topic",
+                status="todo",
+                pinned=False,
+                priority="medium",
+                createdAt=created,
+                updatedAt=created,
+            )
+            session.add(existing_task)
+            session.commit()
+
+        res = self.client.post(
+            "/api/openclaw/resolve-board-send",
+            headers=self.auth_headers,
+            json={
+                "message": "Create a fresh task in this topic for rollout QA",
+                "selectedTopicId": "topic-force-task",
+                "forceNewTask": True,
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertEqual(payload.get("decisionSource"), "direct_selected_topic_new_task")
+        self.assertEqual(payload.get("topicId"), "topic-force-task")
+        self.assertFalse(payload.get("topicCreated"))
+        self.assertTrue(payload.get("taskCreated"))
+        self.assertNotEqual(payload.get("taskId"), "task-force-task-existing")
+
+        with get_session() as session:
+            created_task = session.get(Task, str(payload.get("taskId") or ""))
+            self.assertIsNotNone(created_task)
+            self.assertEqual(created_task.topicId, "topic-force-task")
+
     def test_ing_014_source_scope_metadata_is_normalized(self):
         created = now_iso()
         with get_session() as session:

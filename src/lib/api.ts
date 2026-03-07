@@ -39,28 +39,17 @@ function getExplicitBrowserBase() {
   return runtimeBase && runtimeBase.trim().length > 0 ? coerceBrowserBase(runtimeBase) : "";
 }
 
-export function getApiBase() {
-  if (typeof window !== "undefined") {
-    const explicitBase = getExplicitBrowserBase();
-    if (explicitBase) {
-      return explicitBase;
-    }
-  }
-
+function getEnvBrowserBase() {
   const envBaseRaw = normalizeBase(process.env.NEXT_PUBLIC_CLAWBOARD_API_BASE ?? "");
   if (!envBaseRaw) return "";
+  if (typeof window === "undefined") return envBaseRaw;
 
-  // Smart default for remote access:
-  // If the bundle was built with a localhost API base (e.g. http://localhost:8010) but the
-  // user is visiting Clawboard via a LAN/Tailscale hostname, rewrite the hostname to match
-  // the current page hostname while keeping scheme + port.
-  if (typeof window !== "undefined" && hasScheme(envBaseRaw)) {
+  if (hasScheme(envBaseRaw)) {
     try {
       const url = new URL(envBaseRaw);
       const pageHost = window.location.hostname;
       if (isLoopbackHost(url.hostname) && pageHost && !isLoopbackHost(pageHost)) {
         url.hostname = pageHost;
-        // Preserve the env port if present; otherwise default to the common docker-compose mapping.
         if (!url.port) url.port = DEFAULT_API_PORT;
         return normalizeBase(url.toString());
       }
@@ -69,16 +58,37 @@ export function getApiBase() {
     }
   }
 
-  return envBaseRaw;
+  return coerceBrowserBase(envBaseRaw);
+}
+
+function shouldUseSameOriginApiProxy(path: string) {
+  if (typeof window === "undefined" || !path.startsWith("/api")) return false;
+  if (getExplicitBrowserBase()) return false;
+
+  const envBase = getEnvBrowserBase();
+  if (!envBase) return true;
+  if (envBase.startsWith("/")) return true;
+
+  try {
+    const url = new URL(envBase);
+    return isLoopbackHost(url.hostname) && url.port === DEFAULT_API_PORT;
+  } catch {
+    return false;
+  }
+}
+
+export function getApiBase() {
+  if (typeof window !== "undefined") {
+    const explicitBase = getExplicitBrowserBase();
+    if (explicitBase) {
+      return explicitBase;
+    }
+  }
+  return getEnvBrowserBase();
 }
 
 export function apiRequestUrl(path: string) {
-  if (typeof window !== "undefined" && path.startsWith("/api")) {
-    const explicitBase = getExplicitBrowserBase();
-    if (!explicitBase) {
-      return path;
-    }
-  }
+  if (shouldUseSameOriginApiProxy(path)) return path;
   return apiUrl(path);
 }
 

@@ -11,7 +11,7 @@ Outputs (required)
 - `research/DEPENDENCY_RESEARCH.md` documenting stack components and alternatives.
 - `research/COVERAGE_MATRIX.md` with coverage against goals.
 - `research/STACK_SNAPSHOT.md` with ranked stack hypotheses, deterministic confidence score, and alternatives.
-- `IMPLEMENTATION_PLAN.md` with goal, validation criteria, and actionable tasks.
+- `docs/legacy-autonomy/IMPLEMENTATION_PLAN.md` with goal, validation criteria, and actionable tasks.
 - `consensus/build_gate.md` if needed for blockers.
 
 Behavior

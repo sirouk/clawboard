@@ -20,11 +20,14 @@ The recommended setup is to store settings in `.env` and load them into containe
 - Create `.env` (see `.env.example`)
 - Compose loads it via `env_file:` in `docker-compose.yaml`
 
-**Important for Tailscale / remote access:** the web UI calls the API from the browser.
-If `NEXT_PUBLIC_CLAWBOARD_API_BASE` is set to `http://localhost:8010`, then anyone
-opening the UI from another machine will try to call *their own* localhost.
+**Important for remote access:** the web UI now prefers the same-origin `/api/*` proxy
+when no explicit browser API base is configured. That is the safest default.
 
-Set `CLAWBOARD_PUBLIC_API_BASE` in `.env` to your tailnet address, e.g.
+Only set `NEXT_PUBLIC_CLAWBOARD_API_BASE` / `CLAWBOARD_PUBLIC_API_BASE` when you intentionally
+want direct browser-to-API traffic. If you point that value at `http://localhost:8010`,
+remote browsers will try to call *their own* localhost.
+
+For direct remote API access, set `CLAWBOARD_PUBLIC_API_BASE` in `.env` to a reachable host, e.g.
 `http://100.91.119.30:8010`.
 
 ## Instance config
@@ -35,7 +38,7 @@ Set instance display name + integration level:
 curl -X POST 'http://localhost:8010/api/config' \
   -H 'Content-Type: application/json' \
   -H 'X-Clawboard-Token: YOUR_TOKEN' \
-  -d '{"title":"CK Claw","integrationLevel":"full"}'
+  -d '{"title":"Clawboard Instance","integrationLevel":"full"}'
 ```
 
 `integrationLevel` values:
@@ -43,7 +46,10 @@ curl -X POST 'http://localhost:8010/api/config' \
 - `write`
 - `full`
 
-Installer defaults to `full` unless you pass `--integration-level` (or `--no-backfill`) to `scripts/bootstrap_openclaw.sh`.
+The canonical installer is `scripts/bootstrap_clawboard.sh`.
+`scripts/bootstrap_openclaw.sh` remains as a backward-compatible wrapper.
+
+Installer defaults to `full` unless you pass `--integration-level` (or `--no-backfill`) to `scripts/bootstrap_clawboard.sh`.
 
 ## Minimal connectivity checks
 

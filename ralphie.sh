@@ -42,13 +42,14 @@ SELF_IMPROVEMENT_LOG_FILE="$PROJECT_DIR/$SELF_IMPROVEMENT_LOG_REL"
 READY_ARCHIVE_DIR="$CONFIG_DIR/ready-archives"
 SETUP_SUBREPOS_SCRIPT="$PROJECT_DIR/engines/setup-agent-subrepos.sh"
 
-PROMPT_BUILD_FILE="$PROJECT_DIR/PROMPT_build.md"
-PROMPT_PLAN_FILE="$PROJECT_DIR/PROMPT_plan.md"
-PROMPT_TEST_FILE="$PROJECT_DIR/PROMPT_test.md"
-PROMPT_REFACTOR_FILE="$PROJECT_DIR/PROMPT_refactor.md"
-PROMPT_LINT_FILE="$PROJECT_DIR/PROMPT_lint.md"
-PROMPT_DOCUMENT_FILE="$PROJECT_DIR/PROMPT_document.md"
-PLAN_FILE="$PROJECT_DIR/IMPLEMENTATION_PLAN.md"
+LEGACY_AUTONOMY_DIR="$PROJECT_DIR/docs/legacy-autonomy"
+PROMPT_BUILD_FILE="$LEGACY_AUTONOMY_DIR/PROMPT_build.md"
+PROMPT_PLAN_FILE="$LEGACY_AUTONOMY_DIR/PROMPT_plan.md"
+PROMPT_TEST_FILE="$LEGACY_AUTONOMY_DIR/PROMPT_test.md"
+PROMPT_REFACTOR_FILE="$LEGACY_AUTONOMY_DIR/PROMPT_refactor.md"
+PROMPT_LINT_FILE="$LEGACY_AUTONOMY_DIR/PROMPT_lint.md"
+PROMPT_DOCUMENT_FILE="$LEGACY_AUTONOMY_DIR/PROMPT_document.md"
+PLAN_FILE="$LEGACY_AUTONOMY_DIR/IMPLEMENTATION_PLAN.md"
 PROJECT_BOOTSTRAP_FILE="$CONFIG_DIR/project-bootstrap.md"
 PROJECT_GOALS_FILE="$CONFIG_DIR/project-goals.md"
 SESSION_CHANGED_PATHS_FILE="$CONFIG_DIR/session-changed-paths.txt"
@@ -5981,7 +5982,7 @@ collect_phase_resume_blockers() {
             ;;
         test|refactor|lint|document)
             if [ ! -f "$PLAN_FILE" ]; then
-                blockers+=("test/build prerequisite missing: IMPLEMENTATION_PLAN.md")
+                blockers+=("test/build prerequisite missing: docs/legacy-autonomy/IMPLEMENTATION_PLAN.md")
             fi
             if [ ! -f "$STACK_SNAPSHOT_FILE" ]; then
                 blockers+=("test/build prerequisite missing: research/STACK_SNAPSHOT.md")
@@ -6553,7 +6554,7 @@ collect_build_prerequisites_issues() {
         missing+=("research directory missing: research/")
     fi
     if [ ! -f "$PLAN_FILE" ]; then
-        missing+=("IMPLEMENTATION_PLAN.md missing before build")
+        missing+=("docs/legacy-autonomy/IMPLEMENTATION_PLAN.md missing before build")
     elif ! plan_is_semantically_actionable "$PLAN_FILE"; then
         missing+=("plan is not semantically actionable")
     fi
@@ -6631,7 +6632,7 @@ Outputs (required)
 - `research/DEPENDENCY_RESEARCH.md` documenting stack components and alternatives.
 - `research/COVERAGE_MATRIX.md` with coverage against goals.
 - `research/STACK_SNAPSHOT.md` with ranked stack hypotheses, deterministic confidence score, and alternatives.
-- `IMPLEMENTATION_PLAN.md` with goal, validation criteria, and actionable tasks.
+- `docs/legacy-autonomy/IMPLEMENTATION_PLAN.md` with goal, validation criteria, and actionable tasks.
 - `consensus/build_gate.md` if needed for blockers.
 
 Behavior
@@ -6650,7 +6651,7 @@ EOF
 You are the implementation agent.
 
 Goal
-- Execute the highest-priority plan tasks from `IMPLEMENTATION_PLAN.md`.
+- Execute the highest-priority plan tasks from `docs/legacy-autonomy/IMPLEMENTATION_PLAN.md`.
 - Keep changes scoped and validated by existing project patterns.
 
 Behavior
@@ -7072,7 +7073,7 @@ ensure_constitution_bootstrap() {
 
 ## Phase Contracts
 - **Plan** produces research artifacts, an explicit implementation plan, and a deterministic stack snapshot.
-- **Build** executes plan tasks against evidence in IMPLEMENTATION_PLAN.md.
+- **Build** executes plan tasks against evidence in `docs/legacy-autonomy/IMPLEMENTATION_PLAN.md`.
 - **Test** verifies behavior changes and documents validation rationale.
 - **Refactor** preserves behavior, reduces complexity, and documents rationale.
 - **Lint** enforces deterministic quality and cleanup policies.

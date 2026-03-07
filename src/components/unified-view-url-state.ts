@@ -5,7 +5,6 @@ import { decodeSlugId } from "@/lib/slug";
 export type UnifiedUrlDensity = "comfortable" | "compact";
 
 export type UnifiedUrlState = {
-  search: string;
   raw: boolean;
   density: UnifiedUrlDensity;
   showToolCalls: boolean;
@@ -29,7 +28,6 @@ type ParseUnifiedUrlStateOptions = {
 };
 
 const DEFAULT_STATE: UnifiedUrlState = {
-  search: "",
   raw: true,
   density: "compact",
   showToolCalls: false,
@@ -116,7 +114,6 @@ export function parseUnifiedUrlState(url: URL, options: ParseUnifiedUrlStateOpti
   const density: UnifiedUrlDensity = densityParam === "comfortable" ? "comfortable" : "compact";
 
   return {
-    search: params.get("q") ?? "",
     raw: parseRawParam(params, rawParseMode, rawDefaultWhenMissing),
     density,
     showToolCalls: params.get("tools") === "1",

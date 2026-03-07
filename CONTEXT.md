@@ -31,6 +31,10 @@ Net effect: the agent can "remember" what happened across Topics/Tasks/logs/note
 ---
 
 ### Task chat routing contract (UI -> OpenClaw)
+- The Unified Board top composer first resolves send intent through `/api/openclaw/resolve-board-send`:
+  - no selection -> `new topic -> new task`
+  - selected topic -> `topic -> new task`
+  - selected task -> `topic -> existing task`
 - Task chat sends from Clawboard go through `POST /api/openclaw/chat` with a task board session key (`clawboard:task:*:*`).
 - Task sessions are still main-mediated orchestration lanes: main receives the turn, then delegates as needed.
 - `agentId` on task chat requests is advisory metadata for dispatch bookkeeping; it does not force direct subagent ownership of a task chat.
@@ -112,7 +116,7 @@ Configuration knobs (OpenClaw plugin config):
 - `contextCacheMaxEntries`
 - `contextUseCacheOnFailure`
 
-If you installed via `scripts/bootstrap_openclaw.sh`, you can set these in Clawboard `.env` as:
+If you installed via `scripts/bootstrap_clawboard.sh` (or the legacy alias `scripts/bootstrap_openclaw.sh`), you can set these in Clawboard `.env` as:
 - `CLAWBOARD_LOGGER_CONTEXT_MODE`
 - `CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS`
 - `CLAWBOARD_LOGGER_CONTEXT_FETCH_RETRIES`
@@ -331,12 +335,9 @@ Because the agent sees:
 - avoid re-asking for stable facts that were already captured as notes
 - leverage Clawboard's hybrid retrieval in addition to OpenClaw-native memory
 
-### Context Contract Spec (Merged)
+### Context Contract
 
-This section is merged from the former CONTEXT_SPEC.md.
-
-
-This document defines the **end-state contract** for how Clawboard provides **robust, efficient, bidirectional context** to the OpenClaw agent (and vice versa), at scale.
+This section defines the **end-state contract** for how Clawboard provides **robust, efficient, bidirectional context** to the OpenClaw agent (and vice versa), at scale.
 
 
 #### Goals

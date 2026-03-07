@@ -11737,6 +11737,8 @@ def _resolve_board_send_target(
     source_space_id: str | None,
     selected_topic_id: str | None,
     selected_task_id: str | None,
+    force_new_topic: bool,
+    force_new_task: bool,
     resolver_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
     normalized_message = _sanitize_log_text(message)
@@ -11750,6 +11752,66 @@ def _resolve_board_send_target(
 
     normalized_selected_topic_id = str(selected_topic_id or "").strip() or None
     normalized_selected_task_id = str(selected_task_id or "").strip() or None
+    explicit_new_topic = bool(force_new_topic)
+    explicit_new_task = bool(force_new_task)
+
+    def create_new_topic() -> Topic:
+        proposed_topic_name = _resolver_derive_topic_name(normalized_message, context_payload=resolver_context)
+        stamp = now_iso()
+        used_colors = {
+            _normalize_hex_color(getattr(item, "color", None))
+            for item in session.exec(select(Topic)).all()
+            if _normalize_hex_color(getattr(item, "color", None))
+        }
+        color = _auto_pick_color(
+            f"topic:resolver:{normalized_space_id}:{proposed_topic_name}:{stamp}",
+            used_colors,
+            0.0,
+        )
+        topic = Topic(
+            id=create_id("topic"),
+            spaceId=normalized_space_id,
+            name=proposed_topic_name,
+            createdBy="user",
+            sortIndex=_next_sort_index_for_new_topic(session, False),
+            color=color,
+            description=None,
+            priority="medium",
+            status="active",
+            snoozedUntil=None,
+            tags=[],
+            parentId=None,
+            pinned=False,
+            createdAt=stamp,
+            updatedAt=stamp,
+        )
+        session.add(topic)
+        return topic
+
+    def create_new_task(topic: Topic) -> Task:
+        selected_topic_id_resolved = str(topic.id or "").strip()
+        if not selected_topic_id_resolved:
+            raise HTTPException(status_code=503, detail="Resolved topic is invalid")
+        proposed_task_title = _resolver_derive_task_title(normalized_message, context_payload=resolver_context)
+        stamp = now_iso()
+        task = Task(
+            id=create_id("task"),
+            spaceId=_space_id_for_topic(topic),
+            topicId=selected_topic_id_resolved,
+            title=proposed_task_title,
+            sortIndex=_next_sort_index_for_new_task(session, selected_topic_id_resolved, False),
+            color=None,
+            status="todo",
+            pinned=False,
+            priority="medium",
+            dueDate=None,
+            snoozedUntil=None,
+            tags=[],
+            createdAt=stamp,
+            updatedAt=stamp,
+        )
+        session.add(task)
+        return task
 
     if normalized_selected_task_id:
         selected_task = session.get(Task, normalized_selected_task_id)
@@ -11776,11 +11838,15 @@ def _resolve_board_send_target(
     selected_task_created = False
     decision_source = "heuristic"
 
-    if normalized_selected_topic_id:
+    if explicit_new_topic:
+        selected_topic = create_new_topic()
+        selected_topic_created = True
+        decision_source = "direct_new_topic"
+    elif normalized_selected_topic_id:
         selected_topic = session.get(Topic, normalized_selected_topic_id)
         if not selected_topic:
             raise HTTPException(status_code=400, detail="selectedTopicId not found")
-        decision_source = "selected_topic_fallback"
+        decision_source = "direct_selected_topic_new_task" if explicit_new_task else "selected_topic_fallback"
     else:
         semantic_topic_id = _resolver_pick_semantic_topic_id(
             session,
@@ -11801,35 +11867,7 @@ def _resolve_board_send_target(
             if duplicate_topic:
                 selected_topic = duplicate_topic
             else:
-                stamp = now_iso()
-                used_colors = {
-                    _normalize_hex_color(getattr(item, "color", None))
-                    for item in session.exec(select(Topic)).all()
-                    if _normalize_hex_color(getattr(item, "color", None))
-                }
-                color = _auto_pick_color(
-                    f"topic:resolver:{normalized_space_id}:{proposed_topic_name}:{stamp}",
-                    used_colors,
-                    0.0,
-                )
-                selected_topic = Topic(
-                    id=create_id("topic"),
-                    spaceId=normalized_space_id,
-                    name=proposed_topic_name,
-                    createdBy="user",
-                    sortIndex=_next_sort_index_for_new_topic(session, False),
-                    color=color,
-                    description=None,
-                    priority="medium",
-                    status="active",
-                    snoozedUntil=None,
-                    tags=[],
-                    parentId=None,
-                    pinned=False,
-                    createdAt=stamp,
-                    updatedAt=stamp,
-                )
-                session.add(selected_topic)
+                selected_topic = create_new_topic()
                 selected_topic_created = True
 
     if not selected_topic:
@@ -11839,41 +11877,29 @@ def _resolve_board_send_target(
     if not selected_topic_id_resolved:
         raise HTTPException(status_code=503, detail="Resolved topic is invalid")
 
-    selected_task = _resolver_pick_semantic_task(
-        session,
-        topic_id=selected_topic_id_resolved,
-        context_payload=resolver_context,
-    )
-    if not selected_task:
-        proposed_task_title = _resolver_derive_task_title(normalized_message, context_payload=resolver_context)
-        duplicate_task = _find_similar_task(
+    selected_task: Task | None = None
+    if explicit_new_task:
+        selected_task = create_new_task(selected_topic)
+        selected_task_created = True
+    else:
+        selected_task = _resolver_pick_semantic_task(
             session,
-            selected_topic_id_resolved,
-            proposed_task_title,
-            threshold=_resolver_task_similarity_threshold(),
+            topic_id=selected_topic_id_resolved,
+            context_payload=resolver_context,
         )
-        if duplicate_task:
-            selected_task = duplicate_task
-        else:
-            stamp = now_iso()
-            selected_task = Task(
-                id=create_id("task"),
-                spaceId=_space_id_for_topic(selected_topic),
-                topicId=selected_topic_id_resolved,
-                title=proposed_task_title,
-                sortIndex=_next_sort_index_for_new_task(session, selected_topic_id_resolved, False),
-                color=None,
-                status="todo",
-                pinned=False,
-                priority="medium",
-                dueDate=None,
-                snoozedUntil=None,
-                tags=[],
-                createdAt=stamp,
-                updatedAt=stamp,
+        if not selected_task:
+            proposed_task_title = _resolver_derive_task_title(normalized_message, context_payload=resolver_context)
+            duplicate_task = _find_similar_task(
+                session,
+                selected_topic_id_resolved,
+                proposed_task_title,
+                threshold=_resolver_task_similarity_threshold(),
             )
-            session.add(selected_task)
-            selected_task_created = True
+            if duplicate_task:
+                selected_task = duplicate_task
+            else:
+                selected_task = create_new_task(selected_topic)
+                selected_task_created = True
 
     if not selected_task:
         raise HTTPException(status_code=503, detail="Failed to resolve task for board send")
@@ -11900,6 +11926,8 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
 
     selected_topic_id = str(payload.selectedTopicId or "").strip() or None
     selected_task_id = str(payload.selectedTaskId or "").strip() or None
+    force_new_topic = bool(getattr(payload, "forceNewTopic", False))
+    force_new_task = bool(getattr(payload, "forceNewTask", False))
     explicit_space_id = _normalize_space_id(payload.spaceId)
 
     started = time.monotonic()
@@ -11951,6 +11979,8 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
             source_space_id=resolved_space_id,
             selected_topic_id=selected_topic_id,
             selected_task_id=selected_task_id,
+            force_new_topic=force_new_topic,
+            force_new_task=force_new_task,
             resolver_context=resolver_context_package,
         )
 
@@ -12024,6 +12054,8 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
             "taskId": str(task.id or "").strip(),
             "selectedTopicId": selected_topic_id,
             "selectedTaskId": selected_task_id,
+            "forceNewTopic": force_new_topic,
+            "forceNewTask": force_new_task,
             "spaceId": resolved_space_id,
         }
         event_hub.publish(

@@ -596,10 +596,7 @@ This catalog enumerates the complete engineered scenario surface at the methodol
 - `classifier/classifier.py`
 - `classifier/embeddings_store.py`
 
-## 16) Scenario Coverage Matrix (Merged)
-
-This section is merged from the former `CLASSIFICATION_TEST_MATRIX.md`.
-
+## 16) Scenario Coverage Matrix
 
 This matrix maps every normative scenario in `CLASSIFICATION.md` section 14 to current automated evidence.
 

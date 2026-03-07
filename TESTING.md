@@ -25,31 +25,31 @@ UI stop controls are covered in Playwright:
 
 ```bash
 # Lint + backend + classifier + extension + script tests + build + e2e
-npm run test:all
+pnpm test:all
 
 # Playwright only
-npm run test:e2e
+pnpm test:e2e
 
 # TypeScript type safety gate
-npm run typecheck
+pnpm typecheck
 
 # Visual regression suite (baseline compare)
-npm run test:visual
+pnpm test:visual
 
 # Regenerate visual baselines
-npm run test:visual:update
+pnpm test:visual:update
 
 # Backend unit tests only
-npm run test:backend
+pnpm test:backend
 
 # Classifier unit tests only
-npm run test:classifier
+pnpm test:classifier
 
 # Logger extension unit tests only
-npm run test:logger
+pnpm test:logger
 
 # Bash script tests only (runs against temp sandbox)
-npm run test:scripts
+pnpm test:scripts
 ```
 
 ## Full System Checks (Docker)
@@ -77,9 +77,28 @@ To skip Playwright (faster iteration):
 - Playwright ports are configurable via env:
   `PLAYWRIGHT_WEB_PORT` (default `3050`) and `PLAYWRIGHT_MOCK_API_PORT` (default `3051`).
 - To run against an already-running stack (for example web on `3010`), skip Playwright-managed servers:
-  `PLAYWRIGHT_USE_EXTERNAL_SERVER=1 PLAYWRIGHT_BASE_URL=http://localhost:3010 PLAYWRIGHT_API_BASE=http://localhost:8010 npm run test:e2e`
+  `PLAYWRIGHT_USE_EXTERNAL_SERVER=1 PLAYWRIGHT_BASE_URL=http://localhost:3010 PLAYWRIGHT_API_BASE=http://localhost:8010 pnpm test:e2e`
 - Visual CI runs include WebKit by default (local runs stay Chromium-only unless `PLAYWRIGHT_VISUAL_WEBKIT=1`).
 - Visual snapshot paths are platform-neutral (`.../{arg}-{projectName}.png`) so the same baselines work on macOS and Linux.
 - CI quality now includes `lint + typecheck + backend + classifier + logger + scripts`.
 - On CI Playwright failures, artifacts (`test-results`, `playwright-report`) are uploaded for triage.
 - GitHub branch protection should require the `required-gate` check from `.github/workflows/ci.yml`.
+
+## Manual UI Spot Checks
+
+Use these when the change is mostly visual or interaction-heavy and you want a fast sanity pass in a real browser:
+
+1. Unified one-box composer
+- Type into the top composer and confirm the draft stays intact while potential matches appear below.
+- Verify the chip and send label change correctly across `new topic`, `topic -> new task`, and `task -> continue`.
+- Confirm `Enter` sends, `Shift+Enter` inserts a newline, and the textarea grows without an internal scrollbar.
+
+2. Task continuation targeting
+- Type a query that should surface an existing task.
+- Confirm matching topics expand automatically and the actionable choice is at the task level.
+- Make sure unrelated low-confidence topics do not dominate the typing state.
+
+3. Mobile task chat
+- Open a task on a phone-sized viewport.
+- Confirm chat becomes fullscreen, the close/status controls are readable, and the composer stays anchored at the bottom.
+- Close the chat and make sure the board returns cleanly.

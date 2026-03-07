@@ -106,8 +106,8 @@ test("topic swipe actions (snooze/archive/delete) and reorder work in unified vi
   await expect(page.locator(`[data-topic-card-id="${t1.id}"]`)).toHaveCount(0);
 
   // Make it visible via search, then swipe again and archive it.
-  const boardSearch = page.locator("[data-testid='unified-board-search']:visible").first();
-  await boardSearch.fill(t1.name);
+  const composer = page.locator("[data-testid='unified-composer-textarea']:visible").first();
+  await composer.fill(t1.name);
   const searchedCard = page.locator(`[data-topic-card-id="${t1.id}"]`).first();
   await expect(searchedCard).toBeVisible();
 
@@ -153,7 +153,7 @@ test("topic swipe actions (snooze/archive/delete) and reorder work in unified vi
   const create3 = await request.post(`${apiBase}/api/topics`, { data: t3 });
   expect(create3.ok()).toBeTruthy();
 
-  await boardSearch.fill("");
+  await composer.fill("");
   const cardC = page.locator(`[data-topic-card-id="${t3.id}"]`).first();
   await expect(cardB).toBeVisible();
   await expect(cardC).toBeVisible();

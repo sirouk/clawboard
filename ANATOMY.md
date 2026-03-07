@@ -57,14 +57,11 @@ Primary source files:
 Related specs:
 - `README.md`
 - `CONTEXT.md`
-- `CONTEXT.md` (Context Contract Spec section)
 - `CLASSIFICATION.md`
-- `CLASSIFICATION.md` (sections 16-17: coverage/trace matrices)
 - `OPENCLAW_CLAWBOARD_UML.md`
 - `TESTING.md`
 - `SEED.md`
 - `DESIGN_RULES.md`
-- `HUMAN_INSTRUCTIONS.md`
 - `design/brand-notes.md`
 - `design/operator-runbook.md`
 - `design/visual-end-state-spec.md`
@@ -276,9 +273,17 @@ Flow:
 12. Orchestration convergence keeps `main.response` open while any subagent item is non-terminal; run closes only after final main assistant completion.
 
 Unified composer routing contract (current UX):
-- Freeform with no selected target resolves topic+task first and sends on `clawboard:task:<topicId>:<taskId>`.
-- Freeform with a selected topic resolves/creates a task in that topic first, then sends on `clawboard:task:<topicId>:<taskId>`.
+- Typing in the unified top composer serves two purposes at once:
+  - preserves the draft message as the thing that will be sent.
+  - drives the potential-match search UI for topic/task reuse.
+- Freeform with no selected target resolves `new topic -> new task` first, then sends on `clawboard:task:<topicId>:<taskId>`.
+- Freeform with a selected topic resolves/creates `topic -> new task`, then sends on `clawboard:task:<topicId>:<taskId>`.
 - Freeform with a selected task sends on `clawboard:task:<topicId>:<taskId>`.
+- The selected send target is always shown back to the user as a chip in the composer.
+- Unified search surfacing is topic-first for hierarchy, but task-first for actions:
+  - topics expand to reveal matching tasks.
+  - only tasks are continuable conversations; selecting a topic means creating a new task there.
+- Semantic board-search results are filtered to lexical hits plus high-confidence semantic hits so the typing state stays focused.
 - Topic/task direct composers always send on their pinned session keys.
 - Topic/task direct composers expose Stop while in-flight; typed `/stop` and `/abort` are aliases for the same thread-scoped cancel action.
 - Unified top composer Stop is scoped to the selected thread target and calls the same cancel endpoint.
@@ -615,14 +620,14 @@ High-level test suites:
 - e2e Playwright: `tests/e2e/*`
 
 Classification and routing traceability:
-- `CLASSIFICATION.md` section 16: scenario-level behavioral assertions (`77/77 covered`).
-- `CLASSIFICATION.md` section 17: implementation-path trace coverage (`77/77 traced`).
+- `CLASSIFICATION.md` section 16: scenario-level behavioral assertions.
+- `CLASSIFICATION.md` section 17: implementation-path trace coverage.
 
 Core commands:
-- `npm run test:backend`
-- `npm run test:classifier`
-- `npm run test:e2e`
-- `npm run test:all`
+- `pnpm test:backend`
+- `pnpm test:classifier`
+- `pnpm test:e2e`
+- `pnpm test:all`
 
 ## 13) Design Contracts and Non-Goals
 
@@ -706,8 +711,7 @@ If you are debugging a live issue:
 | Markdown Spec | Contract Focus | Runtime / Test Anchors |
 |---|---|---|
 | `README.md` | product purpose, architecture, operator entry points | `backend/app/main.py`, `src/components/*`, `extensions/clawboard-logger/index.ts` |
-| `CONTEXT.md` | context bridge and injection behavior | `backend/app/main.py::context`, `extensions/clawboard-logger/index.ts` |
-| `CONTEXT.md` (Context Contract Spec section) | formal two-layer context contract and invariants | `/api/context`, `_search_impl`, `backend/tests/test_context_endpoint.py` |
+| `CONTEXT.md` | context bridge, context contract, and injection behavior | `backend/app/main.py::context`, `extensions/clawboard-logger/index.ts`, `backend/tests/test_context_endpoint.py` |
 | `CLASSIFICATION.md` | classifier lifecycle, forcing, guardrails, replay | `classifier/classifier.py`, `/api/log` patch paths, replay endpoints |
 | `CLASSIFICATION.md` section 16 | scenario coverage commitments | `backend/tests/*`, `classifier/tests/*`, `tests/e2e/classification.spec.ts` |
 | `CLASSIFICATION.md` section 17 | scenario-to-implementation trace | `classifier/classifier.py`, `backend/app/main.py` route/function mappings |
@@ -715,7 +719,6 @@ If you are debugging a live issue:
 | `TESTING.md` | validation command surface | npm scripts + pytest suites in repo |
 | `SEED.md` | bootstrap/auth and seed checks | `backend/app/db.py`, `/api/config`, `/api/spaces*` |
 | `DESIGN_RULES.md` | UX operating rules | `src/components/unified-view.tsx`, `src/components/app-shell.tsx`, `src/components/data-provider.tsx` |
-| `HUMAN_INSTRUCTIONS.md` | human task queue notes | operational reference; no direct runtime behavior |
 | `design/brand-notes.md` | visual identity guidance | frontend styling/component decisions |
 | `design/operator-runbook.md` | day-2 operations and incident playbooks | `/api/metrics`, `/api/stream`, classifier/search/context health paths |
 | `design/visual-end-state-spec.md` | visual QA acceptance criteria | Playwright specs in `tests/e2e/*` and component states |
@@ -807,9 +810,9 @@ Routes currently implemented in `backend/app/main.py`:
 4. Confirm classifier contracts:
    - `classifier/classifier.py`
 5. Run regression suites:
-   - `npm run test:backend`
-   - `npm run test:classifier`
-   - `npm run test:e2e`
+   - `pnpm test:backend`
+   - `pnpm test:classifier`
+   - `pnpm test:e2e`
 6. Re-check matrix docs for scenario coverage drift:
    - `CLASSIFICATION.md` section 16
    - `CLASSIFICATION.md` section 17

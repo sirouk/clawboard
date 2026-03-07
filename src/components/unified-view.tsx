@@ -13,7 +13,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { LogEntry, Space, Task, Topic } from "@/lib/types";
-import { Button, Input, SearchInput, Select, StatusPill, TextArea } from "@/components/ui";
+import { Button, Input, Select, StatusPill, TextArea } from "@/components/ui";
 import { LogList } from "@/components/log-list";
 import { formatRelativeTime } from "@/lib/format";
 import { useAppConfig } from "@/components/providers";
@@ -421,6 +421,18 @@ type UnifiedSearchPlan = {
   isLong: boolean;
 };
 
+type SemanticConfidenceOptions = {
+  absoluteFloor: number;
+  relativeFloor: number;
+  maxCount: number;
+};
+
+type ScoredSemanticMatch = {
+  id: string;
+  score: number;
+  sessionBoosted?: boolean;
+};
+
 type LogChatCountsPayload = {
   taskChatCounts?: Record<string, number>;
 };
@@ -532,6 +544,41 @@ function buildUnifiedSearchPlan(rawQuery: string): UnifiedSearchPlan {
   };
 }
 
+function pickConfidentSemanticIds(
+  matches: readonly ScoredSemanticMatch[] | undefined,
+  options: SemanticConfidenceOptions
+) {
+  const ranked = (matches ?? [])
+    .map((item) => ({
+      id: String(item.id ?? "").trim(),
+      score: Number(item.score) || 0,
+      sessionBoosted: item.sessionBoosted === true,
+    }))
+    .filter((item) => item.id && (item.sessionBoosted || item.score > 0))
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (a.sessionBoosted !== b.sessionBoosted) return a.sessionBoosted ? -1 : 1;
+      return a.id.localeCompare(b.id);
+    });
+
+  if (ranked.length === 0) return new Set<string>();
+
+  const topScore = ranked[0]?.score ?? 0;
+  const floor = Math.max(options.absoluteFloor, topScore * options.relativeFloor);
+  const ids = new Set<string>();
+
+  for (const item of ranked.slice(0, Math.max(1, options.maxCount))) {
+    if (!item.sessionBoosted && item.score < floor) continue;
+    ids.add(item.id);
+  }
+
+  if (ids.size === 0 && ranked[0]?.id) {
+    ids.add(ranked[0].id);
+  }
+
+  return ids;
+}
+
 function matchesSearchText(haystackRaw: string, plan: UnifiedSearchPlan) {
   const haystack = String(haystackRaw ?? "").toLowerCase();
   if (!plan.normalized) return true;
@@ -552,6 +599,51 @@ function matchesSearchText(haystackRaw: string, plan: UnifiedSearchPlan) {
         ? 2
         : 3;
   return hits >= requiredHits;
+}
+
+function scoreSearchText(haystackRaw: string, plan: UnifiedSearchPlan) {
+  const haystack = String(haystackRaw ?? "").toLowerCase();
+  if (!plan.normalized || !haystack) return 0;
+
+  let score = 0;
+  if (haystack.includes(plan.normalized)) {
+    score += 3;
+  } else if (plan.lexicalQuery && haystack.includes(plan.lexicalQuery)) {
+    score += 2.4;
+  }
+
+  for (const shard of plan.phraseShards) {
+    if (shard.length < 20) continue;
+    if (!haystack.includes(shard)) continue;
+    score += 1.2;
+  }
+
+  let hits = 0;
+  let weightedHits = 0;
+  for (const term of plan.terms) {
+    if (!haystack.includes(term)) continue;
+    hits += 1;
+    weightedHits += Math.min(0.85, 0.34 + Math.max(0, term.length - 2) * 0.045);
+  }
+
+  if (hits > 0) {
+    score += Math.min(2.6, weightedHits);
+    score += Math.min(0.9, hits / Math.max(1, plan.terms.length));
+  }
+
+  if (score > 0 && haystack.startsWith(plan.normalized)) {
+    score += 0.35;
+  }
+
+  return Number(score.toFixed(4));
+}
+
+function describeSemanticSearchMode(mode: string) {
+  const normalized = String(mode ?? "").trim().toLowerCase();
+  if (!normalized) return "smart search";
+  if (normalized.includes("qdrant") || normalized.includes("semantic")) return "smart search";
+  if (normalized.includes("bm25") || normalized.includes("lexical")) return "keyword search";
+  return "smart search";
 }
 
 function isTruthyFlag(value: unknown) {
@@ -1873,7 +1965,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [showRaw, setShowRaw] = useState(initialUrlState.raw);
   const [messageDensity, setMessageDensity] = useState<MessageDensity>(initialUrlState.density);
   const [showToolCalls, setShowToolCalls] = useState(initialUrlState.showToolCalls);
-  const [search, setSearch] = useState(initialUrlState.search);
   const [showDone, setShowDone] = useState(initialUrlState.done);
   const [revealSelection, setRevealSelection] = useState(initialUrlState.reveal);
   const [revealedTopicIds, setRevealedTopicIds] = useState<string[]>(initialUrlState.topics);
@@ -3250,7 +3341,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     [selectedSpaceId, setLogs, token]
   );
 
-  const searchPlan = useMemo(() => buildUnifiedSearchPlan(search), [search]);
+  const searchPlan = useMemo(() => buildUnifiedSearchPlan(unifiedComposerDraft), [unifiedComposerDraft]);
   const normalizedSearch = searchPlan.normalized;
   const semanticSearchQuery = searchPlan.lexicalQuery;
   const semanticSearchHintQuery = searchPlan.semanticQuery;
@@ -3671,22 +3762,62 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return semanticSearch.data;
   }, [semanticSearch.data, semanticSearchQuery]);
 
-  const semanticTopicIds = useMemo(() => new Set(semanticForQuery?.matchedTopicIds ?? []), [semanticForQuery]);
-  const semanticTaskIds = useMemo(() => new Set(semanticForQuery?.matchedTaskIds ?? []), [semanticForQuery]);
-  const semanticLogIds = useMemo(() => new Set(semanticForQuery?.matchedLogIds ?? []), [semanticForQuery]);
+  const semanticTopicIds = useMemo(
+    () =>
+      pickConfidentSemanticIds(semanticForQuery?.topics, {
+        absoluteFloor: 0.18,
+        relativeFloor: 0.35,
+        maxCount: 6,
+      }),
+    [semanticForQuery]
+  );
+  const semanticTaskIds = useMemo(
+    () =>
+      pickConfidentSemanticIds(semanticForQuery?.tasks, {
+        absoluteFloor: 0.16,
+        relativeFloor: 0.34,
+        maxCount: 10,
+      }),
+    [semanticForQuery]
+  );
+  const semanticLogIds = useMemo(
+    () =>
+      pickConfidentSemanticIds(semanticForQuery?.logs, {
+        absoluteFloor: 0.14,
+        relativeFloor: 0.28,
+        maxCount: 18,
+      }),
+    [semanticForQuery]
+  );
   const semanticTopicScores = useMemo(
     () => new Map((semanticForQuery?.topics ?? []).map((item) => [item.id, Number(item.score) || 0])),
     [semanticForQuery]
   );
+  const semanticTaskScores = useMemo(
+    () => new Map((semanticForQuery?.tasks ?? []).map((item) => [item.id, Number(item.score) || 0])),
+    [semanticForQuery]
+  );
+  const semanticLogScores = useMemo(
+    () => new Map((semanticForQuery?.logs ?? []).map((item) => [item.id, Number(item.score) || 0])),
+    [semanticForQuery]
+  );
+
+  const matchesLogText = useCallback((entry: LogEntry) => {
+    const haystack = `${entry.summary ?? ""} ${entry.content ?? ""} ${entry.raw ?? ""}`.toLowerCase();
+    return matchesSearchText(haystack, searchPlan);
+  }, [searchPlan]);
+  const scoreLogText = useCallback((entry: LogEntry) => {
+    const haystack = `${entry.summary ?? ""} ${entry.content ?? ""} ${entry.raw ?? ""}`.toLowerCase();
+    return scoreSearchText(haystack, searchPlan);
+  }, [searchPlan]);
 
   const matchesLogSearch = useCallback((entry: LogEntry) => {
     if (!normalizedSearch) return true;
     if (semanticForQuery) {
-      return semanticLogIds.has(entry.id);
+      return semanticLogIds.has(entry.id) || matchesLogText(entry);
     }
-    const haystack = `${entry.summary ?? ""} ${entry.content ?? ""} ${entry.raw ?? ""}`.toLowerCase();
-    return matchesSearchText(haystack, searchPlan);
-  }, [normalizedSearch, searchPlan, semanticForQuery, semanticLogIds]);
+    return matchesLogText(entry);
+  }, [matchesLogText, normalizedSearch, semanticForQuery, semanticLogIds]);
 
   // For active chat panes we always allow a lexical fallback, even when semantic search is enabled,
   // so newly appended (pending) messages still appear immediately.
@@ -3743,16 +3874,20 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const matchesTaskSearch = useCallback((task: Task) => {
     if (revealSelection && revealedTaskIds.includes(task.id)) return true;
     if (!normalizedSearch) return true;
+    const titleMatch = matchesSearchText(task.title, searchPlan);
+    const lexicalLogMatch = logsByTask.get(task.id)?.some(matchesLogText);
     if (semanticForQuery) {
+      if (titleMatch || lexicalLogMatch) return true;
       if (semanticTaskIds.has(task.id)) return true;
       const logMatches = logsByTask.get(task.id)?.some((entry) => semanticLogIds.has(entry.id));
       return Boolean(logMatches);
     }
-    if (matchesSearchText(task.title, searchPlan)) return true;
+    if (titleMatch) return true;
     const logMatches = logsByTask.get(task.id)?.some(matchesLogSearch);
     return Boolean(logMatches);
   }, [
     logsByTask,
+    matchesLogText,
     matchesLogSearch,
     normalizedSearch,
     searchPlan,
@@ -3761,6 +3896,38 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     semanticForQuery,
     semanticLogIds,
     semanticTaskIds,
+  ]);
+
+  const taskSearchScores = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!normalizedSearch) return map;
+
+    for (const task of tasks) {
+      const titleScore = scoreSearchText(task.title, searchPlan);
+      const semanticScore = semanticTaskScores.get(task.id) ?? 0;
+      const confidentSemanticBonus = semanticTaskIds.has(task.id) ? 0.45 : 0;
+      const bestLogScore = Math.max(
+        0,
+        ...(logsByTask.get(task.id) ?? []).map((entry) =>
+          Math.max(scoreLogText(entry), semanticLogScores.get(entry.id) ?? 0)
+        )
+      );
+      const score = titleScore * 1.35 + semanticScore + confidentSemanticBonus + bestLogScore * 0.7;
+      if (score > 0) {
+        map.set(task.id, Number(score.toFixed(4)));
+      }
+    }
+
+    return map;
+  }, [
+    logsByTask,
+    normalizedSearch,
+    scoreLogText,
+    searchPlan,
+    semanticLogScores,
+    semanticTaskIds,
+    semanticTaskScores,
+    tasks,
   ]);
 
   const matchesStatusFilter = useCallback(
@@ -3780,6 +3947,72 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     [normalizedSearch, revealSelection, revealedTaskIds, showDone, showSnoozedTasks, statusFilter]
   );
 
+  const topicSearchScores = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!normalizedSearch) return map;
+
+    for (const topic of topics) {
+      const topicTextScore = scoreSearchText(`${topic.name} ${topic.description ?? ""}`, searchPlan);
+      const semanticScore = semanticTopicScores.get(topic.id) ?? 0;
+      const confidentSemanticBonus = semanticTopicIds.has(topic.id) ? 0.4 : 0;
+      const matchingTaskScores = (tasksByTopic.get(topic.id) ?? [])
+        .filter(matchesStatusFilter)
+        .map((task) => taskSearchScores.get(task.id) ?? 0)
+        .filter((score) => score > 0);
+      const bestTaskScore = matchingTaskScores.length > 0 ? Math.max(...matchingTaskScores) : 0;
+      const matchingTaskCount = matchingTaskScores.length;
+      const bestLogScore = Math.max(
+        0,
+        ...(logsByTopic.get(topic.id) ?? []).map((entry) =>
+          Math.max(scoreLogText(entry), semanticLogScores.get(entry.id) ?? 0)
+        )
+      );
+      const score =
+        topicTextScore * 1.2 +
+        semanticScore +
+        confidentSemanticBonus +
+        bestTaskScore * 0.95 +
+        bestLogScore * 0.45 +
+        Math.min(0.5, matchingTaskCount * 0.12);
+      if (score > 0) {
+        map.set(topic.id, Number(score.toFixed(4)));
+      }
+    }
+
+    return map;
+  }, [
+    logsByTopic,
+    matchesStatusFilter,
+    normalizedSearch,
+    scoreLogText,
+    searchPlan,
+    semanticLogScores,
+    semanticTopicIds,
+    semanticTopicScores,
+    taskSearchScores,
+    tasksByTopic,
+    topics,
+  ]);
+
+  const orderedTasksByTopic = useMemo(() => {
+    if (!normalizedSearch) return tasksByTopic;
+
+    const map = new Map<string, Task[]>();
+    for (const [topicId, list] of tasksByTopic.entries()) {
+      const sorted = [...list].sort((a, b) => {
+        const aScore = taskSearchScores.get(a.id) ?? 0;
+        const bScore = taskSearchScores.get(b.id) ?? 0;
+        if (aScore !== bScore) return bScore - aScore;
+        const aLastActivity = logsByTask.get(a.id)?.[0]?.createdAt ?? a.updatedAt;
+        const bLastActivity = logsByTask.get(b.id)?.[0]?.createdAt ?? b.updatedAt;
+        if (aLastActivity !== bLastActivity) return aLastActivity < bLastActivity ? 1 : -1;
+        return a.title.localeCompare(b.title);
+      });
+      map.set(topicId, sorted);
+    }
+    return map;
+  }, [logsByTask, normalizedSearch, taskSearchScores, tasksByTopic]);
+
   const orderedTopics = useMemo(() => {
     const now = Date.now();
     const scopedTopics =
@@ -3792,6 +4025,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         lastActivity: logsByTopic.get(topic.id)?.[0]?.createdAt ?? topic.updatedAt,
       }))
       .sort((a, b) => {
+        if (normalizedSearch) {
+          const aScore = topicSearchScores.get(a.id) ?? 0;
+          const bScore = topicSearchScores.get(b.id) ?? 0;
+          if (aScore !== bScore) return bScore - aScore;
+          return a.lastActivity < b.lastActivity ? 1 : -1;
+        }
+
         const aBump = topicBumpAt[a.id] ?? 0;
         const bBump = topicBumpAt[b.id] ?? 0;
         const aBoosted = aBump > 0 && now - aBump < NEW_ITEM_BUMP_MS;
@@ -3799,11 +4039,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         if (aBoosted !== bBoosted) return aBoosted ? -1 : 1;
         if (aBoosted && bBoosted && aBump !== bBump) return bBump - aBump;
 
-        if (normalizedSearch && semanticForQuery) {
-          const aScore = semanticTopicScores.get(a.id) ?? 0;
-          const bScore = semanticTopicScores.get(b.id) ?? 0;
-          if (aScore !== bScore) return bScore - aScore;
-        }
         if (a.pinned && !b.pinned) return -1;
         if (!a.pinned && b.pinned) return 1;
         const as = typeof a.sortIndex === "number" ? a.sortIndex : 0;
@@ -3838,13 +4073,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         return hasMatchingTask;
       }
       if (!normalizedSearch) return true;
+      const topicHit = matchesSearchText(`${topic.name} ${topic.description ?? ""}`, searchPlan);
       if (semanticForQuery) {
+        if (topicHit) return true;
         if (semanticTopicIds.has(topic.id)) return true;
         if (hasMatchingTask) return true;
         const topicLogs = logsByTopic.get(topic.id) ?? [];
-        return topicLogs.some((entry) => semanticLogIds.has(entry.id));
+        return topicLogs.some((entry) => semanticLogIds.has(entry.id) || matchesLogText(entry));
       }
-      const topicHit = matchesSearchText(`${topic.name} ${topic.description ?? ""}`, searchPlan);
       if (topicHit) return true;
       if (hasMatchingTask) return true;
       const topicLogs = logsByTopic.get(topic.id) ?? [];
@@ -3884,6 +4120,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     topics,
     topicBumpAt,
     logsByTopic,
+    matchesLogText,
     matchesLogSearch,
     matchesStatusFilter,
     matchesTaskSearch,
@@ -3892,13 +4129,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     semanticForQuery,
     semanticLogIds,
     semanticTopicIds,
-    semanticTopicScores,
     revealSelection,
     revealedTopicIds,
     selectedSpaceId,
     showDone,
     showSnoozedTasks,
     statusFilter,
+    topicSearchScores,
     topicView,
     tasksByTopic,
   ]);
@@ -3909,12 +4146,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const pagedTopics = pageCount > 1 ? orderedTopics.slice((safePage - 1) * pageSize, safePage * pageSize) : orderedTopics;
   const searchTargetsReady =
     normalizedSearch.length > 0 &&
-    unifiedComposerDraft.trim().length > 0 &&
-    orderedTopics.length > 0 &&
-    (semanticSearchQuery.length < 2 ||
-      semanticSearch.query.trim().toLowerCase() === semanticSearchQuery ||
-      Boolean(semanticForQuery) ||
-      Boolean(semanticSearch.error));
+    orderedTopics.length > 0;
   const showSendTargetButtons = searchTargetsReady;
 
   const topicDisplayColors = useMemo(() => {
@@ -5163,7 +5395,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const nextTasks = parsedState.tasks;
     const nextRevealSelection = parsedState.reveal;
 
-    setSearch(parsedState.search);
     setShowRaw(parsedState.raw);
     setMessageDensity(parsedState.density);
     setShowToolCalls(parsedState.showToolCalls);
@@ -5266,7 +5497,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const pushUrl = useCallback(
     (
-      overrides: Partial<Record<"q" | "raw" | "done" | "status" | "page" | "density", string>> & {
+      overrides: Partial<Record<"raw" | "done" | "status" | "page" | "density", string>> & {
         tools?: string;
         topics?: string[];
         tasks?: string[];
@@ -5275,7 +5506,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       mode: "push" | "replace" = "push"
     ) => {
       const params = new URLSearchParams();
-      const nextSearch = overrides.q ?? search;
       const nextRaw = overrides.raw ?? (showRaw ? "1" : "0");
       const nextDensity = overrides.density ?? messageDensity;
       const nextTools = overrides.tools ?? (showToolCalls ? "1" : "0");
@@ -5286,7 +5516,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const nextTasks = overrides.tasks ?? Array.from(expandedTasksSafe);
       const nextReveal = overrides.reveal ?? (revealSelection ? "1" : "0");
 
-      if (nextSearch) params.set("q", nextSearch);
       if (selectedSpaceId) params.set("space", selectedSpaceId);
       if (nextRaw === "1") params.set("raw", "1");
       // Compact is the default; only persist when the user explicitly chooses comfortable.
@@ -5329,7 +5558,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       expandedTasksSafe,
       expandedTopicsSafe,
       safePage,
-      search,
       messageDensity,
       showToolCalls,
       revealSelection,
@@ -5340,19 +5568,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       selectedSpaceId,
     ]
   );
-
-  const updateBoardSearch = useCallback(
-    (value: string) => {
-      setSearch(value);
-      setPage(1);
-      pushUrl({ q: value, page: "1" }, "replace");
-    },
-    [pushUrl, setPage]
-  );
-
-  const clearBoardSearch = useCallback(() => {
-    updateBoardSearch("");
-  }, [updateBoardSearch]);
 
   useEffect(() => {
     const taskId = mobileDoneCollapseTaskIdRef.current;
@@ -5377,10 +5592,32 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     return null;
   }, [composerTarget, tasks, topics]);
+  const unifiedComposerIntent = useMemo(() => {
+    if (selectedComposerTarget?.kind === "task") {
+      return {
+        kind: "task" as const,
+        badge: "Task",
+        chipLabel: `${selectedComposerTarget.topic.name} -> ${selectedComposerTarget.task.title}`,
+        submitLabel: unifiedComposerBusy ? "Sending..." : "Continue task",
+      };
+    }
+    if (selectedComposerTarget?.kind === "topic") {
+      return {
+        kind: "topic" as const,
+        badge: "Topic",
+        chipLabel: `${selectedComposerTarget.topic.name} -> new task`,
+        submitLabel: unifiedComposerBusy ? "Creating task..." : "New task in topic",
+      };
+    }
+    return {
+      kind: "new" as const,
+      badge: "New",
+      chipLabel: "New topic -> new task",
+      submitLabel: unifiedComposerBusy ? "Creating topic..." : "Start new topic",
+    };
+  }, [selectedComposerTarget, unifiedComposerBusy]);
   const unifiedComposerHasText = unifiedComposerDraft.trim().length > 0;
   const unifiedComposerHasContent = unifiedComposerHasText || unifiedComposerAttachments.length > 0;
-  const unifiedComposerAutoResolve = !selectedComposerTarget || selectedComposerTarget.kind === "topic";
-  const unifiedComposerSubmitLabel = unifiedComposerAutoResolve ? "Resolve & Send" : "Send";
   const selectedComposerSessionKey = useMemo(() => {
     if (selectedComposerTarget?.kind === "task") {
       const topicId = String(selectedComposerTarget.task.topicId ?? "").trim();
@@ -5591,6 +5828,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       : selectedComposerTarget?.kind === "task"
         ? selectedComposerTarget.topic
         : null;
+    const forceNewTopic = !selectedTask && !selectedTopic;
+    const forceNewTask = !selectedTask;
 
     const routedSpaceId = selectedSpaceId || undefined;
     let resolvedTopicId = String(selectedTopic?.id ?? selectedTask?.topicId ?? "").trim();
@@ -5612,6 +5851,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               spaceId: routedSpaceId,
               selectedTopicId: selectedTopic ? selectedTopic.id : undefined,
               selectedTaskId: undefined,
+              forceNewTopic,
+              forceNewTask,
             }),
           },
           token
@@ -5766,13 +6007,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           {mdUp || filtersDrawerOpen ? (
             <div className="mt-2">
               <div className="space-y-2 md:hidden">
-                <SearchInput
-                  data-testid="unified-board-search"
-                  value={search}
-                  onChange={(event) => updateBoardSearch(event.target.value)}
-                  onClear={clearBoardSearch}
-                  placeholder="Search topics, tasks, and messages"
-                />
                 <div className="grid grid-cols-2 gap-2">
                   <Select
                     value={topicView}
@@ -5861,14 +6095,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 </div>
               </div>
               <div className="hidden flex-wrap items-center gap-2 md:flex">
-                <SearchInput
-                  data-testid="unified-board-search"
-                  value={search}
-                  onChange={(event) => updateBoardSearch(event.target.value)}
-                  onClear={clearBoardSearch}
-                  placeholder="Search topics, tasks, and messages"
-                  className="min-w-[260px] flex-1"
-                />
                 <Select
                   value={topicView}
                   onChange={(event) => {
@@ -5950,7 +6176,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         <div className="space-y-2">
           <div
             ref={unifiedComposerBoxRef}
-            className="relative rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(8,10,14,0.36)] p-2"
+            className={cn(
+              "relative rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(8,10,14,0.36)] p-2 transition",
+              "focus-within:border-[rgba(77,171,158,0.55)] focus-within:ring-2 focus-within:ring-[rgba(77,171,158,0.18)]"
+            )}
           >
               <TextArea
                 ref={unifiedComposerTextareaRef}
@@ -5979,32 +6208,42 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   addUnifiedComposerFiles(files);
                 }}
                 onKeyDown={(event) => {
-                  if (event.key === 'Enter' && event.ctrlKey) {
-                    event.preventDefault();
-                    void sendUnifiedComposer();
-                    return;
-                  }
-                  // On mobile the keyboard "Send" key fires plain Enter — treat it as send.
-                  if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !mdUp) {
-                    event.preventDefault();
-                    void sendUnifiedComposer();
-                  }
+                  if (event.key !== "Enter" || event.shiftKey) return;
+                  const nativeEvent = event.nativeEvent as KeyboardEvent & { isComposing?: boolean; keyCode?: number };
+                  if (nativeEvent.isComposing || nativeEvent.keyCode === 229) return;
+                  event.preventDefault();
+                  void sendUnifiedComposer();
                 }}
-                placeholder="Send to Task Chat"
-                className="resize-none overflow-y-hidden border-0 bg-transparent p-2 pr-[11.5rem]"
+                placeholder="Type a message. Pick a topic or task if you want to reuse one."
+                className="resize-none overflow-y-hidden border-0 bg-transparent p-2 pb-10 pr-[12.5rem] md:pb-9 md:pr-[14rem]"
                 style={{ minHeight: mdUp ? "44px" : "36px" }}
               />
-              <div className="pointer-events-none absolute bottom-2 left-3 right-[11.25rem] flex min-h-8 items-end">
-                {selectedComposerTarget ? (
-                  <div
-                    data-testid="unified-composer-target-chip"
-                    className="pointer-events-auto inline-flex max-w-full items-center gap-2 rounded-full border border-[rgba(77,171,158,0.55)] bg-[rgba(18,28,34,0.9)] px-2.5 py-1 text-[11px] text-[rgb(var(--claw-text))]"
+              <div className="pointer-events-none absolute bottom-2 left-3 right-[12.25rem] flex min-h-8 items-end md:right-[13.75rem]">
+                <div
+                  data-testid="unified-composer-target-chip"
+                  className={cn(
+                    "pointer-events-auto inline-flex max-w-full items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] text-[rgb(var(--claw-text))]",
+                    unifiedComposerIntent.kind === "task"
+                      ? "border-[rgba(77,171,158,0.55)] bg-[rgba(18,28,34,0.9)]"
+                      : unifiedComposerIntent.kind === "topic"
+                        ? "border-[rgba(255,90,45,0.42)] bg-[rgba(34,22,18,0.9)]"
+                        : "border-[rgba(148,163,184,0.35)] bg-[rgba(18,22,28,0.88)]"
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                      unifiedComposerIntent.kind === "task"
+                        ? "bg-[rgba(77,171,158,0.16)] text-[rgb(var(--claw-accent-2))]"
+                        : unifiedComposerIntent.kind === "topic"
+                          ? "bg-[rgba(255,90,45,0.16)] text-[rgb(var(--claw-accent))]"
+                          : "bg-[rgba(148,163,184,0.16)] text-[rgb(var(--claw-muted))]"
+                    )}
                   >
-                    <span className="truncate">
-                      Sending to {selectedComposerTarget.kind === "task"
-                        ? `task: ${selectedComposerTarget.task.title}`
-                        : `topic (resolve task): ${selectedComposerTarget.topic.name}`}
-                    </span>
+                    {unifiedComposerIntent.badge}
+                  </span>
+                  <span className="truncate">{unifiedComposerIntent.chipLabel}</span>
+                  {selectedComposerTarget ? (
                     <button
                       type="button"
                       data-testid="unified-composer-target-clear"
@@ -6018,10 +6257,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     >
                       ×
                     </button>
-                  </div>
-                ) : (
-                  <span className="text-[11px] text-[rgb(var(--claw-muted))]">No target selected - resolver will pick topic and task</span>
-                )}
+                  ) : null}
+                </div>
               </div>
               <div className="absolute bottom-2 right-2 flex items-center gap-1.5">
                 {unifiedComposerHasContent ? (
@@ -6096,12 +6333,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 ) : null}
                 {unifiedComposerHasText ? (
                   <Button
-                    data-testid={unifiedComposerAutoResolve ? "unified-composer-resolve-send" : "unified-composer-send"}
+                    data-testid="unified-composer-send"
                     size="sm"
+                    className="min-w-[9rem] justify-center"
                     onClick={() => void sendUnifiedComposer()}
                     disabled={unifiedComposerBusy}
                   >
-                    {unifiedComposerSubmitLabel}
+                    {unifiedComposerIntent.submitLabel}
                   </Button>
                 ) : null}
               </div>
@@ -6137,19 +6375,24 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         {readOnly && (
           <span className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add token to move tasks.</span>
         )}
-        {normalizedSearch && (
-          <span className="text-xs text-[rgb(var(--claw-muted))]">
-            {semanticSearch.loading
-              ? "Searching semantic index…"
-              : semanticForQuery
-                ? `Semantic search (${semanticForQuery.mode})`
-                : semanticSearch.error === "search_timeout"
-                  ? "Semantic search timed out, using local match fallback."
-                  : semanticSearch.error
-                  ? "Semantic search unavailable, using local match fallback."
-                  : "Searching…"}
-          </span>
-        )}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[rgb(var(--claw-muted))]">
+          <span>Enter sends. Shift+Enter adds a newline.</span>
+          {normalizedSearch ? (
+            <span>
+              {semanticSearch.loading
+                ? "Finding related topics, tasks, and messages…"
+                : semanticForQuery
+                  ? `Potential matches (${describeSemanticSearchMode(semanticForQuery.mode)})`
+                  : semanticSearch.error === "search_timeout"
+                    ? "Match search timed out, using local fallback."
+                    : semanticSearch.error
+                    ? "Match search unavailable, using local fallback."
+                    : "Finding matches…"}
+            </span>
+          ) : (
+            <span>Type to surface related topics and tasks before you send.</span>
+          )}
+        </div>
       </div>
 
       <div className="space-y-3 max-md:space-y-2.5">
@@ -6158,7 +6401,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const topicId = topic.id;
           const isUnassigned = topicId === "unassigned";
           const deleteKey = `topic:${topic.id}`;
-          const taskList = tasksByTopic.get(topicId) ?? [];
+          const taskList = orderedTasksByTopic.get(topicId) ?? [];
 	          const topicSelectedForSend = selectedComposerTarget?.kind === "topic" && selectedComposerTarget.topic.id === topicId;
 	          const selectedTaskIdForSend = selectedComposerTarget?.kind === "task" ? selectedComposerTarget.task.id : "";
 	          const openCount = taskList.filter((task) => task.status !== "done").length;
@@ -6184,7 +6427,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	            normalizedSearch.length > 0 &&
 	            matchesSearchText(`${topic.name} ${topic.description ?? ""}`, searchPlan);
 	          const showTasks = true;
-	          const isExpanded = expandedTopicsSafe.has(topicId);
+	          const isExpanded = normalizedSearch.length > 0 || expandedTopicsSafe.has(topicId);
 	          const mobileChatTopicId = mobileLayer === "chat" ? mobileChatTarget?.topicId ?? null : null;
 	          if (!mdUp && mobileLayer === "chat" && mobileChatTopicId && mobileChatTopicId !== topicId) {
 	            return null;
@@ -6385,7 +6628,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                              ? "Read-only mode. Add token in Setup to reorder."
 	                            : topicReorderEnabled
 	                              ? "Drag to reorder topics"
-	                              : "Clear search and set Status=All to reorder"
+	                              : "Clear the composer draft and set Status=All to reorder"
 	                      }
 		                        disabled={readOnly || isUnassigned || !topicReorderEnabled}
 		                        draggable={!readOnly && !isUnassigned && topicReorderEnabled}
@@ -6587,7 +6830,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                               setComposerTarget({ kind: "topic", topicId: topic.id });
                             }}
                           >
-                            {topicSelectedForSend ? "Selected" : "Send here"}
+                            {topicSelectedForSend ? "Topic selected" : "New task here"}
                           </Button>
                         ) : null}
                         <button
@@ -6970,7 +7213,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                                    ? "Read-only mode. Add token in Setup to reorder."
 		                                    : taskReorderEnabled
 		                                      ? "Drag to reorder tasks"
-		                                      : "Clear search and set Status=All to reorder"
+		                                      : "Clear the composer draft and set Status=All to reorder"
 		                                }
 		                                disabled={readOnly || !taskReorderEnabled}
 		                                draggable={!readOnly && taskReorderEnabled}
@@ -7204,7 +7447,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                         setComposerTarget({ kind: "task", topicId, taskId: task.id });
                                       }}
                                     >
-                                      {taskSelectedForSend ? "Selected" : "Send here"}
+                                      {taskSelectedForSend ? "Task selected" : "Continue here"}
                                     </Button>
                                   ) : null}
                                   <button

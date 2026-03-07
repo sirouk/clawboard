@@ -8,8 +8,8 @@
 | Document dependencies and alternatives | Complete | `research/DEPENDENCY_RESEARCH.md` | Lockfile strategy decision still open. |
 | Provide coverage against goals | Complete | `research/COVERAGE_MATRIX.md` | None. |
 | Provide ranked stack snapshot with deterministic confidence | Complete | `research/STACK_SNAPSHOT.md` | Scores are static-signal based; no live benchmark weighting. |
-| Produce concrete implementation plan | Complete | `IMPLEMENTATION_PLAN.md` | Path decision and phased execution still required in BUILD. |
-| Compare at least two viable implementation paths under uncertainty | Complete | `IMPLEMENTATION_PLAN.md`, `research/DEPENDENCY_RESEARCH.md` | Needs owner decision on API consolidation path. |
+| Produce concrete implementation plan | Complete | `docs/legacy-autonomy/IMPLEMENTATION_PLAN.md` | Path decision and phased execution still required in BUILD. |
+| Compare at least two viable implementation paths under uncertainty | Complete | `docs/legacy-autonomy/IMPLEMENTATION_PLAN.md`, `research/DEPENDENCY_RESEARCH.md` | Needs owner decision on API consolidation path. |
 | Keep artifacts portable (no local paths/tool transcripts/timing) | Complete | All updated artifacts | None. |
 
 ## Overall Phase Gate

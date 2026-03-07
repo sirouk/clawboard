@@ -413,8 +413,6 @@ async function seedBootstrapInstallTree(installDir, { includePlugin = true } = {
     "ANATOMY.md",
     "CONTEXT.md",
     "CLASSIFICATION.md",
-    "CONTEXT_SPEC.md",
-    "CLASSIFICATION_TEST_MATRIX.md",
     "OPENCLAW_CLAWBOARD_UML.md",
     "TESTING.md",
   ];

@@ -54,19 +54,22 @@ test("unified view expands topics and tasks", async ({ page }) => {
 test("unified board uses freeform composer and hides top-level new topic button", async ({ page }) => {
   await page.goto("/u");
   const composer = page.locator("[data-testid='unified-composer-textarea']:visible").first();
-  const boardSearch = page.locator("[data-testid='unified-board-search']:visible").first();
   await expect(composer).toBeVisible();
-  await expect(boardSearch).toBeVisible();
+  await expect(page.locator("[data-testid='unified-board-search']")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^\+ New topic$/i })).toHaveCount(0);
 
   await composer.fill("Message stays in composer");
-  await expect(page.getByTestId("unified-composer-send")).toHaveCount(0);
+  await expect(page.getByTestId("unified-composer-send")).toContainText("Start new topic");
   await expect(page.getByRole("button", { name: "Attach files" }).first()).toBeVisible();
   await expect(composer).toHaveValue("Message stays in composer");
 
-  await boardSearch.fill("Clawboard");
-  await expect(boardSearch).toHaveValue("Clawboard");
-  await expect(page.locator("[data-topic-card-id='topic-1']").first()).toBeVisible();
+  await composer.fill("Clawboard");
+  await expect(composer).toHaveValue("Clawboard");
+  const topicCard = page.locator("[data-topic-card-id='topic-1']").first();
+  await expect(topicCard).toBeVisible();
+  await expect(page.locator("[data-topic-card-id='topic-1'] > div[role='button']").first()).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByTestId("unified-composer-target-chip")).toContainText("New topic -> new task");
+  await expect(page.getByTestId("unified-composer-send")).toContainText("Start new topic");
 });
 
 test("instance title updates live after config changes", async ({ page, request }) => {
@@ -85,9 +88,13 @@ test("instance title updates live after config changes", async ({ page, request 
   await expect(page.getByText(nextTitle).first()).toBeVisible();
 });
 
-test("browser API calls use same-origin proxy by default, including unified board send", async ({ page, request }) => {
+test("browser API calls use the configured mock API base by default in Playwright, including unified board send", async ({
+  page,
+  request,
+}) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
   const directApiOrigin = new URL(apiBase).origin;
+  const webOrigin = "http://127.0.0.1:3050";
   const suffix = Date.now();
   const topicId = `topic-proxy-send-${suffix}`;
   const topicName = `Proxy Send ${suffix}`;
@@ -106,14 +113,16 @@ test("browser API calls use same-origin proxy by default, including unified boar
   });
   expect(createTask.ok()).toBeTruthy();
 
-  let directApiHits = 0;
-  await page.route(`${directApiOrigin}/**`, async (route) => {
-    directApiHits += 1;
-    await route.abort();
-  });
-
   let sendPayload: Record<string, unknown> | null = null;
-  await page.route("**/api/openclaw/chat", async (route) => {
+  let sendRequestUrl = "";
+  let sameOriginSendHits = 0;
+  page.on("request", (req) => {
+    if (req.url().startsWith(`${webOrigin}/api/openclaw/chat`)) {
+      sameOriginSendHits += 1;
+    }
+  });
+  await page.route(`${directApiOrigin}/api/openclaw/chat`, async (route) => {
+    sendRequestUrl = route.request().url();
     sendPayload = route.request().postDataJSON() as Record<string, unknown>;
     await route.fulfill({
       status: 200,
@@ -136,10 +145,12 @@ test("browser API calls use same-origin proxy by default, including unified boar
 
   const taskHeader = page.locator(`[data-task-card-id="${taskId}"] > div[role="button"]`).first();
   await expect(taskHeader).toBeVisible();
+  await composer.fill(taskTitle);
   const selectTarget = page.getByTestId(`select-task-target-${taskId}`);
   await expect(selectTarget).toBeVisible();
   await selectTarget.click();
-  await expect(page.getByTestId("unified-composer-target-chip")).toContainText(`task: ${taskTitle}`);
+  await expect(page.getByTestId("unified-composer-target-chip")).toContainText(taskTitle);
+  await expect(page.getByTestId("unified-composer-send")).toContainText("Continue task");
 
   await composer.fill(message);
   await page.getByTestId("unified-composer-send").click();
@@ -150,6 +161,7 @@ test("browser API calls use same-origin proxy by default, including unified boar
       sessionKey,
       message,
     });
-  expect(directApiHits).toBe(0);
+  expect(sendRequestUrl.startsWith(`${directApiOrigin}/api/openclaw/chat`)).toBeTruthy();
+  expect(sameOriginSendHits).toBe(0);
   await expect(page.getByText("Failed to fetch")).toHaveCount(0);
 });

@@ -473,7 +473,7 @@ export const createTopic = async (input: {
   const existingColors = await prisma.topic.findMany({ select: { color: true } });
   const pickedColor =
     normalizeHexColor(input.color) ??
-    pickTopicColor(`topic:${id}:${input.name}`, existingColors.map((row) => row.color));
+    pickTopicColor(`topic:${id}:${input.name}`, existingColors.map((row: { color: string | null }) => row.color));
 
   const topic = await prisma.topic.create({
     data: {

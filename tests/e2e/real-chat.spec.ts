@@ -25,11 +25,8 @@ test.describe("Real Chat E2E", () => {
     await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
     const composer = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
-    const boardSearch = page.locator("[data-testid='unified-board-search']:visible").first();
     await expect(composer).toBeVisible();
-    await expect(boardSearch).toBeVisible();
-    await composer.fill(taskTitle.slice(0, 1) || "t");
-    await boardSearch.fill(taskTitle);
+    await composer.fill(taskTitle);
     const topicHeader = page.locator(`[data-topic-card-id="${topicId}"] > div[role="button"]`).first();
     await expect(topicHeader).toBeVisible();
     const topicExpanded = (await topicHeader.getAttribute("aria-expanded")) === "true";
@@ -41,10 +38,10 @@ test.describe("Real Chat E2E", () => {
     const selectTarget = page.getByTestId(`select-task-target-${taskId}`);
     await expect(selectTarget).toBeVisible({ timeout: 20_000 });
     await selectTarget.click();
-    await expect(page.getByTestId("unified-composer-target-chip")).toContainText(`task: ${taskTitle}`);
+    await expect(page.getByTestId("unified-composer-target-chip")).toContainText(taskTitle);
 
     await composer.fill(message);
-    await composer.press("Control+Enter");
+    await composer.press("Enter");
     await expect
       .poll(async () => {
         const logsRes = await request.get(`${apiBase}/api/log?sessionKey=${encodeURIComponent(sessionKey)}&limit=30`);

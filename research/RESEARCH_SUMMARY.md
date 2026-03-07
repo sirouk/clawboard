@@ -15,7 +15,7 @@
 
 ## Highest-Risk Uncertainty
 - It is unclear whether Prisma-backed Next API routes are still required for active workflows or are now compatibility-only.
-- This uncertainty impacts implementation path choice (consolidate vs maintain dual APIs) and is addressed in `IMPLEMENTATION_PLAN.md` with two viable paths.
+- This uncertainty impacts implementation path choice (consolidate vs maintain dual APIs) and is addressed in `docs/legacy-autonomy/IMPLEMENTATION_PLAN.md` with two viable paths.
 
 ## BUILD Handoff Readiness
 - Required planning artifacts are now concrete and portable.

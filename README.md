@@ -95,6 +95,15 @@ Statuses are how the system tracks state:
   - board responding state is driven by `openclaw.typing`, `openclaw.thread_work`, and orchestration run activity.
   - topic/task composers expose Stop and `/stop`/`/abort`; unified top-composer Stop targets the selected thread.
   - cancel requests call `DELETE /api/openclaw/chat` with `sessionKey` (+ `requestId` when available), and backend fans out linked child/subagent sessions when lineage is known.
+- Unified Board uses a single specialized composer:
+  - typing a draft message also surfaces potential topic/task matches.
+  - no selection means `new topic -> new task`.
+  - selecting a topic means `topic -> new task`.
+  - selecting a task means `topic -> existing task`.
+  - `Enter` sends, `Shift+Enter` inserts a newline, and the send label mirrors the action.
+- Browser API traffic is same-origin by default:
+  - when no explicit browser API base is configured, the web app uses the Next `/api/*` proxy.
+  - direct browser-to-API base overrides remain available for advanced/self-hosted setups.
 - Assistant replay dedupe is payload-safe:
   - request/message identifier matches are only collapsed when normalized assistant content matches.
 - Orchestration convergence is strict:
@@ -255,14 +264,14 @@ docker compose run --rm -v "$PWD":/workspace -w /workspace api \
 Core commands:
 
 ```bash
-npm run lint
-npm run test:e2e
-npm run test:backend
-npm run test:classifier
-npm run test:logger
-npm run test:scripts
-npm run test:all
-npm run test:e2e:live-smoke
+pnpm lint
+pnpm test:e2e
+pnpm test:backend
+pnpm test:classifier
+pnpm test:logger
+pnpm test:scripts
+pnpm test:all
+pnpm test:e2e:live-smoke
 ```
 
 Live stack smoke test (`test:e2e:live-smoke`) expects a running stack and external server wiring. Defaults target `http://127.0.0.1:8010` (API) + `http://127.0.0.1:3010` (web); override with `PLAYWRIGHT_API_BASE` / `PLAYWRIGHT_BASE_URL`. For protected deployments set `PLAYWRIGHT_CLAWBOARD_TOKEN` or export `CLAWBOARD_TOKEN`.
@@ -279,8 +288,8 @@ Agentic runtime regression scenarios (main-only, single-subagent, multi-subagent
 Visual regression:
 
 ```bash
-npm run test:visual
-npm run test:visual:update
+pnpm test:visual
+pnpm test:visual:update
 ```
 
 ## Public Repo Safety
@@ -288,13 +297,13 @@ npm run test:visual:update
 Before pushing public changes:
 
 ```bash
-npm run check:publish-safety
+pnpm check:publish-safety
 ```
 
 Optional stricter name scan:
 
 ```bash
-PRIVACY_NAME_REGEX='(<your-first-name>|<your-handle>)' npm run check:publish-safety
+PRIVACY_NAME_REGEX='(<your-first-name>|<your-handle>)' pnpm check:publish-safety
 ```
 
 This check blocks common leaks in tracked files:
@@ -309,11 +318,13 @@ This check blocks common leaks in tracked files:
 - Core architecture map: `ANATOMY.md`
 - Context contract and plugin bridge: `CONTEXT.md`
 - Classification/routing spec and scenario matrix: `CLASSIFICATION.md`
-- Context spec companion: `CONTEXT_SPEC.md`
+- Product/UX rules: `DESIGN_RULES.md`
+- Bootstrap/auth notes: `SEED.md`
+- Testing guide: `TESTING.md`
+- System sequence/reference diagram: `OPENCLAW_CLAWBOARD_UML.md`
 - API ownership contract and migration runbook: `docs/API_OWNERSHIP.md`
 - Operator runbook: `design/operator-runbook.md`
 - Visual system spec: `design/visual-end-state-spec.md`
-- Testing guide: `TESTING.md`
 
 ## Thanks
 

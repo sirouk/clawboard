@@ -583,8 +583,10 @@ class OpenClawResolveBoardSendRequest(BaseModel):
             "example": {
                 "message": "Please prep migration for Postgres indexes this week.",
                 "spaceId": "space-default",
-                "selectedTopicId": "topic-123",
+                "selectedTopicId": None,
                 "selectedTaskId": None,
+                "forceNewTopic": True,
+                "forceNewTask": True,
             }
         }
     )
@@ -610,6 +612,14 @@ class OpenClawResolveBoardSendRequest(BaseModel):
         description="Optional selected task id from Unified view.",
         examples=["task-456"],
     )
+    forceNewTopic: bool = Field(
+        default=False,
+        description="Force creation of a new topic instead of reusing semantic/similar matches.",
+    )
+    forceNewTask: bool = Field(
+        default=False,
+        description="Force creation of a new task instead of reusing semantic/similar matches.",
+    )
 
 
 class OpenClawResolveBoardSendResponse(BaseModel):
@@ -621,7 +631,10 @@ class OpenClawResolveBoardSendResponse(BaseModel):
     taskCreated: bool = Field(description="Whether resolver created task.")
     sessionKey: str = Field(description="Resolved task session key (clawboard:task:<topicId>:<taskId>).")
     decisionSource: str = Field(
-        description="Resolver decision mode source (llm|heuristic|direct_selected_task|selected_topic_fallback).",
+        description=(
+            "Resolver decision mode source "
+            "(heuristic|direct_new_topic|direct_selected_topic_new_task|direct_selected_task)."
+        ),
     )
 
 

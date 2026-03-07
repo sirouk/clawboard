@@ -10,6 +10,8 @@ const ResolveBoardSendRequestSchema = z.object({
   spaceId: z.string().optional(),
   selectedTopicId: z.string().optional().nullable(),
   selectedTaskId: z.string().optional().nullable(),
+  forceNewTopic: z.boolean().optional(),
+  forceNewTask: z.boolean().optional(),
 });
 
 function normalizeBase(raw: string) {

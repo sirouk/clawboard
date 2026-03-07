@@ -2,7 +2,7 @@
 You are the implementation agent.
 
 Goal
-- Execute the highest-priority plan tasks from `IMPLEMENTATION_PLAN.md`.
+- Execute the highest-priority plan tasks from `docs/legacy-autonomy/IMPLEMENTATION_PLAN.md`.
 - Keep changes scoped and validated by existing project patterns.
 
 Behavior
