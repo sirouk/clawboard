@@ -870,6 +870,8 @@ discard_backup_path() {
 install_clawboard_logger_plugin_transactional() {
   local plugin_src="$1"
   local plugin_ext_dir="$2"
+  local plugin_config_json="${3:-}"
+  local plugin_enabled_json="${4:-false}"
   local cfg_snapshot ext_backup stage_root staged_dir preview
 
   cfg_snapshot=""
@@ -889,6 +891,28 @@ install_clawboard_logger_plugin_transactional() {
   fi
 
   sanitize_clawboard_logger_stale_refs
+
+  # OpenClaw validates discovered plugins against their config schema on CLI startup.
+  # Seed a valid config entry before the plugin directory becomes visible so later
+  # bootstrap CLI calls do not deadlock on an invalid intermediate state.
+  if [ -n "$plugin_config_json" ]; then
+    if ! openclaw_cfg_set_file_fallback "plugins.entries.clawboard-logger.config" "$plugin_config_json" json; then
+      restore_file_snapshot "$cfg_snapshot" "$OPENCLAW_CONFIG_PATH" >/dev/null 2>&1 || true
+      restore_backup_path "$ext_backup" "$plugin_ext_dir" >/dev/null 2>&1 || true
+      cleanup_file_snapshot "$cfg_snapshot"
+      preview="failed to seed clawboard-logger config in $OPENCLAW_CONFIG_PATH"
+      log_warn "Rolled back logger plugin install after failure: ${preview:-no output}"
+      return 1
+    fi
+    if ! openclaw_cfg_set_file_fallback "plugins.entries.clawboard-logger.enabled" "$plugin_enabled_json" json; then
+      restore_file_snapshot "$cfg_snapshot" "$OPENCLAW_CONFIG_PATH" >/dev/null 2>&1 || true
+      restore_backup_path "$ext_backup" "$plugin_ext_dir" >/dev/null 2>&1 || true
+      cleanup_file_snapshot "$cfg_snapshot"
+      preview="failed to seed clawboard-logger enabled flag in $OPENCLAW_CONFIG_PATH"
+      log_warn "Rolled back logger plugin install after failure: ${preview:-no output}"
+      return 1
+    fi
+  fi
 
   mkdir -p "$(dirname "$plugin_ext_dir")"
   stage_root="$(mktemp -d "$(dirname "$plugin_ext_dir")/.clawboard-logger.tmp.XXXXXX")" || {
@@ -1252,6 +1276,10 @@ OPENCLAW_HEAP_MB="${CLAWBOARD_OPENCLAW_MAX_OLD_SPACE_MB:-6144}"
 OPENCLAW_GATEWAY_DEVICE_AUTH_OVERRIDE="${CLAWBOARD_OPENCLAW_GATEWAY_USE_DEVICE_AUTH:-}"
 APPLY_AGENT_DIRECTIVES_SETTING="${CLAWBOARD_APPLY_AGENT_DIRECTIVES:-1}"
 SKIP_AGENT_DIRECTIVES=false
+SKIP_LOCAL_MEMORY_SETUP=false
+case "$(printf "%s" "${CLAWBOARD_SKIP_LOCAL_MEMORY_SETUP:-0}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) SKIP_LOCAL_MEMORY_SETUP=true ;;
+esac
 ENV_FILE_CREATED=false
 
 case "$(printf "%s" "$APPLY_AGENT_DIRECTIVES_SETTING" | tr '[:upper:]' '[:lower:]')" in
@@ -1358,6 +1386,7 @@ while [ $# -gt 0 ]; do
     --skip-obsidian-memory-setup) OBSIDIAN_MEMORY_SETUP_MODE="never"; shift ;;
     --setup-openclaw-heap) OPENCLAW_HEAP_SETUP_MODE="always"; shift ;;
     --skip-openclaw-heap-setup) OPENCLAW_HEAP_SETUP_MODE="never"; shift ;;
+    --skip-local-memory-setup) SKIP_LOCAL_MEMORY_SETUP=true; shift ;;
     --apply-agent-directives) SKIP_AGENT_DIRECTIVES=false; shift ;;
     --skip-agent-directives) SKIP_AGENT_DIRECTIVES=true; shift ;;
     --openclaw-max-old-space-mb)
@@ -1399,6 +1428,8 @@ Environment overrides:
                               Offer/run OpenClaw launcher heap tuning at bootstrap end (default: ask)
   CLAWBOARD_OPENCLAW_MAX_OLD_SPACE_MB=<int>
                               Heap size for launcher patch (default: 6144)
+  CLAWBOARD_SKIP_LOCAL_MEMORY_SETUP=<0|1>
+                              Skip setup-openclaw-local-memory.sh during bootstrap
   CLAWBOARD_APPLY_AGENT_DIRECTIVES=<0|1>
                               Reconcile AGENTS/docs roster from directives during bootstrap (default: 1)
   CLAWBOARD_ENV_WIZARD=<0|1>  Force disable/enable interactive .env connection wizard
@@ -1458,6 +1489,8 @@ Environment overrides:
                       Apply OpenClaw launcher heap tuning at the end of bootstrap (interactive)
   --skip-openclaw-heap-setup
                       Skip the OpenClaw launcher heap tuning prompt
+  --skip-local-memory-setup
+                      Skip local memory/model setup during bootstrap
   --apply-agent-directives
                       Reconcile directives + team roster in agent AGENTS.md files
   --skip-agent-directives
@@ -2881,6 +2914,10 @@ maybe_apply_agent_directives() {
 # so the overall flow only does one QMD refresh pass. Handles missing openclaw/script gracefully.
 maybe_run_local_memory_setup() {
   local script_path=""
+  if [ "$SKIP_LOCAL_MEMORY_SETUP" = true ]; then
+    log_info "Skipping local memory setup by configuration."
+    return 0
+  fi
   if ! script_path="$(resolve_local_memory_setup_script 2>/dev/null)"; then
     log_warn "setup-openclaw-local-memory.sh not found; skipping local memory setup (tool allow list, heartbeat, watchdog)."
     return 0
@@ -4011,11 +4048,6 @@ PY
       if [ -z "$_PLUGIN_BASE_URL_INIT" ]; then
         _PLUGIN_BASE_URL_INIT="http://127.0.0.1:8010"
       fi
-      if ! install_clawboard_logger_plugin_transactional "$INSTALL_DIR/extensions/clawboard-logger" "$PLUGIN_EXT_DIR"; then
-        log_error "Failed installing clawboard-logger plugin atomically."
-      fi
-
-      log_info "Configuring logger plugin..."
       LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON=false
       if [ "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE" = "1" ]; then
         LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON=true
@@ -4042,18 +4074,15 @@ PY
       else
         CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextFetchRetries":%s,"contextFallbackModes":%s,"contextMaxChars":%s,"contextCacheTtlMs":%s,"contextCacheMaxEntries":%s,"contextUseCacheOnFailure":%s,"enableOpenClawMemorySearch":%s,"baseUrlFallbacks":["%s","%s"]}' "$API_URL" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_FETCH_RETRIES_VALUE" "$CONTEXT_FALLBACK_MODES_JSON" "$CONTEXT_MAX_CHARS_VALUE" "$CONTEXT_CACHE_TTL_MS_VALUE" "$CONTEXT_CACHE_MAX_ENTRIES_VALUE" "$CONTEXT_USE_CACHE_ON_FAILURE_JSON" "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON" "$_LOGGER_FALLBACK_1" "$_LOGGER_FALLBACK_2")
       fi
-      openclaw_cfg_txn_begin
-      # Some OpenClaw builds normalize/redact plugin config payloads (e.g., token field),
-      # so exact JSON verification can drift even when writes succeed.
-      openclaw_cfg_set_txn plugins.entries.clawboard-logger.config "$CONFIG_JSON" json false
+      if ! install_clawboard_logger_plugin_transactional "$INSTALL_DIR/extensions/clawboard-logger" "$PLUGIN_EXT_DIR" "$CONFIG_JSON" true; then
+        log_error "Failed installing clawboard-logger plugin atomically."
+      fi
+
+      log_info "Configuring logger plugin..."
       _LOGGER_CFG_BASEURL="$(openclaw_cfg_get_scalar_normalized plugins.entries.clawboard-logger.config.baseUrl || true)"
       if [ -z "$_LOGGER_CFG_BASEURL" ] || [ "$_LOGGER_CFG_BASEURL" = "null" ]; then
-        openclaw_cfg_txn_rollback
         log_error "Logger plugin config missing required baseUrl after configuration write."
       fi
-      openclaw_cfg_set_txn plugins.entries.clawboard-logger.enabled true json true
-      openclaw_cfg_txn_verify_or_rollback
-      openclaw_cfg_txn_commit
       OPENCLAW_GATEWAY_RESTART_NEEDED=true
       log_success "Logger plugin installed and enabled."
       ensure_clawboard_logger_in_allow
@@ -4146,6 +4175,8 @@ PY
     # To manually re-index at any time: openclaw memory index --agent <id> --force
     if [ "$OBSIDIAN_MEMORY_SETUP_STATUS" = "configured" ]; then
       log_info "Skipping bootstrap QMD refresh because setup_obsidian_brain.sh already refreshed indexes."
+    elif [ "$SKIP_LOCAL_MEMORY_SETUP" = true ]; then
+      log_info "Skipping bootstrap memory index refresh because local memory setup was skipped."
     elif command -v openclaw >/dev/null 2>&1; then
       log_info "Refreshing QMD memory indexes for all configured agents..."
       _idx_timeout_s="${OPENCLAW_MEMORY_INDEX_TIMEOUT_SEC:-180}"

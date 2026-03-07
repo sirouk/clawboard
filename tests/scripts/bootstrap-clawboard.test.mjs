@@ -74,6 +74,22 @@ raise SystemExit(0 if str(base_url or "").strip() else 1)
 PY
 }
 
+fail_if_discovered_plugin_missing_base_url() {
+  local plugin_dest="$openclaw_home/extensions/clawboard-logger"
+  if [[ "\${OPENCLAW_STUB_FAIL_ANY_COMMAND_MISSING_BASEURL:-0}" != "1" ]]; then
+    return 0
+  fi
+  if [[ ! -d "$plugin_dest" ]]; then
+    return 0
+  fi
+  if plugin_has_base_url; then
+    return 0
+  fi
+  echo "[plugins] clawboard-logger invalid config: baseUrl: must have required property 'baseUrl'" >&2
+  echo "[openclaw] Failed to start CLI: Error: Config validation failed: plugins.entries.clawboard-logger.config.baseUrl: invalid config: must have required property 'baseUrl'" >&2
+  exit 1
+}
+
 python3 - "$config_path" "$openclaw_home" <<'PY' >/dev/null 2>&1 || true
 import json
 import os
@@ -141,6 +157,8 @@ if [[ "$#" -ge 2 && "$1" == "memory" && "$2" == "status" ]]; then
   echo '{"provider":"local","healthy":true}'
   exit 0
 fi
+
+fail_if_discovered_plugin_missing_base_url
 
 if [[ "$#" -ge 3 && "$1" == "config" && "$2" == "get" ]]; then
   key="$3"
@@ -674,6 +692,7 @@ test("bootstrap_clawboard.sh: deploys logger plugin directly so required baseUrl
     OPENCLAW_HOME: openclawHome,
     OPENCLAW_CONFIG_PATH: configPath,
     OPENCLAW_STUB_FAIL_PLUGIN_ENABLE_MISSING_BASEURL: "1",
+    OPENCLAW_STUB_FAIL_ANY_COMMAND_MISSING_BASEURL: "1",
     OPENCLAW_STUB_LOG_FILE: openclawLogPath,
     PATH: `${binDir}:${process.env.PATH ?? ""}`,
     CLAWBOARD_TOKEN: "plugin-token",
@@ -810,6 +829,91 @@ openclaw memory index --agent main --force
     .split("\n")
     .filter((line) => line.trim() === "memory index --agent main --force");
   assert.equal(memoryIndexCalls.length, 1, `expected one memory index call, saw:\n${openclawLog}`);
+});
+
+test("bootstrap_clawboard.sh: skip-local-memory-setup avoids model/bootstrap memory setup", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-skip-local-memory-"));
+  const repoRoot = path.join(tmp, "repo");
+  const installDir = path.join(tmp, "install");
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const binDir = path.join(tmp, "bin");
+  const openclawLogPath = path.join(tmp, "openclaw.log");
+  const localMemoryLogPath = path.join(tmp, "local-memory.log");
+
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
+  await seedBootstrapInstallTree(installDir, { includePlugin: false });
+
+  await mkdir(path.join(installDir, "skills", "clawboard", "scripts"), { recursive: true });
+  await writeFile(
+    path.join(installDir, "skills", "clawboard", "scripts", "setup-openclaw-local-memory.sh"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "local-memory-ran" >> "\${LOCAL_MEMORY_SETUP_LOG_FILE}"
+`,
+    { mode: 0o755 }
+  );
+
+  await makeOpenClawStub(binDir);
+  await makeStub(binDir, "curl", "exit 0");
+
+  const bootstrapPath = path.join(repoRoot, "scripts");
+  await mkdir(bootstrapPath, { recursive: true });
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), path.join(bootstrapPath, "bootstrap_clawboard.sh"));
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_openclaw.sh"), path.join(bootstrapPath, "bootstrap_openclaw.sh"));
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    OPENCLAW_STUB_LOG_FILE: openclawLogPath,
+    LOCAL_MEMORY_SETUP_LOG_FILE: localMemoryLogPath,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    CLAWBOARD_TOKEN: "skip-local-memory-token",
+  };
+
+  const res = await run(
+    [
+      "bash",
+      path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+      "--dir",
+      installDir,
+      "--skip-docker",
+      "--skip-plugin",
+      "--skip-local-memory-setup",
+      "--skip-memory-backup-setup",
+      "--skip-obsidian-memory-setup",
+      "--no-access-url-prompt",
+      "--no-color",
+      "--integration-level",
+      "write",
+    ],
+    { cwd: repoRoot, env }
+  );
+
+  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  assert.match(res.stdout, /Skipping local memory setup by configuration\./);
+  assert.match(res.stdout, /Skipping bootstrap memory index refresh because local memory setup was skipped\./);
+
+  let localMemoryLog = "";
+  try {
+    localMemoryLog = await readFile(localMemoryLogPath, "utf8");
+  } catch (error) {
+    assert.equal(error && typeof error === "object" && "code" in error ? error.code : "", "ENOENT");
+  }
+  assert.equal(localMemoryLog, "");
+
+  let openclawLog = "";
+  try {
+    openclawLog = await readFile(openclawLogPath, "utf8");
+  } catch (error) {
+    assert.equal(error && typeof error === "object" && "code" in error ? error.code : "", "ENOENT");
+  }
+  assert.doesNotMatch(openclawLog, /memory index --agent/);
 });
 
 test("setup-openclaw-local-memory.sh: rolls back config snapshot on required write failure", async () => {
