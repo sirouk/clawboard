@@ -29,7 +29,7 @@ When a follow-up fires:
 1. If a board `taskId` exists, check the task first. If it is already done, stop.
 2. Call `sessions_history(childSessionKey)`.
 3. If the specialist completed successfully:
-   - relay the result to Chris,
+   - relay the result to the user,
    - clear the delegation tags,
    - mark the task done when appropriate,
    - stop scheduling follow-ups.
@@ -42,7 +42,7 @@ When a follow-up fires:
    - update the Clawboard task tags with the new `session:<childSessionKey>`,
    - reset the ladder back to `1m`.
 6. If the specialist failed terminally:
-   - report the failure to Chris,
+   - report the failure to the user,
    - clear delegation tags,
    - do not silently retry forever.
 
@@ -57,7 +57,7 @@ Clawboard is the external ledger. If prior state seems missing, check Clawboard 
 
 ## User-Facing Rule
 
-Chris must always receive a text reply.
+The user must always receive a text reply.
 - Delegated now: say who owns it and when the next checkpoint will happen.
 - Still running: say what is running and the next check ETA.
 - Completed: summarize and deliver.

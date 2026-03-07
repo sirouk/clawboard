@@ -13,7 +13,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { LogEntry, Space, Task, Topic } from "@/lib/types";
-import { Button, Input, Select, StatusPill, TextArea } from "@/components/ui";
+import { Button, Input, SearchInput, Select, StatusPill, TextArea } from "@/components/ui";
 import { LogList } from "@/components/log-list";
 import { formatRelativeTime } from "@/lib/format";
 import { useAppConfig } from "@/components/providers";
@@ -957,96 +957,6 @@ function displaySpaceName(space: Pick<Space, "id" | "name">) {
   if (!raw) return deriveSpaceName(id);
   const friendly = friendlyTagLabel(raw);
   return friendly || deriveSpaceName(id);
-}
-
-const UNIFIED_TOPIC_TITLE_STOPWORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "as",
-  "at",
-  "but",
-  "by",
-  "for",
-  "from",
-  "had",
-  "has",
-  "have",
-  "hey",
-  "help",
-  "i",
-  "in",
-  "is",
-  "just",
-  "message",
-  "need",
-  "of",
-  "on",
-  "or",
-  "please",
-  "the",
-  "to",
-  "vs",
-  "with",
-]);
-
-function titleCaseToken(token: string, forceCapitalize: boolean) {
-  const trimmed = token.trim();
-  if (!trimmed) return "";
-  if (/^[A-Z0-9]{2,}$/.test(trimmed)) return trimmed;
-  const lower = trimmed.toLowerCase();
-  if (!forceCapitalize && UNIFIED_TOPIC_TITLE_STOPWORDS.has(lower)) return lower;
-  return lower.charAt(0).toUpperCase() + lower.slice(1);
-}
-
-function deriveUnifiedTopicNameFromMessage(message: string) {
-  const normalized = stripTransportNoise(String(message ?? "")).replace(/\s+/g, " ").trim();
-  if (!normalized) return "Untitled Topic";
-
-  const sentence = normalized
-    .split(/[\n.!?]+/)
-    .map((part) => part.trim())
-    .find(Boolean) ?? normalized;
-  const cleaned = sentence.replace(/^[\-*#>\d\.\)\(\[\]\s]+/, "").trim();
-  const rawTerms = cleaned
-    .split(/\s+/)
-    .map((term) => term.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, "").trim())
-    .filter(Boolean);
-  if (rawTerms.length === 0) return "Untitled Topic";
-
-  const uniqueTerms: string[] = [];
-  const seenTerms = new Set<string>();
-  for (const term of rawTerms) {
-    const key = term.toLowerCase();
-    if (!key || seenTerms.has(key)) continue;
-    seenTerms.add(key);
-    uniqueTerms.push(term);
-    if (uniqueTerms.length >= 12) break;
-  }
-  if (uniqueTerms.length === 0) return "Untitled Topic";
-
-  const keywordTerms = uniqueTerms.filter((term) => !UNIFIED_TOPIC_TITLE_STOPWORDS.has(term.toLowerCase()));
-  const terms = (keywordTerms.length > 0 ? keywordTerms : uniqueTerms).slice(0, 6);
-
-  const titled = terms
-    .map((token, idx) => titleCaseToken(token, idx === 0 || idx === terms.length - 1))
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!titled) return "Untitled Topic";
-  if (titled.length <= 56) return titled;
-  return `${titled.slice(0, 53).trimEnd()}...`;
-}
-
-function spaceTagFromSelection(spaceId: string | null | undefined, spaces: Pick<Space, "id" | "name">[]) {
-  const normalizedId = String(spaceId ?? "").trim();
-  if (!normalizedId || normalizedId === "space-default") return null;
-  const selected = spaces.find((space) => String(space.id ?? "").trim() === normalizedId) ?? null;
-  const fromName = normalizeTagValue(selected?.name ?? "");
-  if (fromName && spaceIdFromTagLabel(fromName) === normalizedId) return fromName;
-  const fromId = normalizeTagValue(normalizedId.replace(/^space[-_]+/i, "") || normalizedId);
-  if (fromId && spaceIdFromTagLabel(fromId) === normalizedId) return fromId;
-  return fromName || fromId || null;
 }
 
 const CHAT_HEADER_BLURB_LIMIT = 56;
@@ -2434,18 +2344,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [isSticky, setIsSticky] = useState(false);
   const stickyBarRef = useRef<HTMLDivElement>(null);
   const [stickyBarHeight, setStickyBarHeight] = useState(0);
-  const committedSearch = useRef(initialUrlState.search);
   const [topicBumpAt, setTopicBumpAt] = useState<Record<string, number>>({});
   const [taskBumpAt, setTaskBumpAt] = useState<Record<string, number>>({});
   const bumpTimers = useRef<Map<string, number>>(new Map());
   const mobileDoneCollapseTaskIdRef = useRef<string | null>(null);
+  const [mobileForcedCollapsedTaskIds, setMobileForcedCollapsedTaskIds] = useState<Set<string>>(() => new Set());
   const patchedTopicColorsRef = useRef<Set<string>>(new Set());
   const patchedTaskColorsRef = useRef<Set<string>>(new Set());
   const [activeComposer, setActiveComposer] = useState<{ kind: "task"; topicId: string; taskId: string } | null>(null);
   const [autoFocusTask, setAutoFocusTask] = useState<{ topicId: string; taskId: string } | null>(null);
   const [chatMetaExpandEpoch, setChatMetaExpandEpoch] = useState(0);
   const [chatMetaCollapseEpoch, setChatMetaCollapseEpoch] = useState(1);
-  const prevTaskByLogId = useRef<Map<string, string | null>>(new Map());
   const activeChatKeyRef = useRef<string | null>(null);
   const activeChatAtBottomRef = useRef(true);
   const chatLastSeenRef = useRef<Map<string, string>>(new Map());
@@ -2571,31 +2480,51 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     []
   );
 
-  const computeDefaultChatStart = (logs: LogEntry[] | undefined, initialLimit: number) => {
+  const computeDefaultChatStart = (
+    logs: LogEntry[] | undefined,
+    initialLimit: number,
+    showToolCallsInChat: boolean
+  ) => {
     const all = logs ?? [];
     if (all.length === 0) return 0;
-    const fallback = Math.max(0, all.length - initialLimit);
+    let fallback = Math.max(0, all.length - initialLimit);
+    if (!showToolCallsInChat) {
+      let visibleCount = 0;
+      fallback = 0;
+      for (let i = all.length - 1; i >= 0; i -= 1) {
+        if (!isToolingOrSystemChatLog(all[i])) visibleCount += 1;
+        fallback = i;
+        if (visibleCount >= initialLimit) break;
+      }
+    }
     for (let i = all.length - 1; i >= 0; i -= 1) {
       const entry = all[i];
+      const type = String(entry.type ?? "")
+        .trim()
+        .toLowerCase();
       const agentId = String(entry.agentId ?? "")
         .trim()
         .toLowerCase();
-      if (agentId !== "user") continue;
+      if (type !== "conversation" || agentId !== "user") continue;
       return Math.min(fallback, i);
     }
     return fallback;
   };
 
   const computeChatStart = useCallback(
-    (state: Record<string, number>, key: string, len: number, initialLimit: number, logs?: LogEntry[]) => {
+    (
+      state: Record<string, number>,
+      key: string,
+      len: number,
+      initialLimit: number,
+      logs?: LogEntry[],
+      showToolCallsInChat = true
+    ) => {
       const maxStart = Math.max(0, len - 1);
       const has = Object.prototype.hasOwnProperty.call(state, key);
-      const defaultStart = computeDefaultChatStart(logs, initialLimit);
+      const defaultStart = computeDefaultChatStart(logs, initialLimit, showToolCallsInChat);
       const raw = has ? Number(state[key]) : defaultStart;
       const value = Number.isFinite(raw) ? Math.floor(raw) : 0;
-      if (has && value <= 0 && len > initialLimit && !chatHistoryLoadedOlderRef.current.has(key)) {
-        return clamp(defaultStart, 0, maxStart);
-      }
       return clamp(value, 0, maxStart);
     },
     []
@@ -3227,13 +3156,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return map;
   }, [visibleLogs]);
 
-  // Full logs map (includes pending) used for active Topic/Task chat panes.
+  // Full task-chat logs used for active task panes. Pending rows stay visible here so
+  // the live conversation reflects real assistant/tool progress before classification lands.
   const logsByTaskAll = useMemo(() => {
     const eligible = showRaw
       ? logs
-      : logs.filter(
-          (entry) => (entry.classificationStatus ?? "pending") === "classified" && !isCronEventLog(entry)
-        );
+      : logs.filter((entry) => !isCronEventLog(entry));
     const sorted = [...eligible].sort(compareLogCreatedAtAsc);
     const map = new Map<string, LogEntry[]>();
     for (const entry of sorted) {
@@ -3241,23 +3169,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const list = map.get(entry.taskId) ?? [];
       list.push(entry);
       map.set(entry.taskId, list);
-    }
-    return map;
-  }, [logs, showRaw]);
-
-  const logsByTopicAll = useMemo(() => {
-    const eligible = showRaw
-      ? logs
-      : logs.filter(
-          (entry) => (entry.classificationStatus ?? "pending") === "classified" && !isCronEventLog(entry)
-        );
-    const sorted = [...eligible].sort(compareLogCreatedAtAsc);
-    const map = new Map<string, LogEntry[]>();
-    for (const entry of sorted) {
-      if (!entry.topicId) continue;
-      const list = map.get(entry.topicId) ?? [];
-      list.push(entry);
-      map.set(entry.topicId, list);
     }
     return map;
   }, [logs, showRaw]);
@@ -4140,6 +4051,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const updated = parseTaskPayload(await res.json().catch(() => null));
     const nextStatus = String(updated?.status ?? updates.status ?? current.status).trim().toLowerCase();
     const transitionedToDone = nextStatus === "done" && String(current.status ?? "").trim().toLowerCase() !== "done";
+    if (nextStatus !== "done") {
+      setMobileForcedCollapsedTaskIds((prev) => {
+        if (!prev.has(taskId)) return prev;
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
+    }
     setTasks((prev) =>
       prev.map((task) =>
         task.id === taskId
@@ -4153,6 +4072,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     );
     if (!mdUp && transitionedToDone) {
       mobileDoneCollapseTaskIdRef.current = taskId;
+      setMobileForcedCollapsedTaskIds((prev) => {
+        if (prev.has(taskId)) return prev;
+        const next = new Set(prev);
+        next.add(taskId);
+        return next;
+      });
       setExpandedTasks((prev) => {
         if (!prev.has(taskId)) return prev;
         const next = new Set(prev);
@@ -4164,7 +4089,20 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         setMobileChatTarget(null);
       }
     }
-  }, [readOnly, tasks, writeHeaders, token, mdUp, mobileLayer, mobileChatTarget, setTasks, setExpandedTasks, setMobileLayer, setMobileChatTarget]);
+  }, [
+    readOnly,
+    tasks,
+    writeHeaders,
+    token,
+    mdUp,
+    mobileLayer,
+    mobileChatTarget,
+    setMobileForcedCollapsedTaskIds,
+    setTasks,
+    setExpandedTasks,
+    setMobileLayer,
+    setMobileChatTarget,
+  ]);
 
   const persistTopicOrder = useCallback(async (orderedIds: string[]) => {
     if (readOnly) return;
@@ -4992,6 +4930,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const openMobileTaskChat = useCallback(
     (topicId: string, taskId: string) => {
+      setMobileForcedCollapsedTaskIds((prev) => {
+        if (!prev.has(taskId)) return prev;
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
       setMobileChatTarget({ topicId, taskId });
       setMobileLayer("chat");
       setExpandedTopics((prev) => {
@@ -5008,7 +4952,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       });
       scheduleScrollChatToBottom(`task:${taskId}`);
     },
-    [scheduleScrollChatToBottom, setExpandedTasks, setExpandedTopics, setMobileChatTarget, setMobileLayer]
+    [
+      scheduleScrollChatToBottom,
+      setExpandedTasks,
+      setExpandedTopics,
+      setMobileChatTarget,
+      setMobileForcedCollapsedTaskIds,
+      setMobileLayer,
+    ]
   );
 
   const closeMobileChatLayer = useCallback(() => {
@@ -5213,7 +5164,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const nextRevealSelection = parsedState.reveal;
 
     setSearch(parsedState.search);
-    committedSearch.current = parsedState.search;
     setShowRaw(parsedState.raw);
     setMessageDensity(parsedState.density);
     setShowToolCalls(parsedState.showToolCalls);
@@ -5296,7 +5246,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   useEffect(() => {
     if (!hydrated) return;
     // Initialize per-chat history windows once we have the initial snapshot so the
-    // "loaded messages" window doesn't slide forward as new logs append.
+    // visible message window is stable while the pane stays open. New messages can
+    // expand the timeline, but they should not collapse already-visible history until
+    // the next page load resets the per-chat window state.
     setChatHistoryStarts((prev) => {
       let changed = false;
       const next = { ...prev };
@@ -5304,14 +5256,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         const key = chatKeyForTask(taskId);
         if (Object.prototype.hasOwnProperty.call(prev, key)) continue;
         const all = logsByTaskAll.get(taskId) ?? [];
-        const start = computeDefaultChatStart(all, TASK_TIMELINE_LIMIT);
-        if (start <= 0) continue;
+        const start = computeDefaultChatStart(all, TASK_TIMELINE_LIMIT, showToolCalls);
         next[key] = start;
         changed = true;
       }
       return changed ? next : prev;
     });
-  }, [expandedTasksSafe, hydrated, logsByTaskAll]);
+  }, [expandedTasksSafe, hydrated, logsByTaskAll, showToolCalls]);
 
   const pushUrl = useCallback(
     (
@@ -5389,6 +5340,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       selectedSpaceId,
     ]
   );
+
+  const updateBoardSearch = useCallback(
+    (value: string) => {
+      setSearch(value);
+      setPage(1);
+      pushUrl({ q: value, page: "1" }, "replace");
+    },
+    [pushUrl, setPage]
+  );
+
+  const clearBoardSearch = useCallback(() => {
+    updateBoardSearch("");
+  }, [updateBoardSearch]);
 
   useEffect(() => {
     const taskId = mobileDoneCollapseTaskIdRef.current;
@@ -5495,12 +5459,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const clearUnifiedComposerFields = useCallback(() => {
     setUnifiedComposerDraft("");
-    setSearch("");
-    setPage(1);
     clearUnifiedComposerAttachments();
-    committedSearch.current = "";
-    pushUrl({ q: "", page: "1" }, "replace");
-  }, [clearUnifiedComposerAttachments, pushUrl, setPage, setSearch, setUnifiedComposerDraft]);
+  }, [clearUnifiedComposerAttachments, setUnifiedComposerDraft]);
 
   const resolveUnifiedCancelTargetSession = useCallback(() => {
     const selectedKey = normalizeBoardSessionKey(selectedComposerSessionKey);
@@ -5806,6 +5766,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           {mdUp || filtersDrawerOpen ? (
             <div className="mt-2">
               <div className="space-y-2 md:hidden">
+                <SearchInput
+                  data-testid="unified-board-search"
+                  value={search}
+                  onChange={(event) => updateBoardSearch(event.target.value)}
+                  onClear={clearBoardSearch}
+                  placeholder="Search topics, tasks, and messages"
+                />
                 <div className="grid grid-cols-2 gap-2">
                   <Select
                     value={topicView}
@@ -5894,6 +5861,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 </div>
               </div>
               <div className="hidden flex-wrap items-center gap-2 md:flex">
+                <SearchInput
+                  data-testid="unified-board-search"
+                  value={search}
+                  onChange={(event) => updateBoardSearch(event.target.value)}
+                  onClear={clearBoardSearch}
+                  placeholder="Search topics, tasks, and messages"
+                  className="min-w-[260px] flex-1"
+                />
                 <Select
                   value={topicView}
                   onChange={(event) => {
@@ -5988,9 +5963,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   setUnifiedComposerDraft(value);
                   setUnifiedComposerError(null);
                   setUnifiedCancelNotice(null);
-                  setSearch(value);
-                  setPage(1);
-                  pushUrl({ q: value, page: "1" }, "replace");
                 }}
                 enterKeyHint={mdUp ? undefined : "send"}
                 onPaste={(event) => {
@@ -6057,13 +6029,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     type="button"
                     onClick={() => {
                       setUnifiedComposerDraft('');
-                      setSearch('');
-                      setPage(1);
                       clearUnifiedComposerAttachments();
                       setUnifiedComposerError(null);
                       setUnifiedCancelNotice(null);
-                      committedSearch.current = '';
-                      pushUrl({ q: '', page: '1' }, 'replace');
                     }}
                     aria-label="Clear composer"
                     title="Clear composer"
@@ -6805,7 +6773,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                        !mdUp &&
 	                        mobileLayer === "chat" &&
                         mobileTaskId === task.id;
-                      const taskExpanded = taskChatFullscreen || expandedTasksSafe.has(task.id);
+                      const taskExpanded =
+                        !(!mdUp && mobileForcedCollapsedTaskIds.has(task.id)) &&
+                        (taskChatFullscreen || expandedTasksSafe.has(task.id));
 	                      const taskColor =
 	                        taskDisplayColors.get(task.id) ??
 	                        normalizeHexColor(task.color) ??
@@ -6899,7 +6869,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             taskChatKey,
                             taskChatAllLogs.length,
                             TASK_TIMELINE_LIMIT,
-                            taskChatAllLogs
+                            taskChatAllLogs,
+                            showToolCalls
                           );
                       const limitedLogs = taskChatAllLogs.slice(start);
                       const truncated = !normalizedSearch && start > 0;

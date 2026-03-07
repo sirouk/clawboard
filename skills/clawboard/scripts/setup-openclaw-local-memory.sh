@@ -1108,7 +1108,7 @@ PY
   run_cfg_set "${base}.heartbeat.every" "5m" string true
   run_cfg_set "${base}.heartbeat.target" "last" string true
   run_cfg_set "${base}.heartbeat.prompt" \
-    "Heartbeat: (1) read the Clawboard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call sessions_list; (3) call clawboard_search(\"delegating\") as a backup sweep; (4) enforce follow-up ladder 1m->3m->10m->15m->30m->1h (cap 1h): each in-flight delegation must have a one-shot cron follow-up and the next wait must come from this ladder; (5) if any run is still active beyond 5 minutes, send Chris a brief status update with next check ETA; (6) for any Clawboard task with status 'doing' and no matching active session: re-spawn and reset follow-up to +1m; (7) for any completed sub-agent session not yet surfaced: call sessions_history and relay the result to Chris. If nothing needs attention, reply HEARTBEAT_OK." \
+    "Heartbeat: (1) read the Clawboard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call sessions_list; (3) call clawboard_search(\"delegating\") as a backup sweep; (4) enforce follow-up ladder 1m->3m->10m->15m->30m->1h (cap 1h): each in-flight delegation must have a one-shot cron follow-up and the next wait must come from this ladder; (5) if any run is still active beyond 5 minutes, send the user a brief status update with next check ETA; (6) for any Clawboard task with status 'doing' and no matching active session: re-spawn and reset follow-up to +1m; (7) for any completed sub-agent session not yet surfaced: call sessions_history and relay the result to the user. If nothing needs attention, reply HEARTBEAT_OK." \
     string true
   run_cfg_set "${base}.heartbeat.ackMaxChars" 300 json true
 
@@ -1154,7 +1154,7 @@ watchdog_text = (
     "2. Call clawboard_search(\"delegating\") to find all tasks tagged \"delegating\" in Clawboard.\n"
     "3. For each Clawboard task with status \"doing\": extract childSessionKey from tag starting with \"session:\", "
     "extract agentId from tag starting with \"agent:\". Call sessions_history(childSessionKey). "
-    "COMPLETE: clawboard_update_task(taskId, { status: \"done\", tags: [] }), deliver result to Chris. "
+    "COMPLETE: clawboard_update_task(taskId, { status: \"done\", tags: [] }), deliver result to the user. "
     "STILL RUNNING: send brief status if >5 minutes and include next check ETA from ladder [1,3,10,15,30,60] minutes. "
     "LOST (no session, no output): sessions_spawn(agentId, originalTask), "
     "clawboard_update_task(taskId, { tags: [\"delegating\",\"agent:<agentId>\",\"session:<newKey>\"] }), "

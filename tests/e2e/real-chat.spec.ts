@@ -25,8 +25,11 @@ test.describe("Real Chat E2E", () => {
     await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
     const composer = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
+    const boardSearch = page.locator("[data-testid='unified-board-search']:visible").first();
     await expect(composer).toBeVisible();
+    await expect(boardSearch).toBeVisible();
     await composer.fill(taskTitle.slice(0, 1) || "t");
+    await boardSearch.fill(taskTitle);
     const topicHeader = page.locator(`[data-topic-card-id="${topicId}"] > div[role="button"]`).first();
     await expect(topicHeader).toBeVisible();
     const topicExpanded = (await topicHeader.getAttribute("aria-expanded")) === "true";

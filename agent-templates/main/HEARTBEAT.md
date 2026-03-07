@@ -14,7 +14,7 @@ When the heartbeat fires:
 2. Call `sessions_list` to check for any active or recently completed sub-agent sessions.
 3. For each session found:
    - If still running: report status, estimated completion, blockers, and the next check ETA from the ladder.
-   - If completed but result not yet relayed: call `sessions_history` to get the result, then summarize it to Chris.
+   - If completed but result not yet relayed: call `sessions_history` to get the result, then summarize it to the user.
    - If completed and result delivered: no action needed.
 4. Call `clawboard_search("delegating")` as a backup sweep for any in-flight delegation not already found in the injected context.
 5. For each in-flight delegation, ensure a one-shot `cron.add` follow-up exists using the ladder `1m/3m/10m/15m/30m/1h` (reset to `1m` after respawn).
@@ -26,7 +26,7 @@ When the heartbeat fires:
 
 ## Follow-up contract
 - If a sub-agent was spawned and its result has not been delivered yet, surface it now.
-- Do not wait for Chris to ask again. If work is done, report it.
+- Do not wait for the user to ask again. If work is done, report it.
 - If the sub-agent is still running and it has been more than 5 minutes, send a brief "still in progress" update and include the next ladder check ETA.
 
 ## Active recurring checks
@@ -36,4 +36,4 @@ When the heartbeat fires:
 ## Operating rule
 - Do not wait for repeated prompts when work is open.
 - Send timely updates at reasonable intervals or earlier if state changes.
-- Completed work that has not been summarized to Chris = unfinished job. Fix it immediately.
+- Completed work that has not been summarized to the user = unfinished job. Fix it immediately.

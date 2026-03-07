@@ -106,7 +106,7 @@ test("topic swipe actions (snooze/archive/delete) and reorder work in unified vi
   await expect(page.locator(`[data-topic-card-id="${t1.id}"]`)).toHaveCount(0);
 
   // Make it visible via search, then swipe again and archive it.
-  const boardSearch = page.getByTestId("unified-composer-textarea").first();
+  const boardSearch = page.locator("[data-testid='unified-board-search']:visible").first();
   await boardSearch.fill(t1.name);
   const searchedCard = page.locator(`[data-topic-card-id="${t1.id}"]`).first();
   await expect(searchedCard).toBeVisible();

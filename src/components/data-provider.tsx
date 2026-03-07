@@ -6,6 +6,7 @@ import { apiFetch } from "@/lib/api";
 import { useLiveUpdates } from "@/lib/use-live-updates";
 import { LiveEvent, mergeById, mergeLogs, maxTimestamp, removeById, upsertById } from "@/lib/live-utils";
 import { normalizeBoardSessionKey } from "@/lib/board-session";
+import { CLAWBOARD_CONFIG_UPDATED_EVENT } from "@/lib/config-events";
 import {
   CHAT_SEEN_AT_KEY,
   UNSNOOZED_TASKS_KEY,
@@ -353,8 +354,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     if (!payload) return;
     // Full snapshot: replace to avoid keeping stale items when the stream resets or base/token changes.
     if (!since) {
-      // Preserve newer local/SSE-updated space rows if a full snapshot races with in-flight writes.
-      if (Array.isArray(payload.spaces)) setSpaces((prev) => mergeById(prev, payload.spaces as Space[]));
+      if (Array.isArray(payload.spaces)) setSpaces(payload.spaces as Space[]);
       if (Array.isArray(payload.topics)) setTopics(payload.topics as Topic[]);
       if (Array.isArray(payload.tasks)) setTasks(payload.tasks as Task[]);
       if (Array.isArray(payload.logs)) setLogs(mergeLogs([], payload.logs as LogEntry[]));
@@ -409,6 +409,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       if (!event || !event.type) return;
       if (event.type === "space.upserted" && event.data && typeof event.data === "object") {
         upsertSpace(event.data as Space);
+        return;
+      }
+      if (event.type === "config.updated") {
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new Event(CLAWBOARD_CONFIG_UPDATED_EVENT));
+        }
         return;
       }
       if (event.type === "topic.upserted" && event.data && typeof event.data === "object") {

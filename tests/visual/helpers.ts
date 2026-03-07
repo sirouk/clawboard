@@ -74,6 +74,8 @@ export async function applyVisualStabilizers(page: Page) {
         transition-delay: 0ms !important;
         caret-color: transparent !important;
         scroll-behavior: auto !important;
+        -webkit-backdrop-filter: none !important;
+        backdrop-filter: none !important;
       }
     `;
     document.head.appendChild(style);
@@ -83,6 +85,17 @@ export async function applyVisualStabilizers(page: Page) {
 export async function gotoPath(page: Page, href: string) {
   await page.goto(href);
   await page.waitForLoadState("domcontentloaded");
+}
+
+export async function waitForUnifiedViewReady(page: Page) {
+  const firstTopicCard = page.locator("[data-topic-card-id]").first();
+  const mobileBoardControls = page.getByRole("button", { name: /Board controls/i }).first();
+  const composer = page.getByTestId("unified-composer-textarea").first();
+  await Promise.race([
+    firstTopicCard.waitFor({ state: "visible" }),
+    mobileBoardControls.waitFor({ state: "visible" }),
+    composer.waitFor({ state: "visible" }),
+  ]);
 }
 
 export async function openTopic(page: Page, topicName: string) {

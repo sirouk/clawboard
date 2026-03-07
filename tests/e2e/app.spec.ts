@@ -54,11 +54,33 @@ test("unified view expands topics and tasks", async ({ page }) => {
 test("unified board uses freeform composer and hides top-level new topic button", async ({ page }) => {
   await page.goto("/u");
   const composer = page.locator("[data-testid='unified-composer-textarea']:visible").first();
+  const boardSearch = page.locator("[data-testid='unified-board-search']:visible").first();
   await expect(composer).toBeVisible();
+  await expect(boardSearch).toBeVisible();
   await expect(page.getByRole("button", { name: /^\+ New topic$/i })).toHaveCount(0);
 
-  await composer.fill("Composer drives search");
+  await composer.fill("Message stays in composer");
   await expect(page.getByTestId("unified-composer-send")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Attach files" }).first()).toBeVisible();
-  await expect(page.getByTestId("unified-composer-new-topic")).toBeVisible();
+  await expect(composer).toHaveValue("Message stays in composer");
+
+  await boardSearch.fill("Clawboard");
+  await expect(boardSearch).toHaveValue("Clawboard");
+  await expect(page.locator("[data-topic-card-id='topic-1']").first()).toBeVisible();
+});
+
+test("instance title updates live after config changes", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const nextTitle = `Clawboard Live ${Date.now()}`;
+
+  await page.goto("/u");
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await expect(page.getByText("Clawboard").first()).toBeVisible();
+
+  const response = await request.post(`${apiBase}/api/config`, {
+    data: { title: nextTitle },
+  });
+  expect(response.ok()).toBeTruthy();
+
+  await expect(page.getByText(nextTitle).first()).toBeVisible();
 });

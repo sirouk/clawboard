@@ -67,7 +67,9 @@ test("unified composer auto-grows and routes continuation to explicit selected t
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
+  const boardSearch = page.locator("[data-testid='unified-board-search']:visible").first();
   await expect(textarea).toBeVisible();
+  await expect(boardSearch).toBeVisible();
 
   const beforeHeight = await textarea.evaluate((el) => (el as HTMLTextAreaElement).clientHeight);
   await textarea.fill(["line 1", "line 2", "line 3", "line 4", "line 5", "line 6"].join("\n"));
@@ -81,6 +83,8 @@ test("unified composer auto-grows and routes continuation to explicit selected t
   expect(Object.prototype.hasOwnProperty.call(sentPayloads[0] ?? {}, "topicOnly")).toBe(false);
 
   await textarea.fill("continue in explicit task target");
+  await boardSearch.fill(taskTitle);
+  await expect(page.getByTestId(`select-task-target-${taskId}`)).toBeVisible();
   await page.getByTestId(`select-task-target-${taskId}`).click();
   await expect(page.getByTestId("unified-composer-target-chip")).toContainText(`task: ${taskTitle}`);
 
@@ -143,13 +147,16 @@ test("keyboard send in unified composer uses new topic when no target and select
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
+  const boardSearch = page.locator("[data-testid='unified-board-search']:visible").first();
   await expect(textarea).toBeVisible();
+  await expect(boardSearch).toBeVisible();
 
   await textarea.fill(`keyboard-new-topic-${suffix}`);
   await textarea.press("Control+Enter");
   await expect.poll(() => sentPayloads.length).toBe(1);
   expect(String(sentPayloads[0]?.sessionKey ?? "")).toBe(`clawboard:task:topic-auto-${suffix}:task-auto-${suffix}`);
 
+  await boardSearch.fill(topicName);
   await textarea.fill(`target ${topicName}`);
   await expect(page.getByTestId(`select-topic-target-${topicId}`)).toBeVisible();
   await page.getByTestId(`select-topic-target-${topicId}`).click();
@@ -213,9 +220,11 @@ test("typed /stop in unified composer cancels selected target run without postin
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
+  const boardSearch = page.locator("[data-testid='unified-board-search']:visible").first();
   const targetChip = page.getByTestId("unified-composer-target-chip");
   const chipVisible = await targetChip.isVisible().catch(() => false);
   if (!chipVisible) {
+    await boardSearch.fill(taskTitle);
     await textarea.fill(`target ${taskTitle}`);
     await expect(page.getByTestId(`select-task-target-${taskId}`)).toBeVisible();
     await page.getByTestId(`select-task-target-${taskId}`).click();
@@ -438,7 +447,9 @@ test("unified stop button follows orchestration-active selected task and sends s
   await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
+  const boardSearch = page.locator("[data-testid='unified-board-search']:visible").first();
   await textarea.fill(taskTitle.slice(0, 1) || "t");
+  await boardSearch.fill(taskTitle);
   const topicHeader = page.locator(`[data-topic-card-id="${topicId}"] > div[role="button"]`).first();
   await expect(topicHeader).toBeVisible();
   const topicExpanded = (await topicHeader.getAttribute("aria-expanded")) === "true";

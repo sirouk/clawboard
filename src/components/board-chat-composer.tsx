@@ -466,6 +466,11 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     };
   }, [agentId, readOnly, slashCommands.length, slashCommandsLoadedAt, token, BUILTIN_SLASH_COMMANDS]);
 
+  useEffect(() => {
+    if (sending || waiting) return;
+    setPendingRequestId((prev) => (prev === null ? prev : null));
+  }, [sending, waiting]);
+
   useLayoutEffect(() => {
     resizeTextarea();
   }, [draft, resizeTextarea]);
@@ -640,6 +645,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     if (sendingGuardRef.current) return;
     sendingGuardRef.current = true;
     setCancelNotice(null);
+    setPendingRequestId(null);
 
     const localId = randomId();
     const createdAt = new Date().toISOString();
@@ -737,7 +743,6 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     } finally {
       sendingGuardRef.current = false;
       setSending(false);
-      setPendingRequestId(null);
       if (typeof window !== "undefined") {
         window.requestAnimationFrame(() => {
           const el = textareaRef.current;

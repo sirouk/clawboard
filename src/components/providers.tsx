@@ -5,6 +5,7 @@ import type { IntegrationLevel } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
 import { normalizeTokenInput } from "@/lib/token";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
+import { CLAWBOARD_CONFIG_UPDATED_EVENT } from "@/lib/config-events";
 
 export type AppConfig = {
   instanceTitle: string;
@@ -32,12 +33,14 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
   const storedTitle = useLocalStorageItem("clawboard.instanceTitle");
   const storedTokenRaw = useLocalStorageItem("clawboard.token");
   const storedLevelRaw = useLocalStorageItem("clawboard.integrationLevel");
+  const storedApiBaseRaw = useLocalStorageItem("clawboard.apiBase");
 
   const [serverInstanceTitle, setServerInstanceTitle] = useState("Clawboard");
   const [tokenRequired, setTokenRequired] = useState(true);
   const [tokenConfigured, setTokenConfigured] = useState(false);
   const [remoteReadLocked, setRemoteReadLocked] = useState(false);
   const [serverIntegrationLevel, setServerIntegrationLevel] = useState<IntegrationLevel>("write");
+  const [configRefreshNonce, setConfigRefreshNonce] = useState(0);
 
   const instanceTitle = storedTitle && storedTitle.trim().length > 0 ? storedTitle : serverInstanceTitle;
   const token = useMemo(() => {
@@ -58,8 +61,18 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
   }, [storedTokenRaw]);
 
   useEffect(() => {
+    const handleConfigUpdated = () => {
+      setConfigRefreshNonce((prev) => prev + 1);
+    };
+    window.addEventListener(CLAWBOARD_CONFIG_UPDATED_EVENT, handleConfigUpdated);
+    return () => window.removeEventListener(CLAWBOARD_CONFIG_UPDATED_EVENT, handleConfigUpdated);
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
     apiFetch("/api/config", { cache: "no-store" }, token)
       .then(async (res) => {
+        if (!alive) return null;
         if (!res.ok) {
           if (res.status === 401) {
             setRemoteReadLocked(true);
@@ -85,7 +98,10 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
         return null;
       })
       .catch(() => null);
-  }, [token]);
+    return () => {
+      alive = false;
+    };
+  }, [configRefreshNonce, storedApiBaseRaw, token]);
 
   const setToken = (value: string) => {
     const normalized = normalizeTokenInput(value);

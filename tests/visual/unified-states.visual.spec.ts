@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { applyVisualStabilizers, gotoPath, openTask, openTopic } from "./helpers";
+import { applyVisualStabilizers, gotoPath, openTask, openTopic, waitForUnifiedViewReady } from "./helpers";
 
 const TOPIC_NAME = "Clawboard";
 const TOPIC_ID = "topic-1";
@@ -12,7 +12,7 @@ test.beforeEach(async ({ page }) => {
 
 test("unified state: topic expanded", async ({ page }) => {
   await gotoPath(page, "/u");
-  await page.getByPlaceholder("Search topics, tasks, or messages").waitFor();
+  await waitForUnifiedViewReady(page);
   await openTopic(page, TOPIC_NAME);
   await expect(page.getByPlaceholder("Add a task…")).toBeVisible();
   await expect(page).toHaveScreenshot("state-topic-expanded.png");
@@ -20,7 +20,7 @@ test("unified state: topic expanded", async ({ page }) => {
 
 test("unified state: task expanded with chat visible", async ({ page }) => {
   await gotoPath(page, "/u");
-  await page.getByPlaceholder("Search topics, tasks, or messages").waitFor();
+  await waitForUnifiedViewReady(page);
   await openTopic(page, TOPIC_NAME);
   await openTask(page, TASK_NAME);
   await expect(page.getByText("TASK CHAT")).toBeVisible();
@@ -29,7 +29,7 @@ test("unified state: task expanded with chat visible", async ({ page }) => {
 
 test("unified state: legacy inline chat controls absent", async ({ page }) => {
   await gotoPath(page, "/u");
-  await page.getByPlaceholder("Search topics, tasks, or messages").waitFor();
+  await waitForUnifiedViewReady(page);
   await openTopic(page, TOPIC_NAME);
   await expect(page.getByTestId(`toggle-topic-chat-${TOPIC_ID}`)).toHaveCount(0);
   await expect(page).toHaveScreenshot("state-topic-chat-absent.png");
@@ -39,7 +39,7 @@ test("unified state: mobile fullscreen task chat", async ({ page }, testInfo) =>
   test.skip(!testInfo.project.use.isMobile, "Mobile-only snapshot.");
 
   await gotoPath(page, "/u");
-  await page.getByPlaceholder("Search topics, tasks, or messages").waitFor();
+  await waitForUnifiedViewReady(page);
   await openTopic(page, TOPIC_NAME);
   await openTask(page, TASK_NAME);
 

@@ -144,6 +144,73 @@ test("board controls can show hidden tool/system chat rows", async ({ page, requ
   await expect(page.getByText(systemText, { exact: false })).toBeVisible();
 });
 
+test("active task chat shows pending assistant and tool rows before classification settles", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-pending-chat-${suffix}`;
+  const topicName = `Pending Chat ${suffix}`;
+  const taskId = `task-pending-chat-${suffix}`;
+  const taskTitle = `Pending visibility ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
+  const assistantText = `pending-assistant-${suffix}`;
+  const actionText = `pending-tool-${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "todo", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  const pendingAssistant = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      taskId,
+      type: "conversation",
+      content: assistantText,
+      summary: assistantText,
+      classificationStatus: "pending",
+      agentId: "assistant",
+      agentLabel: "OpenClaw",
+      source: { sessionKey, requestId: `req-pending-chat-${suffix}` },
+    },
+  });
+  expect(pendingAssistant.ok()).toBeTruthy();
+  const pendingAssistantEntry = await pendingAssistant.json();
+
+  const pendingAction = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      taskId,
+      type: "action",
+      content: actionText,
+      summary: `Tool call: pending-tool-${suffix}`,
+      classificationStatus: "pending",
+      agentId: "assistant",
+      agentLabel: "OpenClaw",
+      source: { sessionKey, requestId: `req-pending-chat-${suffix}` },
+    },
+  });
+  expect(pendingAction.ok()).toBeTruthy();
+
+  await page.goto(`/u/topic/${topicId}/task/${taskId}`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  await expect(page.getByTestId(`message-bubble-${pendingAssistantEntry.id}`)).toContainText(assistantText);
+  await expect(page.getByText(actionText, { exact: false })).toHaveCount(0);
+
+  const toolCallsToggle = page.getByRole("button", { name: /Show tool calls|Hide tool calls/i }).first();
+  await expect(toolCallsToggle).toBeVisible();
+  if ((await toolCallsToggle.textContent())?.toLowerCase().includes("show")) {
+    await toolCallsToggle.click();
+  }
+
+  await expect(page.getByText(actionText, { exact: false })).toBeVisible();
+});
+
 test("terminal system failures stay visible when tool/system rows are hidden", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
   const suffix = Date.now();
@@ -219,6 +286,8 @@ test("agent message exposes in-between tool call count and can reveal hidden row
   const systemText = `tool-inline-system-${suffix}`;
   const assistantText = `assistant-inline-${suffix}`;
   const priorActionText = `tool-inline-prior-${suffix}`;
+  const baseTime = Date.now();
+  const createdAt = (offsetMs: number) => new Date(baseTime + offsetMs).toISOString();
 
   const createTopic = await request.post(`${apiBase}/api/topics`, {
     data: { id: topicId, name: topicName, pinned: false },
@@ -237,6 +306,7 @@ test("agent message exposes in-between tool call count and can reveal hidden row
       type: "conversation",
       content: `previous-user-inline-${suffix}`,
       summary: "Previous user prompt",
+      createdAt: createdAt(0),
       classificationStatus: "classified",
       agentId: "user",
       agentLabel: "User",
@@ -252,6 +322,7 @@ test("agent message exposes in-between tool call count and can reveal hidden row
       type: "action",
       content: priorActionText,
       summary: `Tool call: inline-prior-${suffix}`,
+      createdAt: createdAt(1),
       classificationStatus: "classified",
       agentId: "assistant",
       agentLabel: "OpenClaw",
@@ -268,6 +339,7 @@ test("agent message exposes in-between tool call count and can reveal hidden row
       type: "conversation",
       content: userText,
       summary: "User prompt",
+      createdAt: createdAt(2),
       classificationStatus: "classified",
       agentId: "user",
       agentLabel: "User",
@@ -283,6 +355,7 @@ test("agent message exposes in-between tool call count and can reveal hidden row
       type: "action",
       content: actionText,
       summary: `Tool call: inline-${suffix}`,
+      createdAt: createdAt(3),
       classificationStatus: "classified",
       agentId: "assistant",
       agentLabel: "OpenClaw",
@@ -299,6 +372,7 @@ test("agent message exposes in-between tool call count and can reveal hidden row
       type: "system",
       content: systemText,
       summary: "System event",
+      createdAt: createdAt(4),
       classificationStatus: "classified",
       agentId: "system",
       agentLabel: "OpenClaw",
@@ -315,6 +389,7 @@ test("agent message exposes in-between tool call count and can reveal hidden row
       type: "conversation",
       content: assistantText,
       summary: "Assistant response",
+      createdAt: createdAt(5),
       classificationStatus: "classified",
       agentId: "assistant",
       agentLabel: "OpenClaw",
@@ -337,13 +412,26 @@ test("agent message exposes in-between tool call count and can reveal hidden row
   const inlineToggle = page.getByTestId(`tool-call-toggle-${assistantLog.id}`);
   await expect(inlineToggle).toBeVisible();
   await expect(inlineToggle).toHaveText(/2 tool calls/i);
+  await expect(inlineToggle).toHaveAttribute("aria-expanded", "false");
 
-  await inlineToggle.click();
+  const setInlineToggleExpanded = async (expanded: boolean) => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await inlineToggle.click();
+      try {
+        await expect(inlineToggle).toHaveAttribute("aria-expanded", expanded ? "true" : "false");
+        return;
+      } catch (error) {
+        if (attempt === 1) throw error;
+      }
+    }
+  };
+
+  await setInlineToggleExpanded(true);
   await expect(actionRow).toBeVisible();
   await expect(systemRow).toBeVisible();
   await expect(priorActionRow).toHaveCount(0);
 
-  await inlineToggle.click();
+  await setInlineToggleExpanded(false);
   await expect(actionRow).toHaveCount(0);
   await expect(systemRow).toHaveCount(0);
 });

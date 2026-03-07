@@ -14,7 +14,7 @@ const authHeaders = (token: string): Record<string, string> => {
 test.describe("live stack smoke", () => {
   test.skip(!LIVE_SMOKE_ENABLED, "Set PLAYWRIGHT_LIVE_STACK_SMOKE=1 to run live stack smoke tests.");
 
-  test("chat send + cancel path is healthy", async ({ page, request }) => {
+  test("chat enqueue + durable log + cancel path is healthy without inference", async ({ page, request }) => {
     const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://127.0.0.1:8010";
     const token = resolveToken();
     const suffix = Date.now();
@@ -64,16 +64,36 @@ test.describe("live stack smoke", () => {
     await page.goto(`/u/topic/${topicId}/task/${taskId}`);
     await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
-    const composer = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
+    const taskCard = page.locator(`[data-task-card-id="${taskId}"]`).first();
+    await expect(taskCard).toBeVisible();
+    const composer = taskCard.locator('textarea[placeholder^="Message "]').first();
     await expect(composer).toBeVisible();
 
-    const send = page.waitForResponse(
-      (resp) => resp.url().includes("/api/openclaw/chat") && resp.request().method() === "POST"
-    );
     await composer.fill(message);
-    await composer.press("Enter");
-    const sendRes = await send;
+    const sendButton = taskCard.getByRole("button", { name: "Send", exact: true }).first();
+    await expect(sendButton).toBeVisible();
+    const sendRes = await Promise.all([
+      page.waitForResponse((resp) => resp.url().includes("/api/openclaw/chat") && resp.request().method() === "POST"),
+      sendButton.click(),
+    ]).then(([resp]) => resp);
     expect(sendRes.ok()).toBeTruthy();
+    const sendBody = (await sendRes.json()) as { queued?: boolean; requestId?: string };
+    expect(sendBody.queued).toBe(true);
+    expect(typeof sendBody.requestId).toBe("string");
+    expect(String(sendBody.requestId || "").trim().length).toBeGreaterThan(0);
+
+    // The smoke only requires the request to be durably accepted; it does not wait for
+    // model output because providers/inference may be unavailable in operator environments.
+    await expect
+      .poll(async () => {
+        const logsRes = await request.get(`${apiBase}/api/log?sessionKey=${encodeURIComponent(sessionKey)}&limit=30`, {
+          headers: authHeaders(token),
+        });
+        if (!logsRes.ok()) return false;
+        const rows = (await logsRes.json()) as Array<{ content?: string; agentId?: string }>;
+        return rows.some((row) => row.content === message && row.agentId === "user");
+      })
+      .toBeTruthy();
 
     const statusRes = await request.get(`${apiBase}/api/openclaw/chat-dispatch/status`, {
       headers: authHeaders(token),
@@ -88,7 +108,7 @@ test.describe("live stack smoke", () => {
 
     const cancelRes = await request.delete(`${apiBase}/api/openclaw/chat`, {
       headers: { ...authHeaders(token), "Content-Type": "application/json" },
-      data: { sessionKey },
+      data: { sessionKey, requestId: sendBody.requestId },
     });
     expect(cancelRes.ok()).toBeTruthy();
   });

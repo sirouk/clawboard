@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { applyVisualStabilizers, gotoPath } from "./helpers";
+import { applyVisualStabilizers, gotoPath, waitForUnifiedViewReady } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   await applyVisualStabilizers(page);
@@ -7,7 +7,7 @@ test.beforeEach(async ({ page }) => {
 
 test("route /u visual baseline", async ({ page }) => {
   await gotoPath(page, "/u");
-  await page.getByPlaceholder("Search topics, tasks, or messages").waitFor();
+  await waitForUnifiedViewReady(page);
   await expect(page).toHaveScreenshot("route-u.png");
 });
 

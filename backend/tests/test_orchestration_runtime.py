@@ -338,6 +338,455 @@ class OrchestrationRuntimeTests(unittest.TestCase):
         self.assertTrue(bool(convergence.get("ready")))
         self.assertEqual(str(convergence.get("reason") or ""), "converged")
 
+    def test_orch_003b_late_subagent_spawn_reopens_main_supervision(self):
+        session_key = "clawboard:task:topic-orch-003b:task-orch-003b"
+        request_id = self._openclaw_chat(session_key=session_key, message="Reply first, then delegate late.")
+        child_session = "agent:coding:subagent:orch-003b-child"
+
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="I have the initial answer and will circle back if I need to delegate.",
+                summary="Main initial reply",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003b-main-initial",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            self.assertEqual(run.status, "done")
+            main_item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == "main.response")
+            ).first()
+            self.assertIsNotNone(main_item)
+            self.assertEqual(main_item.status, "done")
+            self.assertTrue(bool(main_item.completedAt))
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003b-child"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003b-spawn-late",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            self.assertEqual(run.status, "running")
+            self.assertIsNone(run.completedAt)
+            items = {
+                row.itemKey: row
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertIn("main.response", items)
+            self.assertIn(f"subagent:{child_session}", items)
+            self.assertEqual(items["main.response"].status, "running")
+            self.assertEqual(int(items["main.response"].attempts or 0), 0)
+            self.assertIsNone(items["main.response"].completedAt)
+            self.assertTrue(bool(items["main.response"].nextCheckAt))
+            self.assertEqual(items[f"subagent:{child_session}"].status, "running")
+
+    def test_orch_003c_failed_subagent_stays_failed_and_requeues_main_recovery(self):
+        session_key = "clawboard:task:topic-orch-003c:task-orch-003c"
+        request_id = self._openclaw_chat(session_key=session_key, message="Delegate, then recover if the child fails.")
+        child_session = "agent:coding:subagent:orch-003c-child"
+
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="I have the initial answer and may delegate a follow-up.",
+                summary="Main initial reply",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003c-main-initial",
+        )
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003c-child"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003c-spawn-late",
+        )
+
+        with patch.object(main_module, "_orchestration_original_request_still_dispatching", return_value=False), patch.object(
+            main_module,
+            "_orchestration_enqueue_follow_up_dispatch",
+            return_value=True,
+        ) as follow_up_mock:
+            self._append_log(
+                LogAppend(
+                    type="system",
+                    content="OpenClaw chat failed: Request was aborted",
+                    summary="OpenClaw chat failed: Request was aborted",
+                    createdAt=now_iso(),
+                    agentId="system",
+                    agentLabel="System",
+                    source={
+                        "sessionKey": child_session,
+                        "channel": "direct",
+                        "requestId": request_id,
+                        "requestTerminal": True,
+                    },
+                ),
+                idem="orch-003c-subagent-failed",
+            )
+
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Buffered assistant output arrived after the failure log.",
+                summary="Late child assistant backfill",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="Coding",
+                source={"sessionKey": child_session, "channel": "direct", "requestId": request_id},
+            ),
+            idem="orch-003c-subagent-late-assistant",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            self.assertEqual(run.status, "running")
+            self.assertIsNone(run.completedAt)
+            items = {
+                row.itemKey: row
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(items["main.response"].status, "running")
+            self.assertEqual(items[f"subagent:{child_session}"].status, "failed")
+            self.assertEqual(
+                str(items[f"subagent:{child_session}"].lastError or ""),
+                "OpenClaw chat failed: Request was aborted",
+            )
+
+        follow_up_mock.assert_called_once()
+
+    def test_orch_003d_failed_subagent_attempt_does_not_poison_run_after_retry_and_main_final(self):
+        session_key = "clawboard:task:topic-orch-003d:task-orch-003d"
+        request_id = self._openclaw_chat(
+            session_key=session_key,
+            message="Retry delegated work if the first child fails, then finish cleanly.",
+        )
+        first_child = "agent:coding:subagent:orch-003d-a"
+        second_child = "agent:coding:subagent:orch-003d-b"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003d-a"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003d-spawn-a",
+        )
+        self._append_log(
+            LogAppend(
+                type="system",
+                content="OpenClaw chat failed: upstream inference outage",
+                summary="OpenClaw chat failed: upstream inference outage",
+                createdAt=now_iso(),
+                agentId="system",
+                agentLabel="System",
+                source={
+                    "sessionKey": first_child,
+                    "channel": "direct",
+                    "requestId": request_id,
+                    "requestTerminal": True,
+                },
+            ),
+            idem="orch-003d-failed-a",
+        )
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003d-b"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003d-spawn-b",
+        )
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Recovered coding output from the retry attempt.",
+                summary="Retry child finished",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="Coding",
+                source={"sessionKey": second_child, "channel": "direct", "requestId": request_id},
+            ),
+            idem="orch-003d-child-b-done",
+        )
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Here is the final integrated answer after retrying the failed specialist.",
+                summary="Main final answer",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003d-main-final",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            self.assertEqual(run.status, "done")
+            self.assertTrue(bool(run.completedAt))
+            items = {
+                row.itemKey: row
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(items["main.response"].status, "done")
+            self.assertEqual(items[f"subagent:{first_child}"].status, "failed")
+            self.assertEqual(items[f"subagent:{second_child}"].status, "done")
+
+    def test_orch_003e_tick_revives_terminal_run_with_unresolved_failed_subagent(self):
+        session_key = "clawboard:task:topic-orch-003e:task-orch-003e"
+        request_id = self._openclaw_chat(session_key=session_key, message="Recover after restart if delegated work failed.")
+        child_session = "agent:web:subagent:orch-003e-child"
+        legacy_iso = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            main_item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == "main.response")
+            ).first()
+            self.assertIsNotNone(main_item)
+            main_item.status = "done"
+            main_item.completedAt = legacy_iso
+            main_item.updatedAt = legacy_iso
+            main_item.meta = {"role": "primary_response", "lastActivityAt": legacy_iso}
+            session.add(main_item)
+            session.add(
+                OrchestrationItem(
+                    runId=run.runId,
+                    itemKey=f"subagent:{child_session}",
+                    parentItemKey="main.response",
+                    requestId=request_id,
+                    agentId="web",
+                    kind="subagent",
+                    goal="research and report back",
+                    sessionKey=child_session,
+                    status="failed",
+                    attempts=0,
+                    nextCheckAt=None,
+                    startedAt=legacy_iso,
+                    completedAt=legacy_iso,
+                    lastError="gateway outage",
+                    meta={"seededBy": "test_orch_003e"},
+                    createdAt=legacy_iso,
+                    updatedAt=legacy_iso,
+                )
+            )
+            run.status = "failed"
+            run.completedAt = legacy_iso
+            run.updatedAt = legacy_iso
+            session.add(run)
+            session.commit()
+
+        with patch.object(main_module, "_orchestration_original_request_still_dispatching", return_value=False), patch.object(
+            main_module,
+            "_orchestration_enqueue_follow_up_dispatch",
+            return_value=True,
+        ) as follow_up_mock:
+            stats = main_module._orchestration_tick_once(now_dt=datetime.now(timezone.utc))
+
+        self.assertGreaterEqual(int(stats.get("recoveredRuns") or 0), 1)
+        follow_up_mock.assert_called_once()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            self.assertEqual(run.status, "running")
+            self.assertIsNone(run.completedAt)
+            items = {
+                row.itemKey: row
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(items["main.response"].status, "running")
+            self.assertEqual(items[f"subagent:{child_session}"].status, "failed")
+            recovery = dict((run.meta or {}).get("recovery") or {})
+            self.assertEqual(int(recovery.get("attempts") or 0), 1)
+            self.assertTrue(str(recovery.get("lastRequestId") or "").startswith("occhat-fup-"))
+
+    def test_orch_003f_recovery_follow_up_respects_pending_row_and_backoff(self):
+        session_key = "clawboard:task:topic-orch-003f:task-orch-003f"
+        request_id = self._openclaw_chat(session_key=session_key, message="Keep retrying supervision with backoff.")
+        child_session = "agent:docs:subagent:orch-003f-child"
+        base_dt = datetime.now(timezone.utc) - timedelta(minutes=30)
+        base_iso = base_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            main_item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == "main.response")
+            ).first()
+            self.assertIsNotNone(main_item)
+            main_item.status = "running"
+            main_item.updatedAt = base_iso
+            main_item.nextCheckAt = base_iso
+            main_item.meta = {"role": "primary_response", "lastActivityAt": base_iso}
+            session.add(main_item)
+            session.add(
+                OrchestrationItem(
+                    runId=run.runId,
+                    itemKey=f"subagent:{child_session}",
+                    parentItemKey="main.response",
+                    requestId=request_id,
+                    agentId="docs",
+                    kind="subagent",
+                    goal="write the docs update",
+                    sessionKey=child_session,
+                    status="failed",
+                    attempts=0,
+                    nextCheckAt=None,
+                    startedAt=base_iso,
+                    completedAt=base_iso,
+                    lastError="provider timeout",
+                    meta={"seededBy": "test_orch_003f"},
+                    createdAt=base_iso,
+                    updatedAt=base_iso,
+                )
+            )
+            queue_row = session.exec(
+                select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == request_id).limit(1)
+            ).first()
+            self.assertIsNotNone(queue_row)
+            queue_row.status = "sent"
+            queue_row.completedAt = base_iso
+            queue_row.updatedAt = base_iso
+            queue_row.claimedAt = None
+            session.add(queue_row)
+            session.commit()
+
+        first_now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            self.assertTrue(
+                main_module._orchestration_maybe_enqueue_recovery_follow_up(
+                    session,
+                    run=run,
+                    items=items,
+                    now_value=first_now,
+                    trigger="test",
+                    force=True,
+                )
+            )
+            session.commit()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            self.assertFalse(
+                main_module._orchestration_maybe_enqueue_recovery_follow_up(
+                    session,
+                    run=run,
+                    items=items,
+                    now_value=first_now,
+                    trigger="test",
+                    force=False,
+                )
+            )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            recovery = dict((run.meta or {}).get("recovery") or {})
+            follow_up_request_id = str(recovery.get("lastRequestId") or "")
+            self.assertTrue(follow_up_request_id.startswith("occhat-fup-"))
+            queue_row = session.exec(
+                select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == follow_up_request_id).limit(1)
+            ).first()
+            self.assertIsNotNone(queue_row)
+            queue_row.status = "sent"
+            queue_row.completedAt = first_now
+            queue_row.updatedAt = first_now
+            queue_row.claimedAt = None
+            session.add(queue_row)
+            session.commit()
+
+        not_due_iso = (datetime.fromisoformat(first_now.replace("Z", "+00:00")) + timedelta(seconds=90)).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            self.assertFalse(
+                main_module._orchestration_maybe_enqueue_recovery_follow_up(
+                    session,
+                    run=run,
+                    items=items,
+                    now_value=not_due_iso,
+                    trigger="test",
+                    force=False,
+                )
+            )
+
+        due_iso = (datetime.fromisoformat(first_now.replace("Z", "+00:00")) + timedelta(seconds=121)).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            self.assertTrue(
+                main_module._orchestration_maybe_enqueue_recovery_follow_up(
+                    session,
+                    run=run,
+                    items=items,
+                    now_value=due_iso,
+                    trigger="test",
+                    force=False,
+                )
+            )
+            session.commit()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            recovery = dict((run.meta or {}).get("recovery") or {})
+            self.assertEqual(int(recovery.get("attempts") or 0), 2)
+
     def test_orch_004_cancel_marks_run_and_items_cancelled(self):
         session_key = "clawboard:task:topic-orch-004:task-orch-004"
         request_id = self._openclaw_chat(session_key=session_key, message="Will cancel this run.")

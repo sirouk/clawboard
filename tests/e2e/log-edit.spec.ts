@@ -84,19 +84,10 @@ test("messages can be edited and reallocated without impossible topic/task combi
   await taskSelect.selectOption({ value: taskBId });
 
   await row.locator("textarea").first().fill(updatedMessage);
-  let saveClicked = false;
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    const saveButton = row.getByRole("button", { name: "Save" });
-    try {
-      await saveButton.click({ timeout: 5000 });
-      saveClicked = true;
-      break;
-    } catch {
-      if (attempt === 5) throw new Error("Failed to click Save after retries.");
-      await page.waitForTimeout(120);
-    }
-  }
-  expect(saveClicked).toBeTruthy();
+  const saveButton = row.getByRole("button", { name: "Save" });
+  await expect(saveButton).toBeVisible();
+  await saveButton.scrollIntoViewIfNeeded();
+  await saveButton.click({ force: true });
 
   // The log should immediately disappear from the previous task chat scope.
   await expect(page.locator(`[data-log-id="${log.id}"]`)).toHaveCount(0);

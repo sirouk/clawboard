@@ -692,25 +692,24 @@ export function LogList({
     return map;
   }, [hiddenToolRowsByAnchor]);
 
+  const visibleEntryIds = useMemo(() => new Set(visibleFiltered.map((entry) => entry.id)), [visibleFiltered]);
   const [expandedToolAnchors, setExpandedToolAnchors] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     setExpandedToolAnchors((prev) => {
-      const next: Record<string, boolean> = {};
       let changed = false;
-      for (const anchorId of hiddenToolRowsByAnchor.keys()) {
-        const keep = Boolean(prev[anchorId]);
-        if (keep) next[anchorId] = true;
-      }
+      const next: Record<string, boolean> = {};
       for (const key of Object.keys(prev)) {
-        if (!hiddenToolRowsByAnchor.has(key) && prev[key]) {
+        if (!visibleEntryIds.has(key)) {
           changed = true;
+          continue;
         }
+        if (prev[key]) next[key] = true;
       }
       if (!changed && Object.keys(prev).length === Object.keys(next).length) return prev;
       return next;
     });
-  }, [hiddenToolRowsByAnchor]);
+  }, [visibleEntryIds]);
 
   const grouped = useMemo(() => {
     if (!groupByDay) return { all: visibleFiltered };
@@ -1014,10 +1013,14 @@ export function LogList({
                         onToggleHiddenToolCalls={
                           hiddenToolCallsBefore > 0
                             ? () =>
-                                setExpandedToolAnchors((prev) => ({
-                                  ...prev,
-                                  [entry.id]: !prev[entry.id],
-                                }))
+                                setExpandedToolAnchors((prev) => {
+                                  if (prev[entry.id]) {
+                                    const next = { ...prev };
+                                    delete next[entry.id];
+                                    return next;
+                                  }
+                                  return { ...prev, [entry.id]: true };
+                                })
                             : undefined
                         }
                       />

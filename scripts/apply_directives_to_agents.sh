@@ -1182,7 +1182,7 @@ lines.append("## Team Roster")
 lines.append("")
 lines.append("This section is maintained by `scripts/apply_directives_to_agents.sh`.")
 lines.append("Main agent guidance:")
-lines.append("- Use this roster as the routing map: delegate early, supervise actively, and keep Chris updated.")
+lines.append("- Use this roster as the routing map: delegate early, supervise actively, and keep the user updated.")
 lines.append("- Run the intent-confidence gate before execution delegation; clarify or huddle when confidence is not high.")
 if normalize_bool(updated_main_directives.get("forbidMainDoingSubagentJobs"), False):
     lines.append("- Directive (Main): Prefer specialists whenever a capable subagent exists.")
