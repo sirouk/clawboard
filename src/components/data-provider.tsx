@@ -128,6 +128,147 @@ function isIncomingSignalNewer(previousUpdatedAt: string | undefined, incomingUp
   return incomingMs >= previousMs;
 }
 
+function isTimestampAfterCursor(value: string | undefined, cursor: string | undefined) {
+  const valueMs = parseIsoMs(value);
+  const cursorMs = parseIsoMs(cursor);
+  if (Number.isFinite(valueMs) && Number.isFinite(cursorMs)) return valueMs > cursorMs;
+  const valueText = String(value ?? "").trim();
+  const cursorText = String(cursor ?? "").trim();
+  if (!valueText || !cursorText) return false;
+  return valueText > cursorText;
+}
+
+function overlayFresherById<T extends { id: string; updatedAt?: string; createdAt?: string }>(
+  snapshot: T[],
+  current: T[],
+  cursor: string | undefined,
+  merge: (items: T[], incoming: T[]) => T[]
+) {
+  if (!cursor) return snapshot;
+  const fresher = current.filter((item) => isTimestampAfterCursor(item.updatedAt ?? item.createdAt, cursor));
+  if (fresher.length === 0) return snapshot;
+  return merge(snapshot, fresher);
+}
+
+function overlayFresherDrafts(
+  snapshot: Record<string, Draft>,
+  current: Record<string, Draft>,
+  cursor: string | undefined
+) {
+  if (!cursor) return snapshot;
+  let changed = false;
+  const next = { ...snapshot };
+  for (const [key, value] of Object.entries(current)) {
+    if (!isTimestampAfterCursor(value.updatedAt ?? value.createdAt, cursor)) continue;
+    if (JSON.stringify(next[key]) === JSON.stringify(value)) continue;
+    next[key] = value;
+    changed = true;
+  }
+  return changed ? next : snapshot;
+}
+
+type DeletedEntityRef = { id?: unknown; deletedAt?: unknown };
+type TypingSignalSnapshot = { sessionKey?: unknown; typing?: unknown; requestId?: unknown; updatedAt?: unknown };
+type ThreadWorkSignalSnapshot = {
+  sessionKey?: unknown;
+  active?: unknown;
+  requestId?: unknown;
+  reason?: unknown;
+  updatedAt?: unknown;
+};
+type ChangesPayload = {
+  cursor?: unknown;
+  spaces?: unknown;
+  topics?: unknown;
+  tasks?: unknown;
+  logs?: unknown;
+  drafts?: unknown;
+  deletedLogIds?: unknown;
+  deletedTopics?: unknown;
+  deletedTasks?: unknown;
+  openclawTyping?: unknown;
+  openclawThreadWork?: unknown;
+};
+
+function applyDeletedEntityTombstones<T extends { id: string; updatedAt?: string; createdAt?: string }>(
+  items: T[],
+  tombstones: DeletedEntityRef[]
+) {
+  if (tombstones.length === 0) return items;
+  const deletedById = new Map<string, string>();
+  for (const row of tombstones) {
+    const id = String(row.id ?? "").trim();
+    const deletedAt = String(row.deletedAt ?? "").trim();
+    if (!id || !deletedAt) continue;
+    const previous = deletedById.get(id) ?? "";
+    if (!previous || deletedAt > previous) deletedById.set(id, deletedAt);
+  }
+  if (deletedById.size === 0) return items;
+  return items.filter((item) => {
+    const deletedAt = deletedById.get(item.id);
+    if (!deletedAt) return true;
+    const itemStamp = item.updatedAt ?? item.createdAt;
+    return isTimestampAfterCursor(itemStamp, deletedAt);
+  });
+}
+
+function reconcileTypingSnapshot(
+  previous: Record<string, { typing: boolean; requestId?: string; updatedAt: string }>,
+  incoming: TypingSignalSnapshot[],
+  cursor: string | undefined
+) {
+  const next: Record<string, { typing: boolean; requestId?: string; updatedAt: string }> = {};
+  for (const row of incoming) {
+    const sessionKey = normalizeBoardSessionKey(String(row.sessionKey ?? "").trim());
+    const updatedAt = String(row.updatedAt ?? "").trim();
+    if (!sessionKey || !updatedAt) continue;
+    const current = next[sessionKey];
+    if (current && !isIncomingSignalNewer(current.updatedAt, updatedAt)) continue;
+    next[sessionKey] = {
+      typing: Boolean(row.typing ?? true),
+      requestId: String(row.requestId ?? "").trim() || undefined,
+      updatedAt,
+    };
+  }
+  if (cursor) {
+    for (const [sessionKey, row] of Object.entries(previous)) {
+      if (next[sessionKey]) continue;
+      if (!isTimestampAfterCursor(row.updatedAt, cursor)) continue;
+      next[sessionKey] = row;
+    }
+  }
+  return JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+}
+
+function reconcileThreadWorkSnapshot(
+  previous: Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }>,
+  incoming: ThreadWorkSignalSnapshot[],
+  cursor: string | undefined
+) {
+  const next: Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }> = {};
+  for (const row of incoming) {
+    const sessionKey = normalizeBoardSessionKey(String(row.sessionKey ?? "").trim());
+    const updatedAt = String(row.updatedAt ?? "").trim();
+    if (!sessionKey || !updatedAt) continue;
+    const current = next[sessionKey];
+    if (current && !isIncomingSignalNewer(current.updatedAt, updatedAt)) continue;
+    next[sessionKey] = {
+      active: Boolean(row.active ?? true),
+      requestId: String(row.requestId ?? "").trim() || undefined,
+      reason: String(row.reason ?? "").trim() || undefined,
+      updatedAt,
+    };
+  }
+  if (cursor) {
+    for (const [sessionKey, row] of Object.entries(previous)) {
+      if (next[sessionKey]) continue;
+      if (!isTimestampAfterCursor(row.updatedAt, cursor)) continue;
+      next[sessionKey] = row;
+    }
+  }
+  return JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+}
+
 function unsnoozedTopicTag(topicId: string) {
   return `${UNSNOOZE_TOPIC_TAG_PREFIX}${topicId}`;
 }
@@ -350,37 +491,87 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     if (!res.ok) return;
-    const payload = await res.json().catch(() => null);
+    const payload = (await res.json().catch(() => null)) as ChangesPayload | null;
     if (!payload) return;
+    const cursor = String(payload.cursor ?? "").trim() || undefined;
+    const deletedTopics = Array.isArray(payload.deletedTopics) ? (payload.deletedTopics as DeletedEntityRef[]) : [];
+    const deletedTasks = Array.isArray(payload.deletedTasks) ? (payload.deletedTasks as DeletedEntityRef[]) : [];
+    const typingSignals = Array.isArray(payload.openclawTyping) ? (payload.openclawTyping as TypingSignalSnapshot[]) : [];
+    const threadWorkSignals = Array.isArray(payload.openclawThreadWork)
+      ? (payload.openclawThreadWork as ThreadWorkSignalSnapshot[])
+      : [];
     // Full snapshot: replace to avoid keeping stale items when the stream resets or base/token changes.
     if (!since) {
-      if (Array.isArray(payload.spaces)) setSpaces(payload.spaces as Space[]);
-      if (Array.isArray(payload.topics)) setTopics(payload.topics as Topic[]);
-      if (Array.isArray(payload.tasks)) setTasks(payload.tasks as Task[]);
-      if (Array.isArray(payload.logs)) setLogs(mergeLogs([], payload.logs as LogEntry[]));
-      // Ephemeral typing/thread-work signals are stream-only. On full snapshot
-      // resync, clear them so stale in-memory state cannot leak across reconnects.
-      setOpenclawTyping({});
-      setOpenclawThreadWork({});
-      if (Array.isArray(payload.drafts)) {
-        const next: Record<string, Draft> = {};
-        for (const item of payload.drafts as Draft[]) {
-          const key = String((item as Draft | undefined)?.key ?? "").trim();
-          if (!key) continue;
-          next[key] = item as Draft;
+      if (Array.isArray(payload.spaces)) {
+        setSpaces((prev) => overlayFresherById(payload.spaces as Space[], prev, cursor, mergeById));
+      }
+      if (Array.isArray(payload.topics)) {
+        setTopics((prev) =>
+          applyDeletedEntityTombstones(
+            overlayFresherById(payload.topics as Topic[], prev, cursor, mergeById),
+            deletedTopics
+          )
+        );
+      } else if (deletedTopics.length > 0) {
+        setTopics((prev) => applyDeletedEntityTombstones(prev, deletedTopics));
+      }
+      if (Array.isArray(payload.tasks)) {
+        setTasks((prev) =>
+          applyDeletedEntityTombstones(
+            overlayFresherById(payload.tasks as Task[], prev, cursor, mergeById),
+            deletedTasks
+          )
+        );
+      } else if (deletedTasks.length > 0) {
+        setTasks((prev) => applyDeletedEntityTombstones(prev, deletedTasks));
+      }
+      if (Array.isArray(payload.logs)) {
+        setLogs((prev) => {
+          const next = overlayFresherById(payload.logs as LogEntry[], prev, cursor, mergeLogs);
+          if (!Array.isArray(payload.deletedLogIds) || payload.deletedLogIds.length === 0) return next;
+          const deleted = new Set(payload.deletedLogIds.map((id: unknown) => String(id ?? "").trim()).filter(Boolean));
+          if (deleted.size === 0) return next;
+          return next.filter((row) => !deleted.has(row.id));
+        });
+      } else if (Array.isArray(payload.deletedLogIds) && payload.deletedLogIds.length > 0) {
+        const deleted = new Set(payload.deletedLogIds.map((id: unknown) => String(id ?? "").trim()).filter(Boolean));
+        if (deleted.size > 0) {
+          setLogs((prev) => prev.filter((row) => !deleted.has(row.id)));
         }
-        setDrafts(next);
+      }
+      setOpenclawTyping((prev) => reconcileTypingSnapshot(prev, typingSignals, cursor));
+      setOpenclawThreadWork((prev) => reconcileThreadWorkSnapshot(prev, threadWorkSignals, cursor));
+      if (Array.isArray(payload.drafts)) {
+        setDrafts((prev) => {
+          const next: Record<string, Draft> = {};
+          for (const item of payload.drafts as Draft[]) {
+            const key = String((item as Draft | undefined)?.key ?? "").trim();
+            if (!key) continue;
+            next[key] = item as Draft;
+          }
+          return overlayFresherDrafts(next, prev, cursor);
+        });
       }
       setHydrated(true);
     } else {
       if (Array.isArray(payload.spaces)) setSpaces((prev) => mergeById(prev, payload.spaces as Space[]));
-      if (Array.isArray(payload.topics)) setTopics((prev) => mergeById(prev, payload.topics as Topic[]));
-      if (Array.isArray(payload.tasks)) setTasks((prev) => mergeById(prev, payload.tasks as Task[]));
+      if (Array.isArray(payload.topics)) {
+        setTopics((prev) => applyDeletedEntityTombstones(mergeById(prev, payload.topics as Topic[]), deletedTopics));
+      } else if (deletedTopics.length > 0) {
+        setTopics((prev) => applyDeletedEntityTombstones(prev, deletedTopics));
+      }
+      if (Array.isArray(payload.tasks)) {
+        setTasks((prev) => applyDeletedEntityTombstones(mergeById(prev, payload.tasks as Task[]), deletedTasks));
+      } else if (deletedTasks.length > 0) {
+        setTasks((prev) => applyDeletedEntityTombstones(prev, deletedTasks));
+      }
       if (Array.isArray(payload.logs)) setLogs((prev) => mergeLogs(prev, payload.logs as LogEntry[]));
       if (Array.isArray(payload.deletedLogIds) && payload.deletedLogIds.length > 0) {
         const deleted = new Set(payload.deletedLogIds.map((id: unknown) => String(id ?? "").trim()).filter(Boolean));
         if (deleted.size > 0) setLogs((prev) => prev.filter((row) => !deleted.has(row.id)));
       }
+      setOpenclawTyping((prev) => reconcileTypingSnapshot(prev, typingSignals, cursor));
+      setOpenclawThreadWork((prev) => reconcileThreadWorkSnapshot(prev, threadWorkSignals, cursor));
       if (Array.isArray(payload.drafts)) {
         setDrafts((prev) => {
           const next = { ...prev };
@@ -393,13 +584,15 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         });
       }
     }
-    const ts = maxTimestamp([
-      ...(payload.spaces ?? []),
-      ...(payload.topics ?? []),
-      ...(payload.tasks ?? []),
-      ...(payload.logs ?? []),
-      ...(payload.drafts ?? []),
-    ]);
+    const ts =
+      cursor ||
+      maxTimestamp([
+        ...((payload.spaces as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
+        ...((payload.topics as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
+        ...((payload.tasks as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
+        ...((payload.logs as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
+        ...((payload.drafts as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
+      ]);
     return ts;
   };
 

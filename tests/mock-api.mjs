@@ -10,11 +10,21 @@ const PORT = Number(process.env.MOCK_API_PORT || 3051);
 const fixturePath = process.env.CLAWBOARD_FIXTURE_PATH || join(__dirname, "fixtures", "portal.json");
 
 const store = JSON.parse(readFileSync(fixturePath, "utf8"));
+store.spaces = Array.isArray(store.spaces) ? store.spaces : [];
+store.topics = Array.isArray(store.topics) ? store.topics : [];
+store.tasks = Array.isArray(store.tasks) ? store.tasks : [];
+store.logs = Array.isArray(store.logs) ? store.logs : [];
+store.drafts = Array.isArray(store.drafts) ? store.drafts : [];
 const subscribers = new Set();
 const eventBuffer = [];
 const MAX_EVENTS = 200;
 let nextEventId = 0;
 const BOARD_TASK_SESSION_PREFIX = "clawboard:task:";
+const deletedLogs = [];
+const deletedTopics = [];
+const deletedTasks = [];
+const liveTyping = new Map();
+const liveThreadWork = new Map();
 
 function nowIso() {
   return new Date().toISOString();
@@ -88,6 +98,86 @@ function normalizeLog(entry) {
     createdAt,
     updatedAt: entry.updatedAt || createdAt,
   };
+}
+
+function maxIso(current, candidate) {
+  const value = String(candidate || "").trim();
+  if (!value) return current;
+  if (!current) return value;
+  return value > current ? value : current;
+}
+
+function recordDeleted(list, id, deletedAt) {
+  const key = String(id || "").trim();
+  const stamp = String(deletedAt || nowIso()).trim() || nowIso();
+  if (!key) return;
+  list.push({ id: key, deletedAt: stamp });
+}
+
+function setTypingSignal(sessionKey, typing, requestId, updatedAt) {
+  const key = String(sessionKey || "").trim();
+  const stamp = String(updatedAt || nowIso()).trim() || nowIso();
+  const rid = String(requestId || "").trim();
+  if (!key) return;
+  if (typing) {
+    liveTyping.set(key, { sessionKey: key, typing: true, requestId: rid || undefined, updatedAt: stamp });
+  } else {
+    liveTyping.delete(key);
+  }
+  pushEvent("openclaw.typing", { sessionKey: key, typing: Boolean(typing), ...(rid ? { requestId: rid } : {}) }, stamp);
+}
+
+function setThreadWorkSignal(sessionKey, active, requestId, reason, updatedAt) {
+  const key = String(sessionKey || "").trim();
+  const stamp = String(updatedAt || nowIso()).trim() || nowIso();
+  const rid = String(requestId || "").trim();
+  const reasonText = String(reason || "").trim();
+  if (!key) return;
+  if (active) {
+    liveThreadWork.set(key, {
+      sessionKey: key,
+      active: true,
+      requestId: rid || undefined,
+      reason: reasonText || undefined,
+      updatedAt: stamp,
+    });
+  } else {
+    liveThreadWork.delete(key);
+  }
+  pushEvent(
+    "openclaw.thread_work",
+    { sessionKey: key, active: Boolean(active), ...(rid ? { requestId: rid } : {}), ...(reasonText ? { reason: reasonText } : {}) },
+    stamp
+  );
+}
+
+function maybeResolveSignalsFromLog(entry) {
+  const source = entry && typeof entry.source === "object" ? entry.source : {};
+  const sessionKey = String(source.sessionKey || "").trim();
+  const requestId = String(source.requestId || source.messageId || "").trim();
+  const updatedAt = String(entry.updatedAt || entry.createdAt || nowIso()).trim() || nowIso();
+  const agentId = String(entry.agentId || "").trim().toLowerCase();
+  const requestTerminal = Boolean(source.requestTerminal);
+  if (!sessionKey) return;
+  if (agentId === "assistant" || requestTerminal) {
+    setTypingSignal(sessionKey, false, requestId, updatedAt);
+    setThreadWorkSignal(sessionKey, false, requestId, agentId === "assistant" ? "assistant_response" : "request_terminal", updatedAt);
+  }
+}
+
+function buildChangesCursor(payload) {
+  let cursor = "";
+  for (const collection of [payload.spaces, payload.topics, payload.tasks, payload.logs, payload.drafts]) {
+    for (const item of collection || []) {
+      cursor = maxIso(cursor, item.updatedAt || item.createdAt);
+    }
+  }
+  for (const item of payload.deletedTopics || []) cursor = maxIso(cursor, item.deletedAt);
+  for (const item of payload.deletedTasks || []) cursor = maxIso(cursor, item.deletedAt);
+  for (const item of payload.deletedLogs || []) cursor = maxIso(cursor, item.deletedAt);
+  for (const item of payload.openclawTyping || []) cursor = maxIso(cursor, item.updatedAt);
+  for (const item of payload.openclawThreadWork || []) cursor = maxIso(cursor, item.updatedAt);
+  return cursor || undefined;
 }
 
 function parseBoardSessionKey(sessionKey) {
@@ -313,11 +403,24 @@ const server = http.createServer(async (req, res) => {
       if (!since) return items;
       return items.filter((item) => (item[key] || "") >= since);
     };
-    return sendJson(res, 200, {
+    const payload = {
+      cursor: undefined,
+      spaces: filterSince(store.spaces, "updatedAt"),
       topics: filterSince(store.topics, "updatedAt"),
       tasks: filterSince(store.tasks, "updatedAt"),
       logs: filterSince(store.logs, "updatedAt"),
+      drafts: filterSince(store.drafts, "updatedAt"),
+      deletedLogIds: filterSince(deletedLogs, "deletedAt").map((item) => item.id),
+      deletedTopics: filterSince(deletedTopics, "deletedAt"),
+      deletedTasks: filterSince(deletedTasks, "deletedAt"),
+      openclawTyping: Array.from(liveTyping.values()),
+      openclawThreadWork: Array.from(liveThreadWork.values()),
+    };
+    payload.cursor = buildChangesCursor({
+      ...payload,
+      deletedLogs: filterSince(deletedLogs, "deletedAt"),
     });
+    return sendJson(res, 200, payload);
   }
 
   if (url.pathname === "/api/metrics" && req.method === "GET") {
@@ -387,8 +490,28 @@ const server = http.createServer(async (req, res) => {
       source: { sessionKey, channel: "openclaw", requestId, agentId },
     });
     store.logs.push(entry);
+    setTypingSignal(sessionKey, true, requestId, createdAt);
+    setThreadWorkSignal(sessionKey, true, requestId, "queued", createdAt);
     pushEvent("log.appended", entry);
     return sendJson(res, 200, { queued: true, requestId });
+  }
+
+  if (url.pathname === "/api/openclaw/chat" && req.method === "DELETE") {
+    const payload = await parseBody(req);
+    const sessionKey = String(payload.sessionKey || "").trim();
+    const requestId = String(payload.requestId || "").trim();
+    const now = nowIso();
+    if (sessionKey) {
+      setTypingSignal(sessionKey, false, requestId, now);
+      setThreadWorkSignal(sessionKey, false, requestId, "user_cancelled", now);
+    }
+    return sendJson(res, 200, {
+      aborted: true,
+      queueCancelled: sessionKey ? 1 : 0,
+      sessionKey,
+      sessionKeys: sessionKey ? [sessionKey] : [],
+      gatewayAbortCount: sessionKey ? 1 : 0,
+    });
   }
 
   if (url.pathname === "/api/search" && req.method === "GET") {
@@ -515,6 +638,7 @@ const server = http.createServer(async (req, res) => {
     if (idx < 0) return sendJson(res, 200, { ok: true, deleted: false });
     store.topics.splice(idx, 1);
     const now = nowIso();
+    recordDeleted(deletedTopics, topicId, now);
     // Best-effort: detach tasks/logs like the real API does to preserve history.
     for (const task of store.tasks) {
       if (task.topicId !== topicId) continue;
@@ -605,6 +729,7 @@ const server = http.createServer(async (req, res) => {
       if (idx < 0) return sendJson(res, 200, { ok: true, deleted: false });
       store.tasks.splice(idx, 1);
       const now = nowIso();
+      recordDeleted(deletedTasks, taskId, now);
       for (const log of store.logs) {
         if (log.taskId !== taskId) continue;
         log.taskId = null;
@@ -646,6 +771,7 @@ const server = http.createServer(async (req, res) => {
       });
       store.logs.push(entry);
       pushEvent("log.appended", entry);
+      maybeResolveSignalsFromLog(entry);
       return sendJson(res, 200, entry);
     }
   }
@@ -659,6 +785,7 @@ const server = http.createServer(async (req, res) => {
     const normalized = normalizeLog(entry);
     Object.assign(entry, normalized);
     pushEvent("log.patched", entry);
+    maybeResolveSignalsFromLog(entry);
     return sendJson(res, 200, entry);
   }
 
@@ -669,8 +796,10 @@ const server = http.createServer(async (req, res) => {
 
     const deletedIds = toDelete.map((row) => row.id);
     store.logs = store.logs.filter((log) => !deletedIds.includes(log.id));
+    const deletedAt = nowIso();
 
     for (const deletedId of deletedIds) {
+      recordDeleted(deletedLogs, deletedId, deletedAt);
       pushEvent("log.deleted", { id: deletedId, rootId: logId });
     }
 

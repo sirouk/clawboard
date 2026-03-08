@@ -263,6 +263,20 @@ class DeletedLog(SQLModel, table=True):
     deletedAt: str = Field(description="ISO timestamp when the log was deleted.")
 
 
+class DeletedTopic(SQLModel, table=True):
+    """Topic tombstones for incremental /api/changes reconciliation."""
+
+    id: str = Field(primary_key=True, description="Deleted topic ID.")
+    deletedAt: str = Field(description="ISO timestamp when the topic was deleted.")
+
+
+class DeletedTask(SQLModel, table=True):
+    """Task tombstones for incremental /api/changes reconciliation."""
+
+    id: str = Field(primary_key=True, description="Deleted task ID.")
+    deletedAt: str = Field(description="ISO timestamp when the task was deleted.")
+
+
 class SessionRoutingMemory(SQLModel, table=True):
     """Small per-session memory to improve routing under low-signal follow-ups.
 

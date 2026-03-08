@@ -241,6 +241,27 @@ class OrchestrationRuntimeTests(unittest.TestCase):
                 None,
             )
         )
+        self.assertTrue(
+            main_module._orchestration_is_non_delivery_status_text(
+                "HEARTBEAT_OK",
+                "HEARTBEAT_OK",
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_non_delivery_status_text(
+                "No active delegations. Only main session running. All clear.",
+                "Only main session running",
+                None,
+            )
+        )
+        self.assertFalse(
+            main_module._orchestration_is_non_delivery_status_text(
+                "Task complete. Weather monitoring is live. Waiting on your Discord webhook.",
+                "Task complete",
+                None,
+            )
+        )
         self.assertFalse(
             main_module._orchestration_is_waiting_status_text(
                 "**LATENCY_TEST_ALPHA** The coding specialist responded as requested. Task complete.",
@@ -362,6 +383,91 @@ class OrchestrationRuntimeTests(unittest.TestCase):
         convergence = runs[0].get("convergence") or {}
         self.assertTrue(bool(convergence.get("ready")))
         self.assertEqual(str(convergence.get("reason") or ""), "converged")
+
+    def test_orch_003aa_heartbeat_only_status_does_not_count_as_delivery(self):
+        session_key = "clawboard:task:topic-orch-003aa:task-orch-003aa"
+        request_id = self._openclaw_chat(
+            session_key=session_key,
+            message="Do not close the run on heartbeat chatter alone.",
+        )
+        child_session = "agent:coding:subagent:orch-003aa-child"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003aa-child"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003aa-spawn",
+        )
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Completed coding deliverable.",
+                summary="Subagent completed work",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="Coding",
+                source={"sessionKey": child_session, "channel": "direct", "requestId": request_id},
+            ),
+            idem="orch-003aa-subagent-done",
+        )
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="HEARTBEAT_OK",
+                summary="HEARTBEAT_OK",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003aa-heartbeat",
+        )
+
+        main_module._orchestration_tick_once()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            self.assertEqual(run.status, "running")
+            statuses = {
+                row.itemKey: row.status
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(statuses.get(f"subagent:{child_session}"), "done")
+            self.assertEqual(statuses.get("main.response"), "running")
+
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Here is the final integrated result.",
+                summary="Main final response",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003aa-main-final",
+        )
+
+        main_module._orchestration_tick_once()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            self.assertEqual(run.status, "done")
+            statuses = {
+                row.itemKey: row.status
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(statuses.get("main.response"), "done")
+            self.assertEqual(statuses.get(f"subagent:{child_session}"), "done")
 
     def test_orch_003a_waiting_status_after_child_done_keeps_main_open_without_duplicate_follow_up(self):
         session_key = "clawboard:task:topic-orch-003a:task-orch-003a"
@@ -779,6 +885,127 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             self.assertEqual(items["main.response"].status, "done")
             self.assertEqual(items[f"subagent:{first_child}"].status, "failed")
             self.assertEqual(items[f"subagent:{second_child}"].status, "done")
+
+    def test_orch_003da_tick_does_not_revive_resolved_failed_attempt_after_main_delivery(self):
+        session_key = "clawboard:task:topic-orch-003da:task-orch-003da"
+        request_id = self._openclaw_chat(
+            session_key=session_key,
+            message="Do not keep yelling about a failed retry after the user already got the answer.",
+        )
+        failed_child = "agent:coding:subagent:orch-003da-failed"
+        done_child = "agent:coding:subagent:orch-003da-done"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003da-failed"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003da-spawn-failed",
+        )
+        self._append_log(
+            LogAppend(
+                type="system",
+                content="OpenClaw chat failed: 429 from specialist retry",
+                summary="OpenClaw chat failed: 429 from specialist retry",
+                createdAt=now_iso(),
+                agentId="system",
+                agentLabel="System",
+                source={
+                    "sessionKey": failed_child,
+                    "channel": "direct",
+                    "requestId": request_id,
+                    "requestTerminal": True,
+                },
+            ),
+            idem="orch-003da-failed-child-terminal",
+        )
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003da-done"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003da-spawn-done",
+        )
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Recovered specialist output from the successful attempt.",
+                summary="Retry child finished",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="Coding",
+                source={"sessionKey": done_child, "channel": "direct", "requestId": request_id},
+            ),
+            idem="orch-003da-done-child-finished",
+        )
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Integrated final answer already delivered to the user.",
+                summary="Main final answer",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003da-main-final",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            main_item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == "main.response")
+            ).first()
+            self.assertIsNotNone(main_item)
+            # Simulate the stale live state: the final answer exists, but main.response/run were
+            # left active and would previously get reopened + re-stalled forever.
+            main_item.status = "stalled"
+            main_item.completedAt = None
+            main_item.nextCheckAt = now_iso()
+            main_item.updatedAt = now_iso()
+            session.add(main_item)
+            run.status = "stalled"
+            run.completedAt = None
+            session.add(run)
+            session.commit()
+
+        main_module._orchestration_tick_once()
+        main_module._orchestration_tick_once()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            self.assertEqual(run.status, "done")
+            items = {
+                row.itemKey: row
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(items["main.response"].status, "done")
+            self.assertEqual(items[f"subagent:{failed_child}"].status, "failed")
+            self.assertEqual(items[f"subagent:{done_child}"].status, "done")
+            run_events = session.exec(
+                select(OrchestrationEvent)
+                .where(OrchestrationEvent.runId == run.runId)
+                .where(OrchestrationEvent.eventType == "run_status_changed")
+                .order_by(OrchestrationEvent.id.asc())
+            ).all()
+            self.assertTrue(run_events)
+            self.assertEqual(str((run_events[-1].payload or {}).get("to") or "").strip().lower(), "done")
 
     def test_orch_003e_tick_revives_terminal_run_with_unresolved_failed_subagent(self):
         session_key = "clawboard:task:topic-orch-003e:task-orch-003e"

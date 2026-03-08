@@ -18,14 +18,17 @@ os.environ["CLAWBOARD_TOKEN"] = "test-token"
 try:
     from fastapi.testclient import TestClient
 
-    from app.db import init_db
+    from app.db import init_db, get_session
     from app.main import app  # noqa: E402
     from app.events import EventHub, event_hub
+    from app.models import OpenClawChatDispatchQueue
     _API_TESTS_AVAILABLE = True
 except Exception:
     TestClient = None  # type: ignore[assignment]
     EventHub = None  # type: ignore[assignment]
     event_hub = None  # type: ignore[assignment]
+    get_session = None  # type: ignore[assignment]
+    OpenClawChatDispatchQueue = None  # type: ignore[assignment]
     _API_TESTS_AVAILABLE = False
 
 
@@ -95,6 +98,88 @@ class StreamReplayTests(unittest.TestCase):
         should_reset = oldest is not None and 2 < oldest
         self.assertTrue(should_reset)
         self.assertEqual(replayed["eventId"], "11")
+
+    def test_changes_reconcile_returns_topic_and_task_tombstones(self):
+        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        read_headers = {"Host": "localhost:8010"}
+        suffix = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+
+        topic_res = self.client.post(
+            "/api/topics",
+            json={"id": f"topic-replay-delete-{suffix}", "name": f"Replay Delete Topic {suffix}"},
+            headers=write_headers,
+        )
+        self.assertEqual(topic_res.status_code, 200, topic_res.text)
+        topic = topic_res.json()
+
+        task_res = self.client.post(
+            "/api/tasks",
+            json={
+                "id": f"task-replay-delete-{suffix}",
+                "topicId": topic["id"],
+                "title": f"Replay Delete Task {suffix}",
+                "status": "todo",
+            },
+            headers=write_headers,
+        )
+        self.assertEqual(task_res.status_code, 200, task_res.text)
+        task = task_res.json()
+
+        since = now_iso()
+
+        deleted_task = self.client.delete(f"/api/tasks/{task['id']}", headers=write_headers)
+        self.assertEqual(deleted_task.status_code, 200, deleted_task.text)
+        deleted_topic = self.client.delete(f"/api/topics/{topic['id']}", headers=write_headers)
+        self.assertEqual(deleted_topic.status_code, 200, deleted_topic.text)
+
+        changes = self.client.get("/api/changes", params={"since": since}, headers=read_headers)
+        self.assertEqual(changes.status_code, 200, changes.text)
+        payload = changes.json()
+
+        deleted_tasks = payload.get("deletedTasks") or []
+        deleted_topics = payload.get("deletedTopics") or []
+        self.assertTrue(any(str(item.get("id") or "") == str(task["id"]) for item in deleted_tasks))
+        self.assertTrue(any(str(item.get("id") or "") == str(topic["id"]) for item in deleted_topics))
+        self.assertTrue(str(payload.get("cursor") or "").strip())
+
+    def test_changes_reconcile_returns_active_openclaw_signal_snapshots(self):
+        read_headers = {"Host": "localhost:8010"}
+        session_key = "clawboard:task:topic-signal-sync:task-signal-sync"
+        request_id = "occhat-signal-sync"
+        stamp = now_iso()
+
+        with get_session() as session:
+            session.add(
+                OpenClawChatDispatchQueue(
+                    requestId=request_id,
+                    sessionKey=session_key,
+                    agentId="main",
+                    sentAt=stamp,
+                    message="Signal sync smoke",
+                    attachmentIds=[],
+                    status="pending",
+                    attempts=0,
+                    nextAttemptAt=stamp,
+                    claimedAt=None,
+                    completedAt=None,
+                    lastError=None,
+                    createdAt=stamp,
+                    updatedAt=stamp,
+                )
+            )
+            session.commit()
+
+        changes = self.client.get("/api/changes", headers=read_headers)
+        self.assertEqual(changes.status_code, 200, changes.text)
+        payload = changes.json()
+
+        typing = payload.get("openclawTyping") or []
+        thread_work = payload.get("openclawThreadWork") or []
+        self.assertTrue(any(str(item.get("sessionKey") or "") == session_key for item in typing))
+        self.assertTrue(any(str(item.get("sessionKey") or "") == session_key for item in thread_work))
+        self.assertTrue(any(str(item.get("requestId") or "") == request_id for item in typing))
+        self.assertTrue(any(str(item.get("requestId") or "") == request_id for item in thread_work))
+        self.assertGreaterEqual(str(payload.get("cursor") or ""), stamp)
 
 
 @unittest.skipUnless(_API_TESTS_AVAILABLE, "FastAPI/SQLModel test dependencies are not installed.")

@@ -40,6 +40,8 @@ from .models import (
     Task,
     LogEntry,
     DeletedLog,
+    DeletedTopic,
+    DeletedTask,
     SessionRoutingMemory,
     OpenClawRequestRoute,
     IngestReceipt,
@@ -1186,7 +1188,11 @@ def _changes_revision_token(session: Any) -> str:
     task_count, task_max = _table_count_and_max_ts(session, Task, Task.updatedAt)
     log_count, log_max = _table_count_and_max_ts(session, LogEntry, LogEntry.updatedAt)
     draft_count, draft_max = _table_count_and_max_ts(session, Draft, Draft.updatedAt)
-    deleted_count, deleted_max = _table_count_and_max_ts(session, DeletedLog, DeletedLog.deletedAt)
+    deleted_log_count, deleted_log_max = _table_count_and_max_ts(session, DeletedLog, DeletedLog.deletedAt)
+    deleted_topic_count, deleted_topic_max = _table_count_and_max_ts(session, DeletedTopic, DeletedTopic.deletedAt)
+    deleted_task_count, deleted_task_max = _table_count_and_max_ts(session, DeletedTask, DeletedTask.deletedAt)
+    dispatch_count, dispatch_max = _table_count_and_max_ts(session, OpenClawChatDispatchQueue, OpenClawChatDispatchQueue.updatedAt)
+    run_count, run_max = _table_count_and_max_ts(session, OrchestrationRun, OrchestrationRun.updatedAt)
     return "|".join(
         [
             f"space:{space_count}:{space_max}",
@@ -1194,7 +1200,11 @@ def _changes_revision_token(session: Any) -> str:
             f"task:{task_count}:{task_max}",
             f"log:{log_count}:{log_max}",
             f"draft:{draft_count}:{draft_max}",
-            f"deleted:{deleted_count}:{deleted_max}",
+            f"deleted_log:{deleted_log_count}:{deleted_log_max}",
+            f"deleted_topic:{deleted_topic_count}:{deleted_topic_max}",
+            f"deleted_task:{deleted_task_count}:{deleted_task_max}",
+            f"dispatch:{dispatch_count}:{dispatch_max}",
+            f"orchestration:{run_count}:{run_max}",
         ]
     )
 
@@ -1234,6 +1244,117 @@ def _metrics_revision_token(session: Any) -> str:
             f"audit:{audit_token}",
         ]
     )
+
+
+def _iso_text_max(current: str, candidate: Any) -> str:
+    value = str(candidate or "").strip()
+    if not value:
+        return current
+    if not current:
+        return value
+    return value if value > current else current
+
+
+def _signal_snapshot_upsert(
+    current: dict[str, dict[str, Any]],
+    *,
+    session_keys: Iterable[str],
+    updated_at: str,
+    request_id: str | None = None,
+    typing: bool | None = None,
+    active: bool | None = None,
+    reason: str | None = None,
+) -> None:
+    stamp = str(updated_at or "").strip() or now_iso()
+    request_base = _openclaw_request_id_base(request_id)
+    reason_text = str(reason or "").strip() or None
+    for session_key in _openclaw_event_session_keys(session_keys):
+        key = str(session_key or "").strip()
+        if not key:
+            continue
+        previous = current.get(key)
+        if previous and str(previous.get("updatedAt") or "") > stamp:
+            continue
+        payload: dict[str, Any] = {
+            "sessionKey": key,
+            "updatedAt": stamp,
+        }
+        if request_base:
+            payload["requestId"] = request_base
+        if typing is not None:
+            payload["typing"] = bool(typing)
+        if active is not None:
+            payload["active"] = bool(active)
+        if reason_text:
+            payload["reason"] = reason_text
+        current[key] = payload
+
+
+def _build_openclaw_live_signal_snapshots(session: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    typing_by_session: dict[str, dict[str, Any]] = {}
+    thread_work_by_session: dict[str, dict[str, Any]] = {}
+
+    queue_rows = session.exec(
+        select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.status.in_(["pending", "retry", "processing"]))
+    ).all()
+    for row in queue_rows:
+        stamp = (
+            str(getattr(row, "updatedAt", "") or "").strip()
+            or str(getattr(row, "nextAttemptAt", "") or "").strip()
+            or str(getattr(row, "createdAt", "") or "").strip()
+            or now_iso()
+        )
+        session_key = str(getattr(row, "sessionKey", "") or "").strip()
+        request_id = str(getattr(row, "requestId", "") or "").strip() or None
+        status = str(getattr(row, "status", "") or "").strip().lower()
+        if not session_key:
+            continue
+        _signal_snapshot_upsert(
+            typing_by_session,
+            session_keys=[session_key],
+            updated_at=stamp,
+            request_id=request_id,
+            typing=True,
+        )
+        _signal_snapshot_upsert(
+            thread_work_by_session,
+            session_keys=[session_key],
+            updated_at=stamp,
+            request_id=request_id,
+            active=True,
+            reason="queued" if status == "pending" else ("retry" if status == "retry" else "dispatch_started"),
+        )
+
+    active_runs = session.exec(
+        select(OrchestrationRun).where(OrchestrationRun.status.in_(list(_ORCHESTRATION_ACTIVE_RUN_STATUSES) + ["running"]))
+    ).all()
+    for run in active_runs:
+        session_keys = [
+            str(getattr(run, "sessionKey", "") or "").strip(),
+            str(getattr(run, "baseSessionKey", "") or "").strip(),
+        ]
+        request_id = str(getattr(run, "requestId", "") or "").strip() or None
+        stamp = (
+            str(getattr(run, "updatedAt", "") or "").strip()
+            or str(getattr(run, "startedAt", "") or "").strip()
+            or now_iso()
+        )
+        status = str(getattr(run, "status", "") or "").strip().lower()
+        _signal_snapshot_upsert(
+            thread_work_by_session,
+            session_keys=session_keys,
+            updated_at=stamp,
+            request_id=request_id,
+            active=True,
+            reason="orchestration_stalled" if status == "stalled" else "orchestration_running",
+        )
+
+    typing = sorted(typing_by_session.values(), key=lambda item: (str(item.get("updatedAt") or ""), str(item.get("sessionKey") or "")))
+    thread_work = sorted(
+        thread_work_by_session.values(),
+        key=lambda item: (str(item.get("updatedAt") or ""), str(item.get("sessionKey") or "")),
+    )
+    return typing, thread_work
 SLASH_COMMANDS = {
     "/new",
     "/topic",
@@ -2788,6 +2909,7 @@ def _enqueue_openclaw_chat_dispatch(
     sent_at: str,
     message: str,
     attachment_ids: list[str] | None = None,
+    session: Any | None = None,
 ) -> None:
     rid = str(request_id or "").strip()
     key = str(session_key or "").strip()
@@ -2796,11 +2918,8 @@ def _enqueue_openclaw_chat_dispatch(
         raise RuntimeError("dispatch queue requires request_id, session_key, and message")
     attachment_list = [str(att_id).strip() for att_id in (attachment_ids or []) if str(att_id).strip()]
     stamp = now_iso()
-    with get_session() as session:
-        existing = session.exec(select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == rid).limit(1)).first()
-        if existing is not None:
-            return
-        row = OpenClawChatDispatchQueue(
+    def _build_row() -> OpenClawChatDispatchQueue:
+        return OpenClawChatDispatchQueue(
             requestId=rid,
             sessionKey=key,
             agentId=str(agent_id or "main").strip() or "main",
@@ -2816,12 +2935,35 @@ def _enqueue_openclaw_chat_dispatch(
             createdAt=stamp,
             updatedAt=stamp,
         )
-        session.add(row)
+
+    if session is not None:
         try:
-            session.commit()
+            with session.begin_nested():
+                existing = session.exec(
+                    select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == rid).limit(1)
+                ).first()
+                if existing is not None:
+                    return
+                session.add(_build_row())
+                session.flush()
+        except IntegrityError:
+            return
+        _openclaw_chat_dispatch_wakeup()
+        return
+
+    with get_session() as write_session:
+        existing = write_session.exec(
+            select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == rid).limit(1)
+        ).first()
+        if existing is not None:
+            return
+        row = _build_row()
+        write_session.add(row)
+        try:
+            write_session.commit()
             _openclaw_chat_dispatch_wakeup()
         except IntegrityError:
-            session.rollback()
+            write_session.rollback()
 
 
 _OPENCLAW_CHAT_DISPATCH_CLAIM_LOCK = threading.Lock()
@@ -6541,6 +6683,7 @@ def _orchestration_enqueue_follow_up_dispatch(
     run: Any,
     message: str,
     idempotency_suffix: str,
+    session: Any | None = None,
 ) -> bool:
     """Inject a follow-up chat dispatch to the main agent's board session.
     Returns True if enqueued (or already existed), False if skipped."""
@@ -6560,6 +6703,7 @@ def _orchestration_enqueue_follow_up_dispatch(
             agent_id="main",
             sent_at=now_iso(),
             message=message,
+            session=session,
         )
         return True
     except Exception:
@@ -7412,6 +7556,26 @@ def _orchestration_latest_failed_subagent_iso(items: list["OrchestrationItem"]) 
     return latest_iso
 
 
+def _orchestration_has_unresolved_blocking_subagent_failures(
+    session: Any,
+    *,
+    run: "OrchestrationRun",
+    items: list["OrchestrationItem"],
+) -> bool:
+    if not _orchestration_has_blocking_subagent_failures(items):
+        return False
+    latest_failure_iso = _orchestration_latest_failed_subagent_iso(items)
+    if not latest_failure_iso:
+        return True
+    delivered_after_failure = _orchestration_latest_assistant_completion_iso_for_session(
+        session,
+        session_key=str(getattr(run, "baseSessionKey", "") or getattr(run, "sessionKey", "") or ""),
+        min_created_at=latest_failure_iso,
+        require_delivery=True,
+    )
+    return delivered_after_failure is None
+
+
 def _orchestration_restore_main_delivery_if_missing(
     session: Any,
     *,
@@ -7427,7 +7591,7 @@ def _orchestration_restore_main_delivery_if_missing(
         return False
     if _orchestration_active_subagent_items(items):
         return False
-    if _orchestration_has_blocking_subagent_failures(items):
+    if _orchestration_has_unresolved_blocking_subagent_failures(session, run=run, items=items):
         return False
     if not _orchestration_completed_subagent_items(items):
         return False
@@ -7579,7 +7743,7 @@ def _orchestration_reopen_item(
 def _orchestration_restore_main_supervision(
     session: Any,
     *,
-    run_id: str,
+    run: "OrchestrationRun",
     items: list["OrchestrationItem"],
     now_value: str,
     reason: str,
@@ -7588,12 +7752,12 @@ def _orchestration_restore_main_supervision(
     if main_item is None:
         return False
     has_active_subagents = bool(_orchestration_active_subagent_items(items))
-    has_blocking_failures = _orchestration_has_blocking_subagent_failures(items)
+    has_blocking_failures = _orchestration_has_unresolved_blocking_subagent_failures(session, run=run, items=items)
     if not has_active_subagents and not has_blocking_failures:
         return False
     return _orchestration_reopen_item(
         session,
-        run_id=run_id,
+        run_id=run.runId,
         item=main_item,
         now_value=now_value,
         reason=reason,
@@ -7627,7 +7791,7 @@ def _orchestration_recovery_follow_up_message(items: list["OrchestrationItem"]) 
         "Please run CLAWBOARD LEDGER RECOVERY: inspect sessions_list, use session_status(...) for any still-present "
         "delegated session(s), rely on the failure details already captured in Clawboard, decide whether to respawn "
         "a specialist or finish the work yourself, and then update the user in this thread. Do not depend on "
-        "sessions_history(...) for cross-agent recovery. If inference or tools are unavailable, tell the user "
+        "legacy transcript-history reads for cross-agent recovery. If inference or tools are unavailable, tell the user "
         "explicitly."
     )
 
@@ -7649,7 +7813,7 @@ def _orchestration_maybe_enqueue_recovery_follow_up(
         return False
     if str(getattr(main_item, "status", "") or "").strip().lower() in {"done", "failed", "cancelled"}:
         return False
-    if not _orchestration_has_blocking_subagent_failures(items):
+    if not _orchestration_has_unresolved_blocking_subagent_failures(session, run=run, items=items):
         _orchestration_store_recovery_meta(session, run=run, recovery=None, now_value=now_value)
         return False
     if _orchestration_active_subagent_items(items):
@@ -7684,6 +7848,7 @@ def _orchestration_maybe_enqueue_recovery_follow_up(
         run=run,
         message=_orchestration_recovery_follow_up_message(items),
         idempotency_suffix=idempotency_suffix,
+        session=session,
     )
     if not enqueued:
         return False
@@ -7939,6 +8104,37 @@ def _orchestration_is_waiting_status_text(
     return any(marker in combined for marker in relay_markers) and any(cue in combined for cue in relay_future_cues)
 
 
+def _orchestration_is_non_delivery_status_text(
+    content: str | None,
+    summary: str | None,
+    raw: str | None,
+) -> bool:
+    markers = {
+        "heartbeat_ok",
+        "heartbeat ok",
+        "only main session running",
+        "no active delegations. only main session running. all clear.",
+        "no active delegations only main session running all clear",
+    }
+
+    normalized_parts: list[str] = []
+    for value in (content, summary, raw):
+        cleaned = _sanitize_log_text(str(value or "")).strip().lower().replace("’", "'")
+        if not cleaned:
+            continue
+        normalized_parts.append(re.sub(r"\s+", " ", cleaned))
+    if not normalized_parts:
+        return False
+    if all(part in markers for part in normalized_parts):
+        return True
+    combined = re.sub(
+        r"\s+",
+        " ",
+        _sanitize_log_text(_combined_log_text(content, summary, raw)).strip().lower().replace("’", "'"),
+    )
+    return bool(combined and combined in markers)
+
+
 def _orchestration_latest_assistant_completion_iso_for_session(
     session: Any,
     *,
@@ -7996,12 +8192,14 @@ def _orchestration_latest_assistant_completion_iso_for_session(
             query = query.where(LogEntry.createdAt >= lower_bound)
     rows = session.exec(query.limit(12)).all()
     for row in rows:
-        if require_delivery and _orchestration_is_waiting_status_text(
-            _safe_log_attr_text(row, "content"),
-            _safe_log_attr_text(row, "summary"),
-            _safe_log_attr_text(row, "raw"),
-        ):
-            continue
+        if require_delivery:
+            row_content = _safe_log_attr_text(row, "content")
+            row_summary = _safe_log_attr_text(row, "summary")
+            row_raw = _safe_log_attr_text(row, "raw")
+            if _orchestration_is_waiting_status_text(row_content, row_summary, row_raw):
+                continue
+            if _orchestration_is_non_delivery_status_text(row_content, row_summary, row_raw):
+                continue
         return (
             normalize_iso(str(getattr(row, "createdAt", "") or ""))
             or str(getattr(row, "createdAt", "") or "").strip()
@@ -8072,6 +8270,7 @@ def _orchestration_latest_assistant_result_excerpt_for_session(
         _combined_log_text(
             _safe_log_attr_text(row, "content"),
             _safe_log_attr_text(row, "summary"),
+            _safe_log_attr_text(row, "raw"),
         )
     )
     excerpt = _clip(result_text, max_chars)
@@ -8195,6 +8394,7 @@ def _orchestration_enqueue_repaired_subagent_follow_up(
             run=run,
             message=follow_up_msg,
             idempotency_suffix=f"subagent-done:{str(getattr(item, 'itemKey', '') or '')}",
+            session=session,
         ):
             enqueued = True
     return enqueued
@@ -8276,6 +8476,7 @@ def _orchestration_maybe_enqueue_completed_subagent_follow_up(
             run=run,
             message=follow_up_msg,
             idempotency_suffix=f"subagent-done:{str(getattr(item, 'itemKey', '') or '')}",
+            session=session,
         ):
             enqueued = True
     return enqueued
@@ -8296,7 +8497,7 @@ def _orchestration_maybe_mark_main_done_from_logs(
         return False
     if _orchestration_active_subagent_items(items):
         return False
-    if _orchestration_has_blocking_subagent_failures(items):
+    if _orchestration_has_unresolved_blocking_subagent_failures(session, run=run, items=items):
         return False
     completion_iso = _orchestration_latest_assistant_completion_iso_for_session(
         session,
@@ -8441,7 +8642,7 @@ def _orchestration_sync_log(log_id: str) -> None:
             if main_item is not None:
                 _orchestration_restore_main_supervision(
                     session,
-                    run_id=run.runId,
+                    run=run,
                     items=items,
                     now_value=now_value,
                     reason="active_subagent_work",
@@ -8531,14 +8732,15 @@ def _orchestration_sync_log(log_id: str) -> None:
                                         _combined_log_text(
                                             _safe_log_attr_text(entry, "content"),
                                             _safe_log_attr_text(entry, "summary"),
+                                            _safe_log_attr_text(entry, "raw"),
                                         )
                                     )
                                     result_excerpt = _clip(result_text, 2400)
                                     result_truncated = bool(result_text and result_excerpt and result_excerpt != result_text)
                                     follow_up_msg = (
-                                        f"[ORCHESTRATION_FOLLOW_UP] Subagent '{agent_id}' (session: {item_session}) has just completed. "
-                                        "Read the injected current task thread before replying. "
-                                        "If the result is already visible to the user, do not restate or paraphrase the full body. "
+                                        f"[ORCHESTRATION_FOLLOW_UP] Subagent '{agent_id}' (session: {item_session}) has just completed and its "
+                                        "result is already visible in the current task thread. Read the injected current task thread before replying. "
+                                        "If the user can already see the result, do not restate or paraphrase the full body. "
                                         "Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains. "
                                         f"Subagent result{' (truncated)' if result_truncated else ''}: "
                                         f"{result_excerpt or '(no subagent text was captured; rely on the injected Clawboard result context for this turn)'}"
@@ -8547,6 +8749,7 @@ def _orchestration_sync_log(log_id: str) -> None:
                                         run=run,
                                         message=follow_up_msg,
                                         idempotency_suffix=f"subagent-done:{str(getattr(item, 'itemKey', '') or '')}",
+                                        session=session,
                                     )
                     # Re-evaluate main.response completion now that a subagent has finished.
                     # The one-shot gate at the assistant-reply ingest time may have been skipped
@@ -8734,13 +8937,15 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
             needs_supervision = (
                 main_status not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
                 or bool(_orchestration_active_subagent_items(legacy_items))
-                or _orchestration_has_blocking_subagent_failures(legacy_items)
+                or _orchestration_has_unresolved_blocking_subagent_failures(
+                    session, run=legacy_run, items=legacy_items
+                )
             )
             if not needs_supervision:
                 continue
             _orchestration_restore_main_supervision(
                 session,
-                run_id=legacy_run.runId,
+                run=legacy_run,
                 items=legacy_items,
                 now_value=current_iso,
                 reason="recovered_supervision_gap",
@@ -8790,7 +8995,9 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
             )
             if has_active_subagents:
                 continue
-            if _orchestration_has_blocking_subagent_failures(stranded_items):
+            if _orchestration_has_unresolved_blocking_subagent_failures(
+                session, run=stranded_run, items=stranded_items
+            ):
                 continue
             if _orchestration_has_assistant_completion_log(
                 session,
@@ -8858,7 +9065,7 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
                 touched_runs += 1
             _orchestration_restore_main_supervision(
                 session,
-                run_id=run.runId,
+                run=run,
                 items=items,
                 now_value=current_iso,
                 reason="active_subagent_work",
@@ -8902,7 +9109,9 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
                         if (
                             not waiting_item_keys
                             and int(item.attempts or 0) >= 2
-                            and not _orchestration_has_blocking_subagent_failures(items)
+                            and not _orchestration_has_unresolved_blocking_subagent_failures(
+                                session, run=run, items=items
+                            )
                             and _orchestration_has_assistant_completion_log(
                                 session,
                                 run=run,
@@ -8991,6 +9200,7 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
                                 run=run,
                                 message=nudge_msg,
                                 idempotency_suffix=f"stall-nudge:{run.runId}:{int(idle_seconds // 60)}m",
+                                session=session,
                             )
                 elif status == "stalled":
                     item.status = "running"
@@ -14249,6 +14459,7 @@ def delete_topic(topic_id: str):
 
         session.delete(topic)
         session.commit()
+        _record_deleted_entity_tombstone(session, DeletedTopic, topic_id, detached_at)
 
         enqueue_reindex_request({"op": "delete", "kind": "topic", "id": topic_id})
         for task in tasks:
@@ -14769,6 +14980,8 @@ def empty_unassigned_tasks():
             session.delete(task)
 
         session.commit()
+        for task_id in task_ids:
+            _record_deleted_entity_tombstone(session, DeletedTask, task_id, detached_at)
 
         for task_id in task_ids:
             enqueue_reindex_request({"op": "delete", "kind": "task", "id": task_id})
@@ -14803,6 +15016,7 @@ def delete_task(task_id: str):
 
         session.delete(task)
         session.commit()
+        _record_deleted_entity_tombstone(session, DeletedTask, task_id, detached_at)
 
         enqueue_reindex_request({"op": "delete", "kind": "task", "id": task_id})
 
@@ -15605,10 +15819,69 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
             )
         return entry
 
+def _delete_log_dependencies(session: Any, rows: list[LogEntry]) -> None:
+    if not rows:
+        return
+    deleted_ids = [str(getattr(row, "id", "") or "").strip() for row in rows if str(getattr(row, "id", "") or "").strip()]
+    if not deleted_ids:
+        return
+
+    attachment_ids: set[str] = set()
+    for row in rows:
+        atts = row.attachments if isinstance(row.attachments, list) else []
+        for att in atts:
+            if not isinstance(att, dict):
+                continue
+            att_id = str(att.get("id") or "").strip()
+            if att_id:
+                attachment_ids.add(att_id)
+
+    attachment_rows: list[Attachment] = []
+    attachment_filters: list[Any] = [Attachment.logId.in_(deleted_ids)]
+    if attachment_ids:
+        attachment_filters.append(Attachment.id.in_(list(attachment_ids)))
+    try:
+        attachment_rows = session.exec(select(Attachment).where(or_(*attachment_filters))).all()
+    except Exception:
+        attachment_rows = []
+    if attachment_rows:
+        attachments_root = _attachments_root()
+        seen_attachment_ids: set[str] = set()
+        for attachment_row in attachment_rows:
+            attachment_id = str(getattr(attachment_row, "id", "") or "").strip()
+            if attachment_id and attachment_id in seen_attachment_ids:
+                continue
+            if attachment_id:
+                seen_attachment_ids.add(attachment_id)
+            storage_path = str(getattr(attachment_row, "storagePath", "") or attachment_id)
+            file_path = attachments_root / storage_path
+            try:
+                if file_path.exists():
+                    file_path.unlink()
+            except Exception:
+                pass
+            session.delete(attachment_row)
+
+    receipt_rows = session.exec(select(IngestReceipt).where(IngestReceipt.logId.in_(deleted_ids))).all()
+    for receipt_row in receipt_rows:
+        session.delete(receipt_row)
+
+
+def _record_deleted_entity_tombstone(session: Any, model: Any, entity_id: str, deleted_at: str) -> None:
+    entity_key = str(entity_id or "").strip()
+    stamp = str(deleted_at or "").strip()
+    if not entity_key or not stamp:
+        return
+    try:
+        session.add(model(id=entity_key, deletedAt=stamp))
+        session.commit()
+    except Exception:
+        session.rollback()
+
 
 @app.delete("/api/log/{log_id}", dependencies=[Depends(require_token)], tags=["logs"])
 def delete_log(log_id: str):
-    """Delete a log entry and its attached note rows."""
+    """Delete a log entry and its attached note/receipt/attachment rows."""
     with get_session() as session:
         to_delete = session.exec(
             select(LogEntry).where((LogEntry.id == log_id) | (LogEntry.relatedLogId == log_id))
@@ -15616,6 +15889,7 @@ def delete_log(log_id: str):
         if not to_delete:
             return {"ok": True, "deleted": False, "deletedIds": []}
         deleted_ids = [row.id for row in to_delete]
+        _delete_log_dependencies(session, to_delete)
         for row in to_delete:
             session.delete(row)
         session.commit()
@@ -15688,36 +15962,7 @@ def purge_log_forward(log_id: str):
         to_delete = list(roots) + [row for row in notes if row.id not in set(root_ids)]
         deleted_ids = [row.id for row in to_delete]
 
-        # Best-effort attachment cleanup (DB rows + on-disk files).
-        attachment_ids: set[str] = set()
-        for row in roots:
-            atts = row.attachments if isinstance(row.attachments, list) else []
-            for att in atts:
-                if not isinstance(att, dict):
-                    continue
-                att_id = str(att.get("id") or "").strip()
-                if att_id:
-                    attachment_ids.add(att_id)
-
-        if attachment_ids:
-            try:
-                attachment_rows = session.exec(select(Attachment).where(Attachment.id.in_(list(attachment_ids)))).all()
-            except Exception:
-                attachment_rows = []
-            root = _attachments_root()
-            for att_row in attachment_rows:
-                storage_path = str(att_row.storagePath or att_row.id)
-                path = root / storage_path
-                try:
-                    if path.exists():
-                        path.unlink()
-                except Exception:
-                    pass
-                try:
-                    session.delete(att_row)
-                except Exception:
-                    pass
-
+        _delete_log_dependencies(session, to_delete)
         for row in to_delete:
             session.delete(row)
         session.commit()
@@ -15746,14 +15991,57 @@ def _serialize_changes_payload(
     logs: list[LogEntry],
     drafts: list[Draft],
     deleted_log_ids: list[str],
+    deleted_topics: list[dict[str, Any]],
+    deleted_tasks: list[dict[str, Any]],
+    openclaw_typing: list[dict[str, Any]],
+    openclaw_thread_work: list[dict[str, Any]],
+    cursor: str | None,
 ) -> dict[str, Any]:
     return {
+        "cursor": str(cursor or "").strip() or None,
         "spaces": [SpaceOut.model_validate(row).model_dump() for row in spaces],
         "topics": [TopicOut.model_validate(row).model_dump() for row in topics],
         "tasks": [TaskOut.model_validate(row).model_dump() for row in tasks],
         "logs": [LogOutLite.model_validate(row).model_dump() for row in logs],
         "drafts": [DraftOut.model_validate(row).model_dump() for row in drafts],
         "deletedLogIds": [str(item) for item in deleted_log_ids if str(item).strip()],
+        "deletedTopics": [
+            {
+                "id": str(item.get("id") or "").strip(),
+                "deletedAt": str(item.get("deletedAt") or "").strip(),
+            }
+            for item in deleted_topics
+            if str(item.get("id") or "").strip() and str(item.get("deletedAt") or "").strip()
+        ],
+        "deletedTasks": [
+            {
+                "id": str(item.get("id") or "").strip(),
+                "deletedAt": str(item.get("deletedAt") or "").strip(),
+            }
+            for item in deleted_tasks
+            if str(item.get("id") or "").strip() and str(item.get("deletedAt") or "").strip()
+        ],
+        "openclawTyping": [
+            {
+                "sessionKey": str(item.get("sessionKey") or "").strip(),
+                "typing": bool(item.get("typing")),
+                "requestId": str(item.get("requestId") or "").strip() or None,
+                "updatedAt": str(item.get("updatedAt") or "").strip(),
+            }
+            for item in openclaw_typing
+            if str(item.get("sessionKey") or "").strip() and str(item.get("updatedAt") or "").strip()
+        ],
+        "openclawThreadWork": [
+            {
+                "sessionKey": str(item.get("sessionKey") or "").strip(),
+                "active": bool(item.get("active")),
+                "requestId": str(item.get("requestId") or "").strip() or None,
+                "reason": str(item.get("reason") or "").strip() or None,
+                "updatedAt": str(item.get("updatedAt") or "").strip(),
+            }
+            for item in openclaw_thread_work
+            if str(item.get("sessionKey") or "").strip() and str(item.get("updatedAt") or "").strip()
+        ],
     }
 
 
@@ -15863,12 +16151,51 @@ def _build_changes_payload(
     drafts.sort(key=lambda d: d.updatedAt, reverse=True)
 
     deleted_log_ids: list[str] = []
+    deleted_log_timestamps: list[str] = []
+    deleted_topics: list[dict[str, Any]] = []
+    deleted_tasks: list[dict[str, Any]] = []
     if since:
         try:
             deleted_rows = session.exec(select(DeletedLog).where(DeletedLog.deletedAt >= since)).all()
             deleted_log_ids = [row.id for row in deleted_rows if getattr(row, "id", None)]
+            deleted_log_timestamps = [str(getattr(row, "deletedAt", "") or "").strip() for row in deleted_rows]
         except Exception:
             deleted_log_ids = []
+            deleted_log_timestamps = []
+        try:
+            deleted_topics = [
+                {"id": row.id, "deletedAt": row.deletedAt}
+                for row in session.exec(select(DeletedTopic).where(DeletedTopic.deletedAt >= since)).all()
+                if getattr(row, "id", None) and getattr(row, "deletedAt", None)
+            ]
+        except Exception:
+            deleted_topics = []
+        try:
+            deleted_tasks = [
+                {"id": row.id, "deletedAt": row.deletedAt}
+                for row in session.exec(select(DeletedTask).where(DeletedTask.deletedAt >= since)).all()
+                if getattr(row, "id", None) and getattr(row, "deletedAt", None)
+            ]
+        except Exception:
+            deleted_tasks = []
+
+    openclaw_typing, openclaw_thread_work = _build_openclaw_live_signal_snapshots(session)
+    cursor = ""
+    for collection in (spaces, topics, tasks, logs, drafts):
+        for row in collection:
+            cursor = _iso_text_max(cursor, getattr(row, "updatedAt", None) or getattr(row, "createdAt", None))
+    for row in deleted_topics:
+        cursor = _iso_text_max(cursor, row.get("deletedAt"))
+    for row in deleted_tasks:
+        cursor = _iso_text_max(cursor, row.get("deletedAt"))
+    for deleted_at in deleted_log_timestamps:
+        cursor = _iso_text_max(cursor, deleted_at)
+    for row in openclaw_typing:
+        cursor = _iso_text_max(cursor, row.get("updatedAt"))
+    for row in openclaw_thread_work:
+        cursor = _iso_text_max(cursor, row.get("updatedAt"))
+    if since and not cursor:
+        cursor = since
 
     return _serialize_changes_payload(
         spaces=spaces,
@@ -15877,6 +16204,11 @@ def _build_changes_payload(
         logs=logs,
         drafts=drafts,
         deleted_log_ids=deleted_log_ids,
+        deleted_topics=deleted_topics,
+        deleted_tasks=deleted_tasks,
+        openclaw_typing=openclaw_typing,
+        openclaw_thread_work=openclaw_thread_work,
+        cursor=cursor or None,
     )
 
 

@@ -2756,6 +2756,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const nowMs = Date.now();
       const typing = openclawTyping[key];
       const awaiting = effectiveAwaitingAssistant[key];
+      const hasLocalOptimisticAwaiting = Object.prototype.hasOwnProperty.call(awaitingAssistant, key);
       const orchestrationWork = orchestrationThreadWorkBySession[key];
       const orchestrationWorkMs = parseIsoMs(orchestrationWork?.updatedAt);
       const hasFreshOrchestrationWork =
@@ -2800,7 +2801,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       }
       if (directThreadSignal === true) return true;
       if (typing?.typing) return true;
-      if (Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, key)) return true;
+      if (Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, key)) {
+        const hasAuthoritativeSignal =
+          Object.prototype.hasOwnProperty.call(openclawTyping, key) ||
+          Object.prototype.hasOwnProperty.call(openclawThreadWork, key);
+        if (!hasLocalOptimisticAwaiting && awaiting?.requestId && !hasAuthoritativeSignal && !hasFreshOrchestrationWork) {
+          return false;
+        }
+        return true;
+      }
       if (hasFreshOrchestrationWork) return true;
 
       const alias = typingAliasRef.current.get(key);
@@ -2815,6 +2824,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         nowMs - sourceThreadWorkMs >= 0 &&
         nowMs - sourceThreadWorkMs <= OPENCLAW_ORCHESTRATION_ACTIVE_TTL_MS;
       const sourceAwaiting = effectiveAwaitingAssistant[sourceKey];
+      const sourceHasLocalOptimisticAwaiting = Object.prototype.hasOwnProperty.call(awaitingAssistant, sourceKey);
       const sourceRecentNonUserActivity = recentNonUserActivityBySession[sourceKey];
       const sourceRecentNonUserActivityMs = parseIsoMs(sourceRecentNonUserActivity?.updatedAt);
       const sourceHasRecentNonUserActivity =
@@ -2858,7 +2868,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const sourceResponding =
         sourceDirectThreadSignal === true ||
         Boolean(sourceTyping?.typing) ||
-        Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, sourceKey) ||
+        (Object.prototype.hasOwnProperty.call(effectiveAwaitingAssistant, sourceKey) &&
+          !(
+            !sourceHasLocalOptimisticAwaiting &&
+            sourceAwaiting?.requestId &&
+            !Object.prototype.hasOwnProperty.call(openclawTyping, sourceKey) &&
+            !Object.prototype.hasOwnProperty.call(openclawThreadWork, sourceKey) &&
+            !sourceHasFreshThreadWork
+          )) ||
         sourceHasFreshThreadWork;
       if (sourceResponding) return true;
 
@@ -2870,6 +2887,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     },
     [
       effectiveAwaitingAssistant,
+      awaitingAssistant,
       openclawTyping,
       openclawThreadWork,
       orchestrationThreadWorkBySession,

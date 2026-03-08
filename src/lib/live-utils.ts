@@ -1,6 +1,7 @@
-import type { LogEntry, Task, Topic } from "@/lib/types";
+import type { LogEntry, Space, Task, Topic } from "@/lib/types";
 
 export type LiveEvent =
+  | { type: "space.upserted"; data: Space }
   | { type: "topic.upserted"; data: Topic }
   | { type: "topic.deleted"; data: { id: string } }
   | { type: "task.upserted"; data: Task }

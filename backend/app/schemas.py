@@ -641,7 +641,53 @@ class DraftOut(ModelBase):
     updatedAt: str = Field(description="ISO timestamp when updated.", examples=["2026-02-09T18:05:00.000Z"])
 
 
+class DeletedEntityOut(BaseModel):
+    id: str = Field(description="Deleted entity ID.", examples=["topic-123"])
+    deletedAt: str = Field(
+        description="ISO timestamp when the entity was deleted.",
+        examples=["2026-02-09T18:05:00.000Z"],
+    )
+
+
+class OpenClawTypingSignalOut(BaseModel):
+    sessionKey: str = Field(
+        description="Session key whose typing state is currently active.",
+        examples=["clawboard:task:topic-123:task-456"],
+    )
+    typing: bool = Field(default=True, description="Whether the session is actively typing/responding.")
+    requestId: Optional[str] = Field(
+        default=None,
+        description="Associated request id when known.",
+        examples=["occhat-123e4567-e89b-12d3-a456-426614174000"],
+    )
+    updatedAt: str = Field(description="ISO timestamp of the latest signal update.", examples=["2026-02-09T18:05:00.000Z"])
+
+
+class OpenClawThreadWorkSignalOut(BaseModel):
+    sessionKey: str = Field(
+        description="Session key whose background work is currently active.",
+        examples=["clawboard:task:topic-123:task-456"],
+    )
+    active: bool = Field(default=True, description="Whether the session still has active OpenClaw work.")
+    requestId: Optional[str] = Field(
+        default=None,
+        description="Associated request id when known.",
+        examples=["occhat-123e4567-e89b-12d3-a456-426614174000"],
+    )
+    reason: Optional[str] = Field(
+        default=None,
+        description="Compact reason for the active work state.",
+        examples=["queued"],
+    )
+    updatedAt: str = Field(description="ISO timestamp of the latest signal update.", examples=["2026-02-09T18:05:00.000Z"])
+
+
 class ChangesResponse(BaseModel):
+    cursor: Optional[str] = Field(
+        default=None,
+        description="Best-effort incremental reconciliation cursor (ISO timestamp).",
+        examples=["2026-02-09T18:05:00.000Z"],
+    )
     spaces: List[SpaceOut] = Field(description="Spaces updated since timestamp.")
     topics: List[TopicOut] = Field(description="Topics updated since timestamp.")
     tasks: List[TaskOut] = Field(description="Tasks updated since timestamp.")
@@ -651,6 +697,22 @@ class ChangesResponse(BaseModel):
         default_factory=list,
         description="Log IDs deleted since timestamp (tombstones for clients that missed SSE).",
         examples=[["log-123", "log-456"]],
+    )
+    deletedTopics: List[DeletedEntityOut] = Field(
+        default_factory=list,
+        description="Topics deleted since timestamp (durable tombstones for replay/reconcile).",
+    )
+    deletedTasks: List[DeletedEntityOut] = Field(
+        default_factory=list,
+        description="Tasks deleted since timestamp (durable tombstones for replay/reconcile).",
+    )
+    openclawTyping: List[OpenClawTypingSignalOut] = Field(
+        default_factory=list,
+        description="Authoritative snapshot of currently active typing/responding sessions.",
+    )
+    openclawThreadWork: List[OpenClawThreadWorkSignalOut] = Field(
+        default_factory=list,
+        description="Authoritative snapshot of sessions with active background OpenClaw work.",
     )
 
 

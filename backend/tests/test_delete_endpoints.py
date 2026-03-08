@@ -20,7 +20,7 @@ try:
 
     from app.db import get_session, init_db  # noqa: E402
     from app.main import app  # noqa: E402
-    from app.models import LogEntry, Task, Topic  # noqa: E402
+    from app.models import Attachment, IngestReceipt, LogEntry, Task, Topic  # noqa: E402
 
     _API_TESTS_AVAILABLE = True
 except Exception:
@@ -42,6 +42,10 @@ class DeleteEndpointTests(unittest.TestCase):
 
     def setUp(self):
         with get_session() as session:
+            for row in session.exec(select(Attachment)).all():
+                session.delete(row)
+            for row in session.exec(select(IngestReceipt)).all():
+                session.delete(row)
             for row in session.exec(select(LogEntry)).all():
                 session.delete(row)
             for row in session.exec(select(Task)).all():
@@ -273,6 +277,88 @@ class DeleteEndpointTests(unittest.TestCase):
         with get_session() as session:
             self.assertIsNone(session.get(LogEntry, "log-1"))
             self.assertIsNone(session.get(LogEntry, "note-1"))
+
+    def test_delete_log_also_removes_ingest_receipts_and_attachments(self):
+        ts = now_iso()
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-1",
+                    name="Delete log dependencies",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+            session.add(
+                LogEntry(
+                    id="log-1",
+                    topicId="topic-1",
+                    taskId=None,
+                    relatedLogId=None,
+                    idempotencyKey="event-1",
+                    type="conversation",
+                    content="root",
+                    summary="root",
+                    raw=None,
+                    classificationStatus="classified",
+                    classificationAttempts=1,
+                    classificationError=None,
+                    createdAt=ts,
+                    updatedAt=ts,
+                    agentId="assistant",
+                    agentLabel="OpenClaw",
+                    source={"sessionKey": "channel:discord"},
+                    attachments=[
+                        {
+                            "id": "att-1",
+                            "fileName": "root.txt",
+                            "mimeType": "text/plain",
+                            "sizeBytes": 4,
+                        }
+                    ],
+                )
+            )
+            session.add(
+                Attachment(
+                    id="att-1",
+                    logId="log-1",
+                    fileName="root.txt",
+                    mimeType="text/plain",
+                    sizeBytes=4,
+                    sha256="abcd",
+                    storagePath="att-1.txt",
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.add(
+                IngestReceipt(
+                    eventId="event-1",
+                    logId="log-1",
+                    sourcePath="live",
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        res = self.client.delete("/api/log/log-1", headers=self.auth_headers)
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertTrue(payload.get("deleted"))
+
+        with get_session() as session:
+            self.assertIsNone(session.get(LogEntry, "log-1"))
+            self.assertIsNone(session.get(Attachment, "att-1"))
+            self.assertIsNone(session.get(IngestReceipt, "event-1"))
 
 
 if __name__ == "__main__":
