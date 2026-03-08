@@ -217,6 +217,66 @@ class SharedDomainContractTests(unittest.TestCase):
                 self.assertIn(field, payload[0], res.text)
         self.assertEqual([item.get("id") for item in payload[:3]], ["task-pinned-new", "task-pinned-old", "task-unpinned"])
 
+    def test_task_patch_preserves_structured_delegation_tags(self):
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-delegation-tags",
+                    name="Delegation tags",
+                    color="#4EA1FF",
+                    description="contract",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    sortIndex=0,
+                    createdAt=now_iso(-120),
+                    updatedAt=now_iso(-120),
+                )
+            )
+            session.add(
+                Task(
+                    id="task-delegation-tags",
+                    topicId="topic-delegation-tags",
+                    title="Delegation tags",
+                    color="#4EA1FF",
+                    status="todo",
+                    sortIndex=0,
+                    pinned=False,
+                    createdAt=now_iso(-60),
+                    updatedAt=now_iso(-60),
+                    tags=[],
+                    dueDate=None,
+                    priority="medium",
+                    snoozedUntil=None,
+                )
+            )
+            session.commit()
+
+        res = self.client.patch(
+            "/api/tasks/task-delegation-tags",
+            headers=self.auth_headers,
+            json={
+                "status": "doing",
+                "tags": [
+                    "delegating",
+                    "agent:coding",
+                    "session:agent:coding:subagent:abc-123",
+                ],
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertEqual(
+            payload.get("tags"),
+            [
+                "delegating",
+                "agent:coding",
+                "session:agent:coding:subagent:abc-123",
+            ],
+        )
+
     def test_log_contract_is_array_and_sorted_for_shared_read(self):
         with get_session() as session:
             session.add(

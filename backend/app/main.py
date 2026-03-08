@@ -443,7 +443,8 @@ def _normalize_tag_value(value: str | None) -> str | None:
         suffix = lowered.split(":", 1)[1].strip()
         return f"system:{suffix}" if suffix else "system"
     slug = re.sub(r"\s+", "-", lowered)
-    slug = re.sub(r"[^a-z0-9-]+", "", slug)
+    slug = re.sub(r"[^a-z0-9:_-]+", "", slug)
+    slug = re.sub(r":{2,}", ":", slug)
     slug = re.sub(r"-{2,}", "-", slug).strip("-")
     return slug or None
 
@@ -4754,8 +4755,15 @@ def _maybe_upgrade_existing_duplicate_log(
     idempotency_key: str | None,
     source_identity_key: str | None,
 ) -> LogEntry:
-    if not _non_user_conversation_payload(payload):
+    def _sync_existing() -> LogEntry:
+        try:
+            _orchestration_sync_log(str(getattr(existing, "id", "") or ""))
+        except Exception:
+            pass
         return existing
+
+    if not _non_user_conversation_payload(payload):
+        return _sync_existing()
 
     changed = False
     incoming_content = _coerce_safe_text(payload.content)
@@ -4802,7 +4810,7 @@ def _maybe_upgrade_existing_duplicate_log(
         changed = True
 
     if not changed:
-        return existing
+        return _sync_existing()
 
     existing.updatedAt = updated_at
     session.add(existing)
@@ -4810,7 +4818,7 @@ def _maybe_upgrade_existing_duplicate_log(
     session.refresh(existing)
     event_hub.publish({"type": "log.patched", "data": existing.model_dump(exclude={"raw"}), "eventTs": existing.updatedAt})
     _enqueue_log_reindex(existing)
-    return existing
+    return _sync_existing()
 
 
 def _find_existing_openclaw_non_user_conversation_near_duplicate(
@@ -6561,12 +6569,23 @@ def _orchestration_enqueue_follow_up_dispatch(
 def _orchestration_poll_seconds() -> float:
     raw = str(os.getenv("CLAWBOARD_ORCHESTRATION_POLL_SECONDS") or "").strip()
     if not raw:
-        return 20.0
+        return 5.0
     try:
         value = float(raw)
     except Exception:
-        return 20.0
+        return 5.0
     return max(2.0, min(300.0, value))
+
+
+def _orchestration_completed_subagent_follow_up_grace_seconds() -> float:
+    raw = str(os.getenv("CLAWBOARD_ORCHESTRATION_COMPLETED_SUBAGENT_FOLLOW_UP_GRACE_SECONDS") or "").strip()
+    if not raw:
+        return 15.0
+    try:
+        value = float(raw)
+    except Exception:
+        return 15.0
+    return max(0.0, min(300.0, value))
 
 
 def _orchestration_lease_seconds() -> int:
@@ -7341,6 +7360,17 @@ def _orchestration_active_subagent_items(items: list["OrchestrationItem"]) -> li
     return active
 
 
+def _orchestration_completed_subagent_items(items: list["OrchestrationItem"]) -> list["OrchestrationItem"]:
+    completed: list["OrchestrationItem"] = []
+    for item in items:
+        if str(getattr(item, "kind", "") or "").strip().lower() != "subagent":
+            continue
+        if str(getattr(item, "status", "") or "").strip().lower() != "done":
+            continue
+        completed.append(item)
+    return completed
+
+
 def _orchestration_main_item(items: list["OrchestrationItem"]) -> "OrchestrationItem" | None:
     return next(
         (item for item in items if str(getattr(item, "itemKey", "") or "").strip().lower() == "main.response"),
@@ -7380,6 +7410,52 @@ def _orchestration_latest_failed_subagent_iso(items: list["OrchestrationItem"]) 
         if candidate_iso and (latest_iso is None or candidate_iso > latest_iso):
             latest_iso = candidate_iso
     return latest_iso
+
+
+def _orchestration_restore_main_delivery_if_missing(
+    session: Any,
+    *,
+    run: "OrchestrationRun",
+    items: list["OrchestrationItem"],
+    now_value: str,
+    reason: str,
+) -> bool:
+    main_item = _orchestration_main_item(items)
+    if main_item is None:
+        return False
+    if str(getattr(main_item, "status", "") or "").strip().lower() not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
+        return False
+    if _orchestration_active_subagent_items(items):
+        return False
+    if _orchestration_has_blocking_subagent_failures(items):
+        return False
+    if not _orchestration_completed_subagent_items(items):
+        return False
+    latest_subagent_iso = _orchestration_latest_terminal_subagent_iso(items)
+    if not latest_subagent_iso:
+        return False
+    if _orchestration_latest_assistant_completion_iso_for_session(
+        session,
+        session_key=str(getattr(run, "baseSessionKey", "") or getattr(run, "sessionKey", "") or ""),
+        min_created_at=latest_subagent_iso,
+        require_delivery=True,
+    ):
+        return False
+    reopened = _orchestration_reopen_item(
+        session,
+        run_id=run.runId,
+        item=main_item,
+        now_value=now_value,
+        reason=reason,
+    )
+    if not reopened:
+        return False
+    run.status = "running"
+    run.completedAt = None
+    run.updatedAt = now_value
+    run.version = int(getattr(run, "version", 0) or 0) + 1
+    session.add(run)
+    return True
 
 
 def _orchestration_original_request_still_dispatching(session: Any, run: "OrchestrationRun") -> bool:
@@ -7548,9 +7624,11 @@ def _orchestration_recovery_follow_up_message(items: list["OrchestrationItem"]) 
     return (
         "[ORCHESTRATION_RECOVERY] One or more delegated attempts ended unsuccessfully. "
         f"Failed attempts: {joined}. "
-        "Please run CLAWBOARD LEDGER RECOVERY: inspect sessions_list, call sessions_history(...) for the failed "
-        "session(s), decide whether to respawn a specialist or finish the work yourself, and then update the user in "
-        "this thread. If inference or tools are unavailable, tell the user explicitly."
+        "Please run CLAWBOARD LEDGER RECOVERY: inspect sessions_list, use session_status(...) for any still-present "
+        "delegated session(s), rely on the failure details already captured in Clawboard, decide whether to respawn "
+        "a specialist or finish the work yourself, and then update the user in this thread. Do not depend on "
+        "sessions_history(...) for cross-agent recovery. If inference or tools are unavailable, tell the user "
+        "explicitly."
     )
 
 
@@ -7665,6 +7743,7 @@ def _orchestration_mark_item_status(
     now_value: str,
     reason: str | None = None,
     source_log_id: str | None = None,
+    completed_at: str | None = None,
 ) -> bool:
     next_status = str(status or "").strip().lower()
     if not next_status:
@@ -7685,8 +7764,9 @@ def _orchestration_mark_item_status(
     if next_status in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
         current_rank = int(_ORCHESTRATION_ITEM_STATUS_RANK.get(current, 0))
         next_rank = int(_ORCHESTRATION_ITEM_STATUS_RANK.get(next_status, 0))
+        completed_value = normalize_iso(str(completed_at or "")) or now_value
         if not item.completedAt or next_rank > current_rank:
-            item.completedAt = now_value
+            item.completedAt = completed_value
         item.nextCheckAt = None
     if next_status == "done" and not reason:
         item.lastError = None
@@ -7810,6 +7890,194 @@ def _orchestration_latest_terminal_subagent_iso(items: list["OrchestrationItem"]
     return latest_iso
 
 
+def _orchestration_is_waiting_status_text(
+    content: str | None,
+    summary: str | None,
+    raw: str | None,
+) -> bool:
+    combined = _combined_log_text(content, summary, raw).lower().replace("’", "'")
+    if not combined:
+        return False
+    markers = [
+        "waiting for ",
+        "awaiting ",
+        "will relay it here when the child run completes",
+        "will relay ",
+        "delegation rails set",
+        "task tagged with delegation state",
+        "task tagged in clawboard",
+        "still in progress",
+        "next checkpoint",
+        "dispatched to ",
+        "dispatching to ",
+        "auto-announce",
+        "auto announce",
+    ]
+    if any(marker in combined for marker in markers):
+        return True
+    relay_markers = [
+        "i'll relay",
+        "we'll relay",
+        "will relay",
+        "relay it back",
+        "relay the result",
+    ]
+    relay_future_cues = [
+        "when complete",
+        "when the specialist completes",
+        "when the child run completes",
+        "the moment the specialist completes",
+        "once complete",
+        "once the specialist completes",
+        "as soon as",
+        "after the specialist completes",
+        "after the child run completes",
+        "auto-announce",
+        "auto announce",
+        "back here immediately",
+    ]
+    return any(marker in combined for marker in relay_markers) and any(cue in combined for cue in relay_future_cues)
+
+
+def _orchestration_latest_assistant_completion_iso_for_session(
+    session: Any,
+    *,
+    session_key: str | None,
+    min_created_at: str | None = None,
+    require_delivery: bool = False,
+) -> str | None:
+    base_session = _base_session_key(session_key)
+    if not base_session:
+        return None
+    candidate_keys, canonical_board_key = _session_routing_memory_lookup_keys(base_session)
+    if not candidate_keys:
+        candidate_keys = [base_session]
+    lower_bound = normalize_iso(str(min_created_at or "")) or ""
+    if DATABASE_URL.startswith("sqlite"):
+        parts: list[str] = []
+        params: dict[str, Any] = {}
+        for i, key in enumerate(candidate_keys):
+            parts.append(
+                f"(json_extract(source, '$.sessionKey') = :key_{i}"
+                f" OR json_extract(source, '$.sessionKey') LIKE :like_{i})"
+            )
+            params[f"key_{i}"] = key
+            params[f"like_{i}"] = f"{key}|%"
+        if canonical_board_key:
+            parts.append("json_extract(source, '$.sessionKey') LIKE :board_contains")
+            params["board_contains"] = f"%{canonical_board_key}%"
+        session_clause = " OR ".join(parts)
+        query = (
+            select(LogEntry)
+            .where(LogEntry.type == "conversation")
+            .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "assistant")
+            .where(text(f"({session_clause})"))
+            .params(**params)
+            .order_by(LogEntry.createdAt.desc(), text("rowid DESC"))
+        )
+        if lower_bound:
+            query = query.where(LogEntry.createdAt >= lower_bound)
+    else:
+        source_session_expr = LogEntry.source["sessionKey"].as_string()
+        session_exprs: list[Any] = []
+        for key in candidate_keys:
+            session_exprs.append(source_session_expr == key)
+            session_exprs.append(source_session_expr.like(f"{key}|%"))
+        if canonical_board_key:
+            session_exprs.append(source_session_expr.like(f"%{canonical_board_key}%"))
+        query = (
+            select(LogEntry)
+            .where(LogEntry.type == "conversation")
+            .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "assistant")
+            .where(or_(*session_exprs))
+            .order_by(LogEntry.createdAt.desc(), LogEntry.id.desc())
+        )
+        if lower_bound:
+            query = query.where(LogEntry.createdAt >= lower_bound)
+    rows = session.exec(query.limit(12)).all()
+    for row in rows:
+        if require_delivery and _orchestration_is_waiting_status_text(
+            _safe_log_attr_text(row, "content"),
+            _safe_log_attr_text(row, "summary"),
+            _safe_log_attr_text(row, "raw"),
+        ):
+            continue
+        return (
+            normalize_iso(str(getattr(row, "createdAt", "") or ""))
+            or str(getattr(row, "createdAt", "") or "").strip()
+            or None
+        )
+    return None
+
+
+def _orchestration_latest_assistant_result_excerpt_for_session(
+    session: Any,
+    *,
+    session_key: str | None,
+    min_created_at: str | None = None,
+    max_chars: int = 2400,
+) -> tuple[str, bool]:
+    base_session = _base_session_key(session_key)
+    if not base_session:
+        return "", False
+    candidate_keys, canonical_board_key = _session_routing_memory_lookup_keys(base_session)
+    if not candidate_keys:
+        candidate_keys = [base_session]
+    lower_bound = normalize_iso(str(min_created_at or "")) or ""
+    if DATABASE_URL.startswith("sqlite"):
+        parts: list[str] = []
+        params: dict[str, Any] = {}
+        for i, key in enumerate(candidate_keys):
+            parts.append(
+                f"(json_extract(source, '$.sessionKey') = :key_{i}"
+                f" OR json_extract(source, '$.sessionKey') LIKE :like_{i})"
+            )
+            params[f"key_{i}"] = key
+            params[f"like_{i}"] = f"{key}|%"
+        if canonical_board_key:
+            parts.append("json_extract(source, '$.sessionKey') LIKE :board_contains")
+            params["board_contains"] = f"%{canonical_board_key}%"
+        session_clause = " OR ".join(parts)
+        query = (
+            select(LogEntry)
+            .where(LogEntry.type == "conversation")
+            .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "assistant")
+            .where(text(f"({session_clause})"))
+            .params(**params)
+            .order_by(LogEntry.createdAt.desc(), text("rowid DESC"))
+        )
+        if lower_bound:
+            query = query.where(LogEntry.createdAt >= lower_bound)
+    else:
+        source_session_expr = LogEntry.source["sessionKey"].as_string()
+        session_exprs: list[Any] = []
+        for key in candidate_keys:
+            session_exprs.append(source_session_expr == key)
+            session_exprs.append(source_session_expr.like(f"{key}|%"))
+        if canonical_board_key:
+            session_exprs.append(source_session_expr.like(f"%{canonical_board_key}%"))
+        query = (
+            select(LogEntry)
+            .where(LogEntry.type == "conversation")
+            .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "assistant")
+            .where(or_(*session_exprs))
+            .order_by(LogEntry.createdAt.desc(), LogEntry.id.desc())
+        )
+        if lower_bound:
+            query = query.where(LogEntry.createdAt >= lower_bound)
+    row = session.exec(query.limit(1)).first()
+    if row is None:
+        return "", False
+    result_text = _sanitize_log_text(
+        _combined_log_text(
+            _safe_log_attr_text(row, "content"),
+            _safe_log_attr_text(row, "summary"),
+        )
+    )
+    excerpt = _clip(result_text, max_chars)
+    return excerpt or "", bool(result_text and excerpt and excerpt != result_text)
+
+
 def _orchestration_has_assistant_completion_log(
     session: Any,
     *,
@@ -7830,57 +8098,223 @@ def _orchestration_has_assistant_completion_log(
     base_session = _base_session_key(str(getattr(run, "baseSessionKey", "") or getattr(run, "sessionKey", "") or ""))
     if not base_session:
         return False
-    candidate_keys, canonical_board_key = _session_routing_memory_lookup_keys(base_session)
-    if not candidate_keys:
-        candidate_keys = [base_session]
     started_at = normalize_iso(str(getattr(run, "startedAt", "") or ""))
     min_created = normalize_iso(str(min_created_at or ""))
     lower_bound = started_at or ""
     if min_created and (not lower_bound or min_created > lower_bound):
         lower_bound = min_created
-    if DATABASE_URL.startswith("sqlite"):
-        # Build OR conditions covering exact matches, |suffix variants, and agent-prefixed variants.
-        parts: list[str] = []
-        params: dict[str, Any] = {}
-        for i, key in enumerate(candidate_keys):
-            parts.append(
-                f"(json_extract(source, '$.sessionKey') = :key_{i}"
-                f" OR json_extract(source, '$.sessionKey') LIKE :like_{i})"
-            )
-            params[f"key_{i}"] = key
-            params[f"like_{i}"] = f"{key}|%"
-        if canonical_board_key:
-            # Catch "agent:main:clawboard:task:..." and similar prefixed variants.
-            parts.append("json_extract(source, '$.sessionKey') LIKE :board_contains")
-            params["board_contains"] = f"%{canonical_board_key}%"
-        session_clause = " OR ".join(parts)
-        query = (
-            select(LogEntry)
-            .where(LogEntry.type == "conversation")
-            .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "assistant")
-            .where(text(f"({session_clause})"))
-            .params(**params)
+    return (
+        _orchestration_latest_assistant_completion_iso_for_session(
+            session,
+            session_key=base_session,
+            min_created_at=lower_bound,
+            require_delivery=True,
         )
-        if lower_bound:
-            query = query.where(LogEntry.createdAt >= lower_bound)
-    else:
-        source_session_expr = LogEntry.source["sessionKey"].as_string()
-        session_exprs: list[Any] = []
-        for key in candidate_keys:
-            session_exprs.append(source_session_expr == key)
-            session_exprs.append(source_session_expr.like(f"{key}|%"))
-        if canonical_board_key:
-            # Catch "agent:main:clawboard:task:..." and similar prefixed variants.
-            session_exprs.append(source_session_expr.like(f"%{canonical_board_key}%"))
-        query = (
-            select(LogEntry)
-            .where(LogEntry.type == "conversation")
-            .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "assistant")
-            .where(or_(*session_exprs))
+        is not None
+    )
+
+
+def _orchestration_reconcile_completed_subagent_items(
+    session: Any,
+    *,
+    run_id: str,
+    items: list["OrchestrationItem"],
+    now_value: str,
+) -> list["OrchestrationItem"]:
+    repaired: list["OrchestrationItem"] = []
+    for item in items:
+        if str(getattr(item, "kind", "") or "").strip().lower() != "subagent":
+            continue
+        if str(getattr(item, "status", "") or "").strip().lower() in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
+            continue
+        item_meta = dict(getattr(item, "meta", None) or {})
+        min_created_at = (
+            normalize_iso(str(item_meta.get("lastActivityAt") or ""))
+            or normalize_iso(str(getattr(item, "startedAt", "") or ""))
+            or normalize_iso(str(getattr(item, "createdAt", "") or ""))
         )
-        if lower_bound:
-            query = query.where(LogEntry.createdAt >= lower_bound)
-    return session.exec(query.limit(1)).first() is not None
+        completion_iso = _orchestration_latest_assistant_completion_iso_for_session(
+            session,
+            session_key=str(getattr(item, "sessionKey", "") or ""),
+            min_created_at=min_created_at,
+        )
+        if not completion_iso:
+            continue
+        if _orchestration_mark_item_status(
+            session,
+            run_id=run_id,
+            item=item,
+            status="done",
+            now_value=now_value,
+            completed_at=completion_iso,
+        ):
+            repaired.append(item)
+    return repaired
+
+
+def _orchestration_enqueue_repaired_subagent_follow_up(
+    session: Any,
+    *,
+    run: "OrchestrationRun",
+    items: list["OrchestrationItem"],
+    repaired_items: list["OrchestrationItem"],
+) -> bool:
+    if not repaired_items:
+        return False
+    if not _orchestration_auto_follow_up_enabled():
+        return False
+    if _orchestration_original_request_still_dispatching(session, run):
+        return False
+    if _orchestration_latest_assistant_completion_iso_for_session(
+        session,
+        session_key=str(getattr(run, "baseSessionKey", "") or getattr(run, "sessionKey", "") or ""),
+        min_created_at=_orchestration_latest_terminal_subagent_iso(items),
+        require_delivery=True,
+    ):
+        return False
+    enqueued = False
+    for item in repaired_items:
+        agent_id = str(getattr(item, "agentId", "") or "").strip() or "specialist"
+        item_session = str(getattr(item, "sessionKey", "") or "").strip()
+        result_excerpt, result_truncated = _orchestration_latest_assistant_result_excerpt_for_session(
+            session,
+            session_key=item_session,
+            min_created_at=str(getattr(item, "startedAt", "") or getattr(item, "createdAt", "") or ""),
+        )
+        follow_up_msg = (
+            f"[ORCHESTRATION_FOLLOW_UP] Subagent '{agent_id}' (session: {item_session}) already completed and its "
+            "result is already visible in the current task thread. Read the injected current task thread before replying. "
+            "If the user can already see the result, do not restate or paraphrase the full body. "
+            "Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains. "
+            "Do not run broad recovery or unrelated search. Stay on the current task/session. "
+            f"Subagent result{' (truncated)' if result_truncated else ''}: "
+            f"{result_excerpt or '(no subagent text was captured; rely on the injected Clawboard result context for this turn)'} "
+            f"Use session_status('{item_session}') only if you need quick confirmation."
+        )
+        if _orchestration_enqueue_follow_up_dispatch(
+            run=run,
+            message=follow_up_msg,
+            idempotency_suffix=f"subagent-done:{str(getattr(item, 'itemKey', '') or '')}",
+        ):
+            enqueued = True
+    return enqueued
+
+
+def _orchestration_maybe_enqueue_completed_subagent_follow_up(
+    session: Any,
+    *,
+    run: "OrchestrationRun",
+    items: list["OrchestrationItem"],
+    now_value: str | None = None,
+) -> bool:
+    if not _orchestration_auto_follow_up_enabled():
+        return False
+    main_item = _orchestration_main_item(items)
+    if main_item is None:
+        return False
+    if str(getattr(main_item, "status", "") or "").strip().lower() in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
+        return False
+    if _orchestration_active_subagent_items(items):
+        return False
+    if _orchestration_has_blocking_subagent_failures(items):
+        return False
+    completed_items = _orchestration_completed_subagent_items(items)
+    if not completed_items:
+        return False
+    if _orchestration_original_request_still_dispatching(session, run):
+        return False
+    latest_subagent_iso = _orchestration_latest_terminal_subagent_iso(items)
+    if not latest_subagent_iso:
+        return False
+    if _orchestration_latest_assistant_completion_iso_for_session(
+        session,
+        session_key=str(getattr(run, "baseSessionKey", "") or getattr(run, "sessionKey", "") or ""),
+        min_created_at=latest_subagent_iso,
+        require_delivery=True,
+    ):
+        return False
+    latest_main_activity_iso = _orchestration_latest_assistant_completion_iso_for_session(
+        session,
+        session_key=str(getattr(run, "baseSessionKey", "") or getattr(run, "sessionKey", "") or ""),
+        min_created_at=latest_subagent_iso,
+        require_delivery=False,
+    )
+    if latest_main_activity_iso:
+        latest_main_ts = _iso_to_timestamp(latest_main_activity_iso)
+        latest_subagent_ts = _iso_to_timestamp(latest_subagent_iso)
+        if (
+            latest_main_ts is not None
+            and latest_subagent_ts is not None
+            and latest_main_ts > latest_subagent_ts
+        ):
+            return False
+    now_iso_value = normalize_iso(str(now_value or "")) or now_iso()
+    now_ts = _iso_to_timestamp(now_iso_value)
+    latest_subagent_ts = _iso_to_timestamp(latest_subagent_iso)
+    if now_ts is not None and latest_subagent_ts is not None:
+        if (now_ts - latest_subagent_ts) < _orchestration_completed_subagent_follow_up_grace_seconds():
+            return False
+    enqueued = False
+    for item in completed_items:
+        agent_id = str(getattr(item, "agentId", "") or "").strip() or "specialist"
+        item_session = str(getattr(item, "sessionKey", "") or "").strip()
+        result_excerpt, result_truncated = _orchestration_latest_assistant_result_excerpt_for_session(
+            session,
+            session_key=item_session,
+            min_created_at=str(getattr(item, "startedAt", "") or getattr(item, "createdAt", "") or ""),
+        )
+        follow_up_msg = (
+            f"[ORCHESTRATION_FOLLOW_UP] Subagent '{agent_id}' (session: {item_session}) has already completed and its "
+            "result is already visible in the current task thread. Read the injected current task thread before replying. "
+            "If the user can already see the result, do not restate or paraphrase the full body. "
+            "Do not send another status-only promise. Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains. "
+            f"Subagent result{' (truncated)' if result_truncated else ''}: "
+            f"{result_excerpt or '(no subagent text was captured; rely on the injected Clawboard result context for this turn)'} "
+            f"Use session_status('{item_session}') only if you need quick confirmation."
+        )
+        if _orchestration_enqueue_follow_up_dispatch(
+            run=run,
+            message=follow_up_msg,
+            idempotency_suffix=f"subagent-done:{str(getattr(item, 'itemKey', '') or '')}",
+        ):
+            enqueued = True
+    return enqueued
+
+
+def _orchestration_maybe_mark_main_done_from_logs(
+    session: Any,
+    *,
+    run: "OrchestrationRun",
+    items: list["OrchestrationItem"],
+    now_value: str,
+    source_log_id: str | None = None,
+) -> bool:
+    main_item = _orchestration_main_item(items)
+    if main_item is None:
+        return False
+    if str(getattr(main_item, "status", "") or "").strip().lower() in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
+        return False
+    if _orchestration_active_subagent_items(items):
+        return False
+    if _orchestration_has_blocking_subagent_failures(items):
+        return False
+    completion_iso = _orchestration_latest_assistant_completion_iso_for_session(
+        session,
+        session_key=str(getattr(run, "baseSessionKey", "") or getattr(run, "sessionKey", "") or ""),
+        min_created_at=_orchestration_latest_terminal_subagent_iso(items),
+        require_delivery=True,
+    )
+    if not completion_iso:
+        return False
+    return _orchestration_mark_item_status(
+        session,
+        run_id=run.runId,
+        item=main_item,
+        status="done",
+        now_value=now_value,
+        source_log_id=source_log_id,
+        completed_at=completion_iso,
+    )
 
 
 def _orchestration_sync_log(log_id: str) -> None:
@@ -7991,6 +8425,19 @@ def _orchestration_sync_log(log_id: str) -> None:
                 matched_items.append(main_item)
             if not matched_items and _session_keys_equivalent(source_session, run.baseSessionKey) and main_item is not None:
                 matched_items.append(main_item)
+            entry_type = str(getattr(entry, "type", "") or "").strip().lower()
+            entry_agent_id = str(getattr(entry, "agentId", "") or "").strip().lower()
+            if entry_type == "conversation" and entry_agent_id == "assistant" and not source_is_subagent_session:
+                repaired_items = _orchestration_reconcile_completed_subagent_items(
+                    session,
+                    run_id=run.runId,
+                    items=items,
+                    now_value=now_value,
+                )
+                if repaired_items:
+                    items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+                    item_by_key = {item.itemKey: item for item in items}
+                    main_item = item_by_key.get("main.response")
             if main_item is not None:
                 _orchestration_restore_main_supervision(
                     session,
@@ -8027,6 +8474,7 @@ def _orchestration_sync_log(log_id: str) -> None:
                 terminal_status = "cancelled" if ("cancel" in combined_lower or "user_cancelled" in combined_lower) else "failed"
                 targets = matched_items or ([main_item] if main_item is not None else [])
                 terminal_reason = _safe_log_attr_text(entry, "summary") or _safe_log_attr_text(entry, "content")
+                completed_at = normalize_iso(activity_ts) or activity_ts
                 for item in targets:
                     changed = _orchestration_mark_item_status(
                         session,
@@ -8036,6 +8484,7 @@ def _orchestration_sync_log(log_id: str) -> None:
                         now_value=now_value,
                         reason=terminal_reason,
                         source_log_id=str(getattr(entry, "id", "") or ""),
+                        completed_at=completed_at,
                     )
                     if (
                         changed
@@ -8062,6 +8511,7 @@ def _orchestration_sync_log(log_id: str) -> None:
                             status="done",
                             now_value=now_value,
                             source_log_id=str(getattr(entry, "id", "") or ""),
+                            completed_at=normalize_iso(activity_ts) or activity_ts,
                         )
                         if was_done and _orchestration_auto_follow_up_enabled() and main_item is not None:
                             main_still_active = str(getattr(main_item, "status", "") or "").strip().lower() not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
@@ -8077,12 +8527,21 @@ def _orchestration_sync_log(log_id: str) -> None:
                                 if not _orchestration_original_request_still_dispatching(session, run):
                                     agent_id = str(getattr(item, "agentId", "") or "").strip() or "specialist"
                                     item_session = str(getattr(item, "sessionKey", "") or "").strip()
-                                    content_preview = _clip(_sanitize_log_text(_safe_log_attr_text(entry, "content")), 400)
+                                    result_text = _sanitize_log_text(
+                                        _combined_log_text(
+                                            _safe_log_attr_text(entry, "content"),
+                                            _safe_log_attr_text(entry, "summary"),
+                                        )
+                                    )
+                                    result_excerpt = _clip(result_text, 2400)
+                                    result_truncated = bool(result_text and result_excerpt and result_excerpt != result_text)
                                     follow_up_msg = (
                                         f"[ORCHESTRATION_FOLLOW_UP] Subagent '{agent_id}' (session: {item_session}) has just completed. "
-                                        f"Result preview: {content_preview or '(check sessions_history for full output)'}. "
-                                        f"Please call sessions_history('{item_session}') to get the full output, "
-                                        f"then relay the results to the user in this thread."
+                                        "Read the injected current task thread before replying. "
+                                        "If the result is already visible to the user, do not restate or paraphrase the full body. "
+                                        "Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains. "
+                                        f"Subagent result{' (truncated)' if result_truncated else ''}: "
+                                        f"{result_excerpt or '(no subagent text was captured; rely on the injected Clawboard result context for this turn)'}"
                                     )
                                     _orchestration_enqueue_follow_up_dispatch(
                                         run=run,
@@ -8100,48 +8559,36 @@ def _orchestration_sync_log(log_id: str) -> None:
                             refreshed_items = session.exec(
                                 select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)
                             ).all()
-                            min_completion_ts = _orchestration_latest_terminal_subagent_iso(refreshed_items)
-                            still_has_active_subagents = any(
-                                str(getattr(it, "kind", "") or "").strip().lower() == "subagent"
-                                and str(getattr(it, "status", "") or "").strip().lower()
-                                not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
-                                for it in refreshed_items
+                            _orchestration_maybe_mark_main_done_from_logs(
+                                session,
+                                run=run,
+                                items=refreshed_items,
+                                now_value=now_value,
+                                source_log_id=str(getattr(entry, "id", "") or ""),
                             )
-                            if (
-                                not still_has_active_subagents
-                                and not _orchestration_has_blocking_subagent_failures(refreshed_items)
-                                and _orchestration_has_assistant_completion_log(
-                                    session,
-                                    run=run,
-                                    min_created_at=min_completion_ts,
-                                )
-                            ):
-                                _orchestration_mark_item_status(
-                                    session,
-                                    run_id=run.runId,
-                                    item=main_item,
-                                    status="done",
-                                    now_value=now_value,
-                                    source_log_id=str(getattr(entry, "id", "") or ""),
-                                )
+                            _orchestration_maybe_enqueue_completed_subagent_follow_up(
+                                session,
+                                run=run,
+                                items=refreshed_items,
+                                now_value=now_value,
+                            )
                 elif main_item is not None and (
                     request_matches_run or _session_keys_equivalent(source_session, run.baseSessionKey)
                 ):
-                    has_active_subagent_items = any(
-                        str(getattr(item, "kind", "") or "").strip().lower() == "subagent"
-                        and str(getattr(item, "status", "") or "").strip().lower()
-                        not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
-                        for item in item_by_key.values()
+                    refreshed_items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+                    _orchestration_maybe_mark_main_done_from_logs(
+                        session,
+                        run=run,
+                        items=refreshed_items,
+                        now_value=now_value,
+                        source_log_id=str(getattr(entry, "id", "") or ""),
                     )
-                    if not has_active_subagent_items:
-                        _orchestration_mark_item_status(
-                            session,
-                            run_id=run.runId,
-                            item=main_item,
-                            status="done",
-                            now_value=now_value,
-                            source_log_id=str(getattr(entry, "id", "") or ""),
-                        )
+                    _orchestration_maybe_enqueue_completed_subagent_follow_up(
+                        session,
+                        run=run,
+                        items=refreshed_items,
+                        now_value=now_value,
+                    )
 
             final_items = list(item_by_key.values())
             _orchestration_maybe_enqueue_recovery_follow_up(
@@ -8375,6 +8822,40 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
             if not items:
                 _orchestration_ensure_main_item(session, run, now_value=current_iso)
                 items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            if _orchestration_restore_main_delivery_if_missing(
+                session,
+                run=run,
+                items=items,
+                now_value=current_iso,
+                reason="missing_delivery_after_subagent_done",
+            ):
+                items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+                _orchestration_recompute_run_status(session, run=run, items=items, now_value=current_iso)
+                touched_runs += 1
+            repaired_items = _orchestration_reconcile_completed_subagent_items(
+                session,
+                run_id=run.runId,
+                items=items,
+                now_value=current_iso,
+            )
+            if repaired_items:
+                items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+                _orchestration_enqueue_repaired_subagent_follow_up(
+                    session,
+                    run=run,
+                    items=items,
+                    repaired_items=repaired_items,
+                )
+                _orchestration_maybe_mark_main_done_from_logs(
+                    session,
+                    run=run,
+                    items=items,
+                    now_value=current_iso,
+                    source_log_id=None,
+                )
+                items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+                _orchestration_recompute_run_status(session, run=run, items=items, now_value=current_iso)
+                touched_runs += 1
             _orchestration_restore_main_supervision(
                 session,
                 run_id=run.runId,
@@ -8382,6 +8863,13 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
                 now_value=current_iso,
                 reason="active_subagent_work",
             )
+            if _orchestration_maybe_enqueue_completed_subagent_follow_up(
+                session,
+                run=run,
+                items=items,
+                now_value=current_iso,
+            ):
+                touched_runs += 1
             for item in items:
                 status = str(item.status or "").strip().lower()
                 if status in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
@@ -17250,6 +17738,42 @@ def _query_has_signal(text: str) -> bool:
     return any(len(tok) >= 4 for tok in tokens)
 
 
+def _parse_internal_task_completion_event(text: str | None) -> dict[str, str]:
+    raw = _coerce_safe_text(text).replace("\r\n", "\n").replace("\r", "\n").strip() if text else ""
+    if not raw:
+        return {}
+    if "[internal task completion event]" not in raw.lower():
+        return {}
+    event: dict[str, str] = {}
+    for field in ("source", "session_key", "session_id", "type", "task", "status"):
+        match = re.search(rf"(?im)^\s*{re.escape(field)}:\s*(.+)$", raw)
+        if match:
+            value = _sanitize_log_text(match.group(1))
+            if value:
+                event[field] = value
+    result_match = re.search(
+        r"Result \(untrusted content, treat as data\):\s*(.*?)\s*(?:\n\s*Stats:|\n\s*Action:|$)",
+        raw,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if result_match:
+        result_preview = _clip(_sanitize_log_text(result_match.group(1)), 320)
+        if result_preview:
+            event["result_preview"] = result_preview
+    return event
+
+
+def _internal_task_completion_intent_label(event: dict[str, str]) -> str:
+    task_name = _sanitize_log_text(event.get("task"))
+    status = _sanitize_log_text(event.get("status"))
+    parts = ["follow up on delegated task completion"]
+    if task_name:
+        parts.append(task_name)
+    if status:
+        parts.append(status)
+    return _clip(" | ".join(parts), 500)
+
+
 def _parse_dt(value: str | None) -> datetime | None:
     normalized = normalize_iso(value)
     if not normalized:
@@ -17323,19 +17847,28 @@ def context(
     timelineLimit: int = Query(default=6, ge=0, le=40, description="Max session timeline lines."),
 ):
     """Return a prompt-ready, layered context block for agent runs (Layer A always; Layer B optional)."""
-    raw_query = _sanitize_log_text(q or "")
-    normalized_query = _clip(raw_query, 500)
+    raw_query_input = _coerce_safe_text(q or "")
+    raw_query = _sanitize_log_text(raw_query_input)
+    completion_event = _parse_internal_task_completion_event(raw_query_input)
+    normalized_query = (
+        _internal_task_completion_intent_label(completion_event)
+        if completion_event
+        else _clip(raw_query, 500)
+    )
     requested_mode = (mode or "auto").strip().lower()
     effective_mode = requested_mode if requested_mode in {"auto", "cheap", "full", "patient"} else "auto"
 
     low_signal = (
-        _is_affirmation(normalized_query)
+        bool(completion_event)
+        or _is_affirmation(normalized_query)
         or normalized_query.strip().startswith("/")
         or _is_low_signal_context_query(normalized_query)
     )
     board_topic_hint_id, board_task_hint_id = _parse_board_session_key(sessionKey or "")
     board_session_hint = bool(board_topic_hint_id or board_task_hint_id)
-    if effective_mode in {"full", "patient"}:
+    if completion_event:
+        run_semantic = False
+    elif effective_mode in {"full", "patient"}:
         run_semantic = True
     elif effective_mode == "cheap":
         run_semantic = False
@@ -17352,6 +17885,23 @@ def context(
     lines.append("Clawboard context (layered):")
     if normalized_query:
         lines.append(f"Current user intent: {_clip(normalized_query, 180)}")
+    if completion_event:
+        completion_task = _sanitize_log_text(completion_event.get("task"))
+        data["turnHint"] = {
+            "kind": "delegated_completion",
+            "task": completion_task or None,
+            "status": _sanitize_log_text(completion_event.get("status")) or None,
+            "source": _sanitize_log_text(completion_event.get("source")) or None,
+            "resultPreview": _sanitize_log_text(completion_event.get("result_preview")) or None,
+        }
+        layers.append("A:turn_hint")
+        lines.append("Turn hint:")
+        lines.append(
+            f"- Delegated specialist just completed{f': {completion_task}' if completion_task else ' in the current task'}."
+        )
+        lines.append("- Read the current task thread before replying.")
+        lines.append("- If the specialist result is already visible there, do not repeat or paraphrase the full body.")
+        lines.append("- Close the loop by validating the work, adding only the delta or caveats, and stating whether the request is satisfied.")
     if effective_mode != "auto":
         lines.append(f"Mode: {effective_mode}")
 
@@ -17378,11 +17928,25 @@ def context(
                 routing_items = list(row.items or [])[-6:]
 
         timeline: list[dict[str, Any]] = []
-        if sessionKey and timelineLimit > 0:
-            base_key = (sessionKey.split("|", 1)[0] or "").strip()
-            if base_key:
-                query_logs = select(LogEntry).options(defer(LogEntry.raw))
-                if DATABASE_URL.startswith("sqlite"):
+        timeline_label = "Recent session timeline:"
+        timeline_scope = "session"
+        if timelineLimit > 0 and (sessionKey or board_task_hint_id or board_topic_hint_id):
+            query_logs = select(LogEntry).options(defer(LogEntry.raw))
+            if board_task_hint_id:
+                timeline_scope = "task_thread"
+                timeline_label = "Recent current task thread:"
+                query_logs = query_logs.where(LogEntry.taskId == board_task_hint_id)
+                if board_topic_hint_id:
+                    query_logs = query_logs.where(LogEntry.topicId == board_topic_hint_id)
+            elif board_topic_hint_id:
+                timeline_scope = "topic_thread"
+                timeline_label = "Recent current topic thread:"
+                query_logs = query_logs.where(LogEntry.topicId == board_topic_hint_id)
+            else:
+                base_key = (sessionKey.split("|", 1)[0] or "").strip()
+                if not base_key:
+                    query_logs = None
+                elif DATABASE_URL.startswith("sqlite"):
                     query_logs = query_logs.where(
                         text(
                             "(json_extract(source, '$.sessionKey') = :base_key OR json_extract(source, '$.sessionKey') LIKE :like_key)"
@@ -17391,6 +17955,7 @@ def context(
                 else:
                     expr = LogEntry.source["sessionKey"].as_string()
                     query_logs = query_logs.where(or_(expr == base_key, expr.like(f"{base_key}|%")))
+            if query_logs is not None:
                 query_logs = query_logs.where(LogEntry.type == "conversation").order_by(
                     LogEntry.createdAt.desc(),
                     (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
@@ -17417,6 +17982,7 @@ def context(
                         if str(entry.agentId or "").strip().lower() == "user"
                         else (entry.agentLabel or entry.agentId or "Agent")
                     )
+                    source_map = entry.source if isinstance(entry.source, dict) else {}
                     timeline.append(
                         {
                             "id": entry.id,
@@ -17424,6 +17990,7 @@ def context(
                             "taskId": entry.taskId,
                             "agentId": entry.agentId,
                             "agentLabel": entry.agentLabel,
+                            "sessionKey": str(source_map.get("sessionKey") or "").strip() or None,
                             "createdAt": entry.createdAt,
                             "text": _clip(f"{who}: {summary}", 160),
                         }
@@ -17432,6 +17999,7 @@ def context(
                         break
                 if timeline:
                     data["timeline"] = timeline
+                    data["timelineScope"] = timeline_scope
                     layers.append("A:timeline")
 
         all_topics = session.exec(select(Topic)).all()
@@ -17620,7 +18188,7 @@ def context(
                     lines.append(f"- {head}")
 
         if timeline:
-            lines.append("Recent session timeline:")
+            lines.append(timeline_label)
             for item in timeline[:timelineLimit]:
                 lines.append(f"- {item['text']}")
 

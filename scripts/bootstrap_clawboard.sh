@@ -355,6 +355,46 @@ else:
 PY
 }
 
+openclaw_cfg_get_scalar_from_file() {
+  local key="$1"
+  python3 - "$OPENCLAW_CONFIG_PATH" "$key" <<'PY' 2>/dev/null || true
+import json
+import sys
+from pathlib import Path
+
+cfg_path = Path(sys.argv[1])
+key = sys.argv[2]
+
+try:
+    data = json.loads(cfg_path.read_text(encoding="utf-8"))
+except Exception:
+    print("", end="")
+    raise SystemExit(0)
+
+cur = data
+for part in [p for p in key.split(".") if p]:
+    if isinstance(cur, dict):
+        cur = cur.get(part)
+    elif isinstance(cur, list) and part.isdigit():
+        idx = int(part)
+        cur = cur[idx] if 0 <= idx < len(cur) else None
+    else:
+        cur = None
+    if cur is None:
+        print("", end="")
+        raise SystemExit(0)
+
+if isinstance(cur, bool):
+    print("true" if cur else "false", end="")
+elif isinstance(cur, (int, float)):
+    print(cur, end="")
+elif isinstance(cur, (list, dict)):
+    print(json.dumps(cur, separators=(",", ":"), sort_keys=True), end="")
+else:
+    print(str(cur), end="")
+PY
+}
+
 openclaw_cfg_file_fallback_enabled() {
   local raw
   raw="$(printf "%s" "${OPENCLAW_CONFIG_FILE_FALLBACK:-true}" | tr '[:upper:]' '[:lower:]')"
@@ -1963,6 +2003,9 @@ reconcile_openclaw_gateway_launchagent_token() {
   fi
 
   gateway_token="$(openclaw_cfg_get_scalar_normalized gateway.auth.token || true)"
+  if [ "$gateway_token" = "__OPENCLAW_REDACTED__" ] || [ -z "$gateway_token" ]; then
+    gateway_token="$(openclaw_cfg_get_scalar_from_file gateway.auth.token || true)"
+  fi
   if [ -z "$gateway_token" ]; then
     log_warn "OpenClaw gateway auth token is missing; skipping macOS LaunchAgent token reconciliation."
     return 0

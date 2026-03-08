@@ -162,6 +162,10 @@ fail_if_discovered_plugin_missing_base_url
 
 if [[ "$#" -ge 3 && "$1" == "config" && "$2" == "get" ]]; then
   key="$3"
+  if [[ "$key" == "gateway.auth.token" && "\${OPENCLAW_STUB_REDACT_GATEWAY_TOKEN:-0}" == "1" ]]; then
+    echo '"__OPENCLAW_REDACTED__"'
+    exit 0
+  fi
   python3 - "$config_path" "$key" <<'PY'
 import json
 import sys
@@ -1228,6 +1232,7 @@ exit 0
     HOME: homeDir,
     OPENCLAW_HOME: openclawHome,
     OPENCLAW_CONFIG_PATH: configPath,
+    OPENCLAW_STUB_REDACT_GATEWAY_TOKEN: "1",
     LAUNCHCTL_STUB_LOG_FILE: launchctlLogPath,
     PATH: `${binDir}:${process.env.PATH ?? ""}`,
     CLAWBOARD_TOKEN: "launchagent-token",
@@ -1357,6 +1362,11 @@ test("delegation supervision cadence stays aligned across templates and setup sc
   assert.match(setupText, /still active beyond 5 minutes/i);
   assert.match(setupText, /session_status/i);
   assert.match(setupText, /queued sub-agent completion|queued sub-agent result/i);
+  assert.match(setupText, /do not restate or paraphrase the full body|do not parrot it back/i);
+  assert.match(setupText, /current task thread/i);
+  assert.match(setupText, /"sessions_spawn","sessions_list","sessions_send","session_status"/i);
+  assert.doesNotMatch(setupText, /"sessions_history"/i);
+  assert.match(setupText, /Delegation tools: sessions_spawn, session_status, sessions_list, sessions_send, cron/i);
   assert.match(setupText, /memoryFlush\.enabled true json false/i);
   assert.match(setupText, /memory\.backend=qmd.*memory-only source/i);
   assert.match(setupText, /memory\.qmd\.sessions\.enabled false json true/i);
@@ -1408,14 +1418,16 @@ test("main-agent orchestration contract documents runtime model, specialist map,
   const heartbeatPath = path.join(root, "agent-templates", "main", "HEARTBEAT.md");
   const bootstrapPath = path.join(root, "agent-templates", "main", "BOOTSTRAP.md");
   const directivePath = path.join(root, "directives", "main", "GENERAL_CONTRACTOR.md");
+  const setupPath = path.join(root, "skills", "clawboard", "scripts", "setup-openclaw-local-memory.sh");
   const readmePath = path.join(root, "README.md");
 
-  const [agentsText, soulText, heartbeatText, bootstrapText, directiveText, readmeText] = await Promise.all([
+  const [agentsText, soulText, heartbeatText, bootstrapText, directiveText, setupText, readmeText] = await Promise.all([
     readFile(agentsPath, "utf8"),
     readFile(soulPath, "utf8"),
     readFile(heartbeatPath, "utf8"),
     readFile(bootstrapPath, "utf8"),
     readFile(directivePath, "utf8"),
+    readFile(setupPath, "utf8"),
     readFile(readmePath, "utf8"),
   ]);
 
@@ -1425,20 +1437,38 @@ test("main-agent orchestration contract documents runtime model, specialist map,
   assert.match(agentsText, /user decision|missing constraints|blocked/i);
   assert.match(agentsText, /session_status/i);
   assert.match(agentsText, /queued auto-announces|queued completion/i);
+  assert.match(agentsText, /do not restate or paraphrase the full body/i);
+  assert.match(agentsText, /current-task thread|current task thread/i);
+  assert.match(agentsText, /skip the task write instead of guessing from the title/i);
+  assert.match(agentsText, /Do not call `session_status` in the same turn you just spawned/i);
+  assert.match(agentsText, /very next action.*plain-text user update/i);
 
   assert.match(soulText, /OpenClaw.*sessions.*cron/i);
   assert.match(soulText, /Clawboard.*durable external ledger/i);
   assert.match(soulText, /coding.*docs.*web.*social/is);
   assert.match(soulText, /blocker requires a user decision/i);
+  assert.match(soulText, /do not parrot|do not repeat the full body/i);
+  assert.match(soulText, /do not burn an extra turn polling `session_status` immediately after `sessions_spawn`/i);
+  assert.match(soulText, /first action after `sessions_spawn\(\.\.\.\)` must be that short user-facing dispatch update/i);
 
   assert.match(heartbeatText, /user decision/i);
   assert.match(heartbeatText, /session_status/i);
   assert.match(heartbeatText, /queued subagent completion|queued completion/i);
+  assert.match(heartbeatText, /do not restate the full body|do not parrot it back/i);
+  assert.match(heartbeatText, /before any extra tool call or task write/i);
   assert.match(bootstrapText, /blocked on a real user decision/i);
   assert.match(bootstrapText, /session_status/i);
+  assert.match(bootstrapText, /skip `clawboard_update_task\(\)` instead of guessing from a task title/i);
+  assert.match(bootstrapText, /Do not call `session_status\(childSessionKey\)` in that same post-spawn turn/i);
+  assert.match(bootstrapText, /next action must be a plain-text dispatch update to the user immediately/i);
+  assert.match(bootstrapText, /do not restate or paraphrase the full body/i);
+  assert.match(bootstrapText, /before any extra tool call or task write/i);
   assert.match(directiveText, /OpenClaw is the runtime/i);
   assert.match(directiveText, /Clawboard is the durable ledger/i);
   assert.match(directiveText, /user decision/i);
+  assert.match(directiveText, /do not parrot the full body back/i);
+  assert.match(setupText, /current task thread/i);
+  assert.match(setupText, /do not restate or paraphrase the full body|do not parrot it back/i);
   assert.match(readmeText, /setup-agentic-team/i);
   assert.match(readmeText, /CLAWBOARD_AGENTIC_TEAM_SETUP=always/i);
 });

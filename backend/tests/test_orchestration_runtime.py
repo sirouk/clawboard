@@ -224,6 +224,31 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             ).first()
             self.assertIsNone(item)
 
+    def test_orch_002d_waiting_status_detector_catches_relay_promises(self):
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "Dispatched to **coding** specialist (session `abcd1234`) - waiting for the result. "
+                "I'll relay it back the moment the specialist completes.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "Task tagged in Clawboard. The coding specialist will auto-announce when complete - "
+                "I'll relay the `LATENCY_TEST_ALPHA` response back here immediately.",
+                None,
+                None,
+            )
+        )
+        self.assertFalse(
+            main_module._orchestration_is_waiting_status_text(
+                "**LATENCY_TEST_ALPHA** The coding specialist responded as requested. Task complete.",
+                None,
+                None,
+            )
+        )
+
     def test_orch_003_main_response_does_not_close_while_subagent_still_active(self):
         session_key = "clawboard:task:topic-orch-003:task-orch-003"
         request_id = self._openclaw_chat(session_key=session_key, message="Do this with a subagent.")
@@ -337,6 +362,133 @@ class OrchestrationRuntimeTests(unittest.TestCase):
         convergence = runs[0].get("convergence") or {}
         self.assertTrue(bool(convergence.get("ready")))
         self.assertEqual(str(convergence.get("reason") or ""), "converged")
+
+    def test_orch_003a_waiting_status_after_child_done_keeps_main_open_without_duplicate_follow_up(self):
+        session_key = "clawboard:task:topic-orch-003a:task-orch-003a"
+        request_id = self._openclaw_chat(
+            session_key=session_key,
+            message="Delegate to coding, then relay the completed result without stalling on status promises.",
+        )
+        child_session = "agent:coding:subagent:orch-003a-child"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003a-child"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003a-spawn",
+        )
+
+        with patch.object(main_module, "_orchestration_original_request_still_dispatching", return_value=True):
+            self._append_log(
+                LogAppend(
+                    type="conversation",
+                    content="LATENCY_TEST_ALPHA",
+                    summary="Child completion",
+                    createdAt=now_iso(),
+                    agentId="assistant",
+                    agentLabel="Coding",
+                    source={"sessionKey": child_session, "channel": "direct", "requestId": request_id},
+                ),
+                idem="orch-003a-child-done",
+            )
+
+        with patch.object(main_module, "_orchestration_original_request_still_dispatching", return_value=False), patch.object(
+            main_module,
+            "_orchestration_enqueue_follow_up_dispatch",
+            return_value=True,
+        ) as follow_up_mock:
+            self._append_log(
+                LogAppend(
+                    type="conversation",
+                    content=(
+                        "Task tagged in Clawboard. The coding specialist will auto-announce when complete - "
+                        "I'll relay the `LATENCY_TEST_ALPHA` response back here immediately."
+                    ),
+                    summary="Main waiting status",
+                    createdAt=now_iso(),
+                    agentId="assistant",
+                    agentLabel="OpenClaw",
+                    source={"sessionKey": session_key, "channel": "webchat", "requestId": request_id},
+                ),
+                idem="orch-003a-main-waiting",
+            )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            self.assertEqual(run.status, "running")
+            self.assertIsNone(run.completedAt)
+            items = {
+                row.itemKey: row
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(items["main.response"].status, "running")
+            self.assertEqual(items[f"subagent:{child_session}"].status, "done")
+
+        follow_up_mock.assert_not_called()
+
+    def test_orch_003aa_tick_enqueues_follow_up_after_child_done_and_main_silence(self):
+        session_key = "clawboard:task:topic-orch-003aa:task-orch-003aa"
+        request_id = self._openclaw_chat(
+            session_key=session_key,
+            message="Delegate to coding, then recover if the main agent goes silent after the child finishes.",
+        )
+        child_session = "agent:coding:subagent:orch-003aa-child"
+        base_dt = datetime.now(timezone.utc)
+        child_done_iso = (base_dt - timedelta(seconds=30)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003aa-child"}}',
+                createdAt=(base_dt - timedelta(seconds=40)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003aa-spawn",
+        )
+
+        with patch.object(main_module, "_orchestration_original_request_still_dispatching", return_value=True):
+            self._append_log(
+                LogAppend(
+                    type="conversation",
+                    content="LATENCY_TEST_ALPHA",
+                    summary="Child completion",
+                    createdAt=child_done_iso,
+                    agentId="assistant",
+                    agentLabel="Coding",
+                    source={"sessionKey": child_session, "channel": "direct", "requestId": request_id},
+                ),
+                idem="orch-003aa-child-done",
+            )
+
+        with patch.object(main_module, "_orchestration_original_request_still_dispatching", return_value=False), patch.object(
+            main_module,
+            "_orchestration_completed_subagent_follow_up_grace_seconds",
+            return_value=0.0,
+        ), patch.object(
+            main_module,
+            "_orchestration_enqueue_follow_up_dispatch",
+            return_value=True,
+        ) as follow_up_mock:
+            main_module._orchestration_tick_once(now_dt=datetime.now(timezone.utc))
+
+        follow_up_mock.assert_called_once()
+        follow_up_message = str(follow_up_mock.call_args.kwargs.get("message") or "")
+        self.assertIn("[ORCHESTRATION_FOLLOW_UP]", follow_up_message)
+        self.assertIn("Do not send another status-only promise", follow_up_message)
+        self.assertIn("LATENCY_TEST_ALPHA", follow_up_message)
+        self.assertNotIn("sessions_history", follow_up_message)
 
     def test_orch_003b_late_subagent_spawn_reopens_main_supervision(self):
         session_key = "clawboard:task:topic-orch-003b:task-orch-003b"
@@ -485,6 +637,58 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             )
 
         follow_up_mock.assert_called_once()
+        recovery_follow_up = str(follow_up_mock.call_args.kwargs.get("message") or "")
+        self.assertIn("session_status", recovery_follow_up)
+        self.assertNotIn("sessions_history", recovery_follow_up)
+
+    def test_orch_003cc_completed_subagent_follow_up_embeds_result_without_sessions_history(self):
+        session_key = "clawboard:task:topic-orch-003cc:task-orch-003cc"
+        request_id = self._openclaw_chat(
+            session_key=session_key,
+            message="Delegate to a child and relay the result without cross-agent history reads.",
+        )
+        child_session = "agent:coding:subagent:orch-003cc-child"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003cc-child"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003cc-spawn",
+        )
+
+        with patch.object(main_module, "_orchestration_original_request_still_dispatching", return_value=False), patch.object(
+            main_module,
+            "_orchestration_enqueue_follow_up_dispatch",
+            return_value=True,
+        ) as follow_up_mock:
+            self._append_log(
+                LogAppend(
+                    type="conversation",
+                    content="Child completed with the cron inventory already summarized.",
+                    summary="Child completion",
+                    createdAt=now_iso(),
+                    agentId="assistant",
+                    agentLabel="Coding",
+                    source={"sessionKey": child_session, "channel": "direct", "requestId": request_id},
+                ),
+                idem="orch-003cc-child-done",
+            )
+
+        follow_up_mock.assert_called_once()
+        follow_up_message = str(follow_up_mock.call_args.kwargs.get("message") or "")
+        self.assertIn("[ORCHESTRATION_FOLLOW_UP]", follow_up_message)
+        self.assertIn("result is already visible in the current task thread", follow_up_message)
+        self.assertIn("do not restate or paraphrase the full body", follow_up_message.lower())
+        self.assertIn("validating the work", follow_up_message)
+        self.assertIn("Child completed with the cron inventory already summarized.", follow_up_message)
+        self.assertNotIn("sessions_history", follow_up_message)
 
     def test_orch_003d_failed_subagent_attempt_does_not_poison_run_after_retry_and_main_final(self):
         session_key = "clawboard:task:topic-orch-003d:task-orch-003d"
@@ -632,6 +836,9 @@ class OrchestrationRuntimeTests(unittest.TestCase):
 
         self.assertGreaterEqual(int(stats.get("recoveredRuns") or 0), 1)
         follow_up_mock.assert_called_once()
+        recovery_follow_up = str(follow_up_mock.call_args.kwargs.get("message") or "")
+        self.assertIn("session_status", recovery_follow_up)
+        self.assertNotIn("sessions_history", recovery_follow_up)
 
         with get_session() as session:
             run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
@@ -786,6 +993,242 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
             recovery = dict((run.meta or {}).get("recovery") or {})
             self.assertEqual(int(recovery.get("attempts") or 0), 2)
+
+    def test_orch_003g_duplicate_subagent_replay_repairs_stale_completion_state(self):
+        session_key = "clawboard:task:topic-orch-003g:task-orch-003g"
+        request_id = self._openclaw_chat(session_key=session_key, message="Delegate and recover from replay races.")
+        child_session = "agent:coding:subagent:orch-003g-child"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003g-child"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003g-spawn",
+        )
+
+        child_message_id = "oc:orch-003g-child-msg"
+        first_child_row = self._append_log(
+            LogAppend(
+                type="conversation",
+                content="LATENCY_OK",
+                summary="LATENCY_OK",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="Coding",
+                source={"sessionKey": child_session, "channel": "direct", "requestId": request_id, "messageId": child_message_id},
+            ),
+            idem="orch-003g-child-first",
+        )
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Done — latency test complete.",
+                summary="Main final response",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id, "messageId": "oc:orch-003g-main"},
+            ),
+            idem="orch-003g-main-final",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            child_item = next(item for item in items if item.itemKey == f"subagent:{child_session}")
+            main_item = next(item for item in items if item.itemKey == "main.response")
+            child_item.status = "stalled"
+            child_item.completedAt = None
+            child_item.nextCheckAt = now_iso()
+            main_item.status = "running"
+            main_item.completedAt = None
+            main_item.nextCheckAt = now_iso()
+            run.status = "running"
+            run.completedAt = None
+            session.add(child_item)
+            session.add(main_item)
+            session.add(run)
+            session.commit()
+
+        replay_row = self._append_log(
+            LogAppend(
+                type="conversation",
+                content="LATENCY_OK",
+                summary="LATENCY_OK",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="Coding",
+                source={"sessionKey": child_session, "channel": "direct", "requestId": request_id, "messageId": child_message_id},
+            ),
+            idem="orch-003g-child-replay",
+        )
+
+        self.assertEqual(replay_row.id, first_child_row.id)
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            statuses = {
+                row.itemKey: row.status
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(statuses.get(f"subagent:{child_session}"), "done")
+            self.assertEqual(statuses.get("main.response"), "done")
+            self.assertEqual(run.status, "done")
+
+    def test_orch_003h_tick_repairs_stale_subagent_completion_from_existing_logs(self):
+        session_key = "clawboard:task:topic-orch-003h:task-orch-003h"
+        request_id = self._openclaw_chat(session_key=session_key, message="Recover stale orchestration state from logs.")
+        child_session = "agent:coding:subagent:orch-003h-child"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003h-child"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003h-spawn",
+        )
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="LATENCY_OK",
+                summary="LATENCY_OK",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="Coding",
+                source={"sessionKey": child_session, "channel": "direct", "requestId": request_id, "messageId": "oc:orch-003h-child"},
+            ),
+            idem="orch-003h-child",
+        )
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Done — latency test complete.",
+                summary="Main final response",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id, "messageId": "oc:orch-003h-main"},
+            ),
+            idem="orch-003h-main",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            child_item = next(item for item in items if item.itemKey == f"subagent:{child_session}")
+            main_item = next(item for item in items if item.itemKey == "main.response")
+            child_item.status = "stalled"
+            child_item.completedAt = None
+            child_item.nextCheckAt = now_iso()
+            main_item.status = "running"
+            main_item.completedAt = None
+            main_item.nextCheckAt = now_iso()
+            run.status = "running"
+            run.completedAt = None
+            session.add(child_item)
+            session.add(main_item)
+            session.add(run)
+            session.commit()
+
+        main_module._orchestration_tick_once()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            statuses = {
+                row.itemKey: row.status
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(statuses.get(f"subagent:{child_session}"), "done")
+            self.assertEqual(statuses.get("main.response"), "done")
+            self.assertEqual(run.status, "done")
+
+    def test_orch_003i_tick_repair_enqueues_follow_up_when_child_finished_but_main_has_not_replied(self):
+        session_key = "clawboard:task:topic-orch-003i:task-orch-003i"
+        request_id = self._openclaw_chat(session_key=session_key, message="Recover a finished child and relay it.")
+        child_session = "agent:coding:subagent:orch-003i-child"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003i-child"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003i-spawn",
+        )
+        self._append_log(
+            LogAppend(
+                type="conversation",
+                content="LATENCY_OK",
+                summary="LATENCY_OK",
+                createdAt=now_iso(),
+                agentId="assistant",
+                agentLabel="Coding",
+                source={"sessionKey": child_session, "channel": "direct", "requestId": request_id, "messageId": "oc:orch-003i-child"},
+            ),
+            idem="orch-003i-child",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            child_item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == f"subagent:{child_session}")
+            ).first()
+            self.assertIsNotNone(child_item)
+            child_item.status = "stalled"
+            child_item.completedAt = None
+            session.add(child_item)
+            queue_row = session.exec(
+                select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == request_id).limit(1)
+            ).first()
+            self.assertIsNotNone(queue_row)
+            queue_row.status = "sent"
+            queue_row.completedAt = now_iso()
+            queue_row.updatedAt = queue_row.completedAt
+            queue_row.claimedAt = None
+            session.add(queue_row)
+            session.commit()
+
+        main_module._orchestration_tick_once()
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            child_item = session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run.runId)
+                .where(OrchestrationItem.itemKey == f"subagent:{child_session}")
+            ).first()
+            self.assertEqual(child_item.status, "done")
+            follow_up_rows = session.exec(
+                select(OpenClawChatDispatchQueue)
+                .where(OpenClawChatDispatchQueue.requestId.like("occhat-fup-%"))
+            ).all()
+            self.assertTrue(follow_up_rows)
+            self.assertTrue(any(session_key == row.sessionKey for row in follow_up_rows))
 
     def test_orch_004_cancel_marks_run_and_items_cancelled(self):
         session_key = "clawboard:task:topic-orch-004:task-orch-004"

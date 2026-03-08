@@ -281,6 +281,30 @@ function lexicalSimilarity(a, b) {
         return 0;
     return inter / union;
 }
+function normalizeTaskIdentity(value) {
+    const normalized = typeof value === "string" ? value.trim() : "";
+    if (!normalized)
+        return "";
+    return normalized.replace(/^task[-_:]?/i, "");
+}
+function resolveBoardTaskPatchId(requestedId, sessionKey, fallbackTaskId) {
+    const requested = typeof requestedId === "string" ? requestedId.trim() : "";
+    const route = parseBoardSessionKey(sessionKey);
+    const sessionTaskId = route?.kind === "task"
+        ? route.taskId
+        : (typeof fallbackTaskId === "string" ? fallbackTaskId.trim() : "");
+    if (!requested)
+        return sessionTaskId || undefined;
+    if (!sessionTaskId)
+        return requested;
+    if (requested === sessionTaskId)
+        return requested;
+    if (normalizeTaskIdentity(requested) === normalizeTaskIdentity(sessionTaskId))
+        return sessionTaskId;
+    if (!/^task[-_:]/i.test(requested))
+        return sessionTaskId;
+    return requested;
+}
 function extractTextLoose(value, depth = 0) {
     if (!value || depth > 4)
         return undefined;
@@ -1969,8 +1993,8 @@ export default function register(api) {
                     required: ["id"],
                 },
                 async execute(_toolCallId, params) {
-                    const id = typeof params.id === "string" ? params.id.trim() : "";
-                    if (!id)
+                    const requestedId = typeof params.id === "string" ? params.id.trim() : "";
+                    if (!requestedId)
                         return toolJsonResult({ ok: false, error: "id required" });
                     const patch = {};
                     if (typeof params.status === "string" && params.status.trim())
@@ -1987,6 +2011,9 @@ export default function register(api) {
                         patch.tags = params.tags.filter((t) => typeof t === "string").map((t) => t.trim()).filter(Boolean);
                     if (Object.keys(patch).length === 0)
                         return toolJsonResult({ ok: false, error: "no patch fields provided" });
+                    const id = resolveBoardTaskPatchId(requestedId, defaultSessionKey, defaultTaskId);
+                    if (!id)
+                        return toolJsonResult({ ok: false, error: "task id unavailable for current board session" });
                     const res = await toolFetchJson({
                         pathname: `/api/tasks/${encodeURIComponent(id)}`,
                         method: "PATCH",
@@ -2833,30 +2860,43 @@ export default function register(api) {
             return "";
         return raw.split("|", 1)[0] ?? raw;
     };
-    const rememberOutgoingSession = (sessionKey) => {
+    const rememberOutgoingSession = (sessionKey, content) => {
         const key = dedupeSessionKey(sessionKey);
         if (!key)
             return;
         const now = Date.now();
-        recentOutgoingBySession.set(key, now);
-        for (const [known, ts] of recentOutgoingBySession) {
-            if (now - ts > RECENT_OUTGOING_SESSION_WINDOW_MS)
+        recentOutgoingBySession.set(key, { ts: now, content: sanitizeMessageContent(content ?? "") });
+        for (const [known, row] of recentOutgoingBySession) {
+            if (now - row.ts > RECENT_OUTGOING_SESSION_WINDOW_MS)
                 recentOutgoingBySession.delete(known);
         }
     };
-    const hasRecentOutgoingSession = (sessionKey) => {
+    const recentOutgoingSession = (sessionKey) => {
         const key = dedupeSessionKey(sessionKey);
         if (!key)
-            return false;
-        const ts = recentOutgoingBySession.get(key);
-        if (!ts)
-            return false;
+            return undefined;
+        const row = recentOutgoingBySession.get(key);
+        if (!row)
+            return undefined;
         const now = Date.now();
-        if (now - ts > RECENT_OUTGOING_SESSION_WINDOW_MS) {
+        if (now - row.ts > RECENT_OUTGOING_SESSION_WINDOW_MS) {
             recentOutgoingBySession.delete(key);
-            return false;
+            return undefined;
         }
-        return true;
+        return row;
+    };
+    const looksLikeRecentBoardAssistantEcho = (sessionKey, content) => {
+        const recent = recentOutgoingSession(sessionKey);
+        if (!recent?.content)
+            return false;
+        const clean = sanitizeMessageContent(content);
+        if (!clean)
+            return false;
+        if (clean === recent.content)
+            return true;
+        if (clean.includes(recent.content) || recent.content.includes(clean))
+            return true;
+        return lexicalSimilarity(clean, recent.content) >= 0.6;
     };
     const outgoingMessageIdDedupeKey = (channelId, sessionKey, messageId) => {
         const mid = String(messageId ?? "").trim();
@@ -2970,7 +3010,7 @@ export default function register(api) {
             return;
         for (const key of dedupeKeys)
             rememberOutgoing(key);
-        rememberOutgoingSession(effectiveSessionKey ?? ctx.sessionKey);
+        rememberOutgoingSession(effectiveSessionKey ?? ctx.sessionKey, cleanRaw);
         sendAsync({
             topicId,
             taskId,
@@ -3410,7 +3450,6 @@ export default function register(api) {
             const isChannelSession = inferredSessionKey.startsWith("channel:");
             const isBoardSession = Boolean(parseBoardSessionKey(inferredSessionKey));
             const isSubagentSession = Boolean(parseSubagentSession(inferredSessionKey));
-            const skipBoardAssistantFallback = isBoardSession && hasRecentOutgoingSession(inferredSessionKey);
             let startIdx = 0;
             if (!isChannelSession) {
                 const prev = agentEndCursorBySession.get(inferredSessionKey);
@@ -3482,17 +3521,17 @@ export default function register(api) {
                         continue;
                 }
                 if (role === "assistant") {
-                    if (skipBoardAssistantFallback)
-                        continue;
                     const dedupeKeys = [
                         outgoingMessageIdDedupeKey(inferredChannelId, inferredSessionKey, messageId),
                         outgoingFingerprintDedupeKey(inferredChannelId, inferredSessionKey, cleanedContent),
                     ].filter(Boolean);
                     if (dedupeKeys.some((key) => recentOutgoing.has(key)))
                         continue;
+                    if (isBoardSession && looksLikeRecentBoardAssistantEcho(inferredSessionKey, cleanedContent))
+                        continue;
                     for (const key of dedupeKeys)
                         rememberOutgoing(key);
-                    rememberOutgoingSession(inferredSessionKey);
+                    rememberOutgoingSession(inferredSessionKey, cleanedContent);
                     const messageCreatedAt = new Date(createdAtBaseMs + agentEndSeq).toISOString();
                     agentEndSeq += 1;
                     sendAsync({
@@ -3663,4 +3702,4 @@ export default function register(api) {
     }
 }
 // Export utility functions for testing
-export { normalizeBaseUrl, sanitizeMessageContent, summarize, dedupeFingerprint, truncateRaw, clip, normalizeWhitespace, tokenSet, lexicalSimilarity };
+export { normalizeBaseUrl, sanitizeMessageContent, summarize, dedupeFingerprint, truncateRaw, clip, normalizeWhitespace, tokenSet, lexicalSimilarity, normalizeTaskIdentity, resolveBoardTaskPatchId, };

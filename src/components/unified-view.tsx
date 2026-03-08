@@ -79,6 +79,12 @@ const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
 const TOPIC_VIEWS = ["active", "snoozed", "archived", "all"] as const;
 type TopicView = (typeof TOPIC_VIEWS)[number];
 const isTopicView = (value: string): value is TopicView => TOPIC_VIEWS.includes(value as TopicView);
+const TOPIC_VIEW_LABELS: Record<TopicView, string> = {
+  active: "Active topics",
+  snoozed: "Snoozed topics",
+  archived: "Archived topics",
+  all: "All topics",
+};
 
 function GripIcon({ className }: { className?: string }) {
   return (
@@ -2341,7 +2347,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const el = unifiedComposerTextareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    const minH = mdUp ? 44 : 36;
+    const minH = mdUp ? 42 : 38;
     const nextHeight = Math.min(Math.max(el.scrollHeight, minH), UNIFIED_COMPOSER_MAX_HEIGHT_PX);
     el.style.height = `${nextHeight}px`;
     el.style.overflowY = el.scrollHeight > UNIFIED_COMPOSER_MAX_HEIGHT_PX ? "auto" : "hidden";
@@ -2432,9 +2438,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [deleteInFlightKey, setDeleteInFlightKey] = useState<string | null>(null);
   const [renameErrors, setRenameErrors] = useState<Record<string, string>>({});
   const [page, setPage] = useState(initialUrlState.page);
-  const [isSticky, setIsSticky] = useState(false);
-  const stickyBarRef = useRef<HTMLDivElement>(null);
-  const [stickyBarHeight, setStickyBarHeight] = useState(0);
   const [topicBumpAt, setTopicBumpAt] = useState<Record<string, number>>({});
   const [taskBumpAt, setTaskBumpAt] = useState<Record<string, number>>({});
   const bumpTimers = useRef<Map<string, number>>(new Map());
@@ -3050,25 +3053,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (typeof window === "undefined") return basePath;
     return `${window.location.pathname}${window.location.search}`;
   }, [basePath]);
-
-  useEffect(() => {
-    const handle = () => {
-      setIsSticky(window.scrollY > 12);
-    };
-    handle();
-    window.addEventListener("scroll", handle, { passive: true });
-    return () => window.removeEventListener("scroll", handle);
-  }, []);
-
-  useEffect(() => {
-    const el = stickyBarRef.current;
-    if (!el) return;
-    const update = () => setStickyBarHeight(el.offsetHeight);
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
 
   useEffect(() => {
     const timers = bumpTimers.current;
@@ -5974,67 +5958,100 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     writeHeaders,
   ]);
 
+  const displaySummary = [
+    showDone ? "Done visible" : "Done hidden",
+    showSnoozedTasks ? "Snoozed visible" : "Snoozed hidden",
+    showRaw ? "Full messages visible" : "Messages trimmed",
+    showToolCalls ? "Tool calls visible" : "Tool calls hidden",
+    twoColumn ? "2-column board" : "1-column board",
+  ].join(" · ");
+  const unifiedComposerPlaceholder = mdUp
+    ? "Type a message. Pick a topic or task if you want to reuse one."
+    : "Type a message or pick a target.";
+  const composerIdleHint = mdUp
+    ? "Type to surface related topics and tasks before you send."
+    : "Type to surface related matches before you send.";
+
   return (
     <div className="space-y-4">
       <div
-        ref={stickyBarRef}
         className={cn(
-          "sticky top-0 z-30 -mx-3 space-y-2 px-3 pb-2 pt-2 transition sm:-mx-4 sm:px-4 sm:pb-2.5 sm:pt-2.5 md:-mx-6 md:space-y-3 md:px-6 md:pb-3 md:pt-4",
-          mobileLayer === "chat" ? "max-md:hidden" : "",
-          isSticky
-            ? "border-b border-[rgb(var(--claw-border))] bg-[rgba(12,14,18,0.9)] backdrop-blur"
-            : "bg-transparent"
+          "space-y-3",
+          mobileLayer === "chat" ? "max-md:hidden" : ""
         )}
       >
-        <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.92)] p-2.5 md:p-3">
-          <button
-            type="button"
-            onClick={toggleFiltersDrawer}
-            aria-expanded={filtersDrawerOpen}
-            className={cn(
-              "flex w-full items-center justify-between gap-3 rounded-[var(--radius-sm)] border px-3 py-2 text-left transition md:hidden",
-              filtersDrawerOpen
-                ? "border-[rgba(255,90,45,0.35)] bg-[rgba(255,90,45,0.08)]"
-                : "border-[rgb(var(--claw-border))] bg-[rgba(8,10,14,0.28)]"
-            )}
-          >
-            <span className="text-sm font-semibold">Board controls</span>
-            <span className="inline-flex items-center gap-2 text-xs text-[rgb(var(--claw-muted))]">
-              {filtersDrawerOpen ? "Close" : "Open"}
-              <span className="text-[10px]">{filtersDrawerOpen ? "▴" : "▾"}</span>
-            </span>
-          </button>
-          {mdUp || filtersDrawerOpen ? (
-            <div className="mt-2">
-              <div className="space-y-2 md:hidden">
-                <div className="grid grid-cols-2 gap-2">
-                  <Select
-                    value={topicView}
-                    onChange={(event) => {
-                      setLocalStorageItem(TOPIC_VIEW_KEY, event.target.value);
-                      setPage(1);
-                      pushUrl({ page: "1" }, "replace");
-                    }}
-                    className="w-full"
-                  >
-                    <option value="active">Active topics</option>
-                    <option value="snoozed">Snoozed topics</option>
-                    <option value="archived">Archived topics</option>
-                    <option value="all">All topics</option>
-                  </Select>
-                  <Select value={statusFilter} onChange={(event) => updateStatusFilter(event.target.value)} className="w-full">
-                    <option value="all">All statuses</option>
-                    <option value="todo">To Do</option>
-                    <option value="doing">Doing</option>
-                    <option value="blocked">Blocked</option>
-                    <option value="done">Done</option>
-                  </Select>
+        <div
+          data-testid="unified-board-top-panel"
+          className="rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] bg-[rgba(12,15,20,0.72)] px-3 py-3 sm:px-4 sm:py-4"
+        >
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
+              <div className="grid gap-2 sm:grid-cols-2 lg:min-w-0 lg:flex-1 lg:max-w-[430px]">
+                <Select
+                  value={topicView}
+                  onChange={(event) => {
+                    setLocalStorageItem(TOPIC_VIEW_KEY, event.target.value);
+                    setPage(1);
+                    pushUrl({ page: "1" }, "replace");
+                  }}
+                  className="w-full"
+                >
+                  <option value="active">Active topics</option>
+                  <option value="snoozed">Snoozed topics</option>
+                  <option value="archived">Archived topics</option>
+                  <option value="all">All topics</option>
+                </Select>
+                <Select value={statusFilter} onChange={(event) => updateStatusFilter(event.target.value)} className="w-full">
+                  <option value="all">All statuses</option>
+                  <option value="todo">To Do</option>
+                  <option value="doing">Doing</option>
+                  <option value="blocked">Blocked</option>
+                  <option value="done">Done</option>
+                </Select>
+              </div>
+              <div className="flex flex-col gap-2 lg:min-w-0 lg:items-end">
+                {!filtersDrawerOpen ? (
+                  <div className="hidden max-w-[560px] text-right text-xs text-[rgb(var(--claw-muted))] lg:block">
+                    {TOPIC_VIEW_LABELS[topicView]} · {statusFilter === "all" ? "All statuses" : STATUS_LABELS[statusFilter]} ·{" "}
+                    {displaySummary}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={toggleFiltersDrawer}
+                  aria-expanded={filtersDrawerOpen}
+                  className={cn(
+                    "inline-flex items-center justify-between gap-3 rounded-full border px-3.5 py-2 text-sm font-medium transition",
+                    filtersDrawerOpen
+                      ? "border-[rgba(255,90,45,0.4)] bg-[rgba(255,90,45,0.1)] text-[rgb(var(--claw-text))]"
+                      : "border-[rgb(var(--claw-border))] bg-[rgba(8,10,14,0.42)] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
+                  )}
+                >
+                  <span>{filtersDrawerOpen ? "Hide options" : "View options"}</span>
+                  <span className="text-[10px] uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))]">
+                    {twoColumn ? "2 col" : "1 col"} {filtersDrawerOpen ? "▴" : "▾"}
+                  </span>
+                </button>
+              </div>
+            </div>
+            {filtersDrawerOpen ? (
+              <div className="space-y-3 border-t border-[rgba(255,255,255,0.08)] pt-3">
+                <div className="text-[11px] uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))]">
+                  Display and board options
                 </div>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="flex flex-wrap gap-2">
                   <Button
                     variant="secondary"
                     size="sm"
-                    className={cn("w-full justify-center", showSnoozedTasks ? "border-[rgba(77,171,158,0.55)]" : "opacity-85")}
+                    className={cn(showDone ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+                    onClick={toggleDoneVisibility}
+                  >
+                    {showDone ? "Hide done" : "Show done"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className={cn(showSnoozedTasks ? "border-[rgba(77,171,158,0.55)]" : "opacity-85")}
                     onClick={() => {
                       setLocalStorageItem(SHOW_SNOOZED_TASKS_KEY, showSnoozedTasks ? "false" : "true");
                     }}
@@ -6044,20 +6061,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   <Button
                     variant="secondary"
                     size="sm"
-                    className={cn("w-full justify-center", showDone ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                    onClick={toggleDoneVisibility}
+                    className={cn(showRaw ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+                    onClick={toggleRawVisibility}
                   >
-                    {showDone ? "Hide done" : "Show done"}
+                    {showRaw ? "Hide full messages" : "Show full messages"}
                   </Button>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
                   <Button
                     variant="secondary"
                     size="sm"
-                    className={cn(
-                      "w-full justify-center",
-                      showToolCalls ? "border-[rgba(255,90,45,0.5)]" : "opacity-85"
-                    )}
+                    className={cn(showToolCalls ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
                     onClick={toggleToolCallsVisibility}
                   >
                     {showToolCalls ? "Hide tool calls" : "Show tool calls"}
@@ -6065,17 +6077,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   <Button
                     variant="secondary"
                     size="sm"
-                    className={cn("w-full justify-center", showRaw ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                    onClick={toggleRawVisibility}
-                  >
-                    {showRaw ? "Hide full msgs" : "Show full msgs"}
-                  </Button>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className={cn("w-full justify-center", twoColumn ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
+                    className={cn(twoColumn ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
                     onClick={toggleTwoColumn}
                     title={twoColumn ? "Switch to single column" : "Switch to two columns"}
                   >
@@ -6084,100 +6086,20 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   <Button
                     variant="secondary"
                     size="sm"
-                    className={cn(
-                      "w-full justify-center",
-                      isEverythingExpanded ? "border-[rgba(255,90,45,0.5)]" : "opacity-85"
-                    )}
+                    className={cn(isEverythingExpanded ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
                     onClick={toggleExpandAll}
                   >
                     {isEverythingExpanded ? "Collapse all" : "Expand all"}
                   </Button>
                 </div>
+                <div className="text-xs text-[rgb(var(--claw-muted))] lg:hidden">{displaySummary}</div>
               </div>
-              <div className="hidden flex-wrap items-center gap-2 md:flex">
-                <Select
-                  value={topicView}
-                  onChange={(event) => {
-                    setLocalStorageItem(TOPIC_VIEW_KEY, event.target.value);
-                    setPage(1);
-                    pushUrl({ page: "1" }, "replace");
-                  }}
-                  className="max-w-[190px]"
-                >
-                  <option value="active">Active topics</option>
-                  <option value="snoozed">Snoozed topics</option>
-                  <option value="archived">Archived topics</option>
-                  <option value="all">All topics</option>
-                </Select>
-                <Select value={statusFilter} onChange={(event) => updateStatusFilter(event.target.value)} className="max-w-[190px]">
-                  <option value="all">All statuses</option>
-                  <option value="todo">To Do</option>
-                  <option value="doing">Doing</option>
-                  <option value="blocked">Blocked</option>
-                  <option value="done">Done</option>
-                </Select>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className={cn(showDone ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                  onClick={toggleDoneVisibility}
-                >
-                  {showDone ? "Hide done" : "Show done"}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className={cn(showSnoozedTasks ? "border-[rgba(77,171,158,0.55)]" : "opacity-85")}
-                  onClick={() => {
-                    setLocalStorageItem(SHOW_SNOOZED_TASKS_KEY, showSnoozedTasks ? "false" : "true");
-                  }}
-                >
-                  {showSnoozedTasks ? "Hide snoozed" : "Show snoozed"}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className={cn(showRaw ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                  onClick={toggleRawVisibility}
-                >
-                  {showRaw ? "Hide full messages" : "Show full messages"}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className={cn(showToolCalls ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                  onClick={toggleToolCallsVisibility}
-                >
-                  {showToolCalls ? "Hide tool calls" : "Show tool calls"}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className={cn(
-                    isEverythingExpanded ? "border-[rgba(255,90,45,0.5)]" : "opacity-85"
-                  )}
-                  onClick={toggleExpandAll}
-                >
-                  {isEverythingExpanded ? "Collapse all" : "Expand all"}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className={cn("ml-auto", twoColumn ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                  onClick={toggleTwoColumn}
-                  title={twoColumn ? "Switch to single column" : "Switch to two columns"}
-                >
-                  {twoColumn ? "1 column" : "2 column"}
-                </Button>
-              </div>
-            </div>
-          ) : null}
-        </div>
-        <div className="space-y-2">
+            ) : null}
+            <div className="space-y-2 border-t border-[rgba(255,255,255,0.08)] pt-3">
           <div
             ref={unifiedComposerBoxRef}
             className={cn(
-              "relative rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(8,10,14,0.36)] p-2 transition",
+              "relative rounded-[var(--radius-md)] border border-[rgba(255,255,255,0.12)] bg-[rgba(8,10,14,0.46)] px-2.5 py-2 transition",
               "focus-within:border-[rgba(77,171,158,0.55)] focus-within:ring-2 focus-within:ring-[rgba(77,171,158,0.18)]"
             )}
           >
@@ -6214,9 +6136,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   event.preventDefault();
                   void sendUnifiedComposer();
                 }}
-                placeholder="Type a message. Pick a topic or task if you want to reuse one."
-                className="resize-none overflow-y-hidden border-0 bg-transparent p-2 pb-10 pr-[12.5rem] md:pb-9 md:pr-[14rem]"
-                style={{ minHeight: mdUp ? "44px" : "36px" }}
+                placeholder={unifiedComposerPlaceholder}
+                className="min-h-0 resize-none overflow-y-hidden border-0 bg-transparent p-1.5 pb-6 pr-[11.75rem] text-[15px] md:pb-6 md:pr-[13.25rem]"
+                style={{ minHeight: mdUp ? "42px" : "38px" }}
               />
               <div className="pointer-events-none absolute bottom-2 left-3 right-[12.25rem] flex min-h-8 items-end md:right-[13.75rem]">
                 <div
@@ -6344,54 +6266,56 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 ) : null}
               </div>
             </div>
-          <div className="flex flex-wrap items-start gap-3">
-            {unifiedComposerAttachments.length > 0 ? (
-              <AttachmentStrip
-                attachments={unifiedComposerAttachments}
-                onRemove={(idx) => {
-                  setUnifiedComposerAttachments((prev) => {
-                    const target = prev[idx];
-                    if (target?.previewUrl) {
-                      try {
-                        URL.revokeObjectURL(target.previewUrl);
-                      } catch {
-                        // ignore
-                      }
-                    }
-                    return prev.filter((_, i) => i !== idx);
-                  });
-                }}
-                className="ml-auto"
-              />
-            ) : null}
+              <div className="flex flex-wrap items-start gap-3">
+                {unifiedComposerAttachments.length > 0 ? (
+                  <AttachmentStrip
+                    attachments={unifiedComposerAttachments}
+                    onRemove={(idx) => {
+                      setUnifiedComposerAttachments((prev) => {
+                        const target = prev[idx];
+                        if (target?.previewUrl) {
+                          try {
+                            URL.revokeObjectURL(target.previewUrl);
+                          } catch {
+                            // ignore
+                          }
+                        }
+                        return prev.filter((_, i) => i !== idx);
+                      });
+                    }}
+                    className="ml-auto"
+                  />
+                ) : null}
+              </div>
+              {unifiedComposerError ? (
+                <div className="text-xs text-[rgb(var(--claw-warning))]">{unifiedComposerError}</div>
+              ) : null}
+              {unifiedCancelNotice ? (
+                <div className="text-xs text-[rgb(var(--claw-muted))]">{unifiedCancelNotice}</div>
+              ) : null}
+              {readOnly && (
+                <span className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add token to move tasks.</span>
+              )}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[rgb(var(--claw-muted))]">
+                <span>Enter sends. Shift+Enter adds a newline.</span>
+                {normalizedSearch ? (
+                  <span>
+                    {semanticSearch.loading
+                      ? "Finding related topics, tasks, and messages…"
+                      : semanticForQuery
+                        ? `Potential matches (${describeSemanticSearchMode(semanticForQuery.mode)})`
+                        : semanticSearch.error === "search_timeout"
+                          ? "Match search timed out, using local fallback."
+                          : semanticSearch.error
+                          ? "Match search unavailable, using local fallback."
+                          : "Finding matches…"}
+                  </span>
+                ) : (
+                  <span>{composerIdleHint}</span>
+                )}
+              </div>
+            </div>
           </div>
-          {unifiedComposerError ? (
-            <div className="text-xs text-[rgb(var(--claw-warning))]">{unifiedComposerError}</div>
-          ) : null}
-          {unifiedCancelNotice ? (
-            <div className="text-xs text-[rgb(var(--claw-muted))]">{unifiedCancelNotice}</div>
-          ) : null}
-        </div>
-        {readOnly && (
-          <span className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add token to move tasks.</span>
-        )}
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[rgb(var(--claw-muted))]">
-          <span>Enter sends. Shift+Enter adds a newline.</span>
-          {normalizedSearch ? (
-            <span>
-              {semanticSearch.loading
-                ? "Finding related topics, tasks, and messages…"
-                : semanticForQuery
-                  ? `Potential matches (${describeSemanticSearchMode(semanticForQuery.mode)})`
-                  : semanticSearch.error === "search_timeout"
-                    ? "Match search timed out, using local fallback."
-                    : semanticSearch.error
-                    ? "Match search unavailable, using local fallback."
-                    : "Finding matches…"}
-            </span>
-          ) : (
-            <span>Type to surface related topics and tasks before you send.</span>
-          )}
         </div>
       </div>
 
@@ -6566,7 +6490,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                )}
 	                style={
 	                  isExpanded
-	                    ? { top: stickyBarHeight, ...stickyTopicHeaderStyle(topicColor, topicIndex) }
+	                    ? { top: 0, ...stickyTopicHeaderStyle(topicColor, topicIndex) }
 	                    : undefined
 	                }
                 onClick={(event) => {
@@ -7153,7 +7077,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             )}
                             style={
                               taskExpanded && !taskChatFullscreen
-                                ? { top: stickyBarHeight, ...stickyTaskHeaderStyle(taskColor, taskIndex) }
+                                ? { top: 0, ...stickyTaskHeaderStyle(taskColor, taskIndex) }
                                 : undefined
                             }
                             onClick={(event) => {

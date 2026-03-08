@@ -2,15 +2,25 @@
  * Tests for:
  *   1. Freeform composer textarea smaller default height (min-height 40px via inline style)
  *   2. Composer auto-expands as text is typed
- *   3. Sticky topic headers in single-column mode
- *   4. Sticky task headers in single-column mode
- *   5. Sticky headers disabled in two-column mode
+ *   3. Unified top panel stays in normal flow (not sticky/floating)
+ *   4. Sticky topic headers pin directly to the viewport now that the top panel no longer floats
+ *   5. Sticky task headers do the same in both single- and two-column layouts
  */
 import { expect, test } from "@playwright/test";
 
 const BASE = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3010";
 
 test.describe("composer textarea height", () => {
+  test("top panel is not sticky or fixed", async ({ page }) => {
+    await page.goto(`${BASE}/u`);
+    const topPanel = page.locator('[data-testid="unified-board-top-panel"]:visible').first();
+    await expect(topPanel).toBeVisible({ timeout: 15_000 });
+
+    const position = await topPanel.evaluate((el) => window.getComputedStyle(el).position);
+    expect(position).not.toBe("sticky");
+    expect(position).not.toBe("fixed");
+  });
+
   test("empty textarea has reduced min-height (~40px not 120px)", async ({ page }) => {
     await page.goto(`${BASE}/u`);
     const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
@@ -23,7 +33,7 @@ test.describe("composer textarea height", () => {
     // With JS floor of 44px, the rendered height should be 44-60px (44px + possible font/padding).
     // Old behaviour was 88px (the JS auto-resize floor was hardcoded to 88).
     expect(box!.height).toBeGreaterThanOrEqual(30);
-    expect(box!.height).toBeLessThan(72);
+    expect(box!.height).toBeLessThanOrEqual(72);
   });
 
   test("textarea grows as content is typed", async ({ page }) => {
@@ -49,7 +59,7 @@ test.describe("composer textarea height", () => {
 test.describe("sticky topic headers (single column, mobile viewport)", () => {
   test.use({ viewport: { width: 520, height: 900 } }); // Below md breakpoint → always single column
 
-  test("expanded topic header is position:sticky with correct top offset", async ({ page }) => {
+  test("expanded topic header is position:sticky with zero top offset", async ({ page }) => {
     await page.goto(`${BASE}/u`);
     await page.waitForSelector("[data-topic-card-id]", { timeout: 20_000 });
 
@@ -78,13 +88,12 @@ test.describe("sticky topic headers (single column, mobile viewport)", () => {
     );
     expect(position).toBe("sticky");
 
-    // top should be set to stickyBarHeight (> 0px, some positive value below a reasonable cap)
+    // Topic headers now pin directly to the viewport because the unified top panel no longer floats.
     const topValue = await stickyHeader.evaluate((el) =>
       window.getComputedStyle(el).top
     );
     const topPx = parseInt(topValue, 10);
-    expect(topPx).toBeGreaterThan(0);
-    expect(topPx).toBeLessThan(600); // board bar + any banners
+    expect(topPx).toBe(0);
 
     // Topic header z-index is 10; task headers are z-20 so they pop over topics when both are stuck
     const zIndex = await stickyHeader.evaluate((el) =>
@@ -107,45 +116,41 @@ test.describe("sticky headers desktop (single vs two column)", () => {
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async function ensureSingleColumn(page: any) {
-    const boardControls = page.getByRole("button", { name: /Board controls/i }).first();
-    const hasToggle = await boardControls.isVisible().catch(() => false);
+    const optionsToggle = page.getByRole("button", { name: /options/i }).first();
+    const hasToggle = await optionsToggle.isVisible().catch(() => false);
     if (hasToggle) {
-      await boardControls.click();
-      await page.waitForTimeout(400);
+      const label = (await optionsToggle.textContent().catch(() => "")) ?? "";
+      if (!/hide options/i.test(label)) {
+        await optionsToggle.click();
+        await page.waitForTimeout(400);
+      }
     }
 
-    // If we see "1 column" button, we're currently in 2-col → click to switch to single
     const oneColBtn = page.getByRole("button", { name: /^1 column$/i }).first();
     const isInTwoCol = await oneColBtn.isVisible().catch(() => false);
     if (isInTwoCol) {
       await oneColBtn.click();
       await page.waitForTimeout(400);
     }
-    if (hasToggle) {
-      await boardControls.click();
-      await page.waitForTimeout(300);
-    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async function ensureTwoColumn(page: any) {
-    const boardControls = page.getByRole("button", { name: /Board controls/i }).first();
-    const hasToggle = await boardControls.isVisible().catch(() => false);
+    const optionsToggle = page.getByRole("button", { name: /options/i }).first();
+    const hasToggle = await optionsToggle.isVisible().catch(() => false);
     if (hasToggle) {
-      await boardControls.click();
-      await page.waitForTimeout(400);
+      const label = (await optionsToggle.textContent().catch(() => "")) ?? "";
+      if (!/hide options/i.test(label)) {
+        await optionsToggle.click();
+        await page.waitForTimeout(400);
+      }
     }
 
-    // If we see "2 column" button, we're currently in single-col → click to switch to two-col
     const twoColBtn = page.getByRole("button", { name: /^2 column$/i }).first();
     const isInSingleCol = await twoColBtn.isVisible().catch(() => false);
     if (isInSingleCol) {
       await twoColBtn.click();
       await page.waitForTimeout(400);
-    }
-    if (hasToggle) {
-      await boardControls.click();
-      await page.waitForTimeout(300);
     }
   }
 
@@ -172,7 +177,7 @@ test.describe("sticky headers desktop (single vs two column)", () => {
     const topValue = await stickyHeader.evaluate((el) =>
       window.getComputedStyle(el).top
     );
-    expect(parseInt(topValue, 10)).toBeGreaterThan(0);
+    expect(parseInt(topValue, 10)).toBe(0);
 
     await page.screenshot({ path: "test-results/single-col-sticky-desktop.png" });
   });

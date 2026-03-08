@@ -475,6 +475,31 @@ function lexicalSimilarity(a: string, b: string) {
   return inter / union;
 }
 
+function normalizeTaskIdentity(value: string | undefined | null) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) return "";
+  return normalized.replace(/^task[-_:]?/i, "");
+}
+
+function resolveBoardTaskPatchId(
+  requestedId: string | undefined | null,
+  sessionKey: string | undefined | null,
+  fallbackTaskId?: string | undefined | null
+) {
+  const requested = typeof requestedId === "string" ? requestedId.trim() : "";
+  const route = parseBoardSessionKey(sessionKey);
+  const sessionTaskId =
+    route?.kind === "task"
+      ? route.taskId
+      : (typeof fallbackTaskId === "string" ? fallbackTaskId.trim() : "");
+  if (!requested) return sessionTaskId || undefined;
+  if (!sessionTaskId) return requested;
+  if (requested === sessionTaskId) return requested;
+  if (normalizeTaskIdentity(requested) === normalizeTaskIdentity(sessionTaskId)) return sessionTaskId;
+  if (!/^task[-_:]/i.test(requested)) return sessionTaskId;
+  return requested;
+}
+
 function extractTextLoose(value: unknown, depth = 0): string | undefined {
   if (!value || depth > 4) return undefined;
   if (typeof value === "string") return value;
@@ -2258,8 +2283,8 @@ export default function register(api: OpenClawPluginApi) {
             required: ["id"],
           },
           async execute(_toolCallId: string, params: Record<string, unknown>) {
-            const id = typeof params.id === "string" ? params.id.trim() : "";
-            if (!id) return toolJsonResult({ ok: false, error: "id required" });
+            const requestedId = typeof params.id === "string" ? params.id.trim() : "";
+            if (!requestedId) return toolJsonResult({ ok: false, error: "id required" });
             const patch: Record<string, unknown> = {};
             if (typeof params.status === "string" && params.status.trim()) patch.status = params.status.trim();
             if (typeof params.priority === "string" && params.priority.trim()) patch.priority = params.priority.trim();
@@ -2268,6 +2293,8 @@ export default function register(api: OpenClawPluginApi) {
             if (typeof params.snoozedUntil === "string") patch.snoozedUntil = params.snoozedUntil.trim() || null;
             if (Array.isArray(params.tags)) patch.tags = params.tags.filter((t) => typeof t === "string").map((t) => t.trim()).filter(Boolean);
             if (Object.keys(patch).length === 0) return toolJsonResult({ ok: false, error: "no patch fields provided" });
+            const id = resolveBoardTaskPatchId(requestedId, defaultSessionKey, defaultTaskId);
+            if (!id) return toolJsonResult({ ok: false, error: "task id unavailable for current board session" });
             const res = await toolFetchJson({
               pathname: `/api/tasks/${encodeURIComponent(id)}`,
               method: "PATCH",
@@ -3151,33 +3178,42 @@ export default function register(api: OpenClawPluginApi) {
     }
     (setTimeout(() => recentOutgoing.delete(key), 30_000) as unknown as { unref?: () => void })?.unref?.();
   };
-  const recentOutgoingBySession = new Map<string, number>();
+  const recentOutgoingBySession = new Map<string, { ts: number; content: string }>();
   const RECENT_OUTGOING_SESSION_WINDOW_MS = 5 * 60_000;
   const dedupeSessionKey = (sessionKey: string | undefined | null) => {
     const raw = String(sessionKey ?? "").trim();
     if (!raw) return "";
     return raw.split("|", 1)[0] ?? raw;
   };
-  const rememberOutgoingSession = (sessionKey: string | undefined | null) => {
+  const rememberOutgoingSession = (sessionKey: string | undefined | null, content?: string) => {
     const key = dedupeSessionKey(sessionKey);
     if (!key) return;
     const now = Date.now();
-    recentOutgoingBySession.set(key, now);
-    for (const [known, ts] of recentOutgoingBySession) {
-      if (now - ts > RECENT_OUTGOING_SESSION_WINDOW_MS) recentOutgoingBySession.delete(known);
+    recentOutgoingBySession.set(key, { ts: now, content: sanitizeMessageContent(content ?? "") });
+    for (const [known, row] of recentOutgoingBySession) {
+      if (now - row.ts > RECENT_OUTGOING_SESSION_WINDOW_MS) recentOutgoingBySession.delete(known);
     }
   };
-  const hasRecentOutgoingSession = (sessionKey: string | undefined | null) => {
+  const recentOutgoingSession = (sessionKey: string | undefined | null) => {
     const key = dedupeSessionKey(sessionKey);
-    if (!key) return false;
-    const ts = recentOutgoingBySession.get(key);
-    if (!ts) return false;
+    if (!key) return undefined;
+    const row = recentOutgoingBySession.get(key);
+    if (!row) return undefined;
     const now = Date.now();
-    if (now - ts > RECENT_OUTGOING_SESSION_WINDOW_MS) {
+    if (now - row.ts > RECENT_OUTGOING_SESSION_WINDOW_MS) {
       recentOutgoingBySession.delete(key);
-      return false;
+      return undefined;
     }
-    return true;
+    return row;
+  };
+  const looksLikeRecentBoardAssistantEcho = (sessionKey: string | undefined | null, content: string) => {
+    const recent = recentOutgoingSession(sessionKey);
+    if (!recent?.content) return false;
+    const clean = sanitizeMessageContent(content);
+    if (!clean) return false;
+    if (clean === recent.content) return true;
+    if (clean.includes(recent.content) || recent.content.includes(clean)) return true;
+    return lexicalSimilarity(clean, recent.content) >= 0.6;
   };
   const outgoingMessageIdDedupeKey = (
     channelId: string | undefined,
@@ -3316,7 +3352,7 @@ export default function register(api: OpenClawPluginApi) {
     ].filter(Boolean);
     if (dedupeKeys.some((key) => recentOutgoing.has(key))) return;
     for (const key of dedupeKeys) rememberOutgoing(key);
-    rememberOutgoingSession(effectiveSessionKey ?? ctx.sessionKey);
+    rememberOutgoingSession(effectiveSessionKey ?? ctx.sessionKey, cleanRaw);
 
     sendAsync({
       topicId,
@@ -3796,7 +3832,6 @@ export default function register(api: OpenClawPluginApi) {
       const isChannelSession = inferredSessionKey.startsWith("channel:");
       const isBoardSession = Boolean(parseBoardSessionKey(inferredSessionKey));
       const isSubagentSession = Boolean(parseSubagentSession(inferredSessionKey));
-      const skipBoardAssistantFallback = isBoardSession && hasRecentOutgoingSession(inferredSessionKey);
       let startIdx = 0;
       if (!isChannelSession) {
         const prev = agentEndCursorBySession.get(inferredSessionKey);
@@ -3864,14 +3899,14 @@ export default function register(api: OpenClawPluginApi) {
           if (recentIncoming.has(dedupeKey)) continue;
         }
         if (role === "assistant") {
-          if (skipBoardAssistantFallback) continue;
           const dedupeKeys = [
             outgoingMessageIdDedupeKey(inferredChannelId, inferredSessionKey, messageId),
             outgoingFingerprintDedupeKey(inferredChannelId, inferredSessionKey, cleanedContent),
           ].filter(Boolean);
           if (dedupeKeys.some((key) => recentOutgoing.has(key))) continue;
+          if (isBoardSession && looksLikeRecentBoardAssistantEcho(inferredSessionKey, cleanedContent)) continue;
           for (const key of dedupeKeys) rememberOutgoing(key);
-          rememberOutgoingSession(inferredSessionKey);
+          rememberOutgoingSession(inferredSessionKey, cleanedContent);
           const messageCreatedAt = new Date(createdAtBaseMs + agentEndSeq).toISOString();
           agentEndSeq += 1;
           sendAsync({
@@ -4058,5 +4093,7 @@ export {
   clip,
   normalizeWhitespace,
   tokenSet,
-  lexicalSimilarity
+  lexicalSimilarity,
+  normalizeTaskIdentity,
+  resolveBoardTaskPatchId,
 };
