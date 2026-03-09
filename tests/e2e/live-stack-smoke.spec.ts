@@ -40,6 +40,28 @@ async function waitForLiveApiReady(
     .toBe("ok");
 }
 
+async function waitForLiveWebReady(
+  request: APIRequestContext,
+  baseUrl: string
+) {
+  await expect
+    .poll(
+      async () => {
+        try {
+          const response = await request.get(`${baseUrl}/u`);
+          return response.ok() ? "ok" : `status:${response.status()}`;
+        } catch (error) {
+          return `error:${String(error)}`;
+        }
+      },
+      {
+        timeout: 45_000,
+        intervals: [500, 1000, 1500, 2000],
+      }
+    )
+    .toBe("ok");
+}
+
 async function postWithTransientRetry(
   request: APIRequestContext,
   url: string,
@@ -69,6 +91,7 @@ test.describe("live stack smoke", () => {
 
   test("chat enqueue + durable log + cancel path is healthy without inference", async ({ page, request }) => {
     const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://127.0.0.1:8010";
+    const baseUrl = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:3010";
     const token = resolveToken();
     const suffix = Date.now();
     const topicId = `topic-live-smoke-${suffix}`;
@@ -116,23 +139,17 @@ test.describe("live stack smoke", () => {
       [apiBase, token]
     );
 
-    await page.goto(`/u/topic/${topicId}/task/${taskId}`);
+    await waitForLiveWebReady(request, baseUrl);
+    await page.goto(`${baseUrl}/u/topic/${topicId}/task/${taskId}`);
     await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
-    const composer = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
+    const taskComposer = page.getByTestId(`task-chat-composer-${taskId}`);
+    await expect(taskComposer).toBeVisible();
+    const composer = taskComposer.getByRole("textbox");
+    const sendButton = taskComposer.getByRole("button", { name: "Send" });
     await expect(composer).toBeVisible();
-    const targetChip = page.getByTestId("unified-composer-target-chip");
-    const chipText = (await targetChip.textContent().catch(() => "")) ?? "";
-    if (!chipText.includes(taskTitle)) {
-      await composer.fill(taskTitle);
-      await expect(page.getByTestId(`select-task-target-${taskId}`)).toBeVisible();
-      await page.getByTestId(`select-task-target-${taskId}`).click();
-    }
-    await expect(page.getByTestId("unified-composer-target-chip")).toContainText(taskTitle);
-
-    await composer.fill(message);
-    const sendButton = page.getByTestId("unified-composer-send");
     await expect(sendButton).toBeVisible();
+    await composer.fill(message);
     const sendRes = await Promise.all([
       page.waitForResponse((resp) => resp.url().includes("/api/openclaw/chat") && resp.request().method() === "POST"),
       sendButton.click(),
@@ -156,11 +173,11 @@ test.describe("live stack smoke", () => {
       })
       .toBeTruthy();
 
-    await page.goto("/u");
+    await page.goto(`${baseUrl}/u`);
     await page.getByRole("heading", { name: "Unified View" }).waitFor();
     await expect(page.locator('[data-testid="unified-composer-stop"]:visible')).toHaveCount(0);
 
-    await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
+    await page.goto(`${baseUrl}/u/topic/${topicId}/task/${taskId}?reveal=1`);
     await page.getByRole("heading", { name: "Unified View" }).waitFor();
     await expect(page.getByTestId(`task-status-trigger-${taskId}`)).toContainText("Doing");
     await expect(page.locator('[data-testid="unified-composer-stop"]:visible')).toHaveCount(1);

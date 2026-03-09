@@ -1542,6 +1542,131 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(content[2].get("source", {}).get("media_type"), "image/png")
         self.assertEqual(base64.b64decode(content[2].get("source", {}).get("data") or ""), image_bytes)
 
+    def test_chat_002aa_plain_board_message_uses_openresponses_when_transport_auto(self):
+        published: list[dict] = []
+        captured: dict[str, object] = {}
+        scheduled: list[dict] = []
+
+        class _FakeResponse:
+            status_code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def iter_lines(self):
+                yield "event: response.created"
+                yield 'data: {"type":"response.created"}'
+                yield ""
+
+            def read(self):
+                return b""
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                captured["client_kwargs"] = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, method, url, headers=None, content=None):
+                captured["method"] = method
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["content"] = content
+                return _FakeResponse()
+
+        with patch.dict(main_module.os.environ, {"OPENCLAW_CHAT_TRANSPORT": "auto"}, clear=False), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ), patch.object(main_module.httpx, "Client", side_effect=lambda **kwargs: _FakeClient(**kwargs)) as client_mock, patch.object(
+            main_module, "gateway_rpc", new=AsyncMock(return_value={"status": "started", "runId": "unused-run"})
+        ) as rpc_mock, patch.object(
+            main_module, "_schedule_openclaw_assistant_log_check", side_effect=lambda **kwargs: scheduled.append(kwargs)
+        ):
+            main_module._run_openclaw_chat(
+                "request-chat-002aa",
+                base_url="http://127.0.0.1:18789",
+                token="test-token",
+                session_key="clawboard:task:topic-chat-002aa:task-chat-002aa",
+                agent_id="main",
+                sent_at=now_iso(),
+                message="plain board send",
+                attachments=None,
+            )
+
+        rpc_mock.assert_not_called()
+        client_mock.assert_called_once()
+        self.assertEqual(captured.get("method"), "POST")
+        self.assertEqual(captured.get("url"), "http://127.0.0.1:18789/v1/responses")
+        payload = json.loads((captured.get("content") or b"{}").decode("utf-8"))
+        items = payload.get("input") or []
+        self.assertEqual(len(items), 1)
+        content = items[0].get("content") or []
+        self.assertEqual(content, [{"type": "input_text", "text": "plain board send"}])
+        self.assertEqual(len(scheduled), 1)
+
+    def test_chat_002ab_plain_board_message_falls_back_to_gateway_rpc_when_openresponses_disabled(self):
+        published: list[dict] = []
+        scheduled: list[dict] = []
+
+        class _FakeResponse:
+            status_code = 404
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def iter_lines(self):
+                if False:
+                    yield ""
+
+            def read(self):
+                return b""
+
+        class _FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, method, url, headers=None, content=None):
+                return _FakeResponse()
+
+        with patch.dict(main_module.os.environ, {"OPENCLAW_CHAT_TRANSPORT": "auto"}, clear=False), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ), patch.object(main_module.httpx, "Client", return_value=_FakeClient()) as client_mock, patch.object(
+            main_module, "_openclaw_chat_in_flight_probe_seconds", return_value=0.0
+        ), patch.object(
+            main_module, "_openclaw_chat_board_in_flight_probe_seconds", return_value=0.0
+        ), patch.object(
+            main_module, "gateway_rpc", new=AsyncMock(return_value={"status": "started", "runId": "run-chat-002ab"})
+        ) as rpc_mock, patch.object(
+            main_module, "_schedule_openclaw_assistant_log_check", side_effect=lambda **kwargs: scheduled.append(kwargs)
+        ):
+            main_module._run_openclaw_chat(
+                "request-chat-002ab",
+                base_url="http://127.0.0.1:18789",
+                token="test-token",
+                session_key="clawboard:task:topic-chat-002ab:task-chat-002ab",
+                agent_id="main",
+                sent_at=now_iso(),
+                message="fallback board send",
+                attachments=None,
+            )
+
+        client_mock.assert_called_once()
+        rpc_mock.assert_awaited_once()
+        self.assertEqual(rpc_mock.await_args.args[0], "chat.send")
+        self.assertEqual(len(scheduled), 1)
+
     def test_chat_002b_attachment_payload_rejects_unsupported_agent_file_types(self):
         root = Path(TMP_DIR) / "attachments-chat-002b"
         root.mkdir(parents=True, exist_ok=True)
@@ -1650,7 +1775,11 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         published: list[dict] = []
         scheduled: list[dict] = []
 
-        with patch.object(main_module.event_hub, "publish", side_effect=_publish_collector(published)), patch.object(
+        with patch.dict(
+            main_module.os.environ,
+            {"OPENCLAW_CHAT_TRANSPORT": "rpc"},
+            clear=False,
+        ), patch.object(main_module.event_hub, "publish", side_effect=_publish_collector(published)), patch.object(
             main_module, "gateway_rpc", new=AsyncMock(return_value={"ok": True})
         ), patch.object(main_module, "_schedule_openclaw_assistant_log_check", side_effect=lambda **kwargs: scheduled.append(kwargs)):
             main_module._run_openclaw_chat(
@@ -1713,6 +1842,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "OPENCLAW_CHAT_TRANSPORT": "rpc",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0.01",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
                 "OPENCLAW_CHAT_IN_FLIGHT_RETRY_GRACE_SECONDS": "0",
@@ -1765,6 +1895,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "OPENCLAW_CHAT_TRANSPORT": "rpc",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
                 "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "0.01",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
@@ -1812,6 +1943,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "OPENCLAW_CHAT_TRANSPORT": "rpc",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
                 "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "0.01",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
@@ -1858,6 +1990,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "OPENCLAW_CHAT_TRANSPORT": "rpc",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
                 "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "0.01",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
@@ -1887,6 +2020,61 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(len(scheduled), 1)
         error_logger.assert_not_called()
 
+    def test_chat_004b1aaa_orchestration_follow_up_forces_abort_retry_on_board_session(self):
+        published: list[dict] = []
+        scheduled: list[dict] = []
+        calls: list[tuple[str, dict, dict]] = []
+
+        async def _fake_gateway_rpc(method: str, params: dict, **kwargs):
+            calls.append((method, params, kwargs))
+            idx = len(calls)
+            if idx == 1:
+                return {"status": "started", "runId": "run-004b1aaa-1"}
+            if idx == 2:
+                return {"aborted": True}
+            if idx == 3:
+                return {"status": "started", "runId": "run-004b1aaa-2"}
+            raise AssertionError(f"unexpected gateway call {idx}: {method}")
+
+        def _fake_progress(**kwargs):
+            return len(calls) >= 3
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_CHAT_TRANSPORT": "rpc",
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
+                "OPENCLAW_CHAT_IN_FLIGHT_RETRY_GRACE_SECONDS": "0.05",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_RETRY_GRACE_SECONDS": "0.05",
+                "OPENCLAW_CHAT_BOARD_IN_FLIGHT_ABORT_RETRY": "0",
+            },
+            clear=False,
+        ), patch.object(main_module, "_openclaw_chat_request_has_non_user_activity", side_effect=_fake_progress), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ), patch.object(main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)), patch.object(
+            main_module, "_schedule_openclaw_assistant_log_check", side_effect=lambda **kwargs: scheduled.append(kwargs)
+        ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
+            main_module._run_openclaw_chat(
+                "occhat-fup-004b1aaa",
+                base_url="http://127.0.0.1:18789",
+                token="test-token",
+                session_key="clawboard:task:topic-chat-004b1aaa:task-chat-004b1aaa",
+                agent_id="main",
+                sent_at=now_iso(),
+                message="[ORCHESTRATION_FOLLOW_UP] internal wake-up",
+                attachments=None,
+            )
+
+        self.assertEqual([call[0] for call in calls], ["chat.send", "chat.abort", "chat.send"])
+        self.assertEqual(calls[0][1].get("idempotencyKey"), "occhat-fup-004b1aaa")
+        self.assertEqual(calls[1][1].get("sessionKey"), "clawboard:task:topic-chat-004b1aaa:task-chat-004b1aaa")
+        self.assertEqual(calls[1][1].get("runId"), "run-004b1aaa-1")
+        self.assertEqual(calls[2][1].get("idempotencyKey"), "occhat-fup-004b1aaa:retry-1")
+        self.assertEqual(len(scheduled), 1)
+        error_logger.assert_not_called()
+
     def test_chat_004b1ab_topic_session_direct_retry_requires_progress_during_grace(self):
         published: list[dict] = []
         scheduled: list[dict] = []
@@ -1904,6 +2092,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "OPENCLAW_CHAT_TRANSPORT": "rpc",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
                 "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "0.01",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
@@ -1959,6 +2148,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "OPENCLAW_CHAT_TRANSPORT": "rpc",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0",
                 "OPENCLAW_CHAT_BOARD_IN_FLIGHT_PROBE_SECONDS": "0.01",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
@@ -2053,6 +2243,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "OPENCLAW_CHAT_TRANSPORT": "rpc",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0.01",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
             },
@@ -2102,6 +2293,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "OPENCLAW_CHAT_TRANSPORT": "rpc",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS": "0.01",
                 "OPENCLAW_CHAT_IN_FLIGHT_PROBE_POLL_SECONDS": "0.01",
                 "OPENCLAW_CHAT_IN_FLIGHT_RETRY_GRACE_SECONDS": "0.01",
@@ -2245,7 +2437,11 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 attachments=None,
             )
 
-        with patch.object(main_module.event_hub, "publish", side_effect=_publish_collector(published)), patch.object(
+        with patch.dict(
+            main_module.os.environ,
+            {"OPENCLAW_CHAT_TRANSPORT": "rpc"},
+            clear=False,
+        ), patch.object(main_module.event_hub, "publish", side_effect=_publish_collector(published)), patch.object(
             main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)
         ), patch.object(main_module, "_schedule_openclaw_assistant_log_check", return_value=None):
             first = threading.Thread(target=_run, args=("request-chat-004e-first",))

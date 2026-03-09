@@ -3678,6 +3678,21 @@ log_info "Writing CLAWBOARD_SERVER_API_BASE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SERVER_API_BASE" "$SERVER_API_BASE_VALUE"
 log_info "Writing OPENCLAW_BASE_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_BASE_URL" "$OPENCLAW_BASE_URL_VALUE"
+OPENCLAW_CHAT_TRANSPORT_VALUE=""
+if [ -n "${OPENCLAW_CHAT_TRANSPORT:-}" ]; then
+  OPENCLAW_CHAT_TRANSPORT_VALUE="$OPENCLAW_CHAT_TRANSPORT"
+elif read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_CHAT_TRANSPORT" >/dev/null 2>&1; then
+  OPENCLAW_CHAT_TRANSPORT_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "OPENCLAW_CHAT_TRANSPORT" || true)"
+else
+  OPENCLAW_CHAT_TRANSPORT_VALUE="auto"
+fi
+OPENCLAW_CHAT_TRANSPORT_VALUE="$(printf "%s" "$OPENCLAW_CHAT_TRANSPORT_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+case "$OPENCLAW_CHAT_TRANSPORT_VALUE" in
+  rpc|openresponses|auto) ;;
+  *) OPENCLAW_CHAT_TRANSPORT_VALUE="auto" ;;
+esac
+log_info "Writing OPENCLAW_CHAT_TRANSPORT=$OPENCLAW_CHAT_TRANSPORT_VALUE in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_CHAT_TRANSPORT" "$OPENCLAW_CHAT_TRANSPORT_VALUE"
 OPENCLAW_GATEWAY_USE_DEVICE_AUTH_VALUE="$(resolve_openclaw_gateway_device_auth_value "$INSTALL_DIR/.env" "$ENV_FILE_CREATED")"
 log_info "Writing OPENCLAW_GATEWAY_USE_DEVICE_AUTH=$OPENCLAW_GATEWAY_USE_DEVICE_AUTH_VALUE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_GATEWAY_USE_DEVICE_AUTH" "$OPENCLAW_GATEWAY_USE_DEVICE_AUTH_VALUE"
@@ -4195,7 +4210,16 @@ if [ "$SKIP_OPENCLAW" = false ]; then
       log_success "OpenResponses endpoint already enabled."
     fi
 
-    log_info "Cross-agent follow-up checks will use session_status + queued subagent announces (no tools.sessions.visibility override)."
+    log_info "Cross-agent follow-up checks will use session_status + queued subagent announces, with explicit cross-agent session visibility for supervised recovery."
+
+    CURRENT_SESSION_TOOLS_VISIBILITY="$(openclaw_cfg_get_scalar_normalized tools.sessions.visibility)"
+    if [ "$CURRENT_SESSION_TOOLS_VISIBILITY" != "all" ]; then
+      openclaw_cfg_set_txn tools.sessions.visibility all string true
+      OPENCLAW_GATEWAY_RESTART_NEEDED=true
+      log_success "Set tools.sessions.visibility=all."
+    else
+      log_success "tools.sessions.visibility already set to all."
+    fi
 
     CURRENT_SANDBOX_SESSION_VISIBILITY="$(openclaw_cfg_get_scalar_normalized agents.defaults.sandbox.sessionToolsVisibility)"
     if [ "$CURRENT_SANDBOX_SESSION_VISIBILITY" != "all" ]; then

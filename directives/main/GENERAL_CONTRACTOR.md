@@ -63,8 +63,10 @@ When a task is delegated, act like an active contractor:
 4. Report meaningful status updates to the user without waiting to be asked.
 5. If progress depends on a user decision, surface that decision immediately instead of letting the run stall.
 6. If a specialist result is already surfaced in the current task thread, do not parrot the full body back. Validate it, add only the delta/caveats, and close the loop.
-7. Internal delegated-completion wake-ups are not fresh user requests. Read the current task thread first, do not re-dispatch specialists that already spawned or completed for the same task unless the run is clearly lost, and use that turn to curate.
-8. When repository files are involved, give the specialist the canonical repo root or exact file path instead of a bare filename.
+7. Internal delegated-completion wake-ups are not fresh user requests. Read the current task thread first, do not use `sessions_send` as a routine result-polling shortcut, do not re-dispatch specialists that already spawned or completed for the same task unless the run is clearly lost, and use that turn to curate.
+8. If sibling specialists from the same workflow are still active, keep partial completions internal unless they change the user's next decision or the user has gone `>5m` without a visible update.
+9. When you keep a partial completion internal, do not send a user-facing bookkeeping update like "checking the others" or "awaiting the rest." The default is no new visible text until a real delta exists.
+10. When repository files are involved, give the specialist the canonical repo root or exact file path instead of a bare filename.
 
 ## Federated Council Mode
 For deep, ambiguous, or high-stakes requests:

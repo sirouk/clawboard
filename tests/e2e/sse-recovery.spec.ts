@@ -80,3 +80,61 @@ test("changes reconcile clears stale responding state after missed terminal SSE"
 
   await expect(page.locator('[title="OpenClaw responding"]')).toHaveCount(0, { timeout: 20_000 });
 });
+
+test("terminal request log triggers authoritative replay when task status SSE was missed", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `sse-terminal-topic-${suffix}`;
+  const topicName = `SSE Terminal Topic ${suffix}`;
+  const taskId = `sse-terminal-task-${suffix}`;
+  const taskTitle = `SSE Terminal Task ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "todo", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const sendRes = await request.post(`${apiBase}/api/openclaw/chat`, {
+    data: { sessionKey, message: `terminal replay ${suffix}`, agentId: "main" },
+  });
+  expect(sendRes.ok()).toBeTruthy();
+  const sendBody = (await sendRes.json()) as { requestId?: string };
+  const requestId = String(sendBody.requestId ?? "").trim();
+  expect(requestId.length).toBeGreaterThan(0);
+
+  await expect(page.locator('[title="OpenClaw responding"]').first()).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId(`task-status-trigger-${taskId}`)).toContainText("Doing");
+
+  const silentDone = await request.patch(`${apiBase}/api/tasks/${taskId}`, {
+    headers: { "x-mock-silent-event": "1" },
+    data: { status: "done" },
+  });
+  expect(silentDone.ok()).toBeTruthy();
+
+  const terminalLog = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      taskId,
+      type: "system",
+      content: "All tracked work items reached terminal completion.",
+      summary: "Run done",
+      classificationStatus: "classified",
+      agentId: "system",
+      agentLabel: "System",
+      source: { sessionKey, requestId, requestTerminal: true },
+    },
+  });
+  expect(terminalLog.ok()).toBeTruthy();
+
+  await expect(page.locator('[title="OpenClaw responding"]')).toHaveCount(0, { timeout: 20_000 });
+  await expect(page.getByTestId(`task-status-trigger-${taskId}`)).toContainText("Done", { timeout: 20_000 });
+});

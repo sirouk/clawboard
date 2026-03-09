@@ -140,6 +140,26 @@ export function Markdown({ children, className, highlightCommands = true }: { ch
           ul: ({ children }) => <ul className="ml-5 list-disc space-y-1">{children}</ul>,
           ol: ({ children }) => <ol className="ml-5 list-decimal space-y-1">{children}</ol>,
           li: ({ children }) => <li className="break-words">{children}</li>,
+          table: ({ children }) => (
+            <div className="max-w-full overflow-x-auto rounded-[var(--radius-md)] border border-[rgba(255,255,255,0.12)] bg-black/25">
+              <table className="min-w-max border-collapse text-left text-xs leading-relaxed text-[rgb(var(--claw-text))]">
+                {children}
+              </table>
+            </div>
+          ),
+          thead: ({ children }) => <thead className="bg-[rgba(255,255,255,0.04)]">{children}</thead>,
+          tbody: ({ children }) => <tbody>{children}</tbody>,
+          tr: ({ children }) => <tr className="border-b border-[rgba(255,255,255,0.08)] last:border-b-0">{children}</tr>,
+          th: ({ children }) => (
+            <th className="whitespace-nowrap border-b border-[rgba(255,255,255,0.12)] px-3 py-2 align-top font-semibold text-[rgba(var(--claw-text),0.96)]">
+              {children}
+            </th>
+          ),
+          td: ({ children }) => (
+            <td className="whitespace-nowrap px-3 py-2 align-top text-[rgba(var(--claw-text),0.9)]">
+              {children}
+            </td>
+          ),
           blockquote: ({ children }) => (
             <blockquote className="border-l-2 border-[rgba(255,255,255,0.18)] pl-3 text-[rgba(var(--claw-text),0.92)]">
               {children}
@@ -156,7 +176,7 @@ export function Markdown({ children, className, highlightCommands = true }: { ch
             return (
               <code
                 className={cn(
-                  "rounded-[8px] bg-black/35 px-1 py-0.5 font-mono text-[0.92em] text-[rgba(var(--claw-text),0.92)]",
+                  "inline-block max-w-full overflow-x-auto whitespace-nowrap align-bottom rounded-[8px] bg-black/35 px-1 py-0.5 font-mono text-[0.92em] text-[rgba(var(--claw-text),0.92)]",
                   className
                 )}
                 {...props}

@@ -209,6 +209,62 @@ test("keyboard send in unified composer uses new topic when no target and select
   });
 });
 
+test("persisted unified draft does not activate board search until the user engages the composer", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const revealedTopicId = `topic-revealed-${suffix}`;
+  const revealedTaskId = `task-revealed-${suffix}`;
+  const revealedTaskTitle = `Revealed Task ${suffix}`;
+  const matchTopicId = `topic-match-${suffix}`;
+  const matchTaskId = `task-match-${suffix}`;
+  const matchTaskTitle = `Persisted Draft Match ${suffix}`;
+  const persistedDraft = matchTaskTitle;
+  const consoleErrors: string[] = [];
+
+  page.on("console", (message) => {
+    if (message.type() !== "error") return;
+    consoleErrors.push(message.text());
+  });
+
+  const createRevealedTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: revealedTopicId, name: `Revealed Topic ${suffix}`, pinned: false },
+  });
+  expect(createRevealedTopic.ok()).toBeTruthy();
+
+  const createRevealedTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: revealedTaskId, topicId: revealedTopicId, title: revealedTaskTitle, status: "todo", pinned: false },
+  });
+  expect(createRevealedTask.ok()).toBeTruthy();
+
+  const createMatchTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: matchTopicId, name: `Match Topic ${suffix}`, pinned: false },
+  });
+  expect(createMatchTopic.ok()).toBeTruthy();
+
+  const createMatchTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: matchTaskId, topicId: matchTopicId, title: matchTaskTitle, status: "todo", pinned: false },
+  });
+  expect(createMatchTask.ok()).toBeTruthy();
+
+  await page.addInitScript((value) => {
+    window.localStorage.setItem(
+      "clawboard.draft.v1:draft:unified:composer",
+      JSON.stringify({ value, updatedAt: new Date().toISOString() })
+    );
+  }, persistedDraft);
+
+  await page.goto(`/u/topic/${revealedTopicId}/task/${revealedTaskId}?reveal=1`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
+  await expect(textarea).toHaveValue(persistedDraft);
+  await expect(page.getByTestId(`select-task-target-${matchTaskId}`)).toHaveCount(0);
+  expect(consoleErrors.some((entry) => entry.includes("Hydration failed"))).toBe(false);
+
+  await textarea.focus();
+  await expect(page.getByTestId(`select-task-target-${matchTaskId}`)).toBeVisible();
+});
+
 test("typing search orders topics and tasks by relevance instead of saved board order", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
   const suffix = Date.now();

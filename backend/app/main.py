@@ -5043,7 +5043,10 @@ def _find_existing_openclaw_non_user_conversation_near_duplicate(
     board_scope_key = _canonical_board_scope_session_key(source_meta=source_meta, session_key=session_key)
     candidate_session_keys = [key for key in [base_key, board_scope_key] if key]
     candidate_session_keys = list(dict.fromkeys(candidate_session_keys))
-    if not candidate_session_keys:
+    incoming_scope = _scope_from_source_metadata(session, source_meta)
+    incoming_space_id, incoming_topic_id, incoming_task_id = incoming_scope
+    has_board_scope = bool(incoming_topic_id or incoming_task_id)
+    if not candidate_session_keys and not has_board_scope:
         return None
 
     created_ts = _iso_to_timestamp(created_at)
@@ -5066,19 +5069,6 @@ def _find_existing_openclaw_non_user_conversation_near_duplicate(
     )
 
     if DATABASE_URL.startswith("sqlite"):
-        session_parts: list[str] = []
-        session_params: dict[str, Any] = {}
-        for idx, key in enumerate(candidate_session_keys):
-            key_name = f"base_key_{idx}"
-            like_name = f"base_like_{idx}"
-            session_parts.append(
-                f"(json_extract(source, '$.sessionKey') = :{key_name} OR "
-                f"json_extract(source, '$.sessionKey') LIKE :{like_name})"
-            )
-            session_params[key_name] = key
-            session_params[like_name] = f"{key}|%"
-        if session_parts:
-            query = query.where(text("(" + " OR ".join(session_parts) + ")")).params(**session_params)
         query = query.where(
             text(
                 "lower(COALESCE(json_extract(source, '$.channel'), '')) "
@@ -5086,12 +5076,6 @@ def _find_existing_openclaw_non_user_conversation_near_duplicate(
             )
         )
     else:
-        source_session_expr = LogEntry.source["sessionKey"].as_string()
-        session_exprs = []
-        for key in candidate_session_keys:
-            session_exprs.append(source_session_expr == key)
-            session_exprs.append(source_session_expr.like(f"{key}|%"))
-        query = query.where(or_(*session_exprs))
         source_channel_expr = func.lower(func.coalesce(LogEntry.source["channel"].as_string(), ""))
         query = query.where(source_channel_expr.in_(["", "openclaw", "clawboard", "webchat", "direct"]))
 
@@ -5099,12 +5083,42 @@ def _find_existing_openclaw_non_user_conversation_near_duplicate(
     incoming_has_identifier = _source_has_message_or_request_id(source_meta)
     candidates = session.exec(query.order_by(LogEntry.createdAt.desc()).limit(64)).all()
     for candidate in candidates:
+        candidate_source = candidate.source if isinstance(candidate.source, dict) else {}
+        candidate_session_key = str(candidate_source.get("sessionKey") or "").strip()
+        candidate_base_key = _base_session_key(candidate_session_key)
+        candidate_board_key = _canonical_board_scope_session_key(
+            source_meta=candidate_source,
+            session_key=candidate_session_key,
+        )
+
+        same_session = False
+        for key in candidate_session_keys:
+            if not key:
+                continue
+            if candidate_base_key == key or candidate_board_key == key:
+                same_session = True
+                break
+            if candidate_session_key.startswith(f"{key}|"):
+                same_session = True
+                break
+
+        same_board_scope = False
+        if has_board_scope:
+            candidate_space_id, candidate_topic_id, candidate_task_id = _scope_from_anchor_log_row(session, candidate)
+            same_board_scope = (
+                candidate_topic_id == incoming_topic_id
+                and candidate_task_id == incoming_task_id
+                and (not incoming_space_id or not candidate_space_id or candidate_space_id == incoming_space_id)
+            )
+
+        if not same_session and not same_board_scope:
+            continue
+
         candidate_text = _normalize_openclaw_assistant_semantic_text(
             str(getattr(candidate, "content", None) or getattr(candidate, "summary", None) or getattr(candidate, "raw", None) or "")
         )
         if not candidate_text or candidate_text != payload_semantic:
             continue
-        candidate_source = candidate.source if isinstance(candidate.source, dict) else {}
         candidate_channel = str(candidate_source.get("channel") or "").strip().lower()
         candidate_has_identifier = _source_has_message_or_request_id(candidate_source)
         # If both rows already carry explicit identifiers on the same channel,
@@ -7987,6 +8001,21 @@ def _orchestration_mark_item_status(
     next_status = str(status or "").strip().lower()
     if not next_status:
         return False
+    persisted_snapshot = session.exec(
+        select(OrchestrationItem.status, OrchestrationItem.completedAt, OrchestrationItem.lastError)
+        .where(OrchestrationItem.runId == run_id)
+        .where(OrchestrationItem.itemKey == item.itemKey)
+        .limit(1)
+    ).first()
+    if persisted_snapshot is not None:
+        persisted_status, persisted_completed_at, persisted_last_error = persisted_snapshot
+        persisted_text = str(persisted_status or "").strip().lower()
+        if persisted_text:
+            item.status = persisted_text
+        if persisted_completed_at:
+            item.completedAt = persisted_completed_at
+        if persisted_last_error is not None:
+            item.lastError = persisted_last_error
     current = str(getattr(item, "status", "") or "").strip().lower()
     if current == next_status:
         return False
@@ -8013,17 +8042,19 @@ def _orchestration_mark_item_status(
         item.lastError = _clip(_sanitize_log_text(reason), 1200)
     item.updatedAt = now_value
     session.add(item)
+    if next_status in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
+        event_idempotency_key = f"orchestration:item-status:{run_id}:{item.itemKey}:{next_status}"
+    elif source_log_id:
+        event_idempotency_key = f"orchestration:item-status:{run_id}:{item.itemKey}:{source_log_id}:{next_status}"
+    else:
+        event_idempotency_key = None
     _orchestration_append_event(
         session,
         run_id=run_id,
         item_key=item.itemKey,
         event_type=f"item_{next_status}",
         payload={"from": current, "to": next_status, "reason": reason or "", "sourceLogId": source_log_id or ""},
-        idempotency_key=(
-            f"orchestration:item-status:{run_id}:{item.itemKey}:{source_log_id}:{next_status}"
-            if source_log_id
-            else None
-        ),
+        idempotency_key=event_idempotency_key,
         created_at=now_value,
     )
     return True
@@ -8141,6 +8172,7 @@ def _orchestration_is_waiting_status_text(
         "waiting for ",
         "awaiting ",
         "still waiting on ",
+        "both specialists are still running",
         "awaiting results from both specialists",
         "follow-up scheduled",
         "follow up scheduled",
@@ -8152,14 +8184,37 @@ def _orchestration_is_waiting_status_text(
         "delegation rails set",
         "task tagged with delegation state",
         "task tagged in clawboard",
+        "task state updated",
         "still in progress",
         "next checkpoint",
         "dispatched to ",
         "dispatching to ",
+        "sent to ",
+        "let me check if ",
+        "checking if ",
+        "query them directly for their results",
+        "same request - checking if ",
+        "same request — checking if ",
+        "already dispatched both ",
+        "re-dispatched ",
+        "respawning fresh specialists",
+        "re-spawning fresh specialists",
+        "let me spawn fresh specialists",
         "auto-announce",
         "auto announce",
     ]
     if any(marker in combined for marker in markers):
+        return True
+    if (
+        "dispatching " in combined
+        and " specialist" in combined
+        and " in parallel" in combined
+        and " now" in combined
+    ):
+        return True
+    if "no additional action needed" in combined and "will return results automatically" in combined:
+        return True
+    if "will be announced back here when complete" in combined:
         return True
     relay_markers = [
         "i'll relay",
@@ -8167,6 +8222,12 @@ def _orchestration_is_waiting_status_text(
         "will relay",
         "relay it back",
         "relay the result",
+        "i'll report back",
+        "i will report back",
+        "will report back",
+        "i'll let you know",
+        "i will let you know",
+        "let you know",
     ]
     relay_future_cues = [
         "when complete",
@@ -8178,6 +8239,13 @@ def _orchestration_is_waiting_status_text(
         "as soon as",
         "after the specialist completes",
         "after the child run completes",
+        "once the result comes in",
+        "once the result comes back",
+        "when the result comes in",
+        "when the result comes back",
+        "once the result is in",
+        "once the result is back",
+        "has completed",
         "auto-announce",
         "auto announce",
         "back here immediately",
@@ -8228,6 +8296,21 @@ def _orchestration_is_low_signal_delivery_text(
     )
     if not combined:
         return False
+    if combined in {"no_reply", "no reply"}:
+        return True
+    if combined.startswith("task closed") or combined.startswith("request complete"):
+        return True
+    if (
+        combined.startswith("done. task closed")
+        or combined.startswith("done task closed")
+        or combined.startswith("done. request complete")
+        or combined.startswith("done request complete")
+    ):
+        return True
+    if combined.startswith("task updated with delegation state."):
+        return True
+    if combined.startswith("task tracking updated."):
+        return True
     if len(combined) > 80:
         return False
     tokens = [re.sub(r"[^a-z0-9]+", "", token) for token in combined.split(" ")]
@@ -8450,6 +8533,10 @@ def _orchestration_latest_assistant_completion_iso_for_session(
             row_content = _safe_log_attr_text(row, "content")
             row_summary = _safe_log_attr_text(row, "summary")
             row_raw = _safe_log_attr_text(row, "raw")
+            if _orchestration_is_waiting_status_text(row_content, row_summary, row_raw):
+                continue
+            if _orchestration_is_non_delivery_status_text(row_content, row_summary, row_raw):
+                continue
             if _orchestration_is_low_signal_delivery_text(row_content, row_summary, row_raw):
                 continue
         return (
@@ -8602,6 +8689,8 @@ def _orchestration_completed_subagent_follow_up_message(
         "If the user can already see the result, do not restate or paraphrase the full body. Do not send another status-only promise. "
         "Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains. "
         "Stay on the current task/session and avoid broad recovery or unrelated search. "
+        "Do not use sessions_send(...) as a routine way to ask already-running specialists for results; rely on the queued completion rail, surfaced child results, and session_status(...) first. "
+        "Use sessions_send(...) only when you truly need to redirect or correct an active child session. "
         f"Completed specialist context: {completed_summary} "
         "Use session_status(...) only if you need quick confirmation."
     )
@@ -9643,7 +9732,7 @@ def _run_openclaw_chat(
     raise_on_error: bool = False,
     log_errors: bool = True,
 ) -> bool:
-    """Dispatch a message to OpenClaw via the Gateway WebSocket (chat.send).
+    """Dispatch a message to OpenClaw.
 
     Clawboard is an external client of the OpenClaw Gateway.
     """
@@ -9689,9 +9778,11 @@ def _run_openclaw_chat(
             return base
         return "http://" + base
 
-    def _run_openclaw_chat_via_openresponses(prepared_attachments: list[dict[str, Any]]) -> None:
-        if not prepared_attachments:
-            return
+    def _run_openclaw_chat_via_openresponses(
+        prepared_attachments: list[dict[str, Any]],
+        *,
+        require_agent_visible_files: bool,
+    ) -> None:
         content_parts: list[dict[str, Any]] = [{"type": "input_text", "text": message}]
         for prepared in prepared_attachments:
             mime_type = _normalize_mime_type(str(prepared.get("mimeType") or "application/octet-stream"))
@@ -9775,9 +9866,11 @@ def _run_openclaw_chat(
         with httpx.Client(timeout=timeout) as client:
             with client.stream("POST", response_url, headers=headers, content=payload_bytes) as response:
                 if response.status_code == 404:
-                    raise RuntimeError(
-                        "OpenClaw /v1/responses is disabled; attachments cannot be made visible to the agent"
-                    )
+                    if require_agent_visible_files:
+                        raise RuntimeError(
+                            "OpenClaw /v1/responses is disabled; attachments cannot be made visible to the agent"
+                        )
+                    raise RuntimeError("OpenClaw /v1/responses is disabled for chat dispatch")
                 if response.status_code >= 400:
                     raw = response.read()
                     error_text = ""
@@ -9793,7 +9886,10 @@ def _run_openclaw_chat(
                             except Exception:
                                 error_text = decoded.strip()
                     suffix = f": {error_text}" if error_text else ""
-                    raise RuntimeError(f"OpenClaw /v1/responses rejected the attachment send ({response.status_code}{suffix})")
+                    operation = "attachment send" if require_agent_visible_files else "chat send"
+                    raise RuntimeError(
+                        f"OpenClaw /v1/responses rejected the {operation} ({response.status_code}{suffix})"
+                    )
 
                 event_name = ""
                 data_lines: list[str] = []
@@ -9830,7 +9926,11 @@ def _run_openclaw_chat(
                     if event_type == "response.failed":
                         failure_message = (
                             str((((parsed or {}).get("response") or {}).get("error") or {}).get("message") or "").strip()
-                            or "OpenClaw /v1/responses failed before dispatch started"
+                            or (
+                                "OpenClaw /v1/responses failed before attachment dispatch started"
+                                if require_agent_visible_files
+                                else "OpenClaw /v1/responses failed before chat dispatch started"
+                            )
                         )
                         break
                     event_name = ""
@@ -9838,7 +9938,9 @@ def _run_openclaw_chat(
                 if failure_message:
                     raise RuntimeError(failure_message)
                 if not accepted:
-                    raise RuntimeError("OpenClaw /v1/responses closed before attachment dispatch started")
+                    if require_agent_visible_files:
+                        raise RuntimeError("OpenClaw /v1/responses closed before attachment dispatch started")
+                    raise RuntimeError("OpenClaw /v1/responses closed before chat dispatch started")
 
     # Keep the plain WebSocket path for normal chat sends, but use OpenResponses
     # for attachment-bearing messages so file inputs become agent-visible context.
@@ -9924,10 +10026,31 @@ def _run_openclaw_chat(
             detail = f"OpenClaw chat failed: {exc}. requestId={request_id}"
             return _handle_failure(detail=detail, raw=str(exc), cause=exc)
 
+        prefer_openresponses = _openclaw_chat_should_use_openresponses(
+            is_board_session=is_board_session,
+            has_attachments=bool(prepared_attachments),
+        )
+        if prefer_openresponses:
+            try:
+                _run_openclaw_chat_via_openresponses(
+                    prepared_attachments,
+                    require_agent_visible_files=bool(prepared_attachments),
+                )
+            except Exception as exc:
+                raw = str(exc or "")
+                if not _openclaw_chat_should_fallback_to_gateway_rpc(
+                    raw=raw,
+                    has_attachments=bool(prepared_attachments),
+                ):
+                    detail = f"OpenClaw chat failed: {raw or exc}. requestId={request_id}"
+                    return _handle_failure(detail=detail, raw=raw, cause=exc)
+            else:
+                _schedule_openclaw_assistant_log_check(session_key=session_key, request_id=request_id, sent_at=sent_at)
+                return True
+
         if prepared_attachments:
-            _run_openclaw_chat_via_openresponses(prepared_attachments)
-            _schedule_openclaw_assistant_log_check(session_key=session_key, request_id=request_id, sent_at=sent_at)
-            return True
+            detail = f"OpenClaw chat failed: attachments require /v1/responses dispatch. requestId={request_id}"
+            return _handle_failure(detail=detail, raw="attachments require /v1/responses dispatch")
 
         send_params["attachments"] = []
 
@@ -9965,85 +10088,25 @@ def _run_openclaw_chat(
                 time.sleep(min(poll_seconds, remaining))
 
             if not saw_progress:
-                board_abort_retry_enabled = (not used_board_probe_fallback) or _openclaw_chat_board_in_flight_abort_retry_enabled()
-                if board_abort_retry_enabled:
-                    probe_payload = asyncio.run(
-                        gateway_rpc(
-                            "chat.send",
-                            send_params,
-                            scopes=["operator.write"],
-                            timeout_seconds=min(120.0, send_timeout_seconds),
-                        )
-                    )
-                    probe_status, probe_run_id = _openclaw_chat_send_state(probe_payload)
-                    if probe_status == "in_flight":
-                        abort_params: dict[str, Any] = {"sessionKey": session_key}
-                        if probe_run_id:
-                            abort_params["runId"] = probe_run_id
-                        try:
-                            asyncio.run(
-                                gateway_rpc(
-                                    "chat.abort",
-                                    abort_params,
-                                    scopes=["operator.write"],
-                                    timeout_seconds=15.0,
-                                )
-                            )
-                        except Exception:
-                            pass
-
-                        retry_payload = asyncio.run(
+                is_orchestration_follow_up_request = (
+                    is_board_session and _openclaw_chat_is_orchestration_follow_up_request(request_id)
+                )
+                if is_orchestration_follow_up_request:
+                    abort_params: dict[str, Any] = {"sessionKey": session_key}
+                    if run_id:
+                        abort_params["runId"] = run_id
+                    try:
+                        asyncio.run(
                             gateway_rpc(
-                                "chat.send",
-                                {
-                                    **send_params,
-                                    "idempotencyKey": _openclaw_chat_request_id_with_suffix(
-                                        request_id,
-                                        suffix=(
-                                            "retry-1"
-                                            if not dispatch_retry_suffix
-                                            else f"{dispatch_retry_suffix}-probe-retry-1"
-                                        ),
-                                    ),
-                                },
+                                "chat.abort",
+                                abort_params,
                                 scopes=["operator.write"],
-                                timeout_seconds=min(120.0, send_timeout_seconds),
+                                timeout_seconds=15.0,
                             )
                         )
-                        retry_status, retry_run_id = _openclaw_chat_send_state(retry_payload)
-                        if retry_status not in {"started", "accepted", "ok"}:
-                            raise RuntimeError(
-                                "OpenClaw chat appears stalled in-flight after no progress window, "
-                                f"abort+retry failed (status={retry_status or 'unknown'}, runId={retry_run_id or probe_run_id or run_id or 'n/a'}). "
-                                f"requestId={request_id}"
-                            )
-                        retry_grace_seconds = _openclaw_chat_in_flight_retry_grace_seconds()
-                        if is_board_session:
-                            retry_grace_seconds = min(
-                                retry_grace_seconds,
-                                _openclaw_chat_board_in_flight_retry_grace_seconds(),
-                            )
-                        if retry_grace_seconds > 0 and retry_status in {"started", "accepted"}:
-                            retry_deadline = time.monotonic() + retry_grace_seconds
-                            recovered_after_retry = False
-                            while True:
-                                if _openclaw_chat_request_has_non_user_activity(
-                                    request_id=request_id,
-                                    sent_at=sent_at,
-                                    session_key=session_key,
-                                ):
-                                    recovered_after_retry = True
-                                    break
-                                retry_remaining = retry_deadline - time.monotonic()
-                                if retry_remaining <= 0:
-                                    break
-                                time.sleep(min(poll_seconds, retry_remaining))
-                            if not recovered_after_retry:
-                                raise RuntimeError(
-                                    "OpenClaw chat remained stalled after abort+retry with no progress during retry grace window "
-                                    f"({int(retry_grace_seconds)}s). requestId={request_id}"
-                                )
-                elif is_board_session and _openclaw_chat_board_in_flight_direct_retry_enabled():
+                    except Exception:
+                        pass
+
                     retry_payload = asyncio.run(
                         gateway_rpc(
                             "chat.send",
@@ -10052,9 +10115,9 @@ def _run_openclaw_chat(
                                 "idempotencyKey": _openclaw_chat_request_id_with_suffix(
                                     request_id,
                                     suffix=(
-                                        "probe-direct-retry-1"
+                                        "retry-1"
                                         if not dispatch_retry_suffix
-                                        else f"{dispatch_retry_suffix}-probe-direct-retry-1"
+                                        else f"{dispatch_retry_suffix}-follow-up-retry-1"
                                     ),
                                 ),
                             },
@@ -10066,12 +10129,11 @@ def _run_openclaw_chat(
                     if retry_status not in {"started", "accepted", "ok"}:
                         raise RuntimeError(
                             "OpenClaw chat appears stalled in-flight after no progress window, "
-                            f"direct retry failed (status={retry_status or 'unknown'}, runId={retry_run_id or run_id or 'n/a'}). "
+                            f"follow-up abort+retry failed (status={retry_status or 'unknown'}, runId={retry_run_id or run_id or 'n/a'}). "
                             f"requestId={request_id}"
                         )
-                    retry_grace_seconds = _openclaw_chat_in_flight_retry_grace_seconds()
                     retry_grace_seconds = min(
-                        retry_grace_seconds,
+                        _openclaw_chat_in_flight_retry_grace_seconds(),
                         _openclaw_chat_board_in_flight_retry_grace_seconds(),
                     )
                     if retry_grace_seconds > 0 and retry_status in {"started", "accepted"}:
@@ -10091,9 +10153,139 @@ def _run_openclaw_chat(
                             time.sleep(min(poll_seconds, retry_remaining))
                         if not recovered_after_retry:
                             raise RuntimeError(
-                                "OpenClaw chat remained stalled after direct retry with no progress during retry grace window "
+                                "OpenClaw chat remained stalled after follow-up abort+retry with no progress during retry grace window "
                                 f"({int(retry_grace_seconds)}s). requestId={request_id}"
                             )
+                else:
+                    board_abort_retry_enabled = (not used_board_probe_fallback) or _openclaw_chat_board_in_flight_abort_retry_enabled()
+                    if board_abort_retry_enabled:
+                        probe_payload = asyncio.run(
+                            gateway_rpc(
+                                "chat.send",
+                                send_params,
+                                scopes=["operator.write"],
+                                timeout_seconds=min(120.0, send_timeout_seconds),
+                            )
+                        )
+                        probe_status, probe_run_id = _openclaw_chat_send_state(probe_payload)
+                        if probe_status == "in_flight":
+                            abort_params: dict[str, Any] = {"sessionKey": session_key}
+                            if probe_run_id:
+                                abort_params["runId"] = probe_run_id
+                            try:
+                                asyncio.run(
+                                    gateway_rpc(
+                                        "chat.abort",
+                                        abort_params,
+                                        scopes=["operator.write"],
+                                        timeout_seconds=15.0,
+                                    )
+                                )
+                            except Exception:
+                                pass
+
+                            retry_payload = asyncio.run(
+                                gateway_rpc(
+                                    "chat.send",
+                                    {
+                                        **send_params,
+                                        "idempotencyKey": _openclaw_chat_request_id_with_suffix(
+                                            request_id,
+                                            suffix=(
+                                                "retry-1"
+                                                if not dispatch_retry_suffix
+                                                else f"{dispatch_retry_suffix}-probe-retry-1"
+                                            ),
+                                        ),
+                                    },
+                                    scopes=["operator.write"],
+                                    timeout_seconds=min(120.0, send_timeout_seconds),
+                                )
+                            )
+                            retry_status, retry_run_id = _openclaw_chat_send_state(retry_payload)
+                            if retry_status not in {"started", "accepted", "ok"}:
+                                raise RuntimeError(
+                                    "OpenClaw chat appears stalled in-flight after no progress window, "
+                                    f"abort+retry failed (status={retry_status or 'unknown'}, runId={retry_run_id or probe_run_id or run_id or 'n/a'}). "
+                                    f"requestId={request_id}"
+                                )
+                            retry_grace_seconds = _openclaw_chat_in_flight_retry_grace_seconds()
+                            if is_board_session:
+                                retry_grace_seconds = min(
+                                    retry_grace_seconds,
+                                    _openclaw_chat_board_in_flight_retry_grace_seconds(),
+                                )
+                            if retry_grace_seconds > 0 and retry_status in {"started", "accepted"}:
+                                retry_deadline = time.monotonic() + retry_grace_seconds
+                                recovered_after_retry = False
+                                while True:
+                                    if _openclaw_chat_request_has_non_user_activity(
+                                        request_id=request_id,
+                                        sent_at=sent_at,
+                                        session_key=session_key,
+                                    ):
+                                        recovered_after_retry = True
+                                        break
+                                    retry_remaining = retry_deadline - time.monotonic()
+                                    if retry_remaining <= 0:
+                                        break
+                                    time.sleep(min(poll_seconds, retry_remaining))
+                                if not recovered_after_retry:
+                                    raise RuntimeError(
+                                        "OpenClaw chat remained stalled after abort+retry with no progress during retry grace window "
+                                        f"({int(retry_grace_seconds)}s). requestId={request_id}"
+                                    )
+                    elif is_board_session and _openclaw_chat_board_in_flight_direct_retry_enabled():
+                        retry_payload = asyncio.run(
+                            gateway_rpc(
+                                "chat.send",
+                                {
+                                    **send_params,
+                                    "idempotencyKey": _openclaw_chat_request_id_with_suffix(
+                                        request_id,
+                                        suffix=(
+                                            "probe-direct-retry-1"
+                                            if not dispatch_retry_suffix
+                                            else f"{dispatch_retry_suffix}-probe-direct-retry-1"
+                                        ),
+                                    ),
+                                },
+                                scopes=["operator.write"],
+                                timeout_seconds=min(120.0, send_timeout_seconds),
+                            )
+                        )
+                        retry_status, retry_run_id = _openclaw_chat_send_state(retry_payload)
+                        if retry_status not in {"started", "accepted", "ok"}:
+                            raise RuntimeError(
+                                "OpenClaw chat appears stalled in-flight after no progress window, "
+                                f"direct retry failed (status={retry_status or 'unknown'}, runId={retry_run_id or run_id or 'n/a'}). "
+                                f"requestId={request_id}"
+                            )
+                        retry_grace_seconds = _openclaw_chat_in_flight_retry_grace_seconds()
+                        retry_grace_seconds = min(
+                            retry_grace_seconds,
+                            _openclaw_chat_board_in_flight_retry_grace_seconds(),
+                        )
+                        if retry_grace_seconds > 0 and retry_status in {"started", "accepted"}:
+                            retry_deadline = time.monotonic() + retry_grace_seconds
+                            recovered_after_retry = False
+                            while True:
+                                if _openclaw_chat_request_has_non_user_activity(
+                                    request_id=request_id,
+                                    sent_at=sent_at,
+                                    session_key=session_key,
+                                ):
+                                    recovered_after_retry = True
+                                    break
+                                retry_remaining = retry_deadline - time.monotonic()
+                                if retry_remaining <= 0:
+                                    break
+                                time.sleep(min(poll_seconds, retry_remaining))
+                            if not recovered_after_retry:
+                                raise RuntimeError(
+                                    "OpenClaw chat remained stalled after direct retry with no progress during retry grace window "
+                                    f"({int(retry_grace_seconds)}s). requestId={request_id}"
+                                )
 
         # We don't need the response body; OpenClaw logs the conversation via plugins.
         _ = payload
@@ -10136,6 +10328,42 @@ def _openclaw_chat_send_state(payload: Any) -> tuple[str | None, str | None]:
     return (status, run_id)
 
 
+def _openclaw_chat_transport_mode() -> str:
+    raw = str(os.getenv("OPENCLAW_CHAT_TRANSPORT") or "rpc").strip().lower()
+    if raw in {"openresponses", "responses", "http"}:
+        return "openresponses"
+    if raw == "auto":
+        return "auto"
+    return "rpc"
+
+
+def _openclaw_chat_should_use_openresponses(*, is_board_session: bool, has_attachments: bool) -> bool:
+    if has_attachments:
+        return True
+    mode = _openclaw_chat_transport_mode()
+    if mode == "openresponses":
+        return True
+    if mode == "auto" and is_board_session:
+        return True
+    return False
+
+
+def _openclaw_chat_should_fallback_to_gateway_rpc(*, raw: str, has_attachments: bool) -> bool:
+    if has_attachments:
+        return False
+    mode = _openclaw_chat_transport_mode()
+    if mode == "openresponses":
+        return False
+    text = str(raw or "").lower()
+    if "/v1/responses is disabled" in text:
+        return True
+    if "closed before chat dispatch started" in text:
+        return True
+    if "rejected the chat send (404" in text:
+        return True
+    return False
+
+
 def _openclaw_chat_request_id_with_suffix(request_id: str, *, suffix: str | None = None) -> str:
     rid = str(request_id or "").strip()
     if not rid:
@@ -10147,6 +10375,11 @@ def _openclaw_chat_request_id_with_suffix(request_id: str, *, suffix: str | None
     if not normalized:
         return rid
     return f"{rid}:{normalized}"
+
+
+def _openclaw_chat_is_orchestration_follow_up_request(request_id: str | None) -> bool:
+    rid = str(request_id or "").strip().lower()
+    return rid.startswith("occhat-fup-")
 
 
 def _openclaw_chat_request_has_non_user_activity(
@@ -12196,6 +12429,11 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 continue
             sanitized_text = _sanitize_log_text(text_body)
             role = str(row.get("role") or "").strip().lower()
+            if role == "assistant" and sanitized_text.strip().lower() in {"no_reply", "no reply"}:
+                # NO_REPLY is an internal no-op sentinel and should never be surfaced in
+                # Clawboard chat, even if it exists in OpenClaw transcript history.
+                max_safe_ms = max(max_safe_ms, timestamp_ms)
+                continue
             if role == "assistant":
                 entry_type = "conversation"
                 agent_id = "assistant"
@@ -15987,6 +16225,12 @@ def _log_source_channel_sql_expr():
     return func.lower(func.coalesce(LogEntry.source["channel"].as_string(), ""))
 
 
+def _log_source_suppressed_waiting_sql_predicate():
+    if DATABASE_URL.startswith("sqlite"):
+        return text("COALESCE(json_extract(source, '$.suppressedWaitingStatus'), 0) IN (1, '1', 'true', 'TRUE')")
+    return text("COALESCE(source->>'suppressedWaitingStatus', '') IN ('true', 'TRUE', '1')")
+
+
 def _chat_log_text_sql_expr():
     return func.lower(func.trim(func.coalesce(LogEntry.summary, LogEntry.content, LogEntry.raw, "")))
 
@@ -16010,8 +16254,47 @@ def _visible_chat_count_log_predicate():
         agent_expr == "assistant",
         text_expr.in_(_CHAT_ASSISTANT_CONTROL_NOISE_MARKERS),
     )
+    assistant_low_signal_closure_noise = and_(
+        type_expr == "conversation",
+        agent_expr == "assistant",
+        or_(
+            text_expr.in_(
+                (
+                    "task closed.",
+                    "task closed",
+                    "done. task closed.",
+                    "done. task closed",
+                    "done task closed.",
+                    "done task closed",
+                    "request complete.",
+                    "request complete",
+                    "done. request complete.",
+                    "done. request complete",
+                    "done request complete.",
+                    "done request complete",
+                )
+            ),
+            text_expr.like("task closed%"),
+            text_expr.like("request complete%"),
+            text_expr.like("done. task closed%"),
+            text_expr.like("done task closed%"),
+            text_expr.like("done. request complete%"),
+            text_expr.like("done request complete%"),
+        ),
+    )
+    suppressed_waiting_noise = and_(
+        type_expr == "system",
+        agent_expr == "system",
+        _log_source_suppressed_waiting_sql_predicate(),
+    )
     cron_event_noise = channel_expr == "cron-event"
-    return and_(~cron_event_noise, ~persistence_noise, ~assistant_control_noise)
+    return and_(
+        ~cron_event_noise,
+        ~persistence_noise,
+        ~assistant_control_noise,
+        ~assistant_low_signal_closure_noise,
+        ~suppressed_waiting_noise,
+    )
 
 
 @app.get("/api/log/chat-counts", response_model=LogChatCountsResponse, tags=["logs"])
@@ -18634,6 +18917,14 @@ def _parse_internal_task_completion_event(text: str | None) -> dict[str, str]:
         result_preview = _clip(_sanitize_log_text(result_match.group(1)), 320)
         if result_preview:
             event["result_preview"] = result_preview
+    active_match = re.search(
+        r"(?im)\bthere\s+(?:are|is)\s+still\s+(\d+)\s+active\s+subagent\s+run(?:s)?\b",
+        raw,
+    )
+    if active_match:
+        active_count = active_match.group(1).strip()
+        if active_count:
+            event["active_subagent_runs"] = active_count
     return event
 
 
@@ -18760,6 +19051,11 @@ def context(
     if normalized_query:
         lines.append(f"Current user intent: {_clip(normalized_query, 180)}")
     if completion_event:
+        remaining_active_subagents = 0
+        try:
+            remaining_active_subagents = max(0, int(str(completion_event.get("active_subagent_runs") or "0").strip() or "0"))
+        except Exception:
+            remaining_active_subagents = 0
         completion_task = _sanitize_log_text(completion_event.get("task"))
         data["turnHint"] = {
             "kind": "delegated_completion",
@@ -18767,6 +19063,7 @@ def context(
             "status": _sanitize_log_text(completion_event.get("status")) or None,
             "source": _sanitize_log_text(completion_event.get("source")) or None,
             "resultPreview": _sanitize_log_text(completion_event.get("result_preview")) or None,
+            "remainingActiveSubagentRuns": remaining_active_subagents or None,
         }
         layers.append("A:turn_hint")
         lines.append("Turn hint:")
@@ -18775,6 +19072,19 @@ def context(
         )
         lines.append("- Read the current task thread before replying.")
         lines.append("- If the specialist result is already visible there, do not repeat or paraphrase the full body.")
+        if remaining_active_subagents > 0:
+            lines.append(
+                f"- {remaining_active_subagents} sibling delegated run(s) are still active in this workflow/session."
+            )
+            lines.append(
+                "- Keep this completion internal until the remaining related runs finish unless a user decision is needed or more than 5 minutes have passed since the last visible update."
+            )
+            lines.append(
+                "- Do not send a user-facing message that only says you are checking, waiting on, or confirming other specialists."
+            )
+            lines.append(
+                "- If you need confirmation, use session_status(...) as internal supervision rather than another status post."
+            )
         lines.append("- Close the loop by validating the work, adding only the delta or caveats, and stating whether the request is satisfied.")
     if effective_mode != "auto":
         lines.append(f"Mode: {effective_mode}")
@@ -18984,6 +19294,29 @@ def context(
                 gate_reason = str(convergence.get("reason") or "").strip().lower()
                 gate_label = "ready" if gate_ready else (f"waiting:{gate_reason}" if gate_reason else "waiting")
                 lines.append(f"- {status_label} [{mode_label}] {terminal}/{total} items | gate {gate_label} | request {request_id}")
+            if completion_event:
+                related_active_subagents = 0
+                for run in orchestration_runs:
+                    for item in run.get("items") or []:
+                        if str(item.get("kind") or "").strip().lower() != "subagent":
+                            continue
+                        if str(item.get("status") or "").strip().lower() in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
+                            continue
+                        related_active_subagents += 1
+                if related_active_subagents > 0:
+                    turn_hint = data.get("turnHint") if isinstance(data.get("turnHint"), dict) else {}
+                    turn_hint["remainingActiveSubagentRuns"] = related_active_subagents
+                    data["turnHint"] = turn_hint
+                    lines.append("Delegation handling:")
+                    lines.append(
+                        f"- {related_active_subagents} sibling delegated run(s) are still active in this task/workflow."
+                    )
+                    lines.append(
+                        "- Treat this completion as internal supervision unless a real blocker or decision needs to be surfaced now."
+                    )
+                    lines.append(
+                        "- Do not narrate routine bookkeeping like 'checking on the others' or 'awaiting the rest' back to the user."
+                    )
 
         continuity_topic_ids: list[str] = []
         continuity_task_ids: list[str] = []

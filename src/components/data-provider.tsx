@@ -120,6 +120,13 @@ function resolveLiveEventTimestamp(event: LiveEvent) {
   return new Date().toISOString();
 }
 
+function normalizeControlText(value: string | null | undefined) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
 function isIncomingSignalNewer(previousUpdatedAt: string | undefined, incomingUpdatedAt: string) {
   const previousMs = parseIsoMs(previousUpdatedAt);
   const incomingMs = parseIsoMs(incomingUpdatedAt);
@@ -267,6 +274,25 @@ function reconcileThreadWorkSnapshot(
     }
   }
   return JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+}
+
+function isTerminalSystemRequestEventLog(entry: LogEntry) {
+  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+  if (agentId !== "system") return false;
+  const type = String(entry.type ?? "").trim().toLowerCase();
+  if (type !== "system") return false;
+  const source = (entry.source && typeof entry.source === "object" ? entry.source : {}) as Record<string, unknown>;
+  if (Boolean(source.watchdogMissingAssistant)) return false;
+  if (source.requestTerminal === false) return false;
+  return true;
+}
+
+function shouldScheduleAuthoritativeReplay(entry: LogEntry) {
+  if (!isTerminalSystemRequestEventLog(entry)) return false;
+  const sessionKey = normalizeBoardSessionKey(String(entry.source?.sessionKey ?? ""));
+  if (!sessionKey) return false;
+  const text = normalizeControlText(entry.summary || entry.content || entry.raw || "");
+  return text.includes("all tracked work items reached terminal completion.");
 }
 
 function unsnoozedTopicTag(topicId: string) {
@@ -475,7 +501,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     };
   }, [handleNotificationClickData]);
 
-  const reconcile = async (since?: string) => {
+  const reconcile = useCallback(async (since?: string) => {
     const params = new URLSearchParams();
     if (since) params.set("since", since);
     if (!since && INITIAL_CHANGES_LIMIT_LOGS > 0) {
@@ -594,7 +620,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         ...((payload.drafts as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
       ]);
     return ts;
-  };
+  }, []);
 
   useLiveUpdates({
     onConnectionChange: setSseConnected,
@@ -640,7 +666,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         event.data &&
         typeof event.data === "object"
       ) {
-        appendLog(event.data as LogEntry);
+        const entry = event.data as LogEntry;
+        appendLog(entry);
+        if (shouldScheduleAuthoritativeReplay(entry)) {
+          void reconcile();
+        }
         return;
       }
       if (event.type === "openclaw.typing" && event.data && typeof event.data === "object") {
@@ -683,6 +713,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
             },
           };
         });
+        if (!active) {
+          void reconcile();
+        }
         return;
       }
       if (event.type === "draft.upserted" && event.data && typeof event.data === "object") {

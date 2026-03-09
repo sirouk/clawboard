@@ -2279,6 +2279,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const { value: unifiedComposerDraft, setValue: setUnifiedComposerDraft } = usePersistentDraft("draft:unified:composer", {
     fallback: "",
   });
+  const [unifiedComposerSearchActive, setUnifiedComposerSearchActive] = useState(false);
   const [unifiedComposerAttachments, setUnifiedComposerAttachments] = useState<UnifiedComposerAttachment[]>([]);
   const [unifiedComposerBusy, setUnifiedComposerBusy] = useState(false);
   const [unifiedComposerError, setUnifiedComposerError] = useState<string | null>(null);
@@ -3360,7 +3361,22 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     [selectedSpaceId, setLogs, token]
   );
 
-  const searchPlan = useMemo(() => buildUnifiedSearchPlan(unifiedComposerDraft), [unifiedComposerDraft]);
+  const activateUnifiedComposerSearch = useCallback(() => {
+    setUnifiedComposerSearchActive(true);
+  }, []);
+  const clearUnifiedComposerSearch = useCallback(() => {
+    setUnifiedComposerSearchActive(false);
+  }, []);
+
+  useEffect(() => {
+    if (unifiedComposerDraft.trim().length > 0) return;
+    setUnifiedComposerSearchActive(false);
+  }, [unifiedComposerDraft]);
+
+  const searchPlan = useMemo(
+    () => buildUnifiedSearchPlan(unifiedComposerSearchActive ? unifiedComposerDraft : ""),
+    [unifiedComposerDraft, unifiedComposerSearchActive]
+  );
   const normalizedSearch = searchPlan.normalized;
   const semanticSearchQuery = searchPlan.lexicalQuery;
   const semanticSearchHintQuery = searchPlan.semanticQuery;
@@ -5690,9 +5706,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     [effectiveAwaitingAssistant, openclawTyping, openclawThreadWork, orchestrationThreadWorkBySession]
   );
   const clearUnifiedComposerFields = useCallback(() => {
+    clearUnifiedComposerSearch();
     setUnifiedComposerDraft("");
     clearUnifiedComposerAttachments();
-  }, [clearUnifiedComposerAttachments, setUnifiedComposerDraft]);
+  }, [clearUnifiedComposerAttachments, clearUnifiedComposerSearch, setUnifiedComposerDraft]);
 
   const resolveUnifiedCancelTargetSession = useCallback(() => {
     const selectedKey = normalizeBoardSessionKey(selectedComposerSessionKey);
@@ -6096,10 +6113,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 ref={unifiedComposerTextareaRef}
                 data-testid="unified-composer-textarea"
                 value={unifiedComposerDraft}
-                onFocus={startUnifiedComposerFocusNudge}
+                onFocus={() => {
+                  activateUnifiedComposerSearch();
+                  startUnifiedComposerFocusNudge();
+                }}
                 onBlur={clearUnifiedComposerFocusNudge}
                 onChange={(event) => {
                   const value = event.target.value;
+                  activateUnifiedComposerSearch();
                   setUnifiedComposerDraft(value);
                   setUnifiedComposerError(null);
                   setUnifiedCancelNotice(null);
@@ -6176,6 +6197,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   <button
                     type="button"
                     onClick={() => {
+                      clearUnifiedComposerSearch();
                       setUnifiedComposerDraft('');
                       clearUnifiedComposerAttachments();
                       setUnifiedComposerError(null);
@@ -7570,13 +7592,24 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                               className={cn(
                                 "mt-2.5 pt-2",
                                 taskChatFullscreen
-                                  ? "mt-0 flex min-h-0 flex-1 flex-col overflow-hidden overscroll-none px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-[calc(env(safe-area-inset-top)+2.7rem)]"
+                                  ? "mt-0 flex min-h-0 flex-1 flex-col overflow-hidden overscroll-none px-4"
                                   : ""
                               )}
-                              style={taskChatFullscreen ? mobileOverlaySurfaceStyle(taskColor) : undefined}
+                              style={
+                                taskChatFullscreen
+                                  ? {
+                                      ...mobileOverlaySurfaceStyle(taskColor),
+                                      paddingTop: "calc(env(safe-area-inset-top) + 2.7rem)",
+                                      paddingBottom: "calc(env(safe-area-inset-bottom) + 1rem)",
+                                    }
+                                  : undefined
+                              }
                             >
                               {taskChatFullscreen ? (
-                                <div className="absolute left-3 top-[calc(env(safe-area-inset-top)+0.5rem)] z-20 flex items-center gap-2">
+                                <div
+                                  className="absolute left-3 z-20 flex items-center gap-2"
+                                  style={{ top: "calc(env(safe-area-inset-top) + 0.5rem)" }}
+                                >
                                   <button
                                     type="button"
                                     className="inline-flex h-8 w-8 items-center justify-center rounded-full border text-base text-[rgb(var(--claw-text))] backdrop-blur"
@@ -7641,15 +7674,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                               <nav
                                                 aria-label="Task chat context"
                                                 data-testid={`task-chat-breadcrumb-${task.id}`}
-                                                className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[11px] text-[rgb(var(--claw-muted))]"
+                                                className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 text-[11px] text-[rgb(var(--claw-muted))]"
                                               >
                                                 <span className="shrink-0 uppercase tracking-[0.14em]">Topic</span>
-                                                <span className="min-w-0 max-w-[30vw] truncate font-medium text-[rgb(var(--claw-text))]">
+                                                <span className="inline-flex max-w-full overflow-x-auto whitespace-nowrap font-medium text-[rgb(var(--claw-text))]">
                                                   {topic.name}
                                                 </span>
                                                 <span className="shrink-0 text-[rgba(var(--claw-muted),0.65)]">/</span>
                                                 <span className="shrink-0 uppercase tracking-[0.14em]">Task</span>
-                                                <span className="min-w-0 max-w-[48vw] break-words font-medium leading-tight text-[rgb(var(--claw-text))]">
+                                                <span className="inline-flex max-w-full overflow-x-auto whitespace-nowrap font-medium text-[rgb(var(--claw-text))]">
                                                   {task.title}
                                                 </span>
                                               </nav>
@@ -7687,7 +7720,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                               <>
                                                 <span className="text-xs text-[rgba(var(--claw-muted),0.55)]">·</span>
                                                 <div
-                                                  className="min-w-0 max-w-[56ch] truncate text-xs text-[rgba(var(--claw-muted),0.9)]"
+                                                  className="min-w-0 max-w-[56ch] overflow-x-auto whitespace-nowrap text-xs text-[rgba(var(--claw-muted),0.9)]"
                                                   title={taskChatBlurb.full}
                                                 >
                                                   {taskChatBlurb.clipped}

@@ -175,3 +175,33 @@ test("browser API calls use the configured mock API base by default in Playwrigh
   expect(sameOriginSendHits).toBe(0);
   await expect(page.getByText("Failed to fetch")).toHaveCount(0);
 });
+
+test("explicit local loopback api base still uses same-origin proxy for browser calls", async ({ page }) => {
+  const webOrigin = "http://127.0.0.1:3050";
+  let sameOriginConfigHits = 0;
+  let directLoopbackHits = 0;
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem("clawboard.apiBase", "http://127.0.0.1:8010");
+    window.localStorage.setItem("clawboard.token", "local-proxy-token");
+  });
+
+  page.on("request", (req) => {
+    if (req.url().startsWith(`${webOrigin}/api/config`)) sameOriginConfigHits += 1;
+    if (req.url().startsWith("http://127.0.0.1:8010/api/config")) directLoopbackHits += 1;
+  });
+
+  await page.route("http://127.0.0.1:8010/api/config", async (route) => {
+    directLoopbackHits += 1000;
+    await route.abort();
+  });
+
+  await page.goto(`${webOrigin}/u`);
+  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+
+  await expect
+    .poll(() => sameOriginConfigHits)
+    .toBeGreaterThan(0);
+  expect(directLoopbackHits).toBe(0);
+  await expect(page.getByText("Failed to fetch")).toHaveCount(0);
+});

@@ -295,6 +295,487 @@ test("chat hides transport noise while still surfacing meaningful tool rows and 
   await expect(page.getByTestId(`task-chat-entries-${taskId}`)).toHaveText("3 entries · 1 tool/system call");
 });
 
+test("chat hides orchestration admin chatter while keeping curated agent answers", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-admin-noise-${suffix}`;
+  const topicName = `Admin Noise ${suffix}`;
+  const taskId = `task-admin-noise-${suffix}`;
+  const taskTitle = `Admin chatter task ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "todo", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  const appendLog = async (data: Record<string, unknown>) => {
+    const response = await request.post(`${apiBase}/api/log`, { data });
+    expect(response.ok()).toBeTruthy();
+  };
+
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: `user-admin-${suffix}`,
+    summary: `user-admin-${suffix}`,
+    classificationStatus: "classified",
+    agentId: "user",
+    agentLabel: "User",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Dispatching to coding specialist to inspect the cron jobs now.",
+    summary: "Dispatching to coding specialist",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "system",
+    content: "Dispatched to **coding** specialist — checking cron jobs now. I'll report back once the result comes in.",
+    summary: "Delegated to coding",
+    classificationStatus: "classified",
+    agentId: "system",
+    agentLabel: "System",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Task updated with delegation state. The coding specialist will report the cron list results when complete.",
+    summary: "Task updated with delegation state",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "webchat", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Task tracking updated. The coding specialist will auto-report when the cron check completes.",
+    summary: "Task tracking updated",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Task state updated — coding specialist is checking for active cron jobs now. I'll let you know as soon as the result comes back.",
+    summary: "Task state updated",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Let me check if the coding specialist has completed the cron list check.",
+    summary: "Follow-up check",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "No additional action needed — the coding specialist has accepted the task and will return results automatically.",
+    summary: "Specialist accepted task",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Dispatching two coding specialists in parallel now.",
+    summary: "Dispatching two coding specialists in parallel now.",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Dispatching to both `coding` and `docs` in parallel — you'll get a combined answer shortly.",
+    summary: "Dispatching to both coding and docs in parallel",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Dispatched two specialists in parallel. Both results will be announced back here when complete. I'll synthesize them into one combined answer.",
+    summary: "Parallel specialist dispatch",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "This is the same request — I already dispatched both coding specialists. Let me check their status and synthesize the combined answer.",
+    summary: "Repeat dispatch status",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Both specialists are still running. Let me query them directly for their results.",
+    summary: "Direct result query status",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Visibility restrictions prevent cross-agent messaging. Re-spawning fresh specialists now.",
+    summary: "Respawn status",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Re-dispatched two fresh coding specialists. Both will auto-report back. I'll deliver the combined answer once results arrive.",
+    summary: "Fresh specialist respawn",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Same request — checking if the two specialists I just spawned have completed.",
+    summary: "Repeat completion check",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Let me spawn fresh specialists with clear instructions.",
+    summary: "Spawn fresh specialists",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "system",
+    content: "Specialist B completed: **2 enabled cron jobs** (`weather-check-am` and `weather-check-pm`). Still waiting on Specialist A (gateway health check). Will deliver the combined answer once both are in.",
+    summary: "Specialist B completed",
+    classificationStatus: "classified",
+    agentId: "system",
+    agentLabel: "System",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "system",
+    content: "Specialist B completed: **2 enabled cron jobs** (`weather-check-am` and `weather-check-pm`). Waiting for Specialist A (gateway health check) to complete before delivering the combined answer.",
+    summary: "Specialist B completed waiting for A",
+    classificationStatus: "classified",
+    agentId: "system",
+    agentLabel: "System",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "system",
+    content: "Monitoring active work: 0 delegated item(s) still running. Next check in ~180s.",
+    summary: "Monitoring active work",
+    classificationStatus: "classified",
+    agentId: "system",
+    agentLabel: "System",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "system",
+    content: "Work item marked done for coding.",
+    summary: "Coding done",
+    classificationStatus: "classified",
+    agentId: "system",
+    agentLabel: "System",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "system",
+    content: "Coding specialist still running. Waiting for its completion to provide the combined answer.",
+    summary: "Coding specialist still running",
+    classificationStatus: "classified",
+    agentId: "system",
+    agentLabel: "System",
+    source: {
+      sessionKey,
+      channel: "clawboard",
+      requestId: `req-admin-${suffix}`,
+      suppressedWaitingStatus: true,
+    },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Cron check complete: 2 active jobs remain scheduled and enabled.",
+    summary: "Cron check complete",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Done. Task closed.",
+    summary: "Done. Task closed.",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Task closed.",
+    summary: "Task closed.",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Task closed. Let me know if you want to troubleshoot those failing weather checks.",
+    summary: "Task closed. Let me know if you want to troubleshoot those failing weather checks.",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Request complete. Let me know if you want me to dig deeper.",
+    summary: "Request complete. Let me know if you want me to dig deeper.",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}` },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "system",
+    content: "All tracked work items reached terminal completion.",
+    summary: "Run done",
+    classificationStatus: "classified",
+    agentId: "system",
+    agentLabel: "System",
+    source: { sessionKey, channel: "clawboard", requestId: `req-admin-${suffix}`, requestTerminal: true },
+  });
+
+  await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  await expect(page.getByText("Dispatching to coding specialist", { exact: false })).toBeVisible();
+  await expect(page.getByText("Cron check complete: 2 active jobs remain scheduled and enabled.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Task updated with delegation state.", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Task tracking updated.", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Task state updated", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Let me check if the coding specialist has completed", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("No additional action needed", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Dispatching two coding specialists in parallel now.", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("you'll get a combined answer shortly", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Both results will be announced back here when complete", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("I already dispatched both coding specialists", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Let me query them directly for their results", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Visibility restrictions prevent cross-agent messaging", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Re-dispatched two fresh coding specialists", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Same request — checking if the two specialists", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Let me spawn fresh specialists with clear instructions", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Still waiting on Specialist A", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Waiting for Specialist A", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Coding specialist still running", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Done. Task closed.", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Task closed.", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("troubleshoot those failing weather checks", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Request complete. Let me know if you want me to dig deeper.", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Monitoring active work:", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Work item marked done for coding.", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("All tracked work items reached terminal completion.", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Dispatched to **coding** specialist", { exact: false })).toHaveCount(0);
+});
+
+test("chat markdown keeps long non-wrapping content horizontally scrollable", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-overflow-${suffix}`;
+  const topicName = `Overflow ${suffix}`;
+  const taskId = `task-overflow-${suffix}`;
+  const taskTitle = `Overflow task ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
+  const longToken = `session:agent:main:clawboard:task:${topicId}:${taskId}:${"x".repeat(72)}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "todo", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  const appendLog = async (data: Record<string, unknown>) => {
+    const response = await request.post(`${apiBase}/api/log`, { data });
+    expect(response.ok()).toBeTruthy();
+  };
+
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: `| Column | Value |\n| --- | --- |\n| Session | \`${longToken}\` |`,
+    summary: "Overflow table",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: {
+      sessionKey,
+      channel: "clawboard",
+      requestId: `req-overflow-${suffix}`,
+      messageId: `oc-overflow-${suffix}`,
+    },
+  });
+
+  await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  await expect(page.locator("code").filter({ hasText: longToken }).first()).toBeVisible();
+
+  const tableStyle = await page.locator("table").first().locator("xpath=..").evaluate((node) => {
+    return {
+      className: (node as HTMLElement).className,
+    };
+  });
+  expect(tableStyle.className).toContain("overflow-x-auto");
+});
+
+test("chat metadata keeps long session details horizontally scrollable", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-meta-overflow-${suffix}`;
+  const topicName = `Meta Overflow ${suffix}`;
+  const taskId = `task-meta-overflow-${suffix}`;
+  const taskTitle = `Meta overflow task ${suffix}`;
+  const longSessionKey = `clawboard:task:${topicId}:${taskId}:${"segment".repeat(12)}`;
+  const longMessageId = `oc-meta-${suffix}-${"x".repeat(40)}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "todo", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  const appendLog = async (data: Record<string, unknown>) => {
+    const response = await request.post(`${apiBase}/api/log`, { data });
+    expect(response.ok()).toBeTruthy();
+  };
+
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "metadata overflow check",
+    summary: "metadata overflow check",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: {
+      sessionKey: longSessionKey,
+      channel: "openclaw",
+      messageId: longMessageId,
+      requestId: `req-meta-${suffix}`,
+    },
+  });
+
+  await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const meta = page.locator("span.font-mono").filter({ hasText: `session: ${longSessionKey}` }).first();
+  await expect(meta).toBeVisible();
+
+  const classNames = await meta.evaluate((node) => ({
+    self: (node as HTMLElement).className,
+    parent: ((node as HTMLElement).parentElement as HTMLElement | null)?.className ?? "",
+  }));
+  expect(classNames.self).toContain("whitespace-nowrap");
+  expect(classNames.parent).toContain("overflow-x-auto");
+});
+
 test("active task chat shows pending assistant and tool rows before classification settles", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
   const suffix = Date.now();

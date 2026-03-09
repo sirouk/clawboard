@@ -1443,6 +1443,13 @@ const LogRow = memo(function LogRow({
                   {replayError}
                 </p>
               ) : null}
+              {!editOpen && sourceMeta ? (
+                <div className={`mt-2 ${isUser ? "flex justify-end" : "flex justify-start"}`}>
+                  <div className="min-w-0 max-w-full overflow-x-auto text-xs text-[rgb(var(--claw-muted))]">
+                    <span className="inline-block whitespace-nowrap font-mono">{sourceMeta}</span>
+                  </div>
+                </div>
+              ) : null}
 
               {allowNotes && entry.type !== "note" && noteOpen && (
                 <div className="mt-2">
@@ -1722,8 +1729,8 @@ const LogRow = memo(function LogRow({
                     </div>
 
                     {sourceMeta && (
-                      <div className="pt-2 text-xs text-[rgb(var(--claw-muted))]">
-                        <span className="font-mono">{sourceMeta}</span>
+                      <div className="min-w-0 max-w-full overflow-x-auto pt-2 text-xs text-[rgb(var(--claw-muted))]">
+                        <span className="inline-block whitespace-nowrap font-mono">{sourceMeta}</span>
                       </div>
                     )}
                     {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}
@@ -1788,7 +1795,7 @@ const LogRow = memo(function LogRow({
 	                        Loading…
 	                      </div>
 	                    ) : null}
-	                    <pre className="mt-1 max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-[10px] border border-[rgba(255,255,255,0.10)] bg-[rgba(10,12,16,0.55)] px-3 py-2 font-mono text-[11px] text-[rgb(var(--claw-text))]">
+	                    <pre className="mt-1 max-h-[420px] overflow-auto whitespace-pre rounded-[10px] border border-[rgba(255,255,255,0.10)] bg-[rgba(10,12,16,0.55)] px-3 py-2 font-mono text-[11px] text-[rgb(var(--claw-text))]">
 	                      {toolRaw ?? "(No tool details)"}
 	                    </pre>
 	                  </div>
@@ -2130,8 +2137,8 @@ const LogRow = memo(function LogRow({
                   )}
 
                   {sourceMeta && (
-                    <div className="pt-2 text-xs text-[rgb(var(--claw-muted))]">
-                      <span className="font-mono">{sourceMeta}</span>
+                    <div className="min-w-0 max-w-full overflow-x-auto pt-2 text-xs text-[rgb(var(--claw-muted))]">
+                      <span className="inline-block whitespace-nowrap font-mono">{sourceMeta}</span>
                     </div>
                   )}
                   {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}
@@ -2272,7 +2279,7 @@ const LogRow = memo(function LogRow({
                     </Button>
                   )}
                   {showFullMessage && (
-                    <pre className="mt-2 max-h-[520px] overflow-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+                    <pre className="mt-2 max-h-[520px] overflow-auto whitespace-pre rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
                       {toolRaw ?? entry.raw}
                     </pre>
                   )}
@@ -2293,7 +2300,7 @@ const LogRow = memo(function LogRow({
                     </Button>
                   )}
                   {showFullMessage && (
-                    <pre className="mt-2 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
+                    <pre className="mt-2 overflow-auto whitespace-pre rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">
                       {entry.raw}
                     </pre>
                   )}
@@ -2609,8 +2616,8 @@ const LogRow = memo(function LogRow({
             )}
 
             {sourceMeta && (
-              <div className="pt-2 text-xs text-[rgb(var(--claw-muted))]">
-                <span className="font-mono">{sourceMeta}</span>
+              <div className="min-w-0 max-w-full overflow-x-auto pt-2 text-xs text-[rgb(var(--claw-muted))]">
+                <span className="inline-block whitespace-nowrap font-mono">{sourceMeta}</span>
               </div>
             )}
             {readOnly && <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup.</p>}

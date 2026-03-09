@@ -70,21 +70,38 @@ function getEnvBrowserBase() {
   return coerceBrowserBase(envBaseRaw);
 }
 
+function shouldProxyBrowserBase(path: string, base: string) {
+  if (typeof window === "undefined" || !path.startsWith("/api")) return false;
+  if (!base) return false;
+  if (base.startsWith("/")) return true;
+
+  try {
+    const url = new URL(base);
+    if (url.port !== DEFAULT_API_PORT) return false;
+    return isSameBrowserHost(url);
+  } catch {
+    return false;
+  }
+}
+
 function shouldUseSameOriginApiProxy(path: string) {
   if (typeof window === "undefined" || !path.startsWith("/api")) return false;
-  if (getExplicitBrowserBase()) return false;
+  const explicitBase = getExplicitBrowserBase();
+  if (explicitBase) return shouldProxyBrowserBase(path, explicitBase);
 
   const envBase = getEnvBrowserBase();
   if (!envBase) return true;
   if (envBase.startsWith("/")) return true;
-
   try {
     const url = new URL(envBase);
-    if (isSameBrowserHost(url) && url.port === DEFAULT_API_PORT) return true;
-    return isLoopbackHost(url.hostname) && url.port === DEFAULT_API_PORT;
+    // Product default: real Clawboard browser traffic should use the Next same-origin proxy
+    // whenever the configured backend is the normal API service port. Nonstandard ports
+    // (for example mock Playwright servers on 3051) stay direct.
+    if (url.port === DEFAULT_API_PORT) return true;
   } catch {
-    return false;
+    // Fall through to host-aware proxy heuristics.
   }
+  return shouldProxyBrowserBase(path, envBase);
 }
 
 export function getApiBase() {

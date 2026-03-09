@@ -1043,6 +1043,12 @@ PY
   local allow_agents_json
   log_info "Configuring main agent tool policy (index $main_idx)..."
 
+  # Cross-agent supervision only works reliably when session tools can see across
+  # agent boundaries and sandbox clamping does not silently reduce that scope.
+  run_cfg_set "tools.sessions.visibility" "all" string true
+  run_cfg_set "tools.agentToAgent.enabled" true json true
+  run_cfg_set "agents.defaults.sandbox.sessionToolsVisibility" "all" string true
+
   # Keep main delegation targets aligned with actual configured agents.
   # This allows an elastic specialist pool without hardcoding ids in this script.
   allow_agents_json="$(
@@ -1108,7 +1114,7 @@ PY
   run_cfg_set "${base}.heartbeat.every" "5m" string true
   run_cfg_set "${base}.heartbeat.target" "last" string true
   run_cfg_set "${base}.heartbeat.prompt" \
-    "Heartbeat: (1) read the Clawboard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call clawboard_search(\"delegating\") as a backup sweep; (3) for each tagged child session key, call session_status(sessionKey=<childSessionKey>); (4) enforce follow-up ladder 1m->3m->10m->15m->30m->1h (cap 1h): each in-flight delegation must have a one-shot cron follow-up and the next wait must come from this ladder; (5) if any queued sub-agent completion message is present, treat it as an internal supervision wake-up, read the current task thread first, and if the result is already visible there, do not restate or paraphrase the full body or re-dispatch the same specialists; close the loop with validation, key delta/caveats, and a clear satisfied-or-blocked status; (6) if any tagged run is missing or terminal without a relayed result: re-spawn and reset follow-up to +1m; (7) if any run is still active beyond 5 minutes, send the user a brief status update with next check ETA; if nothing materially changed and the last visible status is newer than 5 minutes, do not send another status-only update. If nothing needs attention, reply HEARTBEAT_OK." \
+    "Heartbeat: (1) read the Clawboard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call clawboard_search(\"delegating\") as a backup sweep; (3) for each tagged child session key, call session_status(sessionKey=<childSessionKey>); (4) enforce follow-up ladder 1m->3m->10m->15m->30m->1h (cap 1h): each in-flight delegation must have a one-shot cron follow-up and the next wait must come from this ladder; (5) if any queued sub-agent completion message is present, treat it as an internal supervision wake-up, read the current task thread first, and if the result is already visible there, do not restate or paraphrase the full body or re-dispatch the same specialists; if sibling specialists from the same workflow are still active, keep partial results internal unless they change the user's next decision or the user has gone >5m without a visible update; do not send a user-facing message that only says you are checking or waiting on the remaining specialists; close the loop with validation, key delta/caveats, and a clear satisfied-or-blocked status; (6) if any tagged run is missing or terminal without a relayed result: re-spawn and reset follow-up to +1m; (7) if any run is still active beyond 5 minutes, send the user a brief status update with next check ETA; if nothing materially changed and the last visible status is newer than 5 minutes, do not send another status-only update. If nothing needs attention, reply HEARTBEAT_OK." \
     string true
   run_cfg_set "${base}.heartbeat.ackMaxChars" 300 json true
 
@@ -1159,7 +1165,7 @@ watchdog_text = (
     "LOST (session missing or terminal without relayed output): sessions_spawn(agentId, originalTask), "
     "clawboard_update_task(taskId, { tags: [\"delegating\",\"agent:<agentId>\",\"session:<newKey>\"] }), "
     "cron.add new follow-up at +1 minute and continue ladder progression.\n"
-    "3. If a queued sub-agent completion message is present at wake-up, treat it as internal supervision rather than a fresh user request; read the current task thread first; if the result is already visible there, do not parrot it back or re-dispatch the same specialists; add only the supervisor delta, clear delegation tags, and close the loop.\n"
+    "3. If a queued sub-agent completion message is present at wake-up, treat it as internal supervision rather than a fresh user request; read the current task thread first; if the result is already visible there, do not parrot it back or re-dispatch the same specialists; if sibling specialists from the same workflow are still active, keep partial results internal unless they change the user's next decision or the user has gone >5m without a visible update; do not send a user-facing message that only says you are checking or waiting on the rest; add only the supervisor delta, clear delegation tags, and close the loop.\n"
     "If nothing needs attention, reply HEARTBEAT_OK."
   )
 jobs.append({

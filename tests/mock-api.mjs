@@ -201,6 +201,47 @@ function normalizeText(value) {
     .trim();
 }
 
+function isBriefParallelDispatchText(text) {
+  return (
+    (
+      text.includes("dispatching ")
+      && text.includes(" specialist")
+      && text.includes(" in parallel")
+      && text.includes(" now")
+    )
+    || (
+      text.includes("dispatching to both ")
+      && text.includes(" in parallel")
+      && text.includes("combined answer shortly")
+    )
+  );
+}
+
+function isRedundantPartialSpecialistCompletionText(text) {
+  return (
+    text.includes("specialist ")
+    && text.includes(" completed:")
+    && (text.includes("still waiting on specialist ") || text.includes("waiting for specialist "))
+    && (text.includes("will deliver the combined answer") || text.includes("delivering the combined answer"))
+  );
+}
+
+function hasSuppressedWaitingStatus(entry) {
+  const value = entry?.source?.suppressedWaitingStatus;
+  return value === true || value === 1 || normalizeText(value) === "true";
+}
+
+function isLowSignalClosureText(text) {
+  return (
+    text.startsWith("task closed")
+    || text.startsWith("done. task closed")
+    || text.startsWith("done task closed")
+    || text.startsWith("request complete")
+    || text.startsWith("done. request complete")
+    || text.startsWith("done request complete")
+  );
+}
+
 function isChatNoiseLog(entry) {
   const type = normalizeText(entry?.type);
   const agentId = normalizeText(entry?.agentId);
@@ -215,6 +256,18 @@ function isChatNoiseLog(entry) {
     agentId === "assistant" &&
     (text === "heartbeat_ok" || text === "same recovery event already handled")
   ) {
+    return true;
+  }
+  if (type === "conversation" && agentId === "assistant" && isBriefParallelDispatchText(text)) {
+    return true;
+  }
+  if (type === "conversation" && agentId === "assistant" && isLowSignalClosureText(text)) {
+    return true;
+  }
+  if (type === "system" && agentId === "system" && hasSuppressedWaitingStatus(entry)) {
+    return true;
+  }
+  if (type === "system" && agentId === "system" && isRedundantPartialSpecialistCompletionText(text)) {
     return true;
   }
   return false;
@@ -739,7 +792,10 @@ const server = http.createServer(async (req, res) => {
       const task = store.tasks.find((row) => row.id === taskId);
       if (!task) return sendJson(res, 404, { error: "Not found" });
       Object.assign(task, payload, { updatedAt: nowIso() });
-      pushEvent("task.upserted", task);
+      const silentEvent = String(req.headers["x-mock-silent-event"] || "").trim() === "1";
+      if (!silentEvent) {
+        pushEvent("task.upserted", task);
+      }
       return sendJson(res, 200, task);
     }
 

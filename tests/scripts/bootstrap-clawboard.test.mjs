@@ -569,8 +569,9 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   assert.equal(firstRun.code, 0, `exit=${firstRun.code}\nstdout:\n${firstRun.stdout}\nstderr:\n${firstRun.stderr}`);
   assert.match(
     firstRun.stdout,
-    /Cross-agent follow-up checks will use session_status \+ queued subagent announces \(no tools\.sessions\.visibility override\)\./
+    /Cross-agent follow-up checks will use session_status \+ queued subagent announces, with explicit cross-agent session visibility for supervised recovery\./
   );
+  assert.match(firstRun.stdout, /tools\.sessions\.visibility=all/i);
   assert.match(firstRun.stdout, /agents\.defaults\.sandbox\.sessionToolsVisibility=all/i);
   assert.match(firstRun.stdout, /tools\.agentToAgent\.enabled=true/i);
 
@@ -604,6 +605,7 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   const envText = await readFile(envPath, "utf8");
   const envLines = envText.split(/\r?\n/);
   const singleEntryKeys = [
+    "OPENCLAW_CHAT_TRANSPORT",
     "OPENCLAW_REQUEST_ID_MAX_ENTRIES",
     "OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS",
     "OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES",
@@ -617,6 +619,7 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
     const count = envLines.filter((line) => line.startsWith(`${key}=`)).length;
     assert.equal(count, 1, `expected ${key} to be written exactly once after rerun, found ${count}`);
   }
+  assert.match(envText, /^OPENCLAW_CHAT_TRANSPORT=auto$/m);
 });
 
 test("bootstrap_clawboard.sh: uses CLAWBOARD_TOKEN for API health and config writes", async () => {
@@ -1074,7 +1077,7 @@ test("bootstrap_clawboard.sh: setup-agentic-team enrolls specialists and syncs m
   assert.match(openclawLog, /agents add social --workspace/);
 });
 
-test("bootstrap_clawboard.sh: does not write unsupported tools.sessions.visibility config", async () => {
+test("bootstrap_clawboard.sh: writes cross-agent session visibility config", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-session-visibility-"));
   const repoRoot = path.join(tmp, "repo");
   const installDir = path.join(tmp, "install");
@@ -1146,11 +1149,13 @@ test("bootstrap_clawboard.sh: does not write unsupported tools.sessions.visibili
   assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
   assert.match(
     res.stdout,
-    /Cross-agent follow-up checks will use session_status \+ queued subagent announces \(no tools\.sessions\.visibility override\)\./
+    /Cross-agent follow-up checks will use session_status \+ queued subagent announces, with explicit cross-agent session visibility for supervised recovery\./
   );
 
   const config = JSON.parse(await readFile(configPath, "utf8"));
-  assert.ok(!("sessions" in (config.tools ?? {})), "bootstrap should not persist tools.sessions in config");
+  assert.equal(config.tools?.sessions?.visibility, "all");
+  assert.equal(config.agents?.defaults?.sandbox?.sessionToolsVisibility, "all");
+  assert.equal(config.tools?.agentToAgent?.enabled, true);
 });
 
 test("bootstrap_clawboard.sh: reconciles macOS LaunchAgent gateway token drift from OpenClaw config", async () => {
@@ -1432,7 +1437,8 @@ test("specialist contracts document canonical clawboard repo paths", async () =>
     ]);
 
   for (const text of [codingAgentText, docsAgentText, codingDirectiveText, docsDirectiveText]) {
-    assert.match(text, /\$OPENCLAW_HOME\/workspace\/projects\/clawboard|projects\/clawboard/i);
+    assert.match(text, /~\/\.openclaw\/workspace\/projects\/clawboard|projects\/clawboard/i);
+    assert.match(text, /Do not assume .*OPENCLAW_HOME.* set|Do not assume .*OPENCLAW_HOME.* exported/i);
   }
   for (const text of [codingAgentText, codingDirectiveText]) {
     assert.match(text, /skills\/clawboard/i);
@@ -1470,6 +1476,8 @@ test("main-agent orchestration contract documents runtime model, specialist map,
   assert.match(agentsText, /session_status/i);
   assert.match(agentsText, /queued auto-announces|queued completion/i);
   assert.match(agentsText, /do not restate or paraphrase the full body/i);
+  assert.match(agentsText, /sibling specialists.*still active|partial results internal/i);
+  assert.match(agentsText, /checking the other specialists|awaiting the rest|no new user-facing text/i);
   assert.match(agentsText, /current-task thread|current task thread/i);
   assert.match(agentsText, /skip the task write instead of guessing from the title/i);
   assert.match(agentsText, /Do not call `session_status` in the same turn you just spawned/i);
@@ -1487,6 +1495,8 @@ test("main-agent orchestration contract documents runtime model, specialist map,
   assert.match(heartbeatText, /session_status/i);
   assert.match(heartbeatText, /queued subagent completion|queued completion/i);
   assert.match(heartbeatText, /do not restate the full body|do not parrot it back/i);
+  assert.match(heartbeatText, /sibling specialists.*still active|partial results internal/i);
+  assert.match(heartbeatText, /checking or waiting on the other specialists|preferred next action is no user-facing text/i);
   assert.match(heartbeatText, /before any extra tool call or task write/i);
   assert.match(bootstrapText, /blocked on a real user decision/i);
   assert.match(bootstrapText, /session_status/i);
@@ -1494,13 +1504,19 @@ test("main-agent orchestration contract documents runtime model, specialist map,
   assert.match(bootstrapText, /Do not call `session_status\(childSessionKey\)` in that same post-spawn turn/i);
   assert.match(bootstrapText, /next action must be a plain-text dispatch update to the user immediately/i);
   assert.match(bootstrapText, /do not restate or paraphrase the full body/i);
+  assert.match(bootstrapText, /sibling specialists.*still active|partial results internal/i);
+  assert.match(bootstrapText, /checking the others|awaiting the rest/i);
   assert.match(bootstrapText, /before any extra tool call or task write/i);
   assert.match(directiveText, /OpenClaw is the runtime/i);
   assert.match(directiveText, /Clawboard is the durable ledger/i);
   assert.match(directiveText, /user decision/i);
   assert.match(directiveText, /do not parrot the full body back/i);
+  assert.match(directiveText, /sibling specialists.*still active|partial completions internal/i);
+  assert.match(directiveText, /checking the others|awaiting the rest|no new visible text/i);
   assert.match(setupText, /current task thread/i);
   assert.match(setupText, /do not restate or paraphrase the full body|do not parrot it back/i);
+  assert.match(setupText, /sibling specialists.*still active|partial results internal/i);
+  assert.match(setupText, /checking or waiting on the remaining specialists|checking or waiting on the rest/i);
   assert.match(readmeText, /setup-agentic-team/i);
   assert.match(readmeText, /CLAWBOARD_AGENTIC_TEAM_SETUP=always/i);
 });

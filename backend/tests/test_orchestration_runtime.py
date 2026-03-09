@@ -250,6 +250,92 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             )
         )
         self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "Sent to coding agent — running `openclaw cron list --json` now. "
+                "I'll report back with whether any jobs are active once the result comes in.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "Task state updated — coding specialist is checking for active cron jobs now. "
+                "I'll let you know as soon as the result comes back.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "Let me check if the coding specialist has completed the cron list check.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "No additional action needed — the coding specialist has accepted the task and will return results automatically.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "Dispatched two specialists in parallel. Both results will be announced back here when complete. I'll synthesize them into one combined answer.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "Dispatching two coding specialists in parallel now.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "This is the same request — I already dispatched both coding specialists. Let me check their status and synthesize the combined answer.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "Both specialists are still running. Let me query them directly for their results.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "Visibility restrictions prevent cross-agent messaging. Re-spawning fresh specialists now.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "Re-dispatched two fresh coding specialists. Both will auto-report back. I'll deliver the combined answer once results arrive.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "Same request — checking if the two specialists I just spawned have completed.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_waiting_status_text(
+                "Let me spawn fresh specialists with clear instructions.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
             main_module._orchestration_is_non_delivery_status_text(
                 "HEARTBEAT_OK",
                 "HEARTBEAT_OK",
@@ -315,6 +401,137 @@ class OrchestrationRuntimeTests(unittest.TestCase):
         self.assertEqual(second.type, "system")
         self.assertEqual(second.agentId, "system")
         self.assertTrue(bool((second.source or {}).get("suppressedWaitingStatus")))
+
+    def test_orch_002dc_live_style_follow_up_statuses_are_demoted_to_system_logs(self):
+        session_key = "clawboard:task:topic-orch-002dc:task-orch-002dc"
+        request_id = self._openclaw_chat(
+            session_key=session_key,
+            message="Use coding to inspect the cron jobs and keep status noise out of the user thread.",
+        )
+
+        first_iso = now_iso()
+        second_iso = (datetime.now(timezone.utc) + timedelta(seconds=6)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        third_iso = (datetime.now(timezone.utc) + timedelta(seconds=12)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+        first = self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Dispatching to the coding specialist to run `openclaw cron list --json` and check for active jobs.",
+                summary="Initial dispatch",
+                createdAt=first_iso,
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "webchat", "requestId": request_id},
+            ),
+            idem="orch-002dc-first",
+        )
+        second = self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Task state updated — coding specialist is checking for active cron jobs now. I'll let you know as soon as the result comes back.",
+                summary="Task state updated",
+                createdAt=second_iso,
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "webchat", "requestId": request_id},
+            ),
+            idem="orch-002dc-second",
+        )
+        third = self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Let me check if the coding specialist has completed the cron list check.",
+                summary="Follow-up check",
+                createdAt=third_iso,
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "webchat", "requestId": request_id},
+            ),
+            idem="orch-002dc-third",
+        )
+        fourth = self._append_log(
+            LogAppend(
+                type="conversation",
+                content="No additional action needed — the coding specialist has accepted the task and will return results automatically.",
+                summary="Specialist accepted task",
+                createdAt=(datetime.now(timezone.utc) + timedelta(seconds=18)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "webchat", "requestId": request_id},
+            ),
+            idem="orch-002dc-fourth",
+        )
+        fifth = self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Dispatched two specialists in parallel. Both results will be announced back here when complete. I'll synthesize them into one combined answer.",
+                summary="Parallel specialist dispatch",
+                createdAt=(datetime.now(timezone.utc) + timedelta(seconds=24)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "webchat", "requestId": request_id},
+            ),
+            idem="orch-002dc-fifth",
+        )
+        sixth = self._append_log(
+            LogAppend(
+                type="conversation",
+                content="This is the same request — I already dispatched both coding specialists. Let me check their status and synthesize the combined answer.",
+                summary="Repeat dispatch status",
+                createdAt=(datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "webchat", "requestId": request_id},
+            ),
+            idem="orch-002dc-sixth",
+        )
+        seventh = self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Visibility restrictions prevent cross-agent messaging. Re-spawning fresh specialists now.",
+                summary="Respawn status",
+                createdAt=(datetime.now(timezone.utc) + timedelta(seconds=36)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "webchat", "requestId": request_id},
+            ),
+            idem="orch-002dc-seventh",
+        )
+        eighth = self._append_log(
+            LogAppend(
+                type="conversation",
+                content="Let me spawn fresh specialists with clear instructions.",
+                summary="Fresh specialist respawn",
+                createdAt=(datetime.now(timezone.utc) + timedelta(seconds=42)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                agentId="assistant",
+                agentLabel="OpenClaw",
+                source={"sessionKey": session_key, "channel": "webchat", "requestId": request_id},
+            ),
+            idem="orch-002dc-eighth",
+        )
+
+        self.assertEqual(first.type, "conversation")
+        self.assertEqual(second.type, "system")
+        self.assertEqual(second.agentId, "system")
+        self.assertTrue(bool((second.source or {}).get("suppressedWaitingStatus")))
+        self.assertEqual(third.type, "system")
+        self.assertEqual(third.agentId, "system")
+        self.assertTrue(bool((third.source or {}).get("suppressedWaitingStatus")))
+        self.assertEqual(fourth.type, "system")
+        self.assertEqual(fourth.agentId, "system")
+        self.assertTrue(bool((fourth.source or {}).get("suppressedWaitingStatus")))
+        self.assertEqual(fifth.type, "system")
+        self.assertEqual(fifth.agentId, "system")
+        self.assertTrue(bool((fifth.source or {}).get("suppressedWaitingStatus")))
+        self.assertEqual(sixth.type, "system")
+        self.assertEqual(sixth.agentId, "system")
+        self.assertTrue(bool((sixth.source or {}).get("suppressedWaitingStatus")))
+        self.assertEqual(seventh.type, "system")
+        self.assertEqual(seventh.agentId, "system")
+        self.assertTrue(bool((seventh.source or {}).get("suppressedWaitingStatus")))
+        self.assertEqual(eighth.type, "system")
+        self.assertEqual(eighth.agentId, "system")
+        self.assertTrue(bool((eighth.source or {}).get("suppressedWaitingStatus")))
 
     def test_orch_002db_duplicate_waiting_status_updates_are_demoted_without_request_id(self):
         session_key = "clawboard:task:topic-orch-002db:task-orch-002db"
@@ -847,6 +1064,75 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             self.assertEqual(items[f"subagent:{coding_child}"].status, "done")
             self.assertEqual(items["main.response"].status, "running")
 
+    def test_orch_003aca_waiting_status_after_child_done_does_not_block_recovery_follow_up(self):
+        session_key = "clawboard:task:topic-orch-003aca:task-orch-003aca"
+        request_id = self._openclaw_chat(
+            session_key=session_key,
+            message="Delegate to coding, but recover with a curated follow-up if main only posts status chatter.",
+        )
+        child_session = "agent:coding:subagent:orch-003aca-child"
+        base_dt = datetime.now(timezone.utc)
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003aca-child"}}',
+                createdAt=(base_dt - timedelta(seconds=40)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003aca-spawn",
+        )
+
+        with patch.object(main_module, "_orchestration_original_request_still_dispatching", return_value=False):
+            self._append_log(
+                LogAppend(
+                    type="conversation",
+                    content="Cron inspection finished: there are 2 active jobs.",
+                    summary="Coding completion",
+                    createdAt=(base_dt - timedelta(seconds=30)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                    agentId="assistant",
+                    agentLabel="Coding",
+                    source={"sessionKey": child_session, "channel": "direct", "requestId": request_id},
+                ),
+                idem="orch-003aca-child-done",
+            )
+            self._append_log(
+                LogAppend(
+                    type="conversation",
+                    content="Task state updated — coding specialist is checking for active cron jobs now. I'll let you know as soon as the result comes back.",
+                    summary="Task state updated",
+                    createdAt=(base_dt - timedelta(seconds=20)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                    agentId="assistant",
+                    agentLabel="OpenClaw",
+                    source={"sessionKey": session_key, "channel": "webchat", "requestId": request_id},
+                ),
+                idem="orch-003aca-main-waiting",
+            )
+
+        with patch.object(
+            main_module,
+            "_orchestration_completed_subagent_follow_up_grace_seconds",
+            return_value=0.0,
+        ), patch.object(
+            main_module,
+            "_orchestration_original_request_still_dispatching",
+            return_value=False,
+        ), patch.object(
+            main_module,
+            "_orchestration_enqueue_follow_up_dispatch",
+            return_value=True,
+        ) as follow_up_mock:
+            main_module._orchestration_tick_once(now_dt=datetime.now(timezone.utc))
+
+        follow_up_mock.assert_called_once()
+        follow_up_message = str(follow_up_mock.call_args.kwargs.get("message") or "")
+        self.assertIn("[ORCHESTRATION_FOLLOW_UP]", follow_up_message)
+        self.assertIn("Do not send another status-only promise", follow_up_message)
+
     def test_orch_003ad_low_signal_main_ack_after_child_done_does_not_count_as_delivery(self):
         session_key = "clawboard:task:topic-orch-003ad:task-orch-003ad"
         request_id = self._openclaw_chat(
@@ -926,6 +1212,40 @@ class OrchestrationRuntimeTests(unittest.TestCase):
         follow_up_message = str(follow_up_mock.call_args.kwargs.get("message") or "")
         self.assertIn("[ORCHESTRATION_FOLLOW_UP]", follow_up_message)
         self.assertIn("Do not send another status-only promise", follow_up_message)
+
+    def test_orch_003ae_task_admin_messages_are_low_signal_delivery_text(self):
+        self.assertTrue(
+            main_module._orchestration_is_low_signal_delivery_text(
+                "Task tracking updated. The coding specialist will auto-report when the cron check completes.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(
+            main_module._orchestration_is_low_signal_delivery_text(
+                "Task updated with delegation state. The coding specialist will report the cron list results when complete.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(main_module._orchestration_is_low_signal_delivery_text("Task closed.", None, None))
+        self.assertTrue(
+            main_module._orchestration_is_low_signal_delivery_text(
+                "Task closed. Let me know if you want to troubleshoot those failing weather checks.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(main_module._orchestration_is_low_signal_delivery_text("Done. Task closed.", None, None))
+        self.assertTrue(main_module._orchestration_is_low_signal_delivery_text("Request complete.", None, None))
+        self.assertTrue(
+            main_module._orchestration_is_low_signal_delivery_text(
+                "Request complete. Let me know if you want me to dig deeper.",
+                None,
+                None,
+            )
+        )
+        self.assertTrue(main_module._orchestration_is_low_signal_delivery_text("Done. Request complete.", None, None))
 
     def test_orch_003b_late_subagent_spawn_reopens_main_supervision(self):
         session_key = "clawboard:task:topic-orch-003b:task-orch-003b"
@@ -2459,6 +2779,79 @@ class OrchestrationRuntimeTests(unittest.TestCase):
                 .where(OrchestrationItem.itemKey == f"subagent:{child_session}")
             ).all()
             self.assertEqual(len(subagent_items), 1)
+
+    def test_orch_009a_stale_session_cannot_append_duplicate_item_done_event(self):
+        session_key = "clawboard:task:topic-orch-009a:task-orch-009a"
+        request_id = self._openclaw_chat(session_key=session_key, message="Delegate once and close cleanly.")
+        child_session = "agent:coding:subagent:orch-009a-child"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-009a-child"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-009a-spawn",
+        )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            run_id = run.runId
+
+        with get_session() as stale_session:
+            stale_item = stale_session.exec(
+                select(OrchestrationItem)
+                .where(OrchestrationItem.runId == run_id)
+                .where(OrchestrationItem.itemKey == f"subagent:{child_session}")
+            ).first()
+            self.assertIsNotNone(stale_item)
+            self.assertEqual(stale_item.status, "running")
+
+            with get_session() as fresh_session:
+                fresh_item = fresh_session.exec(
+                    select(OrchestrationItem)
+                    .where(OrchestrationItem.runId == run_id)
+                    .where(OrchestrationItem.itemKey == f"subagent:{child_session}")
+                ).first()
+                self.assertIsNotNone(fresh_item)
+                changed = main_module._orchestration_mark_item_status(
+                    fresh_session,
+                    run_id=run_id,
+                    item=fresh_item,
+                    status="done",
+                    now_value=now_iso(),
+                    source_log_id="orch-009a-log-a",
+                    completed_at=now_iso(),
+                )
+                self.assertTrue(changed)
+                fresh_session.commit()
+
+            changed_again = main_module._orchestration_mark_item_status(
+                stale_session,
+                run_id=run_id,
+                item=stale_item,
+                status="done",
+                now_value=now_iso(),
+                source_log_id="orch-009a-log-b",
+                completed_at=now_iso(),
+            )
+            self.assertFalse(changed_again)
+            stale_session.commit()
+
+        with get_session() as session:
+            done_events = session.exec(
+                select(OrchestrationEvent)
+                .where(OrchestrationEvent.runId == run_id)
+                .where(OrchestrationEvent.itemKey == f"subagent:{child_session}")
+                .where(OrchestrationEvent.eventType == "item_done")
+            ).all()
+            self.assertEqual(len(done_events), 1)
 
 
 if __name__ == "__main__":

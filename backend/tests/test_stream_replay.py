@@ -17,17 +17,21 @@ os.environ["CLAWBOARD_TOKEN"] = "test-token"
 
 try:
     from fastapi.testclient import TestClient
+    from sqlmodel import select
 
     from app.db import init_db, get_session
-    from app.main import app  # noqa: E402
+    from app.main import app, _ingest_openclaw_history_messages  # noqa: E402
     from app.events import EventHub, event_hub
-    from app.models import OpenClawChatDispatchQueue
+    from app.models import LogEntry, OpenClawChatDispatchQueue
     _API_TESTS_AVAILABLE = True
 except Exception:
     TestClient = None  # type: ignore[assignment]
+    select = None  # type: ignore[assignment]
     EventHub = None  # type: ignore[assignment]
     event_hub = None  # type: ignore[assignment]
     get_session = None  # type: ignore[assignment]
+    _ingest_openclaw_history_messages = None  # type: ignore[assignment]
+    LogEntry = None  # type: ignore[assignment]
     OpenClawChatDispatchQueue = None  # type: ignore[assignment]
     _API_TESTS_AVAILABLE = False
 
@@ -295,6 +299,18 @@ class StreamReplayTests(unittest.TestCase):
             {
                 "topicId": topic_id,
                 "taskId": task_id,
+                "type": "conversation",
+                "content": "Done. Task closed.",
+                "summary": "Done. Task closed.",
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {"sessionKey": session_key, "channel": "clawboard"},
+            }
+        )
+        append_log(
+            {
+                "topicId": topic_id,
+                "taskId": task_id,
                 "type": "system",
                 "content": "cron-noise",
                 "summary": "cron-noise",
@@ -303,11 +319,124 @@ class StreamReplayTests(unittest.TestCase):
                 "source": {"sessionKey": session_key, "channel": "cron-event"},
             }
         )
+        append_log(
+            {
+                "topicId": topic_id,
+                "taskId": task_id,
+                "type": "system",
+                "content": "Coding specialist still running. Waiting for its completion to provide the combined answer.",
+                "summary": "Coding specialist still running. Waiting for its completion to provide the combined answer.",
+                "agentId": "system",
+                "agentLabel": "System",
+                "source": {
+                    "sessionKey": session_key,
+                    "channel": "clawboard",
+                    "suppressedWaitingStatus": True,
+                },
+            }
+        )
 
         counts = self.client.get("/api/log/chat-counts", headers=read_headers)
         self.assertEqual(counts.status_code, 200, counts.text)
         payload = counts.json()
         self.assertEqual((payload.get("taskChatCounts") or {}).get(task_id), 3)
+
+    def test_history_sync_skips_no_reply_sentinel_messages(self):
+        session_key = "clawboard:task:topic-no-reply-skip:task-no-reply-skip"
+
+        ingested, max_seen = _ingest_openclaw_history_messages(
+            session_key=session_key,
+            messages=[
+                {
+                    "role": "assistant",
+                    "timestamp": 1773033001464,
+                    "content": [{"type": "text", "text": "NO_REPLY"}],
+                    "messageId": "oc:no-reply-sentinel",
+                    "requestId": "occhat-no-reply-sentinel",
+                }
+            ],
+            since_ms=0,
+        )
+
+        self.assertEqual(ingested, 0)
+        self.assertEqual(max_seen, 1773033001464)
+
+        with get_session() as session:
+            rows = session.exec(
+                select(LogEntry).where(LogEntry.source["sessionKey"].as_string() == session_key)
+            ).all()
+        self.assertEqual(rows, [])
+
+    def test_history_sync_skips_board_scoped_assistant_duplicate_from_live_path(self):
+        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        suffix = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+        topic_id = f"topic-history-dedupe-{suffix}"
+        task_id = f"task-history-dedupe-{suffix}"
+        session_key = f"clawboard:task:{topic_id}:{task_id}"
+        live_session_key = f"agent:main:{session_key}"
+        message_text = "Good news: the cron scheduler is enabled and running with 2 jobs configured."
+
+        topic_res = self.client.post(
+            "/api/topics",
+            json={"id": topic_id, "name": f"History Dedupe {suffix}"},
+            headers=write_headers,
+        )
+        self.assertEqual(topic_res.status_code, 200, topic_res.text)
+
+        task_res = self.client.post(
+            "/api/tasks",
+            json={"id": task_id, "topicId": topic_id, "title": f"History Dedupe Task {suffix}", "status": "todo"},
+            headers=write_headers,
+        )
+        self.assertEqual(task_res.status_code, 200, task_res.text)
+
+        live_res = self.client.post(
+            "/api/log",
+            json={
+                "topicId": topic_id,
+                "taskId": task_id,
+                "type": "conversation",
+                "content": message_text,
+                "summary": message_text,
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {
+                    "sessionKey": live_session_key,
+                    "channel": "direct",
+                    "requestId": f"occhat-history-dedupe-{suffix}",
+                    "boardScopeTopicId": topic_id,
+                    "boardScopeTaskId": task_id,
+                    "boardScopeKind": "task",
+                    "boardScopeLock": True,
+                },
+            },
+            headers=write_headers,
+        )
+        self.assertEqual(live_res.status_code, 200, live_res.text)
+
+        history_timestamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+        _ingest_openclaw_history_messages(
+            session_key=session_key,
+            messages=[
+                {
+                    "id": f"history-message-{suffix}",
+                    "role": "assistant",
+                    "timestamp": history_timestamp,
+                    "content": [{"type": "text", "text": message_text}],
+                }
+            ],
+            since_ms=0,
+        )
+
+        with get_session() as session:
+            rows = session.exec(
+                select(LogEntry)
+                .where(LogEntry.topicId == topic_id)
+                .where(LogEntry.taskId == task_id)
+                .where(LogEntry.type == "conversation")
+                .where(LogEntry.agentId == "assistant")
+            ).all()
+        self.assertEqual(len(rows), 1)
 
 
 @unittest.skipUnless(_API_TESTS_AVAILABLE, "FastAPI/SQLModel test dependencies are not installed.")

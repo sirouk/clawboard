@@ -103,7 +103,12 @@ export function usePersistentDraft(key: string, options?: { fallback?: string; d
   const fallback = options?.fallback ?? "";
   const debounceMs = options?.debounceMs ?? DEFAULT_DEBOUNCE_MS;
 
-  const [value, setValueState] = useState(() => readBestDraftValue(safeKey, serverLike, fallback));
+  const [value, setValueState] = useState(() => {
+    // Keep the server render and initial client render aligned.
+    // Local-storage reconciliation happens in the effect below after hydration.
+    if (!safeKey) return fallback;
+    return (serverLike?.value ?? fallback) ?? "";
+  });
   const lastEditAtRef = useRef(0);
   const keyRef = useRef("");
 
