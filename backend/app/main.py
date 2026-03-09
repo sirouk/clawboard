@@ -14,6 +14,7 @@ import asyncio
 import threading
 import time
 import re
+import httpx
 from pathlib import Path
 import urllib.request
 import urllib.error
@@ -113,30 +114,70 @@ app = FastAPI(
     description="Clawboard API for topics, tasks, logs, and live updates.",
 )
 
+
+def _normalize_browser_origin(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    except Exception:
+        return None
+    scheme = str(parsed.scheme or "").strip().lower()
+    netloc = str(parsed.netloc or "").strip()
+    if scheme not in {"http", "https"} or not netloc:
+        return None
+    return f"{scheme}://{netloc}"
+
+
 cors_origins = os.getenv("CLAWBOARD_CORS_ORIGINS", "*")
 allowed_origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
+allow_origin_regex = None
 if not allowed_origins:
     allowed_origins = ["*"]
 
-# In development, be permissive with local and Tailscale origins
+# In development, be permissive with local and Tailscale origins without using the
+# invalid allow_credentials + "*" combination that browsers reject on custom-header requests.
 if os.getenv("CLAWBOARD_WEB_HOT_RELOAD") == "1" or "*" in allowed_origins:
-    allowed_origins = ["*"]
+    normalized_origins: list[str] = []
+    for candidate in [
+        "http://localhost:3010",
+        "http://127.0.0.1:3010",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        os.getenv("CLAWBOARD_PUBLIC_WEB_URL"),
+    ]:
+        origin = _normalize_browser_origin(candidate)
+        if origin and origin not in normalized_origins:
+            normalized_origins.append(origin)
+    extra_allowed = str(os.getenv("CLAWBOARD_ALLOWED_DEV_ORIGINS") or "").strip()
+    if extra_allowed:
+        for raw_origin in extra_allowed.split(","):
+            origin = _normalize_browser_origin(raw_origin)
+            if origin and origin not in normalized_origins:
+                normalized_origins.append(origin)
+    allowed_origins = normalized_origins
+    allow_origin_regex = r"https?://.*"
 else:
-    # Ensure both local and Tailscale origins are allowed
+    normalized_origins = []
     extra_origins = [
         "http://localhost:3010",
         "http://100.91.119.30:3010",
         "http://localhost:3000",
         "http://127.0.0.1:3010",
         "http://127.0.0.1:3000",
+        os.getenv("CLAWBOARD_PUBLIC_WEB_URL"),
     ]
-    for origin in extra_origins:
-        if origin not in allowed_origins:
-            allowed_origins.append(origin)
+    for candidate in allowed_origins + extra_origins:
+        origin = _normalize_browser_origin(candidate)
+        if origin and origin not in normalized_origins:
+            normalized_origins.append(origin)
+    allowed_origins = normalized_origins
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if "*" in allowed_origins else allowed_origins,
+    allow_origins=allowed_origins,
+    allow_origin_regex=allow_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1503,6 +1544,22 @@ ATTACHMENT_ALLOWED_MIME_TYPES = {
 ATTACHMENT_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 ATTACHMENT_TEXT_MIME_TYPES = {"text/plain", "text/markdown", "text/csv", "application/json"}
 OPENCLAW_EXTRACTED_TEXT_LIMIT = int(os.getenv("OPENCLAW_EXTRACTED_TEXT_LIMIT", "15000") or "15000")
+OPENCLAW_RESPONSES_MAX_BODY_BYTES = int(
+    os.getenv("OPENCLAW_RESPONSES_MAX_BODY_BYTES", str(20 * 1024 * 1024)) or str(20 * 1024 * 1024)
+)
+OPENCLAW_RESPONSES_INPUT_FILE_MAX_BYTES = int(
+    os.getenv("OPENCLAW_RESPONSES_INPUT_FILE_MAX_BYTES", str(5 * 1024 * 1024)) or str(5 * 1024 * 1024)
+)
+OPENCLAW_RESPONSES_INPUT_IMAGE_MAX_BYTES = int(
+    os.getenv("OPENCLAW_RESPONSES_INPUT_IMAGE_MAX_BYTES", str(10 * 1024 * 1024)) or str(10 * 1024 * 1024)
+)
+OPENCLAW_RESPONSES_FILE_MIME_TYPES = {
+    "text/plain",
+    "text/markdown",
+    "text/csv",
+    "application/json",
+    "application/pdf",
+}
 
 
 def _sanitize_attachment_filename(name: str) -> str:
@@ -5871,6 +5928,23 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             source_meta["boardScopeSpaceId"] = canonical_space
 
     log_type = str(payload.type or "").strip().lower()
+    suppress_duplicate_waiting_status = False
+    if not control_plane_filtered and log_type == "conversation" and agent_id == "assistant":
+        suppress_duplicate_waiting_status = _orchestration_should_suppress_duplicate_waiting_status(
+            session,
+            request_id=(source_meta or {}).get("requestId") if isinstance(source_meta, dict) else None,
+            session_key=source_session_key,
+            created_at=created_at,
+            content=content_text,
+            summary=summary_text,
+            raw=raw_text,
+        )
+        if suppress_duplicate_waiting_status:
+            log_type = "system"
+            agent_id = "system"
+            agent_label = "System"
+            if source_meta is not None:
+                source_meta["suppressedWaitingStatus"] = True
     is_tool_trace_action = log_type == "action" and _is_tool_trace_text(payload.content, payload.summary, payload.raw)
     is_memory_action = (
         log_type == "action"
@@ -5900,7 +5974,7 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     elif log_type in {"system", "import"}:
         classification_status = "classified"
         classification_attempts = 1
-        classification_error = "filtered_non_semantic"
+        classification_error = "filtered_duplicate_waiting_status" if suppress_duplicate_waiting_status else "filtered_non_semantic"
     elif is_tool_trace_action:
         classification_attempts = 1
         if is_memory_action:
@@ -5944,7 +6018,7 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         relatedLogId=payload.relatedLogId,
         idempotencyKey=idempotency_key,
         sourceIdentityKey=source_identity_key,
-        type=_coerce_safe_text(payload.type),
+        type=log_type,
         content=content_text,
         summary=summary_text,
         raw=raw_text,
@@ -8066,6 +8140,13 @@ def _orchestration_is_waiting_status_text(
     markers = [
         "waiting for ",
         "awaiting ",
+        "still waiting on ",
+        "awaiting results from both specialists",
+        "follow-up scheduled",
+        "follow up scheduled",
+        "before synthesizing",
+        "once both are in",
+        "once both report back",
         "will relay it here when the child run completes",
         "will relay ",
         "delegation rails set",
@@ -8133,6 +8214,123 @@ def _orchestration_is_non_delivery_status_text(
         _sanitize_log_text(_combined_log_text(content, summary, raw)).strip().lower().replace("’", "'"),
     )
     return bool(combined and combined in markers)
+
+
+def _orchestration_duplicate_waiting_status_window_seconds() -> int:
+    raw = str(os.getenv("CLAWBOARD_ORCHESTRATION_WAITING_STATUS_SUPPRESS_WINDOW_SECONDS") or "").strip()
+    if not raw:
+        return 5 * 60
+    try:
+        value = int(raw)
+    except Exception:
+        return 5 * 60
+    return max(30, min(24 * 60 * 60, value))
+
+
+def _orchestration_should_suppress_duplicate_waiting_status(
+    session: Any,
+    *,
+    request_id: str | None,
+    session_key: str | None,
+    created_at: str | None,
+    content: str | None,
+    summary: str | None,
+    raw: str | None,
+) -> bool:
+    if not _orchestration_is_waiting_status_text(content, summary, raw):
+        return False
+    request_text = _openclaw_request_id_base(request_id)
+    base_session = _base_session_key(session_key)
+    created_iso = normalize_iso(str(created_at or ""))
+    created_ts = _iso_to_timestamp(created_iso)
+    if not base_session or created_ts is None:
+        return False
+    if "clawboard:" not in base_session:
+        return False
+    lower_bound = _iso_after_seconds(
+        datetime.fromtimestamp(created_ts, tz=timezone.utc),
+        -float(_orchestration_duplicate_waiting_status_window_seconds()),
+    )
+    if request_text:
+        exact_terms, like_terms = _openclaw_identifier_match_terms([request_text])
+        if DATABASE_URL.startswith("sqlite"):
+            parts: list[str] = []
+            params: dict[str, Any] = {}
+            for idx, identifier in enumerate(exact_terms):
+                key = f"wait_eq_{idx}"
+                parts.append(
+                    f"(json_extract(source, '$.requestId') = :{key} OR json_extract(source, '$.messageId') = :{key})"
+                )
+                params[key] = identifier
+            for idx, identifier_like in enumerate(like_terms):
+                key = f"wait_like_{idx}"
+                parts.append(
+                    f"(json_extract(source, '$.requestId') LIKE :{key} OR json_extract(source, '$.messageId') LIKE :{key})"
+                )
+                params[key] = identifier_like
+            query = (
+                select(LogEntry.id)
+                .where(LogEntry.type == "conversation")
+                .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "assistant")
+                .where(LogEntry.createdAt >= lower_bound)
+                .where(LogEntry.createdAt < created_iso)
+            )
+            if parts:
+                query = query.where(text("(" + " OR ".join(parts) + ")")).params(**params)
+            else:
+                query = query.where(text("1=0"))
+        else:
+            exprs: list[Any] = []
+            for identifier in exact_terms:
+                exprs.append(LogEntry.source["requestId"].as_string() == identifier)
+                exprs.append(LogEntry.source["messageId"].as_string() == identifier)
+            for identifier_like in like_terms:
+                exprs.append(LogEntry.source["requestId"].as_string().like(identifier_like))
+                exprs.append(LogEntry.source["messageId"].as_string().like(identifier_like))
+            query = (
+                select(LogEntry.id)
+                .where(LogEntry.type == "conversation")
+                .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "assistant")
+                .where(LogEntry.createdAt >= lower_bound)
+                .where(LogEntry.createdAt < created_iso)
+            )
+            if exprs:
+                query = query.where(or_(*exprs))
+            else:
+                query = query.where(text("1=0"))
+        if session.exec(query.limit(1)).first() is not None:
+            return True
+
+    scope_lower_bound = lower_bound
+    latest_user_rows = _orchestration_recent_conversation_rows_for_session(
+        session,
+        session_key=base_session,
+        agent_id="user",
+        created_after=lower_bound,
+        created_before=created_iso,
+        limit=1,
+    )
+    if latest_user_rows:
+        latest_user_iso = normalize_iso(str(getattr(latest_user_rows[0], "createdAt", "") or ""))
+        if latest_user_iso and latest_user_iso > scope_lower_bound:
+            scope_lower_bound = latest_user_iso
+
+    assistant_rows = _orchestration_recent_conversation_rows_for_session(
+        session,
+        session_key=base_session,
+        agent_id="assistant",
+        created_after=scope_lower_bound,
+        created_before=created_iso,
+        limit=12,
+    )
+    for row in assistant_rows:
+        if _orchestration_is_waiting_status_text(
+            _safe_log_attr_text(row, "content"),
+            _safe_log_attr_text(row, "summary"),
+            _safe_log_attr_text(row, "raw"),
+        ):
+            return True
+    return False
 
 
 def _orchestration_latest_assistant_completion_iso_for_session(
@@ -8277,6 +8475,148 @@ def _orchestration_latest_assistant_result_excerpt_for_session(
     return excerpt or "", bool(result_text and excerpt and excerpt != result_text)
 
 
+def _orchestration_item_activity_iso(item: "OrchestrationItem") -> str | None:
+    return (
+        normalize_iso(str(getattr(item, "completedAt", "") or ""))
+        or normalize_iso(str(getattr(item, "updatedAt", "") or ""))
+        or normalize_iso(str(getattr(item, "startedAt", "") or ""))
+        or normalize_iso(str(getattr(item, "createdAt", "") or ""))
+    )
+
+
+def _orchestration_completed_subagent_follow_up_idempotency_suffix(
+    items: list["OrchestrationItem"],
+) -> str:
+    completed_items = _orchestration_completed_subagent_items(items)
+    if not completed_items:
+        return ""
+    signature_parts: list[str] = []
+    for item in sorted(completed_items, key=lambda row: str(getattr(row, "itemKey", "") or "")):
+        signature_parts.append(
+            "|".join(
+                [
+                    str(getattr(item, "itemKey", "") or "").strip(),
+                    str(getattr(item, "sessionKey", "") or "").strip(),
+                    _orchestration_item_activity_iso(item) or "",
+                ]
+            )
+        )
+    digest = hashlib.sha256("||".join(signature_parts).encode("utf-8")).hexdigest()[:24]
+    return f"subagent-done-batch:{digest}"
+
+
+def _orchestration_completed_subagent_follow_up_message(
+    session: Any,
+    *,
+    items: list["OrchestrationItem"],
+) -> str:
+    completed_items = _orchestration_completed_subagent_items(items)
+    if not completed_items:
+        return ""
+    ordered_items = sorted(
+        completed_items,
+        key=lambda item: (
+            _orchestration_item_activity_iso(item) or "",
+            str(getattr(item, "itemKey", "") or ""),
+        ),
+        reverse=True,
+    )
+    specialist_segments: list[str] = []
+    for item in ordered_items[:3]:
+        agent_id = str(getattr(item, "agentId", "") or "").strip() or "specialist"
+        item_session = str(getattr(item, "sessionKey", "") or "").strip()
+        result_excerpt, result_truncated = _orchestration_latest_assistant_result_excerpt_for_session(
+            session,
+            session_key=item_session,
+            min_created_at=str(getattr(item, "startedAt", "") or getattr(item, "createdAt", "") or ""),
+            max_chars=420,
+        )
+        detail = result_excerpt or "(result already visible in the current task thread; rely on injected Clawboard context)"
+        suffix = " ..." if result_truncated and result_excerpt else ""
+        specialist_segments.append(f"{agent_id} ({item_session}): {detail}{suffix}")
+    if len(ordered_items) > 3:
+        specialist_segments.append(
+            f"+{len(ordered_items) - 3} more completed specialist result(s) already visible in the current task thread."
+        )
+    plural = len(ordered_items) != 1
+    completed_summary = " ".join(specialist_segments)
+    return (
+        "[ORCHESTRATION_FOLLOW_UP] This is an internal delegated-completion wake-up, not a new user request. "
+        f"{'Multiple delegated specialists have' if plural else 'A delegated specialist has'} already completed and "
+        f"{'their results are' if plural else 'the result is'} already visible in the current task thread. "
+        "Read the injected current task thread before replying. Do not re-dispatch specialists that already spawned or completed for this task. "
+        "If the user can already see the result, do not restate or paraphrase the full body. Do not send another status-only promise. "
+        "Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains. "
+        "Stay on the current task/session and avoid broad recovery or unrelated search. "
+        f"Completed specialist context: {completed_summary} "
+        "Use session_status(...) only if you need quick confirmation."
+    )
+
+
+def _orchestration_recent_conversation_rows_for_session(
+    session: Any,
+    *,
+    session_key: str | None,
+    agent_id: str | None = None,
+    created_after: str | None = None,
+    created_before: str | None = None,
+    limit: int = 12,
+) -> list[LogEntry]:
+    base_session = _base_session_key(session_key)
+    if not base_session:
+        return []
+    candidate_keys, canonical_board_key = _session_routing_memory_lookup_keys(base_session)
+    if not candidate_keys:
+        candidate_keys = [base_session]
+    after_iso = normalize_iso(str(created_after or "")) or ""
+    before_iso = normalize_iso(str(created_before or "")) or ""
+    agent_text = str(agent_id or "").strip().lower()
+    limit_value = max(1, min(80, int(limit or 12)))
+    if DATABASE_URL.startswith("sqlite"):
+        parts: list[str] = []
+        params: dict[str, Any] = {}
+        for i, key in enumerate(candidate_keys):
+            parts.append(
+                f"(json_extract(source, '$.sessionKey') = :key_{i}"
+                f" OR json_extract(source, '$.sessionKey') LIKE :like_{i})"
+            )
+            params[f"key_{i}"] = key
+            params[f"like_{i}"] = f"{key}|%"
+        if canonical_board_key:
+            parts.append("json_extract(source, '$.sessionKey') LIKE :board_contains")
+            params["board_contains"] = f"%{canonical_board_key}%"
+        query = (
+            select(LogEntry)
+            .where(LogEntry.type == "conversation")
+            .where(text("(" + " OR ".join(parts) + ")"))
+            .params(**params)
+        )
+    else:
+        source_session_expr = LogEntry.source["sessionKey"].as_string()
+        session_exprs: list[Any] = []
+        for key in candidate_keys:
+            session_exprs.append(source_session_expr == key)
+            session_exprs.append(source_session_expr.like(f"{key}|%"))
+        if canonical_board_key:
+            session_exprs.append(source_session_expr.like(f"%{canonical_board_key}%"))
+        query = (
+            select(LogEntry)
+            .where(LogEntry.type == "conversation")
+            .where(or_(*session_exprs))
+        )
+    if agent_text:
+        query = query.where(func.lower(func.coalesce(LogEntry.agentId, "")) == agent_text)
+    if after_iso:
+        query = query.where(LogEntry.createdAt >= after_iso)
+    if before_iso:
+        query = query.where(LogEntry.createdAt < before_iso)
+    query = query.order_by(
+        LogEntry.createdAt.desc(),
+        (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
+    )
+    return session.exec(query.limit(limit_value)).all()
+
+
 def _orchestration_has_assistant_completion_log(
     session: Any,
     *,
@@ -8371,33 +8711,16 @@ def _orchestration_enqueue_repaired_subagent_follow_up(
         require_delivery=True,
     ):
         return False
-    enqueued = False
-    for item in repaired_items:
-        agent_id = str(getattr(item, "agentId", "") or "").strip() or "specialist"
-        item_session = str(getattr(item, "sessionKey", "") or "").strip()
-        result_excerpt, result_truncated = _orchestration_latest_assistant_result_excerpt_for_session(
-            session,
-            session_key=item_session,
-            min_created_at=str(getattr(item, "startedAt", "") or getattr(item, "createdAt", "") or ""),
-        )
-        follow_up_msg = (
-            f"[ORCHESTRATION_FOLLOW_UP] Subagent '{agent_id}' (session: {item_session}) already completed and its "
-            "result is already visible in the current task thread. Read the injected current task thread before replying. "
-            "If the user can already see the result, do not restate or paraphrase the full body. "
-            "Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains. "
-            "Do not run broad recovery or unrelated search. Stay on the current task/session. "
-            f"Subagent result{' (truncated)' if result_truncated else ''}: "
-            f"{result_excerpt or '(no subagent text was captured; rely on the injected Clawboard result context for this turn)'} "
-            f"Use session_status('{item_session}') only if you need quick confirmation."
-        )
-        if _orchestration_enqueue_follow_up_dispatch(
-            run=run,
-            message=follow_up_msg,
-            idempotency_suffix=f"subagent-done:{str(getattr(item, 'itemKey', '') or '')}",
-            session=session,
-        ):
-            enqueued = True
-    return enqueued
+    idempotency_suffix = _orchestration_completed_subagent_follow_up_idempotency_suffix(items)
+    follow_up_msg = _orchestration_completed_subagent_follow_up_message(session, items=items)
+    if not idempotency_suffix or not follow_up_msg:
+        return False
+    return _orchestration_enqueue_follow_up_dispatch(
+        run=run,
+        message=follow_up_msg,
+        idempotency_suffix=idempotency_suffix,
+        session=session,
+    )
 
 
 def _orchestration_maybe_enqueue_completed_subagent_follow_up(
@@ -8454,32 +8777,16 @@ def _orchestration_maybe_enqueue_completed_subagent_follow_up(
     if now_ts is not None and latest_subagent_ts is not None:
         if (now_ts - latest_subagent_ts) < _orchestration_completed_subagent_follow_up_grace_seconds():
             return False
-    enqueued = False
-    for item in completed_items:
-        agent_id = str(getattr(item, "agentId", "") or "").strip() or "specialist"
-        item_session = str(getattr(item, "sessionKey", "") or "").strip()
-        result_excerpt, result_truncated = _orchestration_latest_assistant_result_excerpt_for_session(
-            session,
-            session_key=item_session,
-            min_created_at=str(getattr(item, "startedAt", "") or getattr(item, "createdAt", "") or ""),
-        )
-        follow_up_msg = (
-            f"[ORCHESTRATION_FOLLOW_UP] Subagent '{agent_id}' (session: {item_session}) has already completed and its "
-            "result is already visible in the current task thread. Read the injected current task thread before replying. "
-            "If the user can already see the result, do not restate or paraphrase the full body. "
-            "Do not send another status-only promise. Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains. "
-            f"Subagent result{' (truncated)' if result_truncated else ''}: "
-            f"{result_excerpt or '(no subagent text was captured; rely on the injected Clawboard result context for this turn)'} "
-            f"Use session_status('{item_session}') only if you need quick confirmation."
-        )
-        if _orchestration_enqueue_follow_up_dispatch(
-            run=run,
-            message=follow_up_msg,
-            idempotency_suffix=f"subagent-done:{str(getattr(item, 'itemKey', '') or '')}",
-            session=session,
-        ):
-            enqueued = True
-    return enqueued
+    idempotency_suffix = _orchestration_completed_subagent_follow_up_idempotency_suffix(items)
+    follow_up_msg = _orchestration_completed_subagent_follow_up_message(session, items=items)
+    if not idempotency_suffix or not follow_up_msg:
+        return False
+    return _orchestration_enqueue_follow_up_dispatch(
+        run=run,
+        message=follow_up_msg,
+        idempotency_suffix=idempotency_suffix,
+        session=session,
+    )
 
 
 def _orchestration_maybe_mark_main_done_from_logs(
@@ -8705,7 +9012,7 @@ def _orchestration_sync_log(log_id: str) -> None:
             elif str(getattr(entry, "type", "") or "").strip().lower() == "conversation" and str(getattr(entry, "agentId", "") or "").strip().lower() == "assistant":
                 if source_session and _is_subagent_session_key(source_session):
                     for item in matched_items:
-                        was_done = _orchestration_mark_item_status(
+                        _orchestration_mark_item_status(
                             session,
                             run_id=run.runId,
                             item=item,
@@ -8714,43 +9021,6 @@ def _orchestration_sync_log(log_id: str) -> None:
                             source_log_id=str(getattr(entry, "id", "") or ""),
                             completed_at=normalize_iso(activity_ts) or activity_ts,
                         )
-                        if was_done and _orchestration_auto_follow_up_enabled() and main_item is not None:
-                            main_still_active = str(getattr(main_item, "status", "") or "").strip().lower() not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES
-                            if main_still_active:
-                                # Do not enqueue a follow-up when the original dispatch is still
-                                # actively in-flight.  In that case the main agent is already
-                                # running the original task and will incorporate the subagent
-                                # result itself.  Sending a follow-up while the original job is
-                                # "processing" would cause a queue serialization deadlock: the
-                                # dispatch worker blocks new jobs for the same sessionKey until
-                                # the prior job clears, so the follow-up sits blocked indefinitely
-                                # while the main agent waits for a nudge that never arrives.
-                                if not _orchestration_original_request_still_dispatching(session, run):
-                                    agent_id = str(getattr(item, "agentId", "") or "").strip() or "specialist"
-                                    item_session = str(getattr(item, "sessionKey", "") or "").strip()
-                                    result_text = _sanitize_log_text(
-                                        _combined_log_text(
-                                            _safe_log_attr_text(entry, "content"),
-                                            _safe_log_attr_text(entry, "summary"),
-                                            _safe_log_attr_text(entry, "raw"),
-                                        )
-                                    )
-                                    result_excerpt = _clip(result_text, 2400)
-                                    result_truncated = bool(result_text and result_excerpt and result_excerpt != result_text)
-                                    follow_up_msg = (
-                                        f"[ORCHESTRATION_FOLLOW_UP] Subagent '{agent_id}' (session: {item_session}) has just completed and its "
-                                        "result is already visible in the current task thread. Read the injected current task thread before replying. "
-                                        "If the user can already see the result, do not restate or paraphrase the full body. "
-                                        "Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains. "
-                                        f"Subagent result{' (truncated)' if result_truncated else ''}: "
-                                        f"{result_excerpt or '(no subagent text was captured; rely on the injected Clawboard result context for this turn)'}"
-                                    )
-                                    _orchestration_enqueue_follow_up_dispatch(
-                                        run=run,
-                                        message=follow_up_msg,
-                                        idempotency_suffix=f"subagent-done:{str(getattr(item, 'itemKey', '') or '')}",
-                                        session=session,
-                                    )
                     # Re-evaluate main.response completion now that a subagent has finished.
                     # The one-shot gate at the assistant-reply ingest time may have been skipped
                     # because subagents were still active then.  Once all subagents are terminal,
@@ -9093,7 +9363,11 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
                     session.add(item)
                     if str(getattr(item, "itemKey", "") or "").strip().lower() == "main.response":
                         waiting_item_keys: list[str] = []
+                        has_delegated_items = False
                         for candidate in items:
+                            candidate_kind = str(getattr(candidate, "kind", "") or "").strip().lower()
+                            if candidate_kind == "subagent":
+                                has_delegated_items = True
                             candidate_status = str(getattr(candidate, "status", "") or "").strip().lower()
                             if candidate_status in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
                                 continue
@@ -9132,22 +9406,23 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
                         next_check_in_seconds = 0
                         if next_check_ts is not None:
                             next_check_in_seconds = int(max(0.0, round(next_check_ts - now_ts)))
-                        _orchestration_append_event(
-                            session,
-                            run_id=run.runId,
-                            item_key=item.itemKey,
-                            event_type="item_check_in",
-                            payload={
-                                "attempt": int(item.attempts or 0),
-                                "activeItems": int(len(waiting_item_keys)),
-                                "waitingItemKeys": waiting_item_keys[:6],
-                                "nextCheckInSeconds": int(next_check_in_seconds),
-                            },
-                            idempotency_key=(
-                                f"orchestration:item-check-in:{run.runId}:{str(item.itemKey or '').strip()}:{int(item.attempts or 0)}"
-                            ),
-                            created_at=current_iso,
-                        )
+                        if has_delegated_items or _orchestration_has_blocking_subagent_failures(items):
+                            _orchestration_append_event(
+                                session,
+                                run_id=run.runId,
+                                item_key=item.itemKey,
+                                event_type="item_check_in",
+                                payload={
+                                    "attempt": int(item.attempts or 0),
+                                    "activeItems": int(len(waiting_item_keys)),
+                                    "waitingItemKeys": waiting_item_keys[:6],
+                                    "nextCheckInSeconds": int(next_check_in_seconds),
+                                },
+                                idempotency_key=(
+                                    f"orchestration:item-check-in:{run.runId}:{str(item.itemKey or '').strip()}:{int(item.attempts or 0)}"
+                                ),
+                                created_at=current_iso,
+                            )
                 last_activity = normalize_iso(str(meta.get("lastActivityAt") or ""))
                 if not last_activity:
                     fallback_activity = (
@@ -9318,8 +9593,200 @@ def _run_openclaw_chat(
     Clawboard is an external client of the OpenClaw Gateway.
     """
 
-    # NOTE: We intentionally do not use OpenResponses here; we speak directly to
-    # the Gateway WS and call the same RPC method used by WebChat clients.
+    def _prepare_dispatch_attachments() -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        if not attachments:
+            return prepared
+        root = _attachments_root()
+        for att in attachments:
+            att_id = str(att.get("id") or "").strip()
+            if not att_id:
+                continue
+            storage_path = str(att.get("storagePath") or att_id).strip()
+            path = root / storage_path
+            if not path.exists():
+                raise RuntimeError(f"attachment missing on disk ({att_id})")
+            try:
+                data_bytes = path.read_bytes()
+            except Exception as exc:
+                raise RuntimeError(f"unable to read attachment ({att_id}): {exc}") from exc
+
+            mime_type = _normalize_mime_type(str(att.get("mimeType") or "application/octet-stream"))
+            filename = _sanitize_attachment_filename(str(att.get("fileName") or "attachment"))
+            prepared.append(
+                {
+                    "id": att_id,
+                    "mimeType": mime_type,
+                    "fileName": filename,
+                    "sizeBytes": len(data_bytes),
+                    "content": base64.b64encode(data_bytes).decode("ascii"),
+                }
+            )
+        return prepared
+
+    def _openclaw_http_base_url(raw_base_url: str) -> str:
+        base = str(raw_base_url or "").strip().rstrip("/")
+        if base.startswith("ws://"):
+            return "http://" + base.removeprefix("ws://")
+        if base.startswith("wss://"):
+            return "https://" + base.removeprefix("wss://")
+        if base.startswith("http://") or base.startswith("https://"):
+            return base
+        return "http://" + base
+
+    def _run_openclaw_chat_via_openresponses(prepared_attachments: list[dict[str, Any]]) -> None:
+        if not prepared_attachments:
+            return
+        content_parts: list[dict[str, Any]] = [{"type": "input_text", "text": message}]
+        for prepared in prepared_attachments:
+            mime_type = _normalize_mime_type(str(prepared.get("mimeType") or "application/octet-stream"))
+            filename = _sanitize_attachment_filename(str(prepared.get("fileName") or "attachment"))
+            encoded = str(prepared.get("content") or "").strip()
+            size_bytes = int(prepared.get("sizeBytes") or 0)
+
+            if mime_type in ATTACHMENT_IMAGE_MIME_TYPES:
+                if size_bytes > OPENCLAW_RESPONSES_INPUT_IMAGE_MAX_BYTES:
+                    raise RuntimeError(
+                        f"attachment too large for image context ({filename}: {size_bytes} bytes > {OPENCLAW_RESPONSES_INPUT_IMAGE_MAX_BYTES})"
+                    )
+                content_parts.append(
+                    {
+                        "type": "input_image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime_type,
+                            "data": encoded,
+                        },
+                    }
+                )
+                continue
+
+            if mime_type not in OPENCLAW_RESPONSES_FILE_MIME_TYPES:
+                raise RuntimeError(
+                    f"attachment type is not yet agent-readable via OpenClaw files ({filename}: {mime_type})"
+                )
+            if size_bytes > OPENCLAW_RESPONSES_INPUT_FILE_MAX_BYTES:
+                raise RuntimeError(
+                    f"attachment too large for file context ({filename}: {size_bytes} bytes > {OPENCLAW_RESPONSES_INPUT_FILE_MAX_BYTES})"
+                )
+            content_parts.append(
+                {
+                    "type": "input_file",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": encoded,
+                        "filename": filename,
+                    },
+                }
+            )
+
+        body = {
+            "model": "openclaw",
+            "stream": True,
+            "metadata": {
+                "clawboardRequestId": str(request_id or "").strip(),
+                "clawboardSessionKey": str(session_key or "").strip(),
+            },
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": content_parts,
+                }
+            ],
+        }
+        payload_bytes = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        if len(payload_bytes) > OPENCLAW_RESPONSES_MAX_BODY_BYTES:
+            raise RuntimeError(
+                f"attachment payload exceeds OpenClaw /v1/responses body limit ({len(payload_bytes)} bytes > {OPENCLAW_RESPONSES_MAX_BODY_BYTES})"
+            )
+
+        headers = {
+            "authorization": f"Bearer {token}",
+            "content-type": "application/json",
+            "accept": "text/event-stream",
+            "x-openclaw-agent-id": str(agent_id or "main").strip() or "main",
+            "x-openclaw-session-key": str(session_key or "").strip(),
+        }
+        response_url = f"{_openclaw_http_base_url(base_url)}/v1/responses"
+        timeout = httpx.Timeout(
+            connect=min(15.0, send_timeout_seconds),
+            read=send_timeout_seconds,
+            write=send_timeout_seconds,
+            pool=min(15.0, send_timeout_seconds),
+        )
+
+        with httpx.Client(timeout=timeout) as client:
+            with client.stream("POST", response_url, headers=headers, content=payload_bytes) as response:
+                if response.status_code == 404:
+                    raise RuntimeError(
+                        "OpenClaw /v1/responses is disabled; attachments cannot be made visible to the agent"
+                    )
+                if response.status_code >= 400:
+                    raw = response.read()
+                    error_text = ""
+                    if raw:
+                        try:
+                            decoded = raw.decode("utf-8", errors="replace")
+                        except Exception:
+                            decoded = ""
+                        if decoded:
+                            try:
+                                payload = json.loads(decoded)
+                                error_text = str(((payload or {}).get("error") or {}).get("message") or "").strip()
+                            except Exception:
+                                error_text = decoded.strip()
+                    suffix = f": {error_text}" if error_text else ""
+                    raise RuntimeError(f"OpenClaw /v1/responses rejected the attachment send ({response.status_code}{suffix})")
+
+                event_name = ""
+                data_lines: list[str] = []
+                accepted = False
+                failure_message = ""
+                for raw_line in response.iter_lines():
+                    line = str(raw_line or "").rstrip("\r")
+                    if line.startswith("event:"):
+                        event_name = line.split(":", 1)[1].strip()
+                        continue
+                    if line.startswith("data:"):
+                        data_lines.append(line.split(":", 1)[1].lstrip())
+                        continue
+                    if line != "":
+                        continue
+                    if not data_lines:
+                        event_name = ""
+                        continue
+
+                    data_text = "\n".join(data_lines).strip()
+                    data_lines = []
+                    parsed: dict[str, Any] | None = None
+                    if data_text:
+                        try:
+                            maybe = json.loads(data_text)
+                            if isinstance(maybe, dict):
+                                parsed = maybe
+                        except Exception:
+                            parsed = None
+                    event_type = str((parsed or {}).get("type") or event_name or "").strip()
+                    if event_type in {"response.created", "response.in_progress", "response.output_item.added"}:
+                        accepted = True
+                        break
+                    if event_type == "response.failed":
+                        failure_message = (
+                            str((((parsed or {}).get("response") or {}).get("error") or {}).get("message") or "").strip()
+                            or "OpenClaw /v1/responses failed before dispatch started"
+                        )
+                        break
+                    event_name = ""
+
+                if failure_message:
+                    raise RuntimeError(failure_message)
+                if not accepted:
+                    raise RuntimeError("OpenClaw /v1/responses closed before attachment dispatch started")
+
+    # Keep the plain WebSocket path for normal chat sends, but use OpenResponses
+    # for attachment-bearing messages so file inputs become agent-visible context.
     timeout_seconds = _openclaw_chat_timeout_seconds()
     dispatch_attempt_num = max(1, int(dispatch_attempt or 1))
     dispatch_retry_suffix: str | None = None
@@ -9396,40 +9863,18 @@ def _run_openclaw_chat(
             reason="dispatch_started",
         )
 
-        ws_attachments: list[dict[str, Any]] = []
-        if attachments:
-            root = _attachments_root()
-            for att in attachments:
-                att_id = str(att.get("id") or "").strip()
-                if not att_id:
-                    continue
-                storage_path = str(att.get("storagePath") or att_id).strip()
-                path = root / storage_path
-                if not path.exists():
-                    return _handle_failure(
-                        detail=f"OpenClaw chat failed: attachment missing on disk ({att_id}). requestId={request_id}",
-                        raw=f"attachment missing on disk ({att_id})",
-                    )
-                try:
-                    data_bytes = path.read_bytes()
-                except Exception as exc:
-                    return _handle_failure(
-                        detail=f"OpenClaw chat failed: unable to read attachment ({att_id}). requestId={request_id}",
-                        raw=str(exc),
-                        cause=exc,
-                    )
+        try:
+            prepared_attachments = _prepare_dispatch_attachments()
+        except RuntimeError as exc:
+            detail = f"OpenClaw chat failed: {exc}. requestId={request_id}"
+            return _handle_failure(detail=detail, raw=str(exc), cause=exc)
 
-                mime_type = _normalize_mime_type(str(att.get("mimeType") or "application/octet-stream"))
-                filename = _sanitize_attachment_filename(str(att.get("fileName") or "attachment"))
-                b64 = base64.b64encode(data_bytes).decode("ascii")
-                ws_attachments.append(
-                    {
-                        "mimeType": mime_type,
-                        "fileName": filename,
-                        "content": b64,
-                    }
-                )
-        send_params["attachments"] = ws_attachments if ws_attachments else []
+        if prepared_attachments:
+            _run_openclaw_chat_via_openresponses(prepared_attachments)
+            _schedule_openclaw_assistant_log_check(session_key=session_key, request_id=request_id, sent_at=sent_at)
+            return True
+
+        send_params["attachments"] = []
 
         payload = asyncio.run(
             gateway_rpc(
@@ -9611,6 +10056,8 @@ def _run_openclaw_chat(
                 "(OPENCLAW_CHAT_TIMEOUT_SECONDS). "
                 f"requestId={request_id}"
             )
+        elif "attachment" in raw.lower() or "/v1/responses" in raw.lower():
+            detail = f"OpenClaw chat failed: {raw}. requestId={request_id}"
         return _handle_failure(
             detail=detail,
             raw=raw,

@@ -1,4 +1,28 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type APIRequestContext } from "@playwright/test";
+
+async function clearActiveBoardRuns(request: APIRequestContext, apiBase: string) {
+  const changes = await request.get(`${apiBase}/api/changes`);
+  expect(changes.ok()).toBeTruthy();
+  const payload = (await changes.json()) as {
+    openclawTyping?: Array<{ sessionKey?: string; typing?: boolean }>;
+    openclawThreadWork?: Array<{ sessionKey?: string; active?: boolean }>;
+  };
+  const sessionKeys = new Set<string>();
+  for (const item of payload.openclawTyping || []) {
+    const sessionKey = String(item?.sessionKey ?? "").trim();
+    if (sessionKey.startsWith("clawboard:task:") && item?.typing) sessionKeys.add(sessionKey);
+  }
+  for (const item of payload.openclawThreadWork || []) {
+    const sessionKey = String(item?.sessionKey ?? "").trim();
+    if (sessionKey.startsWith("clawboard:task:") && item?.active) sessionKeys.add(sessionKey);
+  }
+  for (const sessionKey of sessionKeys) {
+    const cancel = await request.delete(`${apiBase}/api/openclaw/chat`, {
+      data: { sessionKey },
+    });
+    expect(cancel.ok()).toBeTruthy();
+  }
+}
 
 test("unified composer auto-grows and routes continuation to explicit selected target", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
@@ -480,26 +504,22 @@ test("typed /stop in unified composer without selected target does not post a ne
   await textarea.press("Enter");
 
   expect(postCount).toBe(0);
-  const statusNotice = page
-    .getByText("Select a topic/task target to stop.")
-    .or(page.getByText("Cancelled the only active board run."))
-    .or(page.getByText("Cancelled active chat run."));
-  await expect(statusNotice.first()).toBeVisible();
-  expect(deletePayloads.length).toBeLessThanOrEqual(1);
+  await expect(page.getByText("Select a topic/task target to stop.")).toBeVisible();
+  expect(deletePayloads).toHaveLength(0);
 });
 
-test("unified stop button is visible for a single in-flight board run without a selected target", async ({
+test("unified stop button stays hidden for an unrelated in-flight board run without a selected target", async ({
   page,
   request,
 }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  await clearActiveBoardRuns(request, apiBase);
   const suffix = Date.now();
   const topicId = `topic-unified-stop-single-${suffix}`;
   const topicName = `Unified Stop Single ${suffix}`;
   const taskId = `task-unified-stop-single-${suffix}`;
   const taskTitle = `Unified Stop Single Task ${suffix}`;
   const sessionKey = `clawboard:task:${topicId}:${taskId}`;
-  const requestId = `req-unified-stop-single-${suffix}`;
   const deletePayloads: Array<Record<string, unknown>> = [];
 
   const createTopic = await request.post(`${apiBase}/api/topics`, {
@@ -512,20 +532,13 @@ test("unified stop button is visible for a single in-flight board run without a 
   });
   expect(createTask.ok()).toBeTruthy();
 
-  const seedPendingUser = await request.post(`${apiBase}/api/log`, {
+  const queueRun = await request.post(`${apiBase}/api/openclaw/chat`, {
     data: {
-      topicId,
-      taskId,
-      type: "conversation",
-      content: `pending-user-${suffix}`,
-      summary: "Pending user prompt",
-      classificationStatus: "classified",
-      agentId: "user",
-      agentLabel: "User",
-      source: { sessionKey, requestId },
+      sessionKey,
+      message: `pending-user-${suffix}`,
     },
   });
-  expect(seedPendingUser.ok()).toBeTruthy();
+  expect(queueRun.ok()).toBeTruthy();
 
   await page.route("**/api/openclaw/chat", async (route) => {
     if (route.request().method() !== "DELETE") {
@@ -544,16 +557,71 @@ test("unified stop button is visible for a single in-flight board run without a 
   await page.goto("/u");
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
+  await expect(page.locator('[data-testid="unified-composer-stop"]:visible')).toHaveCount(0);
+  const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
+  await textarea.fill("/stop");
+  await textarea.press("Enter");
+
+  expect(deletePayloads).toHaveLength(0);
+  await expect(page.getByText("Select a topic/task target to stop.")).toBeVisible();
+});
+
+test("unified stop button scopes to the revealed task route without an explicit selected target", async ({
+  page,
+  request,
+}) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  await clearActiveBoardRuns(request, apiBase);
+  const suffix = Date.now();
+  const topicId = `topic-unified-stop-revealed-${suffix}`;
+  const topicName = `Unified Stop Revealed ${suffix}`;
+  const taskId = `task-unified-stop-revealed-${suffix}`;
+  const taskTitle = `Unified Stop Revealed Task ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
+  const deletePayloads: Array<Record<string, unknown>> = [];
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "doing", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  const queueRun = await request.post(`${apiBase}/api/openclaw/chat`, {
+    data: {
+      sessionKey,
+      message: `pending-user-${suffix}`,
+    },
+  });
+  expect(queueRun.ok()).toBeTruthy();
+
+  await page.route("**/api/openclaw/chat", async (route) => {
+    if (route.request().method() !== "DELETE") {
+      await route.continue();
+      return;
+    }
+    const payload = route.request().postDataJSON() as Record<string, unknown>;
+    deletePayloads.push(payload);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ aborted: true, queueCancelled: 1, sessionKey, sessionKeys: [sessionKey] }),
+    });
+  });
+
+  await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
   const stop = page.locator('[data-testid="unified-composer-stop"]:visible').first();
   await expect(stop).toBeVisible();
   await stop.click();
   await expect.poll(() => deletePayloads.length).toBe(1);
 
   expect(String(deletePayloads[0]?.sessionKey ?? "")).toBe(sessionKey);
-  const cancelNotice = page
-    .getByText("Cancelled the only active board run.")
-    .or(page.getByText("Cancelled active chat run."));
-  await expect(cancelNotice.first()).toBeVisible();
+  await expect(page.getByText("Cancelled revealed task run.")).toBeVisible();
 });
 
 test("unified stop button follows orchestration-active selected task and sends scoped requestId", async ({ page, request }) => {

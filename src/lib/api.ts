@@ -21,6 +21,15 @@ function isLoopbackHost(hostname: string) {
   return value === "localhost" || value === "127.0.0.1" || value === "::1";
 }
 
+function isSameBrowserHost(url: URL) {
+  if (typeof window === "undefined") return false;
+  const pageHost = (window.location.hostname ?? "").trim().toLowerCase();
+  const targetHost = (url.hostname ?? "").trim().toLowerCase();
+  if (!pageHost || !targetHost) return false;
+  if (pageHost === targetHost) return true;
+  return isLoopbackHost(pageHost) && isLoopbackHost(targetHost);
+}
+
 function coerceBrowserBase(value: string) {
   const trimmed = normalizeBase(value);
   if (!trimmed) return "";
@@ -71,6 +80,7 @@ function shouldUseSameOriginApiProxy(path: string) {
 
   try {
     const url = new URL(envBase);
+    if (isSameBrowserHost(url) && url.port === DEFAULT_API_PORT) return true;
     return isLoopbackHost(url.hostname) && url.port === DEFAULT_API_PORT;
   } catch {
     return false;

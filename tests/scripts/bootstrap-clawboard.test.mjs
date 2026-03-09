@@ -1360,6 +1360,7 @@ test("delegation supervision cadence stays aligned across templates and setup sc
 
   assert.match(setupText, /heartbeat\.every"\s*"5m"/i);
   assert.match(setupText, /still active beyond 5 minutes/i);
+  assert.match(setupText, /do not send another status-only update/i);
   assert.match(setupText, /session_status/i);
   assert.match(setupText, /queued sub-agent completion|queued sub-agent result/i);
   assert.match(setupText, /do not restate or paraphrase the full body|do not parrot it back/i);
@@ -1372,6 +1373,8 @@ test("delegation supervision cadence stays aligned across templates and setup sc
   assert.match(setupText, /memory\.qmd\.sessions\.enabled false json true/i);
   assert.match(agentsText, />5m|5 minutes/i);
   assert.match(heartbeatText, />5m|5 minutes/i);
+  assert.match(agentsText, /do not send repetitive status-only messages|do not keep posting/i);
+  assert.match(heartbeatText, /do not send another status-only update|nothing materially changed/i);
   assert.match(bootstrapText, /openclaw_cfg_set_txn agents\.defaults\.memorySearch\.sources '\["memory"\]' json true/i);
   assert.match(bootstrapText, /openclaw_cfg_set_txn agents\.defaults\.memorySearch\.experimental\.sessionMemory false json true/i);
 
@@ -1409,6 +1412,35 @@ test("main-agent execution lanes stay aligned across template, soul, and directi
   assert.match(agentsText, /sessions_spawn/i);
   assert.match(soulText, /sessions_spawn/i);
   assert.match(readmeText, /orchestration/i);
+});
+
+test("specialist contracts document canonical clawboard repo paths", async () => {
+  const root = process.cwd();
+  const codingAgentPath = path.join(root, "agent-templates", "coding", "AGENTS.md");
+  const docsAgentPath = path.join(root, "agent-templates", "docs", "AGENTS.md");
+  const codingDirectivePath = path.join(root, "directives", "coding", "CODING_CONTRACT.md");
+  const docsDirectivePath = path.join(root, "directives", "docs", "DOCS_CONTRACT.md");
+  const mainAgentPath = path.join(root, "agent-templates", "main", "AGENTS.md");
+
+  const [codingAgentText, docsAgentText, codingDirectiveText, docsDirectiveText, mainAgentText] =
+    await Promise.all([
+      readFile(codingAgentPath, "utf8"),
+      readFile(docsAgentPath, "utf8"),
+      readFile(codingDirectivePath, "utf8"),
+      readFile(docsDirectivePath, "utf8"),
+      readFile(mainAgentPath, "utf8"),
+    ]);
+
+  for (const text of [codingAgentText, docsAgentText, codingDirectiveText, docsDirectiveText]) {
+    assert.match(text, /\$OPENCLAW_HOME\/workspace\/projects\/clawboard|projects\/clawboard/i);
+  }
+  for (const text of [codingAgentText, codingDirectiveText]) {
+    assert.match(text, /skills\/clawboard/i);
+  }
+  for (const text of [docsAgentText, docsDirectiveText]) {
+    assert.match(text, /OpenClaw docs|OpenClaw docs trees/i);
+  }
+  assert.match(mainAgentText, /canonical repo root|exact file path/i);
 });
 
 test("main-agent orchestration contract documents runtime model, specialist map, and decision escalation", async () => {

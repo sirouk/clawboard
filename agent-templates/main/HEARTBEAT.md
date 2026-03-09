@@ -7,6 +7,7 @@
 - Delegation follow-up ladder is fixed: `1m -> 3m -> 10m -> 15m -> 30m -> 1h`.
 - Cap follow-up wait at `1h`.
 - If elapsed runtime for a delegated run is `>5m`, send a "still in progress" user update with the next check ETA.
+- Do not send another status-only update if nothing materially changed and the last visible status for that task was less than 5 minutes ago.
 
 ## Required heartbeat response
 When the heartbeat fires:
@@ -14,7 +15,7 @@ When the heartbeat fires:
 2. For each recorded `childSessionKey`, call `session_status`.
 3. For each delegated run:
     - If `session_status` shows it is still running: report status, blockers, and the next check ETA from the ladder.
-   - If a queued subagent completion message is present: read the injected current-task thread first. If the result is already visible there, do not restate the full body. Close the loop with validation, key delta/caveats, and a clear satisfied-or-blocked status before any extra tool call or task write.
+   - If a queued subagent completion message is present: treat it as an internal supervision wake-up, not a fresh user ask. Read the injected current-task thread first. If the result is already visible there, do not restate the full body and do not re-dispatch specialists already tied to that task. Close the loop with validation, key delta/caveats, and a clear satisfied-or-blocked status before any extra tool call or task write.
    - If the run is already completed and you have already relayed the result: no action needed.
 4. Call `clawboard_search("delegating")` as a backup sweep for any in-flight delegation not already found in the injected context.
 5. For each in-flight delegation, ensure a one-shot `cron.add` follow-up exists using the ladder `1m/3m/10m/15m/30m/1h` (reset to `1m` after respawn).
@@ -30,6 +31,7 @@ When the heartbeat fires:
 - If the result is already visible in the task thread, do not parrot it back. Add only the supervisor delta: validation, caveats, or the next decision.
 - Do not wait for the user to ask again. If work is done, report it.
 - If the sub-agent is still running and it has been more than 5 minutes, send a brief "still in progress" update and include the next ladder check ETA.
+- If the last visible status update is newer than 5 minutes and nothing materially changed, do not send another status-only update yet.
 - If the sub-agent needs a user decision to proceed, ask for that decision now.
 
 ## Active recurring checks

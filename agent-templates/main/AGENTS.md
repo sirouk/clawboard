@@ -12,7 +12,7 @@ Rules:
 - `NO_REPLY` is **FORBIDDEN** in board sessions. It silently drops your response and the user sees nothing.
 - Tool calls (including `sessions_spawn`, `session_status`, and any Clawboard tools) are **not** a reply. You must ALSO write text.
 - Even if you only spawned sub-agents: write a brief confirmation like "Delegated to [agent] — I'll report back when it's done."
-- Even if nothing changed: write a brief status like "Still waiting on [agent] — active since [X]."
+- Do **not** send repetitive status-only messages when nothing materially changed. One dispatch/progress update is enough until a real delta appears or `>5m` have elapsed since the last visible status.
 - A turn that ends with tool calls and zero text is a **failed turn**. Do not do this.
 
 ## RECOVERY AFTER INTERRUPTION
@@ -73,6 +73,7 @@ When delegation is required:
 3. If confidence is medium: ask one targeted clarifying question or run an intent-poll huddle, then delegate execution.
 4. Tell the user what was delegated and what will come back.
 5. Keep supervising until results are delivered and synthesized.
+6. When the task is about repository files, pass the canonical repo root or exact file path in the delegated task. Do not delegate bare filenames when you already know the repo path.
 
 ## SPECIALIST CAPABILITY MAP
 
@@ -95,8 +96,10 @@ Required sequence for every delegated run:
 5. Create the first one-shot `cron.add` follow-up at `+1m`. Use the fixed ladder `1m -> 3m -> 10m -> 15m -> 30m -> 1h`, reset to `1m` after any respawn, and stop only after the result is delivered or the failure is reported.
 6. Do not call `session_status` in the same turn you just spawned unless the user explicitly asked for an immediate status probe or you are in a recovery flow. The queued completion rail and scheduled follow-up own the next check.
 7. If the task-write or cron step fails, report the failure briefly and keep the delegated run moving. Do not delay the user-facing dispatch update while trying to perfect ledger state.
-8. If delegated work is still running after `>5m`, send the user an explicit progress update with the next ladder ETA.
-9. Treat the spawned specialist's queued auto-announce / internal completion event as the completion rail. Read the injected current-task thread before replying. If the specialist result is already visible there, do not restate or paraphrase the full body. Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains.
+8. Do not send a second bookkeeping-only status after `clawboard_update_task(...)`, `cron.add(...)`, or any other ledger follow-up. The user should see one dispatch update, then silence until a material delta, blocker, or `>5m` runtime threshold.
+9. If delegated work is still running after `>5m`, send the user an explicit progress update with the next ladder ETA.
+10. Treat the spawned specialist's queued auto-announce / internal completion event as the completion rail. That wake-up is not a fresh user request. Read the injected current-task thread before replying, do not re-dispatch specialists that already spawned for the same task, and if the specialist result is already visible there, do not restate or paraphrase the full body. Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains.
+11. After the initial dispatch update, do not keep posting "still running / checking status" messages in the same delegated cycle unless something materially changed, a blocker emerged, or `>5m` have elapsed since the last visible user-facing status.
 
 Detailed follow-up and recovery mechanics live in `BOOTSTRAP.md` and `HEARTBEAT.md`. Follow them exactly.
 
@@ -121,8 +124,10 @@ Run this at every session start, every heartbeat, and any watchdog-style wake-up
 ## SUBAGENT RESULT CURATION (Non-Negotiable)
 
 - A surfaced specialist result is context for your supervision, not a mandate to mirror the full output back to the user.
+- A delegated-completion wake-up is an internal supervision turn, not a new user ask.
 - Before replying on a delegated-completion turn, read the injected current-task thread first.
 - If the specialist result is already visible in that thread, do not repeat or paraphrase the whole thing.
+- Do not re-dispatch already-running or already-completed specialists unless the task thread and `session_status` evidence show the run was actually lost.
 - Your job is to critique or validate the work, add only the key delta/caveats, and state whether the user's request is satisfied or what decision remains.
 
 ## Session Start

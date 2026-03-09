@@ -2896,6 +2896,30 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   );
 
   const prevExpandedTaskIdsRef = useRef<Set<string>>(new Set());
+  const liveTaskStateById = useMemo(() => {
+    const map = new Map<string, { responding: boolean; visualStatus: Task["status"] }>();
+    for (const task of tasks) {
+      const topicId = String(task.topicId ?? "").trim();
+      if (!topicId) {
+        map.set(task.id, { responding: false, visualStatus: task.status });
+        continue;
+      }
+      const responding = isSessionResponding(taskSessionKey(topicId, task.id));
+      map.set(task.id, {
+        responding,
+        visualStatus: responding ? "doing" : task.status,
+      });
+    }
+    return map;
+  }, [isSessionResponding, tasks]);
+  const taskVisualStatus = useCallback(
+    (task: Task): Task["status"] => liveTaskStateById.get(task.id)?.visualStatus ?? task.status,
+    [liveTaskStateById]
+  );
+  const isTaskResponding = useCallback(
+    (task: Task) => liveTaskStateById.get(task.id)?.responding ?? false,
+    [liveTaskStateById]
+  );
 
   const [draggingTopicId, setDraggingTopicId] = useState<string | null>(null);
   const [topicDropTargetId, setTopicDropTargetId] = useState<string | null>(null);
@@ -3942,11 +3966,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           if (Number.isFinite(stamp) && stamp > Date.now()) return false;
         }
       }
-      if (statusFilter !== "all") return task.status === statusFilter;
-      if (!showDone && task.status === "done") return false;
+      const visualStatus = taskVisualStatus(task);
+      if (statusFilter !== "all") return visualStatus === statusFilter;
+      if (!showDone && visualStatus === "done") return false;
       return true;
     },
-    [normalizedSearch, revealSelection, revealedTaskIds, showDone, showSnoozedTasks, statusFilter]
+    [normalizedSearch, revealSelection, revealedTaskIds, showDone, showSnoozedTasks, statusFilter, taskVisualStatus]
   );
 
   const topicSearchScores = useMemo(() => {
@@ -5636,6 +5661,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (!topicId || !taskId) return "";
     return taskSessionKey(topicId, taskId);
   }, [activeComposer]);
+  const revealedComposerSessionKey = useMemo(() => {
+    if (!revealSelection || revealedTaskIds.length !== 1) return "";
+    const revealedTaskId = String(revealedTaskIds[0] ?? "").trim();
+    if (!revealedTaskId) return "";
+    const task = tasks.find((entry) => entry.id === revealedTaskId);
+    const topicId = String(task?.topicId ?? "").trim();
+    if (!task || !topicId) return "";
+    return taskSessionKey(topicId, task.id);
+  }, [revealSelection, revealedTaskIds, tasks]);
   const requestIdForSession = useCallback(
     (sessionKey: string) => {
       const key = normalizeBoardSessionKey(sessionKey);
@@ -5662,40 +5696,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     },
     [effectiveAwaitingAssistant, openclawTyping, openclawThreadWork, orchestrationThreadWorkBySession]
   );
-  const inFlightBoardSessionKeys = useMemo(() => {
-    const keys = new Set<string>();
-    for (const key of Object.keys(effectiveAwaitingAssistant)) {
-      const normalized = normalizeBoardSessionKey(key);
-      if (!normalized || !isSessionResponding(normalized)) continue;
-      keys.add(normalized);
-    }
-    for (const [key, typing] of Object.entries(openclawTyping)) {
-      if (!typing?.typing) continue;
-      const normalized = normalizeBoardSessionKey(key);
-      if (!normalized || !isSessionResponding(normalized)) continue;
-      keys.add(normalized);
-    }
-    for (const [key, signal] of Object.entries(openclawThreadWork)) {
-      if (!signal?.active) continue;
-      const normalized = normalizeBoardSessionKey(key);
-      if (!normalized || !isSessionResponding(normalized)) continue;
-      keys.add(normalized);
-    }
-    for (const [key, work] of Object.entries(orchestrationThreadWorkBySession)) {
-      if (!work?.active) continue;
-      const normalized = normalizeBoardSessionKey(key);
-      if (!normalized || !isSessionResponding(normalized)) continue;
-      keys.add(normalized);
-    }
-    return Array.from(keys).sort();
-  }, [
-    effectiveAwaitingAssistant,
-    isSessionResponding,
-    openclawTyping,
-    openclawThreadWork,
-    orchestrationThreadWorkBySession,
-  ]);
-
   const clearUnifiedComposerFields = useCallback(() => {
     setUnifiedComposerDraft("");
     clearUnifiedComposerAttachments();
@@ -5708,37 +5708,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const activeKey = normalizeBoardSessionKey(activeComposerSessionKey);
     if (activeKey) return { sessionKey: activeKey, reason: "active" as const };
 
-    if (inFlightBoardSessionKeys.length === 1) {
-      return { sessionKey: inFlightBoardSessionKeys[0], reason: "single" as const };
-    }
-    if (inFlightBoardSessionKeys.length > 1) {
-      let freshestKey = "";
-      let freshestMs = Number.NEGATIVE_INFINITY;
-      for (const key of inFlightBoardSessionKeys) {
-        const signalMs = Math.max(
-          parseIsoMs(effectiveAwaitingAssistant[key]?.sentAt),
-          parseIsoMs(openclawTyping[key]?.updatedAt),
-          parseIsoMs(openclawThreadWork[key]?.updatedAt),
-          parseIsoMs(orchestrationThreadWorkBySession[key]?.updatedAt),
-          parseIsoMs(recentNonUserActivityBySession[key]?.updatedAt)
-        );
-        if (Number.isFinite(signalMs) && signalMs >= freshestMs) {
-          freshestMs = signalMs;
-          freshestKey = key;
-        }
-      }
-      if (!freshestKey) freshestKey = inFlightBoardSessionKeys[inFlightBoardSessionKeys.length - 1];
-      if (freshestKey) return { sessionKey: freshestKey, reason: "active" as const };
-    }
+    const revealedKey = normalizeBoardSessionKey(revealedComposerSessionKey);
+    if (revealedKey) return { sessionKey: revealedKey, reason: "revealed" as const };
+
     return null;
   }, [
     activeComposerSessionKey,
-    effectiveAwaitingAssistant,
-    inFlightBoardSessionKeys,
-    openclawThreadWork,
-    openclawTyping,
-    orchestrationThreadWorkBySession,
-    recentNonUserActivityBySession,
+    revealedComposerSessionKey,
     selectedComposerSessionKey,
   ]);
 
@@ -5795,9 +5771,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         setUnifiedCancelNotice(
           target.reason === "selected"
             ? "Cancelled selected target run."
+            : target.reason === "revealed"
+              ? "Cancelled revealed task run."
             : target.reason === "active"
               ? "Cancelled active chat run."
-              : "Cancelled the only active board run."
+              : "Cancelled active chat run."
         );
         return true;
       } catch (error) {
@@ -6251,16 +6229,20 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                     aria-label={
                       unifiedCancelTarget?.reason === "selected"
                         ? "Stop selected run"
+                        : unifiedCancelTarget?.reason === "revealed"
+                          ? "Stop revealed task run"
                         : unifiedCancelTarget?.reason === "active"
                           ? "Stop active chat run"
-                          : "Stop active run"
+                          : "Stop active chat run"
                     }
                     title={
                       unifiedCancelTarget?.reason === "selected"
                         ? "Stop selected run"
+                        : unifiedCancelTarget?.reason === "revealed"
+                          ? "Stop revealed task run"
                         : unifiedCancelTarget?.reason === "active"
                           ? "Stop active chat run"
-                          : "Stop active run"
+                          : "Stop active chat run"
                     }
                     className={cn(
                       "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
@@ -6346,9 +6328,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const taskList = orderedTasksByTopic.get(topicId) ?? [];
 	          const topicSelectedForSend = selectedComposerTarget?.kind === "topic" && selectedComposerTarget.topic.id === topicId;
 	          const selectedTaskIdForSend = selectedComposerTarget?.kind === "task" ? selectedComposerTarget.task.id : "";
-	          const openCount = taskList.filter((task) => task.status !== "done").length;
-	          const doingCount = taskList.filter((task) => task.status === "doing").length;
-	          const blockedCount = taskList.filter((task) => task.status === "blocked").length;
+	          const openCount = taskList.filter((task) => taskVisualStatus(task) !== "done").length;
+	          const doingCount = taskList.filter((task) => taskVisualStatus(task) === "doing").length;
+	          const blockedCount = taskList.filter((task) => taskVisualStatus(task) === "blocked").length;
 	          const lastActivity = logsByTopic.get(topicId)?.[0]?.createdAt ?? topic.updatedAt;
 	          const hasUnsnoozedBadge = Object.prototype.hasOwnProperty.call(unsnoozedTopicBadges, topicId);
 	          const topicTaskChatLogs = taskList.flatMap((task) => taskChatLogsByTask.get(task.id) ?? []);
@@ -7463,7 +7445,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                            </div>
 	                          </div>
 	                          <div className="flex items-center gap-2">
-	                            {isSessionResponding(taskSessionKey(topicId, task.id)) ? (
+	                            {isTaskResponding(task) ? (
 	                              <span title="OpenClaw responding" className="inline-flex items-center">
 	                                <TypingDots />
 	                              </span>
@@ -7506,7 +7488,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       : "hover:border-[rgba(148,163,184,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(77,171,158,0.35)]"
                                   )}
                                 >
-                                  <StatusPill tone={STATUS_TONE[task.status]} label={STATUS_LABELS[task.status] ?? task.status} />
+                                  <StatusPill
+                                    tone={STATUS_TONE[taskVisualStatus(task)]}
+                                    label={STATUS_LABELS[taskVisualStatus(task)] ?? taskVisualStatus(task)}
+                                  />
                                 </button>
                                 {statusMenuTaskId === task.id && !readOnly && statusMenuPosition && typeof document !== "undefined"
                                   ? createPortal(
@@ -7658,7 +7643,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                                 <div className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
                                                   TASK CHAT
                                                 </div>
-                                                {isSessionResponding(taskSessionKey(topicId, task.id)) ? <TypingDots /> : null}
+                                                {isTaskResponding(task) ? <TypingDots /> : null}
                                               </div>
                                               <nav
                                                 aria-label="Task chat context"
@@ -7704,7 +7689,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                             <div className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
                                               TASK CHAT
                                             </div>
-                                            {isSessionResponding(taskSessionKey(topicId, task.id)) ? <TypingDots /> : null}
+                                            {isTaskResponding(task) ? <TypingDots /> : null}
                                             {taskChatBlurb ? (
                                               <>
                                                 <span className="text-xs text-[rgba(var(--claw-muted),0.55)]">·</span>
@@ -7749,7 +7734,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       </div>
                               {taskChatAllLogs.length === 0 &&
                               findPendingMessagesBySession(taskSessionKey(topicId, task.id)).length === 0 &&
-                              !isSessionResponding(taskSessionKey(topicId, task.id)) ? (
+                              !isTaskResponding(task) ? (
 		                                <p className="mb-3 text-sm text-[rgb(var(--claw-muted))]">No messages yet.</p>
 		                              ) : null}
 	                                <div className={cn("relative", taskChatFullscreen ? "min-h-0 flex flex-1 flex-col" : "")}>
@@ -7958,7 +7943,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                                    )
 			                                  }
 			                                  onSendUpdate={handleComposerSendUpdate}
-			                                  waiting={isSessionResponding(taskSessionKey(topicId, task.id))}
+			                                  waiting={isTaskResponding(task)}
 			                                  waitingRequestId={requestIdForSession(taskSessionKey(topicId, task.id))}
 			                                  onCancel={() => {
 			                                    const sk = taskSessionKey(topicId, task.id);

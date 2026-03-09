@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 import tempfile
@@ -1440,27 +1441,58 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             self.assertIsNone(row.claimedAt)
             self.assertTrue(bool(str(row.completedAt or "").strip()))
 
-    def test_chat_002_attachment_payload_is_bound_into_gateway_call(self):
+    def test_chat_002_attachment_payload_uses_openresponses_file_and_image_parts(self):
         root = Path(TMP_DIR) / "attachments-chat-002"
         root.mkdir(parents=True, exist_ok=True)
-        attachment_path = root / "att-chat-002"
+        text_attachment_path = root / "att-chat-002-text"
+        image_attachment_path = root / "att-chat-002-image"
         attachment_bytes = b"hello attachment payload\n"
-        attachment_path.write_bytes(attachment_bytes)
+        image_bytes = b"\x89PNG\r\n\x1a\nfakepng"
+        text_attachment_path.write_bytes(attachment_bytes)
+        image_attachment_path.write_bytes(image_bytes)
 
         published: list[dict] = []
         captured: dict[str, object] = {}
 
-        async def _fake_gateway_rpc(method: str, params: dict, **kwargs):
-            captured["method"] = method
-            captured["params"] = params
-            captured["kwargs"] = kwargs
-            return {"ok": True}
+        class _FakeResponse:
+            status_code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def iter_lines(self):
+                yield "event: response.created"
+                yield 'data: {"type":"response.created"}'
+                yield ""
+
+            def read(self):
+                return b""
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                captured["client_kwargs"] = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, method, url, headers=None, content=None):
+                captured["method"] = method
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["content"] = content
+                return _FakeResponse()
 
         with patch.object(main_module, "ATTACHMENTS_DIR", str(root)), patch.object(
             main_module.event_hub, "publish", side_effect=_publish_collector(published)
-        ), patch.object(main_module, "gateway_rpc", new=AsyncMock(side_effect=_fake_gateway_rpc)), patch.object(
-            main_module, "_schedule_openclaw_assistant_log_check", return_value=None
-        ):
+        ), patch.object(main_module.httpx, "Client", side_effect=lambda **kwargs: _FakeClient(**kwargs)) as client_mock, patch.object(
+            main_module, "gateway_rpc", new=AsyncMock(return_value={"ok": True})
+        ) as rpc_mock, patch.object(main_module, "_schedule_openclaw_assistant_log_check", return_value=None):
             main_module._run_openclaw_chat(
                 "request-chat-002",
                 base_url="http://127.0.0.1:18789",
@@ -1471,23 +1503,148 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 message="send with attachment",
                 attachments=[
                     {
-                        "id": "att-chat-002",
-                        "storagePath": "att-chat-002",
+                        "id": "att-chat-002-text",
+                        "storagePath": "att-chat-002-text",
                         "fileName": "notes.txt",
                         "mimeType": "text/plain",
                         "sizeBytes": len(attachment_bytes),
+                    },
+                    {
+                        "id": "att-chat-002-image",
+                        "storagePath": "att-chat-002-image",
+                        "fileName": "diagram.png",
+                        "mimeType": "image/png",
+                        "sizeBytes": len(image_bytes),
                     }
                 ],
             )
 
-        self.assertEqual(captured.get("method"), "chat.send")
-        params = captured.get("params") or {}
-        ws_attachments = params.get("attachments") if isinstance(params, dict) else []
-        self.assertTrue(ws_attachments)
-        self.assertEqual(ws_attachments[0].get("fileName"), "notes.txt")
-        self.assertEqual(ws_attachments[0].get("mimeType"), "text/plain")
-        decoded = base64.b64decode(ws_attachments[0].get("content") or "")
-        self.assertEqual(decoded, attachment_bytes)
+        rpc_mock.assert_not_called()
+        client_mock.assert_called_once()
+        self.assertEqual(captured.get("method"), "POST")
+        self.assertEqual(captured.get("url"), "http://127.0.0.1:18789/v1/responses")
+        headers = captured.get("headers") or {}
+        self.assertEqual(headers.get("x-openclaw-agent-id"), "main")
+        self.assertEqual(headers.get("x-openclaw-session-key"), "clawboard:task:topic-chat-002:task-chat-002")
+        payload = json.loads((captured.get("content") or b"{}").decode("utf-8"))
+        self.assertEqual(payload.get("model"), "openclaw")
+        self.assertTrue(payload.get("stream"))
+        items = payload.get("input") or []
+        self.assertEqual(len(items), 1)
+        content = items[0].get("content") or []
+        self.assertEqual(content[0].get("type"), "input_text")
+        self.assertEqual(content[0].get("text"), "send with attachment")
+        self.assertEqual(content[1].get("type"), "input_file")
+        self.assertEqual(content[1].get("source", {}).get("filename"), "notes.txt")
+        self.assertEqual(content[1].get("source", {}).get("media_type"), "text/plain")
+        self.assertEqual(base64.b64decode(content[1].get("source", {}).get("data") or ""), attachment_bytes)
+        self.assertEqual(content[2].get("type"), "input_image")
+        self.assertEqual(content[2].get("source", {}).get("media_type"), "image/png")
+        self.assertEqual(base64.b64decode(content[2].get("source", {}).get("data") or ""), image_bytes)
+
+    def test_chat_002b_attachment_payload_rejects_unsupported_agent_file_types(self):
+        root = Path(TMP_DIR) / "attachments-chat-002b"
+        root.mkdir(parents=True, exist_ok=True)
+        attachment_path = root / "att-chat-002b"
+        attachment_path.write_bytes(b"fake audio payload")
+
+        published: list[dict] = []
+
+        with patch.object(main_module, "ATTACHMENTS_DIR", str(root)), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ), patch.object(main_module.httpx, "Client") as client_mock, patch.object(
+            main_module, "gateway_rpc", new=AsyncMock(return_value={"ok": True})
+        ) as rpc_mock, patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
+            main_module._run_openclaw_chat(
+                "request-chat-002b",
+                base_url="http://127.0.0.1:18789",
+                token="test-token",
+                session_key="clawboard:task:topic-chat-002b:task-chat-002b",
+                agent_id="main",
+                sent_at=now_iso(),
+                message="send with unsupported attachment",
+                attachments=[
+                    {
+                        "id": "att-chat-002b",
+                        "storagePath": "att-chat-002b",
+                        "fileName": "voice-note.mp3",
+                        "mimeType": "audio/mpeg",
+                        "sizeBytes": attachment_path.stat().st_size,
+                    }
+                ],
+            )
+
+        client_mock.assert_not_called()
+        rpc_mock.assert_not_called()
+        error_logger.assert_called_once()
+        detail = str(error_logger.call_args.kwargs.get("detail") or "")
+        self.assertIn("not yet agent-readable", detail)
+        typing_events = [event for event in published if str(event.get("type") or "") == "openclaw.typing"]
+        self.assertTrue(typing_events)
+        self.assertFalse(bool((typing_events[-1].get("data") or {}).get("typing")))
+
+    def test_chat_002c_attachment_payload_requires_openresponses_endpoint(self):
+        root = Path(TMP_DIR) / "attachments-chat-002c"
+        root.mkdir(parents=True, exist_ok=True)
+        attachment_path = root / "att-chat-002c"
+        attachment_path.write_bytes(b"hello attachment payload\n")
+
+        published: list[dict] = []
+
+        class _FakeResponse:
+            status_code = 404
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def iter_lines(self):
+                if False:
+                    yield ""
+
+            def read(self):
+                return b""
+
+        class _FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, method, url, headers=None, content=None):
+                return _FakeResponse()
+
+        with patch.object(main_module, "ATTACHMENTS_DIR", str(root)), patch.object(
+            main_module.event_hub, "publish", side_effect=_publish_collector(published)
+        ), patch.object(main_module.httpx, "Client", return_value=_FakeClient()) as client_mock, patch.object(
+            main_module, "_log_openclaw_chat_error"
+        ) as error_logger:
+            main_module._run_openclaw_chat(
+                "request-chat-002c",
+                base_url="http://127.0.0.1:18789",
+                token="test-token",
+                session_key="clawboard:task:topic-chat-002c:task-chat-002c",
+                agent_id="main",
+                sent_at=now_iso(),
+                message="send with attachment",
+                attachments=[
+                    {
+                        "id": "att-chat-002c",
+                        "storagePath": "att-chat-002c",
+                        "fileName": "notes.txt",
+                        "mimeType": "text/plain",
+                        "sizeBytes": attachment_path.stat().st_size,
+                    }
+                ],
+            )
+
+        client_mock.assert_called_once()
+        error_logger.assert_called_once()
+        detail = str(error_logger.call_args.kwargs.get("detail") or "")
+        self.assertIn("/v1/responses is disabled", detail)
 
     def test_chat_003_run_openclaw_chat_emits_typing_start_without_forced_stop_on_success(self):
         published: list[dict] = []

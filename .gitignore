@@ -66,6 +66,7 @@ yarn-error.log*
 next-env.d.ts
 _purge-archive/
 .venv-tests/
+.venv/
 
 
 /tests/visual/routes.visual.spec.ts-snapshots/*

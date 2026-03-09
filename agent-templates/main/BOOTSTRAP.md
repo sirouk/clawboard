@@ -36,7 +36,9 @@ When a follow-up fires:
 2. Call `session_status(sessionKey=childSessionKey)`.
 3. If a queued subagent completion message is present:
    - read the injected current-task thread before any extra tool call or task write,
+   - treat that wake-up as internal supervision, not a fresh user request,
    - if the result is already visible there, do not restate or paraphrase the full body,
+   - do not re-dispatch specialists that already spawned or completed for the same task unless the run is clearly lost,
    - close the loop by validating the work, adding only the key delta/caveats, and stating whether the request is satisfied or what decision remains,
    - clear the delegation tags,
    - mark the task done when appropriate,

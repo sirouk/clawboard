@@ -1,4 +1,13 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+async function ensureBoardOptionsVisible(page: Page) {
+  const toolCallsToggle = page.getByRole("button", { name: /Show tool calls|Hide tool calls/i }).first();
+  const fullMessagesToggle = page.getByRole("button", { name: /Show full messages|Hide full messages/i }).first();
+  if ((await toolCallsToggle.count()) > 0 || (await fullMessagesToggle.count()) > 0) return;
+  const optionsToggle = page.getByRole("button", { name: /View options|Hide options/i }).first();
+  await expect(optionsToggle).toBeVisible();
+  await optionsToggle.click();
+}
 
 test("unified chat renders natural bubbles for task chat entries", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
@@ -62,6 +71,7 @@ test("unified chat renders natural bubbles for task chat entries", async ({ page
   await expect(assistantBubble).toHaveAttribute("data-agent-side", "left");
   await expect(userBubble).toHaveAttribute("data-agent-side", "right");
 
+  await ensureBoardOptionsVisible(page);
   const fullMessagesToggle = page.getByRole("button", { name: /Show full messages|Hide full messages/i });
   await expect(fullMessagesToggle).toBeVisible();
   const fullMessagesLabel = ((await fullMessagesToggle.textContent()) || "").toLowerCase();
@@ -129,6 +139,7 @@ test("board controls can show hidden tool/system chat rows", async ({ page, requ
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
+  await ensureBoardOptionsVisible(page);
   const toolCallsToggle = page.getByRole("button", { name: /Show tool calls|Hide tool calls/i }).first();
   await expect(toolCallsToggle).toBeVisible();
   await expect(toolCallsToggle).toHaveText(/Show tool calls/i);
@@ -202,6 +213,7 @@ test("active task chat shows pending assistant and tool rows before classificati
   await expect(page.getByTestId(`message-bubble-${pendingAssistantEntry.id}`)).toContainText(assistantText);
   await expect(page.getByText(actionText, { exact: false })).toHaveCount(0);
 
+  await ensureBoardOptionsVisible(page);
   const toolCallsToggle = page.getByRole("button", { name: /Show tool calls|Hide tool calls/i }).first();
   await expect(toolCallsToggle).toBeVisible();
   if ((await toolCallsToggle.textContent())?.toLowerCase().includes("show")) {
@@ -209,6 +221,41 @@ test("active task chat shows pending assistant and tool rows before classificati
   }
 
   await expect(page.getByText(actionText, { exact: false })).toBeVisible();
+});
+
+test("responding tasks project live doing state into task pills and topic counts", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-live-doing-${suffix}`;
+  const topicName = `Live Doing ${suffix}`;
+  const taskId = `task-live-doing-${suffix}`;
+  const taskTitle = `Live doing task ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "todo", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  const queueRun = await request.post(`${apiBase}/api/openclaw/chat`, {
+    data: {
+      sessionKey,
+      message: `live-doing-seed-${suffix}`,
+    },
+  });
+  expect(queueRun.ok()).toBeTruthy();
+
+  await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const topicCard = page.locator(`[data-topic-card-id="${topicId}"]`);
+  await expect(topicCard.getByText("1 doing")).toBeVisible();
+  await expect(page.getByTestId(`task-status-trigger-${taskId}`)).toContainText("Doing");
 });
 
 test("terminal system failures stay visible when tool/system rows are hidden", async ({ page, request }) => {
@@ -554,6 +601,14 @@ test("typing indicator shows live hidden tool call count while awaiting agent re
   });
   expect(pendingUser.ok()).toBeTruthy();
 
+  const queueRes = await request.post(`${apiBase}/api/openclaw/chat`, {
+    data: {
+      sessionKey,
+      message: `typing-seed-${suffix}`,
+    },
+  });
+  expect(queueRes.ok()).toBeTruthy();
+
   const actionLog = await request.post(`${apiBase}/api/log`, {
     data: {
       topicId,
@@ -562,7 +617,7 @@ test("typing indicator shows live hidden tool call count while awaiting agent re
       content: `typing-action-${suffix}`,
       summary: `Tool call: typing-${suffix}`,
       classificationStatus: "classified",
-      agentId: "assistant",
+      agentId: "system",
       agentLabel: "OpenClaw",
       source: { sessionKey, requestId: `req-typing-${suffix}` },
     },
