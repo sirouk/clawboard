@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type APIRequestContext } from "@playwright/test";
 
 const LIVE_SMOKE_ENABLED = process.env.PLAYWRIGHT_LIVE_STACK_SMOKE === "1";
 
@@ -10,6 +10,59 @@ const authHeaders = (token: string): Record<string, string> => {
   if (!token) return {};
   return { "X-Clawboard-Token": token };
 };
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitForLiveApiReady(
+  request: APIRequestContext,
+  apiBase: string,
+  token: string
+) {
+  await expect
+    .poll(
+      async () => {
+        try {
+          const response = await request.get(`${apiBase}/api/health`, {
+            headers: authHeaders(token),
+          });
+          if (!response.ok()) return `status:${response.status()}`;
+          const payload = (await response.json().catch(() => null)) as { status?: unknown } | null;
+          return String(payload?.status ?? "").trim().toLowerCase() || "missing-status";
+        } catch (error) {
+          return `error:${String(error)}`;
+        }
+      },
+      {
+        timeout: 45_000,
+        intervals: [500, 1000, 1500, 2000],
+      }
+    )
+    .toBe("ok");
+}
+
+async function postWithTransientRetry(
+  request: APIRequestContext,
+  url: string,
+  options: { headers?: Record<string, string>; data?: unknown },
+  attempts = 3
+) {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await request.post(url, options);
+      if (response.status() >= 500 && response.status() < 600 && attempt < attempts) {
+        await sleep(attempt * 1000);
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts) throw error;
+      await sleep(attempt * 1000);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`POST ${url} failed after ${attempts} attempts`);
+}
 
 test.describe("live stack smoke", () => {
   test.skip(!LIVE_SMOKE_ENABLED, "Set PLAYWRIGHT_LIVE_STACK_SMOKE=1 to run live stack smoke tests.");
@@ -26,8 +79,9 @@ test.describe("live stack smoke", () => {
     const message = `live-smoke-message-${suffix}`;
 
     let createTopic: Awaited<ReturnType<typeof request.post>>;
+    await waitForLiveApiReady(request, apiBase, token);
     try {
-      createTopic = await request.post(`${apiBase}/api/topics`, {
+      createTopic = await postWithTransientRetry(request, `${apiBase}/api/topics`, {
         headers: authHeaders(token),
         data: { id: topicId, name: topicName, pinned: false },
       });
@@ -43,7 +97,7 @@ test.describe("live stack smoke", () => {
     }
     expect(createTopic.ok()).toBeTruthy();
 
-    const createTask = await request.post(`${apiBase}/api/tasks`, {
+    const createTask = await postWithTransientRetry(request, `${apiBase}/api/tasks`, {
       headers: authHeaders(token),
       data: { id: taskId, topicId, title: taskTitle, status: "doing", pinned: false },
     });
@@ -102,6 +156,15 @@ test.describe("live stack smoke", () => {
       })
       .toBeTruthy();
 
+    await page.goto("/u");
+    await page.getByRole("heading", { name: "Unified View" }).waitFor();
+    await expect(page.locator('[data-testid="unified-composer-stop"]:visible')).toHaveCount(0);
+
+    await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
+    await page.getByRole("heading", { name: "Unified View" }).waitFor();
+    await expect(page.getByTestId(`task-status-trigger-${taskId}`)).toContainText("Doing");
+    await expect(page.locator('[data-testid="unified-composer-stop"]:visible')).toHaveCount(1);
+
     const statusRes = await request.get(`${apiBase}/api/openclaw/chat-dispatch/status`, {
       headers: authHeaders(token),
     });
@@ -113,10 +176,10 @@ test.describe("live stack smoke", () => {
     expect(typeof status.counts?.retry).toBe("number");
     expect(typeof status.counts?.processing).toBe("number");
 
-    const cancelRes = await request.delete(`${apiBase}/api/openclaw/chat`, {
-      headers: { ...authHeaders(token), "Content-Type": "application/json" },
-      data: { sessionKey, requestId: sendBody.requestId },
-    });
+    const cancelRes = await Promise.all([
+      page.waitForResponse((resp) => resp.url().includes("/api/openclaw/chat") && resp.request().method() === "DELETE"),
+      page.getByTestId("unified-composer-stop").click(),
+    ]).then(([resp]) => resp);
     expect(cancelRes.ok()).toBeTruthy();
   });
 });

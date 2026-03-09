@@ -847,6 +847,86 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             self.assertEqual(items[f"subagent:{coding_child}"].status, "done")
             self.assertEqual(items["main.response"].status, "running")
 
+    def test_orch_003ad_low_signal_main_ack_after_child_done_does_not_count_as_delivery(self):
+        session_key = "clawboard:task:topic-orch-003ad:task-orch-003ad"
+        request_id = self._openclaw_chat(
+            session_key=session_key,
+            message="Delegate to coding, but only close after a real curated answer.",
+        )
+        child_session = "agent:coding:subagent:orch-003ad-child"
+
+        self._append_log(
+            LogAppend(
+                type="action",
+                content="Tool result: sessions_spawn",
+                summary="Tool result: sessions_spawn",
+                raw='{"toolName":"sessions_spawn","result":{"childSessionKey":"agent:coding:subagent:orch-003ad-child"}}',
+                createdAt=now_iso(),
+                agentId="main",
+                agentLabel="Main",
+                source={"sessionKey": session_key, "channel": "openclaw", "requestId": request_id},
+            ),
+            idem="orch-003ad-spawn",
+        )
+
+        with patch.object(main_module, "_orchestration_original_request_still_dispatching", return_value=False):
+            self._append_log(
+                LogAppend(
+                    type="conversation",
+                    content="Bootstrap prompt analysis complete.",
+                    summary="Coding completion",
+                    createdAt=now_iso(),
+                    agentId="assistant",
+                    agentLabel="Coding",
+                    source={"sessionKey": child_session, "channel": "direct", "requestId": request_id},
+                ),
+                idem="orch-003ad-child-done",
+            )
+            self._append_log(
+                LogAppend(
+                    type="conversation",
+                    content="Done.",
+                    summary="Done.",
+                    createdAt=now_iso(),
+                    agentId="assistant",
+                    agentLabel="OpenClaw",
+                    source={"sessionKey": session_key, "channel": "webchat", "requestId": request_id},
+                ),
+                idem="orch-003ad-main-ack",
+            )
+
+        with get_session() as session:
+            run = session.exec(select(OrchestrationRun).where(OrchestrationRun.requestId == request_id)).first()
+            self.assertIsNotNone(run)
+            self.assertEqual(run.status, "running")
+            self.assertIsNone(run.completedAt)
+            items = {
+                row.itemKey: row
+                for row in session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run.runId)).all()
+            }
+            self.assertEqual(items[f"subagent:{child_session}"].status, "done")
+            self.assertEqual(items["main.response"].status, "running")
+
+        with patch.object(
+            main_module,
+            "_orchestration_completed_subagent_follow_up_grace_seconds",
+            return_value=0.0,
+        ), patch.object(
+            main_module,
+            "_orchestration_original_request_still_dispatching",
+            return_value=False,
+        ), patch.object(
+            main_module,
+            "_orchestration_enqueue_follow_up_dispatch",
+            return_value=True,
+        ) as follow_up_mock:
+            main_module._orchestration_tick_once(now_dt=datetime.now(timezone.utc))
+
+        follow_up_mock.assert_called_once()
+        follow_up_message = str(follow_up_mock.call_args.kwargs.get("message") or "")
+        self.assertIn("[ORCHESTRATION_FOLLOW_UP]", follow_up_message)
+        self.assertIn("Do not send another status-only promise", follow_up_message)
+
     def test_orch_003b_late_subagent_spawn_reopens_main_supervision(self):
         session_key = "clawboard:task:topic-orch-003b:task-orch-003b"
         request_id = self._openclaw_chat(session_key=session_key, message="Reply first, then delegate late.")

@@ -155,6 +155,146 @@ test("board controls can show hidden tool/system chat rows", async ({ page, requ
   await expect(page.getByText(systemText, { exact: false })).toBeVisible();
 });
 
+test("chat hides transport noise while still surfacing meaningful tool rows and counts", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-chat-noise-${suffix}`;
+  const topicName = `Chat Noise ${suffix}`;
+  const taskId = `task-chat-noise-${suffix}`;
+  const taskTitle = `Chat noise task ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
+  const meaningfulToolText = `meaningful-tool-${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "todo", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  const appendLog = async (data: Record<string, unknown>) => {
+    const response = await request.post(`${apiBase}/api/log`, { data });
+    expect(response.ok()).toBeTruthy();
+  };
+
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: `user-${suffix}`,
+    summary: `user-${suffix}`,
+    classificationStatus: "classified",
+    agentId: "user",
+    agentLabel: "User",
+    source: { sessionKey, channel: "clawboard" },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: `assistant-${suffix}`,
+    summary: `assistant-${suffix}`,
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard" },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "action",
+    content: meaningfulToolText,
+    summary: `Tool call: ${meaningfulToolText}`,
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard" },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "action",
+    content: "Transcript write: toolresult",
+    summary: "Transcript write: toolresult",
+    classificationStatus: "classified",
+    agentId: "toolresult",
+    agentLabel: "toolresult",
+    source: { sessionKey, channel: "clawboard" },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "action",
+    content: "Tool result persisted: exec",
+    summary: "Tool result persisted: exec",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard" },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "HEARTBEAT_OK",
+    summary: "HEARTBEAT_OK",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard" },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "conversation",
+    content: "Same recovery event already handled",
+    summary: "Same recovery event already handled",
+    classificationStatus: "classified",
+    agentId: "assistant",
+    agentLabel: "OpenClaw",
+    source: { sessionKey, channel: "clawboard" },
+  });
+  await appendLog({
+    topicId,
+    taskId,
+    type: "system",
+    content: "cron-noise",
+    summary: "cron-noise",
+    classificationStatus: "classified",
+    agentId: "system",
+    agentLabel: "System",
+    source: { sessionKey, channel: "cron-event" },
+  });
+
+  await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  await expect(page.getByText(`assistant-${suffix}`)).toBeVisible();
+  await expect(page.getByText("HEARTBEAT_OK", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Same recovery event already handled", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Transcript write: toolresult", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Tool result persisted: exec", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("cron-noise", { exact: false })).toHaveCount(0);
+
+  await ensureBoardOptionsVisible(page);
+  const toolCallsToggle = page.getByRole("button", { name: /Show tool calls|Hide tool calls/i }).first();
+  await expect(toolCallsToggle).toBeVisible();
+  if ((await toolCallsToggle.textContent())?.toLowerCase().includes("show")) {
+    await toolCallsToggle.click();
+  }
+
+  await expect(page.getByText(meaningfulToolText, { exact: false })).toBeVisible();
+  await expect(page.getByText("HEARTBEAT_OK", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Same recovery event already handled", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Transcript write: toolresult", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Tool result persisted: exec", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("cron-noise", { exact: false })).toHaveCount(0);
+  await expect(page.getByTestId(`task-chat-entries-${taskId}`)).toHaveText("3 entries · 1 tool/system call");
+});
+
 test("active task chat shows pending assistant and tool rows before classification settles", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
   const suffix = Date.now();

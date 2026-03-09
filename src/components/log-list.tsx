@@ -11,6 +11,12 @@ import { useDataStore } from "@/components/data-provider";
 import { apiFetch } from "@/lib/api";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { compareLogsDesc } from "@/lib/live-utils";
+import {
+  isAgentConversationChatLog,
+  isChatNoiseLog,
+  isMeaningfulToolingOrSystemChatLog,
+  isToolingOrSystemChatLog,
+} from "@/lib/chat-log-visibility";
 import { Markdown } from "@/components/markdown";
 import { AttachmentStrip } from "@/components/attachments";
 import { usePersistentDraft } from "@/lib/drafts";
@@ -22,8 +28,6 @@ const TYPE_LABELS: Record<string, string> = {
   system: "System",
   import: "Import",
 };
-
-const CHAT_TOOLING_LOG_TYPES = new Set(["action", "system", "import"]);
 
 type LaneFilter = "all" | string;
 type MessageDensity = "comfortable" | "compact";
@@ -55,19 +59,6 @@ function parseToolEvent(entry: LogEntry): ToolEvent | null {
   const kind: ToolEventKind =
     kindRaw === "tool call" ? "call" : kindRaw === "tool result" ? "result" : "error";
   return { kind, toolName };
-}
-
-function isToolingOrSystemChatLog(entry: LogEntry) {
-  const type = String(entry.type ?? "").trim().toLowerCase();
-  if (CHAT_TOOLING_LOG_TYPES.has(type)) return true;
-  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
-  return agentId === "system";
-}
-
-function isAgentConversationLog(entry: LogEntry) {
-  if (String(entry.type ?? "").trim().toLowerCase() !== "conversation") return false;
-  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
-  return Boolean(agentId) && agentId !== "user" && agentId !== "system";
 }
 
 function toolEventKindLabel(kind: ToolEventKind) {
@@ -663,7 +654,8 @@ export function LogList({
     if (variant !== "chat" || !hideToolCallsInChat) return map;
     let pending: LogEntry[] = [];
     for (const entry of visibleFiltered) {
-      if (isToolingOrSystemChatLog(entry) && !isInlineErrorEntry(entry)) {
+      if (isChatNoiseLog(entry)) continue;
+      if (isMeaningfulToolingOrSystemChatLog(entry) && !isInlineErrorEntry(entry)) {
         pending.push(entry);
         continue;
       }
@@ -675,7 +667,7 @@ export function LogList({
           pending = [];
           continue;
         }
-        if (isAgentConversationLog(entry) && pending.length > 0) {
+        if (isAgentConversationChatLog(entry) && pending.length > 0) {
           map.set(entry.id, pending);
           pending = [];
         }
@@ -970,8 +962,9 @@ export function LogList({
                 (() => {
                   const rowsToRender =
                     variant !== "chat" || !hideToolCallsInChat
-                      ? entries
+                      ? entries.filter((entry) => !(variant === "chat" && isChatNoiseLog(entry)))
                       : entries.filter((entry) => {
+                          if (isChatNoiseLog(entry)) return false;
                           if (!isToolingOrSystemChatLog(entry)) return true;
                           if (isInlineErrorEntry(entry)) return true;
                           const anchorId = hiddenToolAnchorByEntryId.get(entry.id);

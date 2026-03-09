@@ -201,6 +201,25 @@ function normalizeText(value) {
     .trim();
 }
 
+function isChatNoiseLog(entry) {
+  const type = normalizeText(entry?.type);
+  const agentId = normalizeText(entry?.agentId);
+  const channel = normalizeText(entry?.source?.channel);
+  const text = normalizeText(entry?.summary || entry?.content || entry?.raw || "");
+  if (channel === "cron-event") return true;
+  if (type === "action" && (agentId === "toolresult" || text.startsWith("transcript write:") || text.startsWith("tool result persisted:"))) {
+    return true;
+  }
+  if (
+    type === "conversation" &&
+    agentId === "assistant" &&
+    (text === "heartbeat_ok" || text === "same recovery event already handled")
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function scoreText(query, text) {
   const q = normalizeText(query);
   const target = normalizeText(text);
@@ -774,6 +793,18 @@ const server = http.createServer(async (req, res) => {
       maybeResolveSignalsFromLog(entry);
       return sendJson(res, 200, entry);
     }
+  }
+
+  if (url.pathname === "/api/log/chat-counts" && req.method === "GET") {
+    const spaceId = String(url.searchParams.get("spaceId") || "").trim();
+    const taskChatCounts = {};
+    for (const log of store.logs.map(normalizeLog)) {
+      if (!log.taskId) continue;
+      if (spaceId && String(log.spaceId || "").trim() !== spaceId) continue;
+      if (isChatNoiseLog(log)) continue;
+      taskChatCounts[log.taskId] = (taskChatCounts[log.taskId] || 0) + 1;
+    }
+    return sendJson(res, 200, { taskChatCounts });
   }
 
   if (url.pathname.startsWith("/api/log/") && req.method === "PATCH") {

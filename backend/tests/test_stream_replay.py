@@ -181,6 +181,134 @@ class StreamReplayTests(unittest.TestCase):
         self.assertTrue(any(str(item.get("requestId") or "") == request_id for item in thread_work))
         self.assertGreaterEqual(str(payload.get("cursor") or ""), stamp)
 
+    def test_log_chat_counts_exclude_internal_noise_and_cron_rows(self):
+        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        read_headers = {"Host": "localhost:8010"}
+        suffix = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+        topic_id = f"topic-chat-counts-{suffix}"
+        task_id = f"task-chat-counts-{suffix}"
+        session_key = f"clawboard:task:{topic_id}:{task_id}"
+
+        topic_res = self.client.post(
+            "/api/topics",
+            json={"id": topic_id, "name": f"Chat Counts {suffix}"},
+            headers=write_headers,
+        )
+        self.assertEqual(topic_res.status_code, 200, topic_res.text)
+
+        task_res = self.client.post(
+            "/api/tasks",
+            json={"id": task_id, "topicId": topic_id, "title": f"Chat Count Task {suffix}", "status": "todo"},
+            headers=write_headers,
+        )
+        self.assertEqual(task_res.status_code, 200, task_res.text)
+
+        def append_log(payload: dict[str, object]) -> None:
+            response = self.client.post("/api/log", json=payload, headers=write_headers)
+            self.assertEqual(response.status_code, 200, response.text)
+
+        append_log(
+            {
+                "topicId": topic_id,
+                "taskId": task_id,
+                "type": "conversation",
+                "content": f"user-{suffix}",
+                "summary": f"user-{suffix}",
+                "agentId": "user",
+                "agentLabel": "User",
+                "source": {"sessionKey": session_key, "channel": "clawboard"},
+            }
+        )
+        append_log(
+            {
+                "topicId": topic_id,
+                "taskId": task_id,
+                "type": "conversation",
+                "content": f"assistant-{suffix}",
+                "summary": f"assistant-{suffix}",
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {"sessionKey": session_key, "channel": "clawboard"},
+            }
+        )
+        append_log(
+            {
+                "topicId": topic_id,
+                "taskId": task_id,
+                "type": "action",
+                "content": f"meaningful-tool-{suffix}",
+                "summary": f"Tool call: meaningful-tool-{suffix}",
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {"sessionKey": session_key, "channel": "clawboard"},
+            }
+        )
+        append_log(
+            {
+                "topicId": topic_id,
+                "taskId": task_id,
+                "type": "action",
+                "content": "Transcript write: toolresult",
+                "summary": "Transcript write: toolresult",
+                "agentId": "toolresult",
+                "agentLabel": "toolresult",
+                "source": {"sessionKey": session_key, "channel": "clawboard"},
+            }
+        )
+        append_log(
+            {
+                "topicId": topic_id,
+                "taskId": task_id,
+                "type": "action",
+                "content": "Tool result persisted: exec",
+                "summary": "Tool result persisted: exec",
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {"sessionKey": session_key, "channel": "clawboard"},
+            }
+        )
+        append_log(
+            {
+                "topicId": topic_id,
+                "taskId": task_id,
+                "type": "conversation",
+                "content": "HEARTBEAT_OK",
+                "summary": "HEARTBEAT_OK",
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {"sessionKey": session_key, "channel": "clawboard"},
+            }
+        )
+        append_log(
+            {
+                "topicId": topic_id,
+                "taskId": task_id,
+                "type": "conversation",
+                "content": "Same recovery event already handled",
+                "summary": "Same recovery event already handled",
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {"sessionKey": session_key, "channel": "clawboard"},
+            }
+        )
+        append_log(
+            {
+                "topicId": topic_id,
+                "taskId": task_id,
+                "type": "system",
+                "content": "cron-noise",
+                "summary": "cron-noise",
+                "agentId": "system",
+                "agentLabel": "System",
+                "source": {"sessionKey": session_key, "channel": "cron-event"},
+            }
+        )
+
+        counts = self.client.get("/api/log/chat-counts", headers=read_headers)
+        self.assertEqual(counts.status_code, 200, counts.text)
+        payload = counts.json()
+        self.assertEqual((payload.get("taskChatCounts") or {}).get(task_id), 3)
+
 
 @unittest.skipUnless(_API_TESTS_AVAILABLE, "FastAPI/SQLModel test dependencies are not installed.")
 class EventHubBackpressureTests(unittest.TestCase):

@@ -8216,6 +8216,51 @@ def _orchestration_is_non_delivery_status_text(
     return bool(combined and combined in markers)
 
 
+def _orchestration_is_low_signal_delivery_text(
+    content: str | None,
+    summary: str | None,
+    raw: str | None,
+) -> bool:
+    combined = re.sub(
+        r"\s+",
+        " ",
+        _sanitize_log_text(_combined_log_text(content, summary, raw)).strip().lower().replace("’", "'"),
+    )
+    if not combined:
+        return False
+    if len(combined) > 80:
+        return False
+    tokens = [re.sub(r"[^a-z0-9]+", "", token) for token in combined.split(" ")]
+    tokens = [token for token in tokens if token]
+    if not tokens or len(tokens) > 10:
+        return False
+    generic_tokens = {
+        "ok",
+        "okay",
+        "done",
+        "complete",
+        "completed",
+        "thanks",
+        "thank",
+        "got",
+        "it",
+        "understood",
+        "noted",
+        "sure",
+        "yes",
+        "yep",
+        "cool",
+        "great",
+        "sounds",
+        "good",
+        "looks",
+        "fine",
+        "all",
+        "set",
+    }
+    return all(token in generic_tokens for token in tokens)
+
+
 def _orchestration_duplicate_waiting_status_window_seconds() -> int:
     raw = str(os.getenv("CLAWBOARD_ORCHESTRATION_WAITING_STATUS_SUPPRESS_WINDOW_SECONDS") or "").strip()
     if not raw:
@@ -8339,6 +8384,7 @@ def _orchestration_latest_assistant_completion_iso_for_session(
     session_key: str | None,
     min_created_at: str | None = None,
     require_delivery: bool = False,
+    ignore_low_signal_non_delivery: bool = False,
 ) -> str | None:
     base_session = _base_session_key(session_key)
     if not base_session:
@@ -8397,6 +8443,14 @@ def _orchestration_latest_assistant_completion_iso_for_session(
             if _orchestration_is_waiting_status_text(row_content, row_summary, row_raw):
                 continue
             if _orchestration_is_non_delivery_status_text(row_content, row_summary, row_raw):
+                continue
+            if _orchestration_is_low_signal_delivery_text(row_content, row_summary, row_raw):
+                continue
+        elif ignore_low_signal_non_delivery:
+            row_content = _safe_log_attr_text(row, "content")
+            row_summary = _safe_log_attr_text(row, "summary")
+            row_raw = _safe_log_attr_text(row, "raw")
+            if _orchestration_is_low_signal_delivery_text(row_content, row_summary, row_raw):
                 continue
         return (
             normalize_iso(str(getattr(row, "createdAt", "") or ""))
@@ -8761,6 +8815,7 @@ def _orchestration_maybe_enqueue_completed_subagent_follow_up(
         session_key=str(getattr(run, "baseSessionKey", "") or getattr(run, "sessionKey", "") or ""),
         min_created_at=latest_subagent_iso,
         require_delivery=False,
+        ignore_low_signal_non_delivery=True,
     )
     if latest_main_activity_iso:
         latest_main_ts = _iso_to_timestamp(latest_main_activity_iso)
@@ -15922,6 +15977,43 @@ def list_logs(
         return [LogOut.model_validate(row) for row in rows]
 
 
+_CHAT_PERSISTENCE_NOISE_PREFIXES = ("transcript write:", "tool result persisted:")
+_CHAT_ASSISTANT_CONTROL_NOISE_MARKERS = ("heartbeat_ok", "same recovery event already handled")
+
+
+def _log_source_channel_sql_expr():
+    if DATABASE_URL.startswith("sqlite"):
+        return func.lower(func.coalesce(func.json_extract(LogEntry.source, "$.channel"), ""))
+    return func.lower(func.coalesce(LogEntry.source["channel"].as_string(), ""))
+
+
+def _chat_log_text_sql_expr():
+    return func.lower(func.trim(func.coalesce(LogEntry.summary, LogEntry.content, LogEntry.raw, "")))
+
+
+def _visible_chat_count_log_predicate():
+    type_expr = func.lower(func.coalesce(LogEntry.type, ""))
+    agent_expr = func.lower(func.coalesce(LogEntry.agentId, ""))
+    channel_expr = _log_source_channel_sql_expr()
+    text_expr = _chat_log_text_sql_expr()
+
+    persistence_noise_exprs = [text_expr.like(f"{prefix}%") for prefix in _CHAT_PERSISTENCE_NOISE_PREFIXES]
+    persistence_noise = and_(
+        type_expr == "action",
+        or_(
+            agent_expr == "toolresult",
+            *persistence_noise_exprs,
+        ),
+    )
+    assistant_control_noise = and_(
+        type_expr == "conversation",
+        agent_expr == "assistant",
+        text_expr.in_(_CHAT_ASSISTANT_CONTROL_NOISE_MARKERS),
+    )
+    cron_event_noise = channel_expr == "cron-event"
+    return and_(~cron_event_noise, ~persistence_noise, ~assistant_control_noise)
+
+
 @app.get("/api/log/chat-counts", response_model=LogChatCountsResponse, tags=["logs"])
 def get_log_chat_counts(
     spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
@@ -15934,8 +16026,11 @@ def get_log_chat_counts(
             source_space_id=spaceId,
             allowed_space_ids_raw=allowedSpaceIds,
         )
-
-        task_query = select(LogEntry.taskId, func.count(LogEntry.id)).where(LogEntry.taskId.is_not(None))
+        task_query = (
+            select(LogEntry.taskId, func.count(LogEntry.id))
+            .where(LogEntry.taskId.is_not(None))
+            .where(_visible_chat_count_log_predicate())
+        )
         if allowed_space_ids is not None:
             space_values = [item for item in sorted(allowed_space_ids) if item]
             if space_values:

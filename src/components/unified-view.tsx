@@ -26,6 +26,12 @@ import { useDataStore } from "@/components/data-provider";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { mergeLogs } from "@/lib/live-utils";
 import {
+  isAgentConversationChatLog,
+  isChatNoiseLog,
+  isMeaningfulToolingOrSystemChatLog,
+  isToolingOrSystemChatLog,
+} from "@/lib/chat-log-visibility";
+import {
   BoardChatComposer,
   type BoardChatComposerHandle,
   type BoardChatComposerSendEvent,
@@ -747,9 +753,9 @@ function isNonUserActivityChatLog(entry: LogEntry) {
   const agentId = String(entry.agentId ?? "").trim().toLowerCase();
   if (!agentId || agentId === "user" || agentId === "assistant") return false;
   if (isTerminalSystemRequestEvent(entry)) return false;
-  const type = String(entry.type ?? "").trim().toLowerCase();
-  if (CHAT_TOOLING_LOG_TYPES.has(type)) return true;
-  return type === "conversation";
+  if (isChatNoiseLog(entry)) return false;
+  if (isMeaningfulToolingOrSystemChatLog(entry)) return true;
+  return String(entry.type ?? "").trim().toLowerCase() === "conversation";
 }
 
 function buildRecentNonUserActivityIndex(logs: LogEntry[]): Record<string, SessionNonUserActivity> {
@@ -1081,26 +1087,11 @@ function isCronEventLog(entry: LogEntry) {
   return CRON_EVENT_SOURCE_CHANNELS.has(channel);
 }
 
-const CHAT_TOOLING_LOG_TYPES = new Set(["action", "system", "import"]);
-
-function isToolingOrSystemChatLog(entry: LogEntry) {
-  const type = String(entry.type ?? "").trim().toLowerCase();
-  if (CHAT_TOOLING_LOG_TYPES.has(type)) return true;
-  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
-  return agentId === "system";
-}
-
-function isAgentConversationChatLog(entry: LogEntry) {
-  if (String(entry.type ?? "").trim().toLowerCase() !== "conversation") return false;
-  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
-  return Boolean(agentId) && agentId !== "user" && agentId !== "system";
-}
-
 function countVisibleChatLogEntries(entries: LogEntry[], showToolCalls: boolean) {
   if (showToolCalls) return entries.length;
   let count = 0;
   for (const entry of entries) {
-    if (!isToolingOrSystemChatLog(entry)) count += 1;
+    if (!isChatNoiseLog(entry) && !isToolingOrSystemChatLog(entry)) count += 1;
   }
   return count;
 }
@@ -1108,7 +1099,7 @@ function countVisibleChatLogEntries(entries: LogEntry[], showToolCalls: boolean)
 function countToolingOrSystemChatLogEntries(entries: LogEntry[]) {
   let count = 0;
   for (const entry of entries) {
-    if (isToolingOrSystemChatLog(entry)) count += 1;
+    if (isMeaningfulToolingOrSystemChatLog(entry)) count += 1;
   }
   return count;
 }
@@ -1124,6 +1115,7 @@ function countTrailingHiddenToolCallsAwaitingAgent(entries: LogEntry[]) {
   let hiddenToolCount = 0;
 
   for (const entry of entries) {
+    if (isChatNoiseLog(entry)) continue;
     const type = String(entry.type ?? "").trim().toLowerCase();
     const agentId = String(entry.agentId ?? "").trim().toLowerCase();
     if (type === "conversation" && agentId === "user") {
@@ -1137,7 +1129,7 @@ function countTrailingHiddenToolCallsAwaitingAgent(entries: LogEntry[]) {
       agentResponded = true;
       continue;
     }
-    if (isToolingOrSystemChatLog(entry)) hiddenToolCount += 1;
+    if (isMeaningfulToolingOrSystemChatLog(entry)) hiddenToolCount += 1;
   }
 
   return seenUserMessage && !agentResponded ? hiddenToolCount : 0;
@@ -2586,7 +2578,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       let visibleCount = 0;
       fallback = 0;
       for (let i = all.length - 1; i >= 0; i -= 1) {
-        if (!isToolingOrSystemChatLog(all[i])) visibleCount += 1;
+        if (!isChatNoiseLog(all[i]) && !isToolingOrSystemChatLog(all[i])) visibleCount += 1;
         fallback = i;
         if (visibleCount >= initialLimit) break;
       }
@@ -3087,7 +3079,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const visibleLogs = useMemo(() => {
     if (showRaw) return logs;
     return logs.filter(
-      (entry) => (entry.classificationStatus ?? "pending") === "classified" && !isCronEventLog(entry)
+      (entry) =>
+        (entry.classificationStatus ?? "pending") === "classified" &&
+        !isCronEventLog(entry) &&
+        !isChatNoiseLog(entry)
     );
   }, [logs, showRaw]);
 
@@ -3276,9 +3271,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   // Full task-chat logs used for active task panes. Pending rows stay visible here so
   // the live conversation reflects real assistant/tool progress before classification lands.
   const logsByTaskAll = useMemo(() => {
-    const eligible = showRaw
-      ? logs
-      : logs.filter((entry) => !isCronEventLog(entry));
+    const eligible = logs.filter((entry) => !isCronEventLog(entry) && !isChatNoiseLog(entry));
     const sorted = [...eligible].sort(compareLogCreatedAtAsc);
     const map = new Map<string, LogEntry[]>();
     for (const entry of sorted) {
@@ -3288,7 +3281,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       map.set(entry.taskId, list);
     }
     return map;
-  }, [logs, showRaw]);
+  }, [logs]);
 
   const markVisibleChatSeen = useCallback(
     (chatKey: string) => {
@@ -5662,14 +5655,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return taskSessionKey(topicId, taskId);
   }, [activeComposer]);
   const revealedComposerSessionKey = useMemo(() => {
-    if (!revealSelection || revealedTaskIds.length !== 1) return "";
+    if (revealedTaskIds.length !== 1) return "";
     const revealedTaskId = String(revealedTaskIds[0] ?? "").trim();
     if (!revealedTaskId) return "";
     const task = tasks.find((entry) => entry.id === revealedTaskId);
     const topicId = String(task?.topicId ?? "").trim();
     if (!task || !topicId) return "";
     return taskSessionKey(topicId, task.id);
-  }, [revealSelection, revealedTaskIds, tasks]);
+  }, [revealedTaskIds, tasks]);
   const requestIdForSession = useCallback(
     (sessionKey: string) => {
       const key = normalizeBoardSessionKey(sessionKey);
