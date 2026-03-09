@@ -14,7 +14,7 @@ if ROOT not in sys.path:
 TMP_DIR = tempfile.mkdtemp(prefix="clawboard-orchestration-tests-")
 os.environ["CLAWBOARD_DB_URL"] = f"sqlite:///{os.path.join(TMP_DIR, 'clawboard-test.db')}"
 os.environ["CLAWBOARD_TOKEN"] = "test-token"
-os.environ["OPENCLAW_BASE_URL"] = "http://127.0.0.1:18789"
+os.environ["OPENCLAW_BASE_URL"] = "http://localhost:18789"
 os.environ["OPENCLAW_GATEWAY_TOKEN"] = "test-token"
 os.environ["CLAWBOARD_ORCHESTRATION_ENABLED"] = "1"
 os.environ["CLAWBOARD_ORCHESTRATION_EMIT_CHAT_EVENTS"] = "1"

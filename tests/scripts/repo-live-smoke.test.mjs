@@ -43,8 +43,8 @@ test("repo_live_smoke prefers local stack origins when available", async () => {
     envFile,
     [
       "CLAWBOARD_TOKEN=test-token",
-      "CLAWBOARD_PUBLIC_API_BASE=http://100.91.119.30:8010",
-      "CLAWBOARD_PUBLIC_WEB_URL=http://100.91.119.30:3010",
+      "CLAWBOARD_PUBLIC_API_BASE=https://clawboard.example.test:8010",
+      "CLAWBOARD_PUBLIC_WEB_URL=https://clawboard.example.test:3010",
     ].join("\n"),
   );
 
@@ -53,7 +53,7 @@ test("repo_live_smoke prefers local stack origins when available", async () => {
     "curl",
     `
 url="\${@: -1}"
-if [[ "$url" == "http://127.0.0.1:8010/api/health" || "$url" == "http://127.0.0.1:3010/u" ]]; then
+if [[ "$url" == "http://localhost:8010/api/health" || "$url" == "http://localhost:3010/u" ]]; then
   exit 0
 fi
 exit 7
@@ -85,8 +85,8 @@ printf 'API=%s\\nBASE=%s\\nTOKEN=%s\\nEXTERNAL=%s\\nLIVE=%s\\nARGS=%s\\n' \
 
   assert.equal(result.code, 0, `exit=${result.code}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
   const log = await readFile(logPath, "utf8");
-  assert.match(log, /API=http:\/\/127\.0\.0\.1:8010/);
-  assert.match(log, /BASE=http:\/\/127\.0\.0\.1:3010/);
+  assert.match(log, /API=http:\/\/localhost:8010/);
+  assert.match(log, /BASE=http:\/\/localhost:3010/);
   assert.match(log, /TOKEN=test-token/);
   assert.match(log, /EXTERNAL=1/);
   assert.match(log, /LIVE=1/);
@@ -103,8 +103,8 @@ test("repo_live_smoke falls back to repo public origins when local stack is unav
     envFile,
     [
       "CLAWBOARD_TOKEN=test-token",
-      "CLAWBOARD_PUBLIC_API_BASE=http://100.91.119.30:8010",
-      "CLAWBOARD_PUBLIC_WEB_URL=http://100.91.119.30:3010",
+      "CLAWBOARD_PUBLIC_API_BASE=https://clawboard.example.test:8010",
+      "CLAWBOARD_PUBLIC_WEB_URL=https://clawboard.example.test:3010",
     ].join("\n"),
   );
 
@@ -131,7 +131,7 @@ printf 'API=%s\\nBASE=%s\\nTOKEN=%s\\n' \
 
   assert.equal(result.code, 0, `exit=${result.code}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
   const log = await readFile(logPath, "utf8");
-  assert.match(log, /API=http:\/\/100\.91\.119\.30:8010/);
-  assert.match(log, /BASE=http:\/\/100\.91\.119\.30:3010/);
+  assert.match(log, /API=https:\/\/clawboard\.example\.test:8010/);
+  assert.match(log, /BASE=https:\/\/clawboard\.example\.test:3010/);
   assert.match(log, /TOKEN=test-token/);
 });

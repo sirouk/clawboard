@@ -20,3 +20,18 @@ class OpenClawSkillsResponse(BaseModel):
     agentId: str
     workspaceDir: Optional[str] = None
     skills: List[OpenClawSkill]
+
+
+class OpenClawWorkspace(BaseModel):
+    agentId: str
+    agentName: Optional[str] = None
+    workspaceDir: str
+    ideUrl: Optional[str] = None
+    preferred: bool = False
+
+
+class OpenClawWorkspacesResponse(BaseModel):
+    configured: bool
+    provider: Optional[str] = None
+    baseUrl: Optional[str] = None
+    workspaces: List[OpenClawWorkspace]

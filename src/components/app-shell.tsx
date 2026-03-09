@@ -5,17 +5,18 @@ import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SearchInput, Select } from "@/components/ui";
-import { useAppConfig } from "@/components/providers";
+import { useAppConfig, useOpenClawWorkspaces } from "@/components/providers";
 import { cn } from "@/lib/cn";
 import { CommandPalette } from "@/components/command-palette";
 import { DataProvider, useDataStore } from "@/components/data-provider";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { formatRelativeTime } from "@/lib/format";
+import { orderOpenClawWorkspaces, workspaceLabel, workspaceRoute } from "@/lib/openclaw-workspaces";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 import { buildTaskUrl, buildTopicUrl, withRevealParam, withSpaceParam } from "@/lib/url";
 import { apiFetch, getApiBase } from "@/lib/api";
-import type { Space, Task, Topic } from "@/lib/types";
+import type { OpenClawWorkspace, Space, Task, Topic } from "@/lib/types";
 
 const ICONS: Record<string, React.ReactElement> = {
   home: (
@@ -67,6 +68,13 @@ const ICONS: Record<string, React.ReactElement> = {
       <path d="M12 3v18" />
       <path d="M16.5 7.5c0-2-2-3-4.5-3s-4.5 1-4.5 3 2 3 4.5 3 4.5 1 4.5 3-2 3-4.5 3-4.5-1-4.5-3" />
       <path d="M4 20l16-16" />
+    </svg>
+  ),
+  workspaces: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 6.5 12 3l8 3.5v11L12 21l-8-3.5z" />
+      <path d="M12 3v18" />
+      <path d="M4 6.5 12 10l8-3.5" />
     </svg>
   ),
 };
@@ -186,6 +194,7 @@ function topicSpaceIds(topic: Pick<Topic, "spaceId" | "tags"> | null | undefined
 
 const NAV_ITEMS = [
   { href: "/u", label: "Board", id: "home" },
+  { href: "/workspaces", label: "Workspaces", id: "workspaces" },
   { href: "/graph", label: "Graph", id: "graph" },
   { href: "/log", label: "Logs", id: "log" },
   { href: "/stats", label: "Stats", id: "stats" },
@@ -195,6 +204,7 @@ const NAV_ITEMS = [
 
 const BOARD_TOPICS_EXPANDED_KEY = "clawboard.board.topics.navExpanded";
 const BOARD_SPACES_EXPANDED_KEY = "clawboard.board.spaces.navExpanded";
+const WORKSPACES_EXPANDED_KEY = "clawboard.workspaces.navExpanded";
 const BOARD_TOPICS_SEARCH_KEY = "clawboard.board.topics.search";
 const BOARD_TOPICS_TASKS_EXPANDED_KEY = "clawboard.board.topics.tasksExpanded";
 const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
@@ -290,6 +300,45 @@ function TaskNavRow({
   );
 }
 
+function WorkspaceNavRow({
+  workspace,
+}: {
+  workspace: OpenClawWorkspace;
+}) {
+  const agentId = String(workspace.agentId || "").trim();
+  const label = workspaceLabel(agentId, workspace.agentName);
+  const preferred = Boolean(workspace.preferred) || agentId === "coding";
+  const href = workspaceRoute(agentId);
+
+  return (
+    <Link
+      href={href}
+      data-testid={`workspace-nav-${agentId}`}
+      className={cn(
+        "flex w-full items-center justify-between rounded-[var(--radius-sm)] border px-3 py-2 text-left text-xs transition",
+        preferred
+          ? "border-[rgba(77,171,158,0.34)] bg-[rgba(77,171,158,0.12)] text-[rgb(var(--claw-text))]"
+          : "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
+      )}
+    >
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-2">
+          <span className="truncate font-semibold">{label}</span>
+          {preferred ? (
+            <span className="shrink-0 rounded-full border border-[rgba(77,171,158,0.35)] px-2 py-0.5 text-[9px] uppercase tracking-[0.16em] text-[rgb(var(--claw-accent-2))]">
+              Preferred
+            </span>
+          ) : null}
+        </span>
+        <span className="mt-1 block truncate font-mono text-[10px] text-[rgba(148,163,184,0.82)]">{workspace.workspaceDir}</span>
+      </span>
+      <span className="ml-3 shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.82)]">
+        View
+      </span>
+    </Link>
+  );
+}
+
 function TopicNavRow({
   topic,
   selected,
@@ -375,9 +424,11 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const { spaces: storeSpaces, logs: storeLogs, topics: storeTopics, tasks: storeTasks, setTopics, hydrated, sseConnected } = useDataStore();
   const { instanceTitle, token, tokenRequired, tokenConfigured, remoteReadLocked } = useAppConfig();
+  const { configured: workspaceConfigured, workspaces: resolvedWorkspaces } = useOpenClawWorkspaces();
   const collapsed = useLocalStorageItem("clawboard.navCollapsed") === "true";
   const boardSpacesExpanded = useLocalStorageItem(BOARD_SPACES_EXPANDED_KEY) !== "false";
   const boardTopicsExpanded = useLocalStorageItem(BOARD_TOPICS_EXPANDED_KEY) === "true";
+  const workspacesExpanded = useLocalStorageItem(WORKSPACES_EXPANDED_KEY) !== "false";
   const topicPanelSearch = useLocalStorageItem(BOARD_TOPICS_SEARCH_KEY) ?? "";
   const topicTasksExpandedRaw = useLocalStorageItem(BOARD_TOPICS_TASKS_EXPANDED_KEY) ?? "";
   const lastBoardUrlStored = useLocalStorageItem(BOARD_LAST_URL_KEY) ?? "";
@@ -514,6 +565,8 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const isBoardRoute =
     pathname === "/" || pathname === "/dashboard" || pathname === "/u" || pathname.startsWith("/u");
   const showBoardTopics = isBoardRoute && boardTopicsExpanded && !collapsed;
+  const orderedWorkspaces = useMemo(() => orderOpenClawWorkspaces(resolvedWorkspaces), [resolvedWorkspaces]);
+  const showWorkspaceNav = !collapsed && workspacesExpanded && orderedWorkspaces.length > 0;
   const boardNavHref = useMemo(() => {
     const candidate = String(lastBoardUrlStored || "").trim();
     if (!candidate) return "/u";
@@ -603,8 +656,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 
   const isItemActive = (href: string) => {
     const isUnified = href === "/u";
+    const isWorkspaces = href === "/workspaces";
     return (
       pathname === href ||
+      (isWorkspaces && pathname.startsWith("/workspaces")) ||
       (isUnified && (pathname === "/" || pathname === "/dashboard" || pathname.startsWith("/u")))
     );
   };
@@ -634,6 +689,12 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
       return {
         title: "Clawgraph",
         subtitle: "Topic, task, entity, and agent relationships mapped as an interactive memory graph.",
+      };
+    }
+    if (cleanPath === "/workspaces" || cleanPath.startsWith("/workspaces/")) {
+      return {
+        title: "Workspaces",
+        subtitle: "Resolved agent workspaces and the in-app IDE surface for direct inspection and edits.",
       };
     }
     if (cleanPath === "/stats") {
@@ -1309,20 +1370,23 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                       const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
 		                  const active = isItemActive(item.href);
 		                  const isBoardItem = item.href === "/u";
-		                  const expanded = isBoardItem && showBoardTopics;
+                      const isWorkspaceItem = item.href === "/workspaces";
+		                  const expanded = isBoardItem ? showBoardTopics : isWorkspaceItem ? showWorkspaceNav : false;
 	
 	                  const navLink = (
 	                    <Link
 	                      key={item.href}
 	                      href={resolvedHref}
 		                      onClick={(event) => {
-		                        const isToggleItem = isBoardItem;
+		                        const isToggleItem = isBoardItem || isWorkspaceItem;
 		                        if (!isToggleItem) return;
 		                        if (!active) return;
 		                        if (collapsed) return;
 		                        event.preventDefault();
 		                        if (isBoardItem) {
 		                          setLocalStorageItem(BOARD_TOPICS_EXPANDED_KEY, showBoardTopics ? "false" : "true");
+		                        } else if (isWorkspaceItem) {
+                                  setLocalStorageItem(WORKSPACES_EXPANDED_KEY, workspacesExpanded ? "false" : "true");
 		                        }
 		                      }}
                       title={collapsed ? item.label : undefined}
@@ -1335,18 +1399,39 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                       )}
 		                      aria-label={item.label}
 		                      aria-current={active ? "page" : undefined}
-		                      aria-expanded={isBoardItem && active ? expanded : undefined}
+		                      aria-expanded={isBoardItem || isWorkspaceItem ? expanded : undefined}
 		                    >
                       <span className="flex items-center gap-2">
                         <span className="h-4 w-4 text-current">{ICONS[item.id]}</span>
                         {!collapsed && <span>{item.label}</span>}
                       </span>
-		                      {!collapsed && isBoardItem && active ? (
+		                      {!collapsed && (isBoardItem || isWorkspaceItem) ? (
 		                        <span className="text-xs uppercase tracking-[0.2em]">{expanded ? "▾" : "▸"}</span>
 		                      ) : null}
 		                    </Link>
 		                  );
 		
+                      if (isWorkspaceItem) {
+                        return (
+                          <div key={item.href} className="flex flex-col gap-2">
+                            {navLink}
+                            {showWorkspaceNav && (
+                              <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.18)] p-3">
+                                <div className="mb-2 flex items-center justify-between gap-2 text-[10px] uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))]">
+                                  <span>{workspaceConfigured ? "Workspace tabs" : "Workspace paths"}</span>
+                                  <span>{orderedWorkspaces.length}</span>
+                                </div>
+                                <div className="space-y-2">
+                                  {orderedWorkspaces.map((workspace) => (
+                                    <WorkspaceNavRow key={workspace.agentId} workspace={workspace} />
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+
 		                  if (!isBoardItem) return navLink;
 		
 		                  return (

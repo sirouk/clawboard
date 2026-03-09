@@ -18,6 +18,7 @@ import httpx
 from pathlib import Path
 import urllib.request
 import urllib.error
+from urllib.parse import parse_qsl, urlparse, urlsplit, urlunsplit, quote
 from difflib import SequenceMatcher
 from datetime import datetime, timezone, timedelta
 from types import SimpleNamespace
@@ -98,7 +99,7 @@ from .schemas import (
     ClassifierReplayRequest,
     ClassifierReplayResponse,
 )
-from .schemas_openclaw_skills import OpenClawSkillsResponse
+from .schemas_openclaw_skills import OpenClawSkillsResponse, OpenClawWorkspacesResponse
 from .openclaw_gateway import gateway_rpc
 from .events import event_hub
 from .clawgraph import build_clawgraph
@@ -162,7 +163,6 @@ else:
     normalized_origins = []
     extra_origins = [
         "http://localhost:3010",
-        "http://100.91.119.30:3010",
         "http://localhost:3000",
         "http://127.0.0.1:3010",
         "http://127.0.0.1:3000",
@@ -3332,7 +3332,7 @@ def _openclaw_chat_dispatch_worker(*, worker_index: int = 1) -> None:
                 _OPENCLAW_CHAT_DISPATCH_WAKEUP.clear()
                 continue
 
-            base_url = os.getenv("OPENCLAW_BASE_URL", "http://127.0.0.1:18789").strip().rstrip("/")
+            base_url = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789").strip().rstrip("/")
             gateway_token = (os.getenv("OPENCLAW_GATEWAY_TOKEN") or "").strip()
             if not base_url:
                 raise RuntimeError("OPENCLAW_BASE_URL is not configured")
@@ -13603,7 +13603,7 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
 )
 def openclaw_chat(payload: OpenClawChatRequest, _background_tasks: BackgroundTasks):
     """Send a user message to OpenClaw via the Gateway and tie it to a stable sessionKey."""
-    base_url = os.getenv("OPENCLAW_BASE_URL", "http://127.0.0.1:18789").strip().rstrip("/")
+    base_url = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789").strip().rstrip("/")
     gateway_token = (os.getenv("OPENCLAW_GATEWAY_TOKEN") or "").strip()
     if not base_url:
         raise HTTPException(status_code=503, detail="OPENCLAW_BASE_URL is not configured")
@@ -13881,6 +13881,188 @@ def openclaw_chat_cancel(payload: OpenClawChatCancelRequest):
         "sessionKey": session_key,
         "sessionKeys": cancel_session_keys,
         "gatewayAbortCount": gateway_abort_count,
+    }
+
+
+def _normalize_fs_path(raw: Any) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    return os.path.abspath(os.path.expanduser(value))
+
+
+def _openclaw_identity_root() -> str:
+    raw = str(os.getenv("OPENCLAW_GATEWAY_IDENTITY_DIR") or os.path.expanduser("~")).strip()
+    return _normalize_fs_path(raw) or _normalize_fs_path(os.path.expanduser("~"))
+
+
+def _openclaw_profile_workspace(base_dir: str, profile_name: str) -> str:
+    safe = re.sub(r"[^a-z0-9_-]+", "-", str(profile_name or "").strip().lower()).strip("-")
+    if not safe or safe in {"default", "main"}:
+        return os.path.join(base_dir, "workspace")
+    return os.path.join(base_dir, f"workspace-{safe}")
+
+
+def _friendly_agent_name(agent_id: str, raw_name: Any = None) -> str:
+    provided = str(raw_name or "").strip()
+    if provided:
+        return provided
+    token = str(agent_id or "").strip().replace("-", " ").replace("_", " ")
+    if not token:
+        return "Agent"
+    return " ".join(part[:1].upper() + part[1:] for part in token.split() if part)
+
+
+def _read_openclaw_install_config() -> dict[str, Any]:
+    explicit = _normalize_fs_path(os.getenv("OPENCLAW_CONFIG_PATH"))
+    identity_root = _openclaw_identity_root()
+    candidate = explicit or os.path.join(identity_root, "openclaw.json")
+    try:
+        with open(candidate, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _resolve_openclaw_agent_workspaces() -> list[dict[str, Any]]:
+    cfg = _read_openclaw_install_config()
+    openclaw_home = _openclaw_identity_root()
+    profile = str(os.getenv("OPENCLAW_PROFILE") or cfg.get("profile") or "").strip()
+    fallback_main = _openclaw_profile_workspace(openclaw_home, profile)
+    agents_cfg = cfg.get("agents") if isinstance(cfg.get("agents"), dict) else {}
+    defaults_cfg = agents_cfg.get("defaults") if isinstance(agents_cfg.get("defaults"), dict) else {}
+    legacy_agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+
+    defaults_workspace = (
+        _normalize_fs_path(defaults_cfg.get("workspace"))
+        or _normalize_fs_path(agents_cfg.get("workspace"))
+        or _normalize_fs_path(legacy_agent_cfg.get("workspace"))
+        or _normalize_fs_path(cfg.get("workspace"))
+        or fallback_main
+    )
+    if defaults_workspace == openclaw_home:
+        defaults_workspace = fallback_main
+
+    agents_raw = agents_cfg.get("list") if isinstance(agents_cfg.get("list"), list) else []
+    rows: dict[str, dict[str, Any]] = {}
+    main_name = "Main"
+
+    for entry in agents_raw:
+        if not isinstance(entry, dict):
+            continue
+        agent_id = str(entry.get("id") or "").strip() or "main"
+        if agent_id == "main":
+            main_name = _friendly_agent_name(agent_id, entry.get("name"))
+        workspace_dir = _normalize_fs_path(entry.get("workspace"))
+        if not workspace_dir:
+            workspace_dir = defaults_workspace if agent_id == "main" else os.path.join(openclaw_home, f"workspace-{agent_id}")
+        if workspace_dir == openclaw_home:
+            workspace_dir = defaults_workspace if agent_id == "main" else os.path.join(openclaw_home, f"workspace-{agent_id}")
+        rows[agent_id] = {
+            "agentId": agent_id,
+            "agentName": _friendly_agent_name(agent_id, entry.get("name")),
+            "workspaceDir": workspace_dir,
+            "preferred": agent_id == "coding",
+        }
+
+    if "main" not in rows:
+        rows["main"] = {
+            "agentId": "main",
+            "agentName": main_name,
+            "workspaceDir": defaults_workspace,
+            "preferred": False,
+        }
+
+    ordered = sorted(
+        rows.values(),
+        key=lambda row: (
+            0 if str(row.get("agentId") or "") == "main" else 1,
+            0 if bool(row.get("preferred")) else 1,
+            str(row.get("agentName") or row.get("agentId") or "").lower(),
+        ),
+    )
+    return ordered
+
+
+def _normalize_http_base_url(raw: Any) -> str | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = urlsplit(text if "://" in text else f"http://{text}")
+    except Exception:
+        return None
+    scheme = str(parsed.scheme or "").strip().lower()
+    netloc = str(parsed.netloc or "").strip()
+    if scheme not in {"http", "https"} or not netloc:
+        return None
+    path = str(parsed.path or "").rstrip("/")
+    return urlunsplit((scheme, netloc, path, "", ""))
+
+
+def _workspace_ide_provider() -> str | None:
+    raw = str(os.getenv("CLAWBOARD_WORKSPACE_IDE_PROVIDER") or "").strip().lower()
+    if raw:
+        return raw
+    return "code-server" if _workspace_ide_base_url() else None
+
+
+def _workspace_ide_base_url() -> str | None:
+    return _normalize_http_base_url(os.getenv("CLAWBOARD_WORKSPACE_IDE_BASE_URL"))
+
+
+def _workspace_ide_url_for(agent_id: str, workspace_dir: str) -> str | None:
+    base_url = _workspace_ide_base_url()
+    if not base_url:
+        return None
+
+    template = str(os.getenv("CLAWBOARD_WORKSPACE_IDE_URL_TEMPLATE") or "").strip()
+    if template:
+        encoded_agent_id = quote(agent_id, safe="")
+        encoded_workspace = quote(workspace_dir, safe="/")
+        return (
+            template
+            .replace("{agentId}", encoded_agent_id)
+            .replace("{workspacePath}", encoded_workspace)
+            .replace("{workspaceDir}", encoded_workspace)
+            .replace("{workspacePathRaw}", workspace_dir)
+            .replace("{workspaceDirRaw}", workspace_dir)
+        )
+
+    query_key = str(os.getenv("CLAWBOARD_WORKSPACE_IDE_FOLDER_QUERY") or "folder").strip() or "folder"
+    parts = urlsplit(base_url)
+    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != query_key]
+    query.append((query_key, workspace_dir))
+    query_string = "&".join(
+        f"{quote(str(key), safe='')}={quote(str(value), safe='/')}"
+        for key, value in query
+    )
+    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", query_string, ""))
+
+
+@app.get(
+    "/api/openclaw/workspaces",
+    dependencies=[Depends(require_token)],
+    response_model=OpenClawWorkspacesResponse,
+    tags=["openclaw"],
+)
+def openclaw_workspaces(agentId: str | None = Query(default=None, description="Optional OpenClaw agent id filter")):
+    requested_agent_id = str(agentId or "").strip()
+    rows = _resolve_openclaw_agent_workspaces()
+    if requested_agent_id:
+        rows = [row for row in rows if str(row.get("agentId") or "").strip() == requested_agent_id]
+    return {
+        "configured": bool(_workspace_ide_base_url()),
+        "provider": _workspace_ide_provider(),
+        "baseUrl": _workspace_ide_base_url(),
+        "workspaces": [
+            {
+                **row,
+                "ideUrl": _workspace_ide_url_for(str(row.get("agentId") or ""), str(row.get("workspaceDir") or "")),
+            }
+            for row in rows
+        ],
     }
 
 

@@ -656,7 +656,7 @@ first_reachable_clawboard_api() {
 
   add_candidate "${CLAWBOARD_API_URL:-}"
   add_candidate "${CLAWBOARD_API_URL_FROM_CONFIG:-}"
-  add_candidate "http://127.0.0.1:8010"
+  add_candidate "http://localhost:8010"
   add_candidate "http://localhost:8010"
 
   for candidate in "${candidates[@]}"; do

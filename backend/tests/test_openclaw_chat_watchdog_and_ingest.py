@@ -20,7 +20,7 @@ TMP_DIR = tempfile.mkdtemp(prefix="clawboard-openclaw-ingest-tests-")
 os.environ["CLAWBOARD_DB_URL"] = f"sqlite:///{os.path.join(TMP_DIR, 'clawboard-test.db')}"
 os.environ["CLAWBOARD_TOKEN"] = "test-token"
 os.environ["CLAWBOARD_ATTACHMENTS_DIR"] = os.path.join(TMP_DIR, "attachments")
-os.environ["OPENCLAW_BASE_URL"] = "http://127.0.0.1:18789"
+os.environ["OPENCLAW_BASE_URL"] = "http://localhost:18789"
 os.environ["OPENCLAW_GATEWAY_TOKEN"] = "test-token"
 os.environ.setdefault("OPENCLAW_CHAT_IN_FLIGHT_PROBE_SECONDS", "0")
 os.environ.setdefault("OPENCLAW_CHAT_IN_FLIGHT_RETRY_GRACE_SECONDS", "120")
@@ -1186,7 +1186,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {"OPENCLAW_BASE_URL": "http://127.0.0.1:18789", "OPENCLAW_GATEWAY_TOKEN": "test-token"},
+            {"OPENCLAW_BASE_URL": "http://localhost:18789", "OPENCLAW_GATEWAY_TOKEN": "test-token"},
             clear=False,
         ), patch.object(background, "add_task") as add_task:
             response = main_module.openclaw_chat(payload, background)
@@ -1495,7 +1495,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ) as rpc_mock, patch.object(main_module, "_schedule_openclaw_assistant_log_check", return_value=None):
             main_module._run_openclaw_chat(
                 "request-chat-002",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-002:task-chat-002",
                 agent_id="main",
@@ -1522,7 +1522,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         rpc_mock.assert_not_called()
         client_mock.assert_called_once()
         self.assertEqual(captured.get("method"), "POST")
-        self.assertEqual(captured.get("url"), "http://127.0.0.1:18789/v1/responses")
+        self.assertEqual(captured.get("url"), "http://localhost:18789/v1/responses")
         headers = captured.get("headers") or {}
         self.assertEqual(headers.get("x-openclaw-agent-id"), "main")
         self.assertEqual(headers.get("x-openclaw-session-key"), "clawboard:task:topic-chat-002:task-chat-002")
@@ -1590,7 +1590,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ):
             main_module._run_openclaw_chat(
                 "request-chat-002aa",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-002aa:task-chat-002aa",
                 agent_id="main",
@@ -1602,7 +1602,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         rpc_mock.assert_not_called()
         client_mock.assert_called_once()
         self.assertEqual(captured.get("method"), "POST")
-        self.assertEqual(captured.get("url"), "http://127.0.0.1:18789/v1/responses")
+        self.assertEqual(captured.get("url"), "http://localhost:18789/v1/responses")
         payload = json.loads((captured.get("content") or b"{}").decode("utf-8"))
         items = payload.get("input") or []
         self.assertEqual(len(items), 1)
@@ -1653,7 +1653,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ):
             main_module._run_openclaw_chat(
                 "request-chat-002ab",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-002ab:task-chat-002ab",
                 agent_id="main",
@@ -1682,7 +1682,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ) as rpc_mock, patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             main_module._run_openclaw_chat(
                 "request-chat-002b",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-002b:task-chat-002b",
                 agent_id="main",
@@ -1749,7 +1749,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ) as error_logger:
             main_module._run_openclaw_chat(
                 "request-chat-002c",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-002c:task-chat-002c",
                 agent_id="main",
@@ -1784,7 +1784,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ), patch.object(main_module, "_schedule_openclaw_assistant_log_check", side_effect=lambda **kwargs: scheduled.append(kwargs)):
             main_module._run_openclaw_chat(
                 "request-chat-003",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-003:task-chat-003",
                 agent_id="main",
@@ -1807,7 +1807,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             main_module._run_openclaw_chat(
                 "request-chat-004",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-004:task-chat-004",
                 agent_id="main",
@@ -1855,7 +1855,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             main_module._run_openclaw_chat(
                 "request-chat-004b",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-004b:task-chat-004b",
                 agent_id="main",
@@ -1910,7 +1910,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             main_module._run_openclaw_chat(
                 "request-chat-004b1",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-004b1:task-chat-004b1",
                 agent_id="main",
@@ -1959,7 +1959,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             main_module._run_openclaw_chat(
                 "request-chat-004b1a",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-004b1a:task-chat-004b1a",
                 agent_id="main",
@@ -2005,7 +2005,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             main_module._run_openclaw_chat(
                 "request-chat-004b1aa",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-004b1aa:task-chat-004b1aa",
                 agent_id="main",
@@ -2058,7 +2058,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             main_module._run_openclaw_chat(
                 "occhat-fup-004b1aaa",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-004b1aaa:task-chat-004b1aaa",
                 agent_id="main",
@@ -2108,7 +2108,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             ok = main_module._run_openclaw_chat(
                 "request-chat-004b1ab",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-004b1ab:task-chat-004b1ab",
                 agent_id="main",
@@ -2163,7 +2163,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             main_module._run_openclaw_chat(
                 "request-chat-004b1b",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-004b1b:task-chat-004b1b",
                 agent_id="main",
@@ -2209,7 +2209,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ), patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             main_module._run_openclaw_chat(
                 "request-chat-004b2",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="agent:main:main",
                 agent_id="main",
@@ -2255,7 +2255,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ) as schedule_mock, patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             main_module._run_openclaw_chat(
                 "request-chat-004c",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-004c:task-chat-004c",
                 agent_id="main",
@@ -2306,7 +2306,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ) as schedule_mock, patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             main_module._run_openclaw_chat(
                 "request-chat-004d",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-004d:task-chat-004d",
                 agent_id="main",
@@ -2428,7 +2428,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         def _run(request_id: str):
             main_module._run_openclaw_chat(
                 request_id,
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-004e:task-chat-004e|thread:test",
                 agent_id="main",
@@ -4216,7 +4216,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {"OPENCLAW_BASE_URL": "http://127.0.0.1:18789", "OPENCLAW_GATEWAY_TOKEN": "test-token"},
+            {"OPENCLAW_BASE_URL": "http://localhost:18789", "OPENCLAW_GATEWAY_TOKEN": "test-token"},
             clear=False,
         ), patch.object(main_module, "append_log_entry", side_effect=RuntimeError("db down")), patch.object(
             background, "add_task"
@@ -4235,7 +4235,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         ) as rpc_mock, patch.object(main_module, "_log_openclaw_chat_error") as error_logger:
             main_module._run_openclaw_chat(
                 "request-chat-008",
-                base_url="http://127.0.0.1:18789",
+                base_url="http://localhost:18789",
                 token="test-token",
                 session_key="clawboard:task:topic-chat-008:task-chat-008",
                 agent_id="main",

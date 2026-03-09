@@ -45,7 +45,7 @@ except Exception:  # pragma: no cover
 CLAWBOARD_API_BASE = os.environ.get("CLAWBOARD_API_BASE", "http://localhost:8010").rstrip("/")
 CLAWBOARD_TOKEN = os.environ.get("CLAWBOARD_TOKEN")
 
-OPENCLAW_BASE_URL = os.environ.get("OPENCLAW_BASE_URL", "http://127.0.0.1:18789").rstrip("/")
+OPENCLAW_BASE_URL = os.environ.get("OPENCLAW_BASE_URL", "http://localhost:18789").rstrip("/")
 OPENCLAW_GATEWAY_TOKEN = os.environ.get("OPENCLAW_GATEWAY_TOKEN")
 OPENCLAW_MODEL = os.environ.get("OPENCLAW_MODEL", "openai-codex/gpt-5.2")
 CLASSIFIER_LLM_MODE = os.environ.get("CLASSIFIER_LLM_MODE", "auto").strip().lower()

@@ -26,7 +26,7 @@ Clawboard runs as a multi-stage pipeline:
 
 3. Stage 3: Retrieve + Visualize
 - API provides context endpoints (`/api/context`, `/api/search`) for response-time augmentation.
-- UI provides Unified Board, Logs, Stats, Setup, Providers, and Clawgraph.
+- UI provides Unified Board, Workspaces, Logs, Stats, Setup, Providers, and Clawgraph.
 
 ## Plain-English Mental Model
 
@@ -168,6 +168,7 @@ Bootstrap characteristics (current):
 - deploys main-agent templates (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`, `BOOTSTRAP.md`) into the resolved OpenClaw main workspace
 - provisions specialist workspaces (`coding`, `docs`, `web`, `social`) and, by default, asks to enroll them so main can delegate through a real team
 - supports non-interactive specialist enrollment with `--setup-agentic-team` or `CLAWBOARD_AGENTIC_TEAM_SETUP=always`
+- writes workspace-IDE defaults so Clawboard can open resolved agent workspaces in a separate code-server tab, with dark-mode and trusted-workspace defaults seeded on first bootstrap
 - deploys Clawboard contract docs (`ANATOMY.md`, `CONTEXT.md`, `CLASSIFICATION.md`, etc.) into the same workspace
 - applies scope-aware directive reconciliation (`directives/all/*` + `directives/<agent-id>/*`) with in-place updates, stale-block pruning, and a locally regenerated team roster
 - keeps main-agent execution lanes (main-only direct, single-specialist, multi-specialist/huddle) aligned with repository contracts
@@ -276,7 +277,7 @@ pnpm test:all
 pnpm test:e2e:live-smoke
 ```
 
-Live stack smoke test (`test:e2e:live-smoke`) expects a running stack and external server wiring. Defaults target `http://127.0.0.1:8010` (API) + `http://127.0.0.1:3010` (web); override with `PLAYWRIGHT_API_BASE` / `PLAYWRIGHT_BASE_URL`. For protected deployments set `PLAYWRIGHT_CLAWBOARD_TOKEN` or export `CLAWBOARD_TOKEN`.
+Live stack smoke test (`test:e2e:live-smoke`) expects a running stack and external server wiring. Defaults target `http://localhost:8010` (API) + `http://localhost:3010` (web); override with `PLAYWRIGHT_API_BASE` / `PLAYWRIGHT_BASE_URL`. For protected deployments set `PLAYWRIGHT_CLAWBOARD_TOKEN` or export `CLAWBOARD_TOKEN`.
 
 Formal full-system soak (docker + security + classifier e2e + backend + frontend + Playwright):
 

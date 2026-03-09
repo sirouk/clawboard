@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import type { IntegrationLevel } from "@/lib/types";
+import type { IntegrationLevel, OpenClawWorkspace } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
 import { normalizeTokenInput } from "@/lib/token";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
@@ -22,7 +22,18 @@ type AppConfigContextValue = AppConfig & {
   setIntegrationLevel: (value: IntegrationLevel) => void;
 };
 
+type OpenClawWorkspaceContextValue = {
+  loading: boolean;
+  error: string | null;
+  configured: boolean;
+  provider: string | null;
+  baseUrl: string | null;
+  workspaces: OpenClawWorkspace[];
+  refresh: () => void;
+};
+
 const AppConfigContext = createContext<AppConfigContextValue | null>(null);
+const OpenClawWorkspaceContext = createContext<OpenClawWorkspaceContextValue | null>(null);
 
 function isIntegrationLevel(value: string): value is IntegrationLevel {
   return value === "manual" || value === "write" || value === "full";
@@ -41,6 +52,13 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
   const [remoteReadLocked, setRemoteReadLocked] = useState(false);
   const [serverIntegrationLevel, setServerIntegrationLevel] = useState<IntegrationLevel>("write");
   const [configRefreshNonce, setConfigRefreshNonce] = useState(0);
+  const [workspaceRefreshNonce, setWorkspaceRefreshNonce] = useState(0);
+  const [workspaceLoadedRequestKey, setWorkspaceLoadedRequestKey] = useState<string | null>(null);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [workspaceConfigured, setWorkspaceConfigured] = useState(false);
+  const [workspaceProvider, setWorkspaceProvider] = useState<string | null>(null);
+  const [workspaceBaseUrl, setWorkspaceBaseUrl] = useState<string | null>(null);
+  const [workspaces, setWorkspaces] = useState<OpenClawWorkspace[]>([]);
 
   const instanceTitle = storedTitle && storedTitle.trim().length > 0 ? storedTitle : serverInstanceTitle;
   const token = useMemo(() => {
@@ -51,6 +69,11 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
     if (storedLevelRaw && isIntegrationLevel(storedLevelRaw)) return storedLevelRaw;
     return serverIntegrationLevel;
   }, [serverIntegrationLevel, storedLevelRaw]);
+  const workspaceRequestKey = useMemo(
+    () => `${storedApiBaseRaw ?? ""}::${token}::${workspaceRefreshNonce}`,
+    [storedApiBaseRaw, token, workspaceRefreshNonce]
+  );
+  const workspaceLoading = workspaceLoadedRequestKey !== workspaceRequestKey;
 
   useEffect(() => {
     if (storedTokenRaw === null) return;
@@ -63,6 +86,7 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const handleConfigUpdated = () => {
       setConfigRefreshNonce((prev) => prev + 1);
+      setWorkspaceRefreshNonce((prev) => prev + 1);
     };
     window.addEventListener(CLAWBOARD_CONFIG_UPDATED_EVENT, handleConfigUpdated);
     return () => window.removeEventListener(CLAWBOARD_CONFIG_UPDATED_EVENT, handleConfigUpdated);
@@ -103,6 +127,43 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
     };
   }, [configRefreshNonce, storedApiBaseRaw, token]);
 
+  useEffect(() => {
+    let alive = true;
+    apiFetch("/api/openclaw/workspaces", { cache: "no-store" }, token)
+      .then(async (res) => {
+        if (!alive) return null;
+        if (!res.ok) {
+          const detail = await res.json().catch(() => null);
+          const message =
+            typeof detail?.detail === "string" ? detail.detail : `Workspace request failed (${res.status})`;
+          throw new Error(message);
+        }
+        const data = await res.json().catch(() => null);
+        if (!alive) return null;
+        setWorkspaceConfigured(Boolean(data?.configured));
+        setWorkspaceProvider(typeof data?.provider === "string" ? data.provider : null);
+        setWorkspaceBaseUrl(typeof data?.baseUrl === "string" ? data.baseUrl : null);
+        setWorkspaces(Array.isArray(data?.workspaces) ? data.workspaces : []);
+        setWorkspaceError(null);
+        setWorkspaceLoadedRequestKey(workspaceRequestKey);
+        return null;
+      })
+      .catch((error) => {
+        if (!alive) return null;
+        setWorkspaceConfigured(false);
+        setWorkspaceProvider(null);
+        setWorkspaceBaseUrl(null);
+        setWorkspaces([]);
+        setWorkspaceError(error instanceof Error ? error.message : "Failed to load workspaces.");
+        setWorkspaceLoadedRequestKey(workspaceRequestKey);
+        return null;
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [token, workspaceRequestKey]);
+
   const setToken = (value: string) => {
     const normalized = normalizeTokenInput(value);
     setLocalStorageItem("clawboard.token", normalized);
@@ -131,13 +192,38 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
     [instanceTitle, token, tokenRequired, tokenConfigured, remoteReadLocked, integrationLevel]
   );
 
-  return <AppConfigContext.Provider value={value}>{children}</AppConfigContext.Provider>;
+  const workspaceValue = useMemo(
+    () => ({
+      loading: workspaceLoading,
+      error: workspaceError,
+      configured: workspaceConfigured,
+      provider: workspaceProvider,
+      baseUrl: workspaceBaseUrl,
+      workspaces,
+      refresh: () => setWorkspaceRefreshNonce((prev) => prev + 1),
+    }),
+    [workspaceBaseUrl, workspaceConfigured, workspaceError, workspaceLoading, workspaceProvider, workspaces]
+  );
+
+  return (
+    <AppConfigContext.Provider value={value}>
+      <OpenClawWorkspaceContext.Provider value={workspaceValue}>{children}</OpenClawWorkspaceContext.Provider>
+    </AppConfigContext.Provider>
+  );
 }
 
 export function useAppConfig() {
   const context = useContext(AppConfigContext);
   if (!context) {
     throw new Error("useAppConfig must be used within AppConfigProvider");
+  }
+  return context;
+}
+
+export function useOpenClawWorkspaces() {
+  const context = useContext(OpenClawWorkspaceContext);
+  if (!context) {
+    throw new Error("useOpenClawWorkspaces must be used within AppConfigProvider");
   }
   return context;
 }

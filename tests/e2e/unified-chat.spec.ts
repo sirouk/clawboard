@@ -85,6 +85,50 @@ test("unified chat renders natural bubbles for task chat entries", async ({ page
   await expect(page.getByText("TASK CHAT")).toBeVisible();
 });
 
+test("task chat surfaces the coding workspace when coding activity lands in the thread", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-workspace-${suffix}`;
+  const topicName = `Workspace Attention ${suffix}`;
+  const taskId = `task-workspace-${suffix}`;
+  const taskTitle = `Workspace cue ${suffix}`;
+  const sessionKey = `clawboard:task:${topicId}:${taskId}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const createTask = await request.post(`${apiBase}/api/tasks`, {
+    data: { id: taskId, topicId, title: taskTitle, status: "doing", pinned: false },
+  });
+  expect(createTask.ok()).toBeTruthy();
+
+  const codingLog = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      taskId,
+      type: "action",
+      content: `Edited repo files for ${suffix}`,
+      summary: "Edited repo files",
+      classificationStatus: "classified",
+      agentId: "coding",
+      agentLabel: "Coding",
+      source: { sessionKey, channel: "openclaw" },
+    },
+  });
+  expect(codingLog.ok()).toBeTruthy();
+
+  await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const workspaceLink = page.getByTestId(`task-chat-workspace-link-${taskId}`);
+  await expect(workspaceLink).toBeVisible();
+  await expect(workspaceLink).toContainText("Open coding workspace");
+  await expect(workspaceLink).toHaveAttribute("target", "_blank");
+  await expect(workspaceLink).toHaveAttribute("href", /workspace-coding/);
+});
+
 test("board controls can show hidden tool/system chat rows", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
   const suffix = Date.now();

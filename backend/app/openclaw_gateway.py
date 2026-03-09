@@ -287,7 +287,7 @@ def load_openclaw_gateway_config(
     token_override: str | None = None,
     use_device_auth_override: bool | None = None,
 ) -> OpenClawGatewayConfig:
-    http_base = os.getenv("OPENCLAW_BASE_URL", "http://127.0.0.1:18789").strip()
+    http_base = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789").strip()
     if token_override is not None:
         token = str(token_override).strip()
     else:

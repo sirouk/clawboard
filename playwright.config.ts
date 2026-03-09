@@ -6,10 +6,10 @@ const reuseServer = process.env.PLAYWRIGHT_REUSE_SERVER === "1" && !process.env.
 const useExternalServer = process.env.PLAYWRIGHT_USE_EXTERNAL_SERVER === "1";
 const mockApiPort = Number(process.env.PLAYWRIGHT_MOCK_API_PORT ?? "3051");
 const webPort = Number(process.env.PLAYWRIGHT_WEB_PORT ?? "3050");
-const mockApiBase = `http://127.0.0.1:${mockApiPort}`;
+const mockApiBase = `http://localhost:${mockApiPort}`;
 const mockBaseURL = `http://localhost:${webPort}`;
-const externalApiBase = process.env.PLAYWRIGHT_EXTERNAL_API_BASE ?? "http://127.0.0.1:8010";
-const externalBaseURL = process.env.PLAYWRIGHT_EXTERNAL_BASE_URL ?? "http://127.0.0.1:3010";
+const externalApiBase = process.env.PLAYWRIGHT_EXTERNAL_API_BASE ?? "http://localhost:8010";
+const externalBaseURL = process.env.PLAYWRIGHT_EXTERNAL_BASE_URL ?? "http://localhost:3010";
 const apiBase = process.env.PLAYWRIGHT_API_BASE ?? (useExternalServer ? externalApiBase : mockApiBase);
 const baseURL =
   process.env.PLAYWRIGHT_BASE_URL ?? (useExternalServer ? externalBaseURL : mockBaseURL);

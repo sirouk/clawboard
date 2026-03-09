@@ -30,7 +30,7 @@ class OpenClawGatewayConfigTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "OPENCLAW_BASE_URL": "http://127.0.0.1:18789",
+                "OPENCLAW_BASE_URL": "http://localhost:18789",
                 "OPENCLAW_GATEWAY_TOKEN": "test-token",
                 "OPENCLAW_GATEWAY_HOST_HEADER": "ws://example.internal:18789",
             },
@@ -43,7 +43,7 @@ class OpenClawGatewayConfigTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "OPENCLAW_BASE_URL": "http://127.0.0.1:18789",
+                "OPENCLAW_BASE_URL": "http://localhost:18789",
                 "OPENCLAW_GATEWAY_TOKEN": "test-token",
             },
             clear=True,
@@ -56,7 +56,7 @@ class OpenClawGatewayConfigTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "OPENCLAW_BASE_URL": "http://127.0.0.1:18789",
+                "OPENCLAW_BASE_URL": "http://localhost:18789",
                 "OPENCLAW_GATEWAY_TOKEN": "test-token",
                 "OPENCLAW_GATEWAY_USE_DEVICE_AUTH": "1",
             },

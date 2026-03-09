@@ -90,8 +90,8 @@ test.describe("live stack smoke", () => {
   test.skip(!LIVE_SMOKE_ENABLED, "Set PLAYWRIGHT_LIVE_STACK_SMOKE=1 to run live stack smoke tests.");
 
   test("chat enqueue + durable log + cancel path is healthy without inference", async ({ page, request }) => {
-    const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://127.0.0.1:8010";
-    const baseUrl = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:3010";
+    const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:8010";
+    const baseUrl = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3010";
     const token = resolveToken();
     const suffix = Date.now();
     const topicId = `topic-live-smoke-${suffix}`;

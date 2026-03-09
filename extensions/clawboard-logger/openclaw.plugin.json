@@ -38,7 +38,7 @@
     "baseUrl": { "label": "Clawboard Base URL", "placeholder": "http://clawboard:8010" },
     "baseUrlFallbacks": {
       "label": "Fallback Base URLs",
-      "placeholder": "[\"http://127.0.0.1:8010\",\"http://localhost:8010\"]"
+      "placeholder": "[\"http://localhost:8010\",\"https://clawboard.example.test:8010\"]"
     },
     "token": { "label": "Clawboard Token", "sensitive": true },
     "queuePath": { "label": "Queue file path" },

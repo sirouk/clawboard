@@ -12,11 +12,11 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import type { LogEntry, Space, Task, Topic } from "@/lib/types";
+import type { LogEntry, OpenClawWorkspace, Space, Task, Topic } from "@/lib/types";
 import { Button, Input, Select, StatusPill, TextArea } from "@/components/ui";
 import { LogList } from "@/components/log-list";
 import { formatRelativeTime } from "@/lib/format";
-import { useAppConfig } from "@/components/providers";
+import { useAppConfig, useOpenClawWorkspaces } from "@/components/providers";
 import { PinToggleGeneric } from "@/components/pin-toggle-generic";
 
 import { decodeSlugId, encodeTaskSlug, encodeTopicSlug, slugify } from "@/lib/slug";
@@ -1178,6 +1178,40 @@ function deriveChatHeaderBlurb(entries: LogEntry[]) {
   );
 }
 
+function normalizeAgentToken(value: string | undefined | null) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function deriveTaskWorkspaceAttention(
+  entries: LogEntry[],
+  workspaceByAgentId: Map<string, OpenClawWorkspace>
+) {
+  let latestAny: { workspace: OpenClawWorkspace; agentId: string } | null = null;
+  let latestCoding: { workspace: OpenClawWorkspace; agentId: string } | null = null;
+
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i];
+    const agentId = normalizeAgentToken(entry.agentId);
+    if (!agentId || agentId === "user" || agentId === "assistant" || agentId === "system" || agentId === "toolresult") {
+      continue;
+    }
+    const workspace = workspaceByAgentId.get(agentId);
+    if (!workspace?.ideUrl) continue;
+    if (!latestAny) latestAny = { workspace, agentId };
+    if (agentId === "coding") {
+      latestCoding = { workspace, agentId };
+      break;
+    }
+  }
+
+  const target = latestCoding ?? latestAny;
+  if (!target) return null;
+  const agentName = String(target.workspace.agentName || "").trim() || target.agentId;
+  const label = target.agentId === "coding" ? "Open coding workspace" : `Open ${agentName} workspace`;
+  const hint = target.agentId === "coding" ? "Recent coding activity" : `Recent ${agentName} workspace activity`;
+  return { ...target, label, hint };
+}
+
 function SwipeRevealRow({
   rowId,
   openId,
@@ -1913,6 +1947,7 @@ export function ColorShuffleTrigger({
 
 export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const { token, tokenRequired } = useAppConfig();
+  const { workspaces } = useOpenClawWorkspaces();
   const {
     spaces: storeSpaces,
     topics: storeTopics,
@@ -1934,6 +1969,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     sseConnected,
   } = useDataStore();
   const readOnly = tokenRequired && !token;
+  const workspaceByAgentId = useMemo(
+    () => new Map(workspaces.map((workspace) => [normalizeAgentToken(workspace.agentId), workspace])),
+    [workspaces]
+  );
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const scrollMemory = useRef<Record<string, number>>({});
@@ -7040,6 +7079,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       const taskToolingOrSystemCallCountLabel = formatToolingOrSystemCallCountLabel(taskToolingOrSystemCallCount);
                       const taskChatMetricsLabel = `${taskChatEntryCountLabel} · ${taskToolingOrSystemCallCountLabel}`;
                       const taskChatBlurb = deriveChatHeaderBlurb(taskChatAllLogs);
+                      const taskWorkspaceAttention = deriveTaskWorkspaceAttention(taskChatAllLogs, workspaceByAgentId);
 	                      const taskChatKey = chatKeyForTask(task.id);
                       const taskChatSessionKey = taskSessionKey(topicId, task.id);
                       const taskHiddenToolCallCount = hiddenToolCallCountForSession(taskChatSessionKey);
@@ -7758,6 +7798,32 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                           </div>
                                         </div>
                                       </div>
+                              {taskWorkspaceAttention ? (
+                                <div
+                                  className={cn(
+                                    "mb-2 flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-md)] border px-3 py-2 text-xs",
+                                    "border-[rgba(77,171,158,0.28)] bg-[rgba(16,27,26,0.42)]"
+                                  )}
+                                >
+                                  <div className="min-w-0">
+                                    <div className="text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-accent-2))]">
+                                      {taskWorkspaceAttention.hint}
+                                    </div>
+                                    <div className="overflow-x-auto whitespace-nowrap text-[rgb(var(--claw-muted))]">
+                                      {taskWorkspaceAttention.workspace.workspaceDir}
+                                    </div>
+                                  </div>
+                                  <a
+                                    href={taskWorkspaceAttention.workspace.ideUrl ?? "#"}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    data-testid={`task-chat-workspace-link-${task.id}`}
+                                    className="inline-flex h-8 shrink-0 items-center justify-center rounded-full border border-[rgba(77,171,158,0.35)] bg-[rgba(77,171,158,0.14)] px-3 text-[11px] font-semibold text-[rgb(var(--claw-text))] transition hover:border-[rgba(255,90,45,0.35)] hover:text-[rgb(var(--claw-text))]"
+                                  >
+                                    {taskWorkspaceAttention.label}
+                                  </a>
+                                </div>
+                              ) : null}
                               {taskChatAllLogs.length === 0 &&
                               findPendingMessagesBySession(taskSessionKey(topicId, task.id)).length === 0 &&
                               !isTaskResponding(task) ? (

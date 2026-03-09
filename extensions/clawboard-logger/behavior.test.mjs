@@ -151,11 +151,11 @@ test("message_received falls back to loopback base URL when primary base URL is 
   try {
     const { fn, calls } = createFetchMock((_idx, url) => {
       const target = String(url);
-      if (target.startsWith("http://100.91.119.30:8010/")) {
+      if (target.startsWith("http://clawboard.example.test:8010/")) {
         const err = new TypeError("fetch failed");
         err.cause = {
           code: "ECONNREFUSED",
-          message: "connect ECONNREFUSED 100.91.119.30:8010",
+          message: "connect ECONNREFUSED clawboard.example.test:8010",
         };
         throw err;
       }
@@ -172,7 +172,10 @@ test("message_received falls back to loopback base URL when primary base URL is 
     });
     globalThis.fetch = fn;
 
-    const api = makeApi({ baseUrl: "http://100.91.119.30:8010" });
+    const api = makeApi({
+      baseUrl: "http://clawboard.example.test:8010",
+      baseUrlFallbacks: ["http://localhost:8010"],
+    });
     register(api);
 
     const handler = api.__handlers.get("message_received");
@@ -210,11 +213,11 @@ test("message_received falls back to loopback base URL when primary base URL is 
       }
     });
     assert.ok(
-      relevant.some((call) => String(call.url).startsWith("http://100.91.119.30:8010/api/log")),
+      relevant.some((call) => String(call.url).startsWith("http://clawboard.example.test:8010/api/log")),
       "expected an initial attempt against configured baseUrl",
     );
     assert.ok(
-      relevant.some((call) => String(call.url).startsWith("http://127.0.0.1:8010/api/log")),
+      relevant.some((call) => String(call.url).startsWith("http://localhost:8010/api/log")),
       "expected fallback attempt against loopback baseUrl",
     );
   } finally {

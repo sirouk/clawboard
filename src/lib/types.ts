@@ -188,3 +188,18 @@ export type SemanticSearchResponse = {
   matchedTaskIds: string[];
   matchedLogIds: string[];
 };
+
+export type OpenClawWorkspace = {
+  agentId: string;
+  agentName?: string | null;
+  workspaceDir: string;
+  ideUrl?: string | null;
+  preferred?: boolean;
+};
+
+export type OpenClawWorkspacesResponse = {
+  configured: boolean;
+  provider?: string | null;
+  baseUrl?: string | null;
+  workspaces: OpenClawWorkspace[];
+};

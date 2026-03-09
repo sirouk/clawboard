@@ -28,7 +28,7 @@ function buildForwardHeaders(request: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
-  const authError = requireToken(req);
+  const authError = requireToken(req, { allowLoopback: true });
   if (authError) return authError;
 
   const base = resolveUpstreamBase();

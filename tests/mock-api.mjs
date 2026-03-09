@@ -25,6 +25,29 @@ const deletedTopics = [];
 const deletedTasks = [];
 const liveTyping = new Map();
 const liveThreadWork = new Map();
+const openclawWorkspaces = [
+  {
+    agentId: "main",
+    agentName: "Main",
+    workspaceDir: "/Users/test/.openclaw/workspace",
+    ideUrl: "http://workspace-ide.localhost:13337/?folder=/Users/test/.openclaw/workspace",
+    preferred: false,
+  },
+  {
+    agentId: "coding",
+    agentName: "Coding",
+    workspaceDir: "/Users/test/.openclaw/workspace-coding",
+    ideUrl: "http://workspace-ide.localhost:13337/?folder=/Users/test/.openclaw/workspace-coding",
+    preferred: true,
+  },
+  {
+    agentId: "docs",
+    agentName: "Docs",
+    workspaceDir: "/Users/test/.openclaw/workspace-docs",
+    ideUrl: "http://workspace-ide.localhost:13337/?folder=/Users/test/.openclaw/workspace-docs",
+    preferred: false,
+  },
+];
 
 function nowIso() {
   return new Date().toISOString();
@@ -467,6 +490,19 @@ const server = http.createServer(async (req, res) => {
       pushEvent("config.updated", store.instance);
       return sendJson(res, 200, { instance: store.instance, tokenRequired: false });
     }
+  }
+
+  if (url.pathname === "/api/openclaw/workspaces" && req.method === "GET") {
+    const requested = String(url.searchParams.get("agentId") || "").trim();
+    const workspaces = requested
+      ? openclawWorkspaces.filter((workspace) => workspace.agentId === requested)
+      : openclawWorkspaces;
+    return sendJson(res, 200, {
+      configured: true,
+      provider: "code-server",
+      baseUrl: "http://workspace-ide.localhost:13337",
+      workspaces,
+    });
   }
 
   if (url.pathname === "/api/changes") {

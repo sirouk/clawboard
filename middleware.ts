@@ -44,10 +44,27 @@ function isLoopbackAddress(value?: string | null): boolean {
   return false;
 }
 
+function normalizedHost(value?: string | null): string {
+  if (!value) return "";
+  const first = value.split(",")[0]?.trim().toLowerCase() || "";
+  if (!first) return "";
+  if (first.startsWith("[") && first.includes("]")) {
+    const end = first.indexOf("]");
+    return first.slice(0, end + 1);
+  }
+  return first.replace(/:\d+$/, "");
+}
+
+function isLoopbackHost(value?: string | null): boolean {
+  return isLoopbackAddress(normalizedHost(value));
+}
+
 function isLocalRequest(request: NextRequest): boolean {
   const ipAddress = clientAddress(request);
   if (isLoopbackAddress(ipAddress)) return true;
   if (isTestHost(ipAddress)) return true;
+  const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || request.nextUrl.hostname;
+  if (isLoopbackHost(host)) return true;
   return false;
 }
 

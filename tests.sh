@@ -121,7 +121,7 @@ run_security_checks() {
   local remote_no_token_code
   remote_no_token_code="$(
     curl -sS -o /dev/null -w "%{http_code}" \
-      -H "Host: 100.91.119.30:8010" \
+      -H "Host: clawboard.example.test:8010" \
       http://localhost:8010/api/config || true
   )"
   [[ "$remote_no_token_code" == "401" ]] || fail "Remote read without token should be 401, got $remote_no_token_code"
@@ -129,7 +129,7 @@ run_security_checks() {
   local remote_with_token_code
   remote_with_token_code="$(
     curl -sS -o /dev/null -w "%{http_code}" \
-      -H "Host: 100.91.119.30:8010" \
+      -H "Host: clawboard.example.test:8010" \
       -H "X-Clawboard-Token: ${CLAWBOARD_TOKEN}" \
       http://localhost:8010/api/config || true
   )"

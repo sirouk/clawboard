@@ -41,8 +41,6 @@ const nextConfig: NextConfig = {
         "*.local",
         // Tailscale MagicDNS, e.g. `host.tailXXXX.ts.net` (variable subdomain depth).
         "**.ts.net",
-        // Tailscale CGNAT range commonly used for tailnet IPs (e.g. `100.91.119.30`).
-        "100.*.*.*",
         ...(process.env.CLAWBOARD_ALLOWED_DEV_ORIGINS || "")
           .split(",")
           .map(normalizeAllowedDevOrigin)

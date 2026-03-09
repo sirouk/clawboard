@@ -26,6 +26,10 @@ function run(cmd, { cwd, env, input } = {}) {
   });
 }
 
+function escapeRegex(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function makeStub(binDir, name, scriptBody) {
   const filePath = path.join(binDir, name);
   const contents = `#!/usr/bin/env bash
@@ -605,10 +609,15 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   const envText = await readFile(envPath, "utf8");
   const envLines = envText.split(/\r?\n/);
   const singleEntryKeys = [
+    "OPENCLAW_HOME",
     "OPENCLAW_CHAT_TRANSPORT",
     "OPENCLAW_REQUEST_ID_MAX_ENTRIES",
     "OPENCLAW_REQUEST_ATTRIBUTION_LOOKBACK_SECONDS",
     "OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES",
+    "CLAWBOARD_WORKSPACE_IDE_PROVIDER",
+    "CLAWBOARD_WORKSPACE_IDE_PORT",
+    "CLAWBOARD_WORKSPACE_IDE_BASE_URL",
+    "CLAWBOARD_WORKSPACE_IDE_PASSWORD",
     "CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS",
     "CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS",
     "CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TOPICS",
@@ -619,7 +628,24 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
     const count = envLines.filter((line) => line.startsWith(`${key}=`)).length;
     assert.equal(count, 1, `expected ${key} to be written exactly once after rerun, found ${count}`);
   }
+  assert.match(envText, new RegExp(`^OPENCLAW_HOME=${escapeRegex(openclawHome)}$`, "m"));
   assert.match(envText, /^OPENCLAW_CHAT_TRANSPORT=auto$/m);
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_PROVIDER=code-server$/m);
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_PORT=13337$/m);
+  const publicWebUrl = envLines.find((line) => line.startsWith("CLAWBOARD_PUBLIC_WEB_URL="))?.split("=")[1] ?? "";
+  const publicWebHost = new URL(publicWebUrl).hostname;
+  assert.match(
+    envText,
+    new RegExp(`^CLAWBOARD_WORKSPACE_IDE_BASE_URL=http://${escapeRegex(publicWebHost)}:13337$`, "m")
+  );
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_PASSWORD=test-token$/m);
+
+  const codeServerSettingsPath = path.join(installDir, "data", "code-server", "local", "User", "settings.json");
+  const codeServerSettings = JSON.parse(await readFile(codeServerSettingsPath, "utf8"));
+  assert.equal(codeServerSettings["workbench.colorTheme"], "Default Dark Modern");
+  assert.equal(codeServerSettings["workbench.preferredDarkColorTheme"], "Default Dark Modern");
+  assert.equal(codeServerSettings["window.autoDetectColorScheme"], false);
+  assert.equal(codeServerSettings["security.workspace.trust.enabled"], false);
 });
 
 test("bootstrap_clawboard.sh: uses CLAWBOARD_TOKEN for API health and config writes", async () => {

@@ -28,7 +28,7 @@ want direct browser-to-API traffic. If you point that value at `http://localhost
 remote browsers will try to call *their own* localhost.
 
 For direct remote API access, set `CLAWBOARD_PUBLIC_API_BASE` in `.env` to a reachable host, e.g.
-`http://100.91.119.30:8010`.
+`https://clawboard.example.test:8010`.
 
 ## Instance config
 

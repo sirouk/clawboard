@@ -1258,6 +1258,10 @@ API_URL="${CLAWBOARD_API_URL:-http://localhost:8010}"
 WEB_URL="${CLAWBOARD_WEB_URL:-http://localhost:3010}"
 PUBLIC_API_BASE="${CLAWBOARD_PUBLIC_API_BASE:-}"
 PUBLIC_WEB_URL="${CLAWBOARD_PUBLIC_WEB_URL:-}"
+WORKSPACE_IDE_BASE_URL_VALUE="${CLAWBOARD_WORKSPACE_IDE_BASE_URL:-}"
+WORKSPACE_IDE_PASSWORD_VALUE="${CLAWBOARD_WORKSPACE_IDE_PASSWORD:-}"
+WORKSPACE_IDE_PORT_VALUE="${CLAWBOARD_WORKSPACE_IDE_PORT:-13337}"
+WORKSPACE_IDE_PROVIDER_VALUE="${CLAWBOARD_WORKSPACE_IDE_PROVIDER:-code-server}"
 OPENCLAW_BASE_URL_VALUE="${OPENCLAW_BASE_URL:-}"
 TOKEN="${CLAWBOARD_TOKEN:-}"
 TITLE="${CLAWBOARD_TITLE:-Clawboard}"
@@ -1271,6 +1275,7 @@ WEB_URL_EXPLICIT=false
 PUBLIC_API_BASE_EXPLICIT=false
 PUBLIC_WEB_URL_EXPLICIT=false
 OPENCLAW_BASE_URL_EXPLICIT=false
+WORKSPACE_IDE_BASE_URL_EXPLICIT=false
 if [ -n "${CLAWBOARD_API_URL+x}" ]; then
   API_URL_EXPLICIT=true
 fi
@@ -1282,6 +1287,9 @@ if [ -n "${CLAWBOARD_PUBLIC_API_BASE+x}" ]; then
 fi
 if [ -n "${CLAWBOARD_PUBLIC_WEB_URL+x}" ]; then
   PUBLIC_WEB_URL_EXPLICIT=true
+fi
+if [ -n "${CLAWBOARD_WORKSPACE_IDE_BASE_URL+x}" ]; then
+  WORKSPACE_IDE_BASE_URL_EXPLICIT=true
 fi
 if [ -n "${OPENCLAW_BASE_URL+x}" ]; then
   OPENCLAW_BASE_URL_EXPLICIT=true
@@ -3627,6 +3635,55 @@ fi
 
 ensure_env_file "$INSTALL_DIR"
 
+# Keep workspace IDE state on host paths with deterministic ownership.
+mkdir -p "$INSTALL_DIR/data/code-server/config" "$INSTALL_DIR/data/code-server/local"
+chmod 700 "$INSTALL_DIR/data/code-server/config" "$INSTALL_DIR/data/code-server/local" 2>/dev/null || true
+mkdir -p "$INSTALL_DIR/data/code-server/local/User"
+
+CODE_SERVER_SETTINGS_FILE="$INSTALL_DIR/data/code-server/local/User/settings.json"
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$CODE_SERVER_SETTINGS_FILE" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+defaults = {
+    "workbench.colorTheme": "Default Dark Modern",
+    "workbench.preferredDarkColorTheme": "Default Dark Modern",
+    "window.autoDetectColorScheme": False,
+    "security.workspace.trust.enabled": False,
+}
+
+data = {}
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            parsed = json.load(handle)
+        if isinstance(parsed, dict):
+            data = parsed
+    except Exception:
+        data = {}
+
+for key, value in defaults.items():
+    data[key] = value
+
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+elif [ ! -f "$CODE_SERVER_SETTINGS_FILE" ]; then
+  cat >"$CODE_SERVER_SETTINGS_FILE" <<'EOF'
+{
+  "security.workspace.trust.enabled": false,
+  "window.autoDetectColorScheme": false,
+  "workbench.colorTheme": "Default Dark Modern",
+  "workbench.preferredDarkColorTheme": "Default Dark Modern"
+}
+EOF
+fi
+
 if [ "$PUBLIC_API_BASE_EXPLICIT" = false ] && read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" >/dev/null 2>&1; then
   PUBLIC_API_BASE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" || true)"
 fi
@@ -3654,6 +3711,8 @@ fi
 
 log_info "Writing CLAWBOARD_TOKEN in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_TOKEN" "$TOKEN"
+log_info "Writing OPENCLAW_HOME in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_HOME" "$OPENCLAW_HOME"
 configure_access_urls
 run_env_connection_wizard
 ACCESS_API_URL="$(normalize_http_url "$ACCESS_API_URL")"
@@ -3668,6 +3727,33 @@ log_info "Writing CLAWBOARD_PUBLIC_API_BASE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" "$ACCESS_API_URL"
 log_info "Writing CLAWBOARD_PUBLIC_WEB_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_WEB_URL" "$ACCESS_WEB_URL"
+WORKSPACE_IDE_PORT_VALUE="$(clamp_int "$WORKSPACE_IDE_PORT_VALUE" 1 65535 || echo "13337")"
+WORKSPACE_IDE_PROVIDER_VALUE="$(printf "%s" "$WORKSPACE_IDE_PROVIDER_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+case "$WORKSPACE_IDE_PROVIDER_VALUE" in
+  code-server|"") ;;
+  *) WORKSPACE_IDE_PROVIDER_VALUE="code-server" ;;
+esac
+if [ -z "$WORKSPACE_IDE_PASSWORD_VALUE" ]; then
+  WORKSPACE_IDE_PASSWORD_VALUE="$TOKEN"
+fi
+if [ "$WORKSPACE_IDE_BASE_URL_EXPLICIT" = false ]; then
+  IDE_HOST="$(extract_url_host "$ACCESS_WEB_URL")"
+  [ -n "$IDE_HOST" ] || IDE_HOST="localhost"
+  if [[ "$ACCESS_WEB_URL" =~ ^https:// ]]; then
+    WORKSPACE_IDE_BASE_URL_VALUE="https://$IDE_HOST:$WORKSPACE_IDE_PORT_VALUE"
+  else
+    WORKSPACE_IDE_BASE_URL_VALUE="http://$IDE_HOST:$WORKSPACE_IDE_PORT_VALUE"
+  fi
+fi
+WORKSPACE_IDE_BASE_URL_VALUE="$(normalize_http_url "$WORKSPACE_IDE_BASE_URL_VALUE")"
+log_info "Writing CLAWBOARD_WORKSPACE_IDE_PROVIDER in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_PROVIDER" "$WORKSPACE_IDE_PROVIDER_VALUE"
+log_info "Writing CLAWBOARD_WORKSPACE_IDE_PORT in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_PORT" "$WORKSPACE_IDE_PORT_VALUE"
+log_info "Writing CLAWBOARD_WORKSPACE_IDE_BASE_URL in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_BASE_URL" "$WORKSPACE_IDE_BASE_URL_VALUE"
+log_info "Writing CLAWBOARD_WORKSPACE_IDE_PASSWORD in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_PASSWORD" "$WORKSPACE_IDE_PASSWORD_VALUE"
 if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SERVER_API_BASE" >/dev/null 2>&1; then
   SERVER_API_BASE_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SERVER_API_BASE" || true)"
 else
@@ -4377,7 +4463,7 @@ PY
       PLUGIN_EXT_DIR="$OPENCLAW_HOME/extensions/clawboard-logger"
       _PLUGIN_BASE_URL_INIT="${API_URL:-}"
       if [ -z "$_PLUGIN_BASE_URL_INIT" ]; then
-        _PLUGIN_BASE_URL_INIT="http://127.0.0.1:8010"
+        _PLUGIN_BASE_URL_INIT="http://localhost:8010"
       fi
       LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON=false
       if [ "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE" = "1" ]; then
@@ -4600,6 +4686,7 @@ log_success "Bootstrap complete."
 echo "Clawboard UI (access):   $ACCESS_WEB_URL"
 echo "Clawboard API (access):  ${ACCESS_API_URL%/}/docs"
 echo "Clawboard API (internal): $API_URL"
+echo "Workspace IDE:  $WORKSPACE_IDE_BASE_URL_VALUE"
 echo "OpenClaw gateway (classifier): $OPENCLAW_BASE_URL_VALUE"
 MASKED_TOKEN="(not set)"
 if [ -n "${TOKEN:-}" ]; then

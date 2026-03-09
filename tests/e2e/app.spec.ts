@@ -44,6 +44,35 @@ test("graph route loads clawgraph view", async ({ page }) => {
   await expect(page.getByTestId("clawgraph-canvas")).toBeVisible();
 });
 
+test("workspaces route loads embedded workspace surface with quick-switch chips", async ({ page }) => {
+  await page.goto("/workspaces");
+  await expect(page.getByRole("heading", { name: "Workspaces" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Agent Workspaces" })).toBeVisible();
+  await expect(page.getByText("In Clawboard")).toBeVisible();
+  await expect(page.getByTestId("workspace-chip-row")).toBeVisible();
+  await expect(page.getByTestId("workspace-nav-toggle")).toHaveCount(0);
+  const navCodingLink = page.getByTestId("workspace-nav-coding");
+  await expect(navCodingLink).toBeVisible();
+  await expect(navCodingLink).toHaveAttribute("href", "/workspaces/coding");
+  const codingLink = page.getByTestId("open-workspace-coding");
+  await expect(codingLink).toBeVisible();
+  await expect(codingLink).toHaveAttribute("href", "/workspaces/coding");
+  await expect(
+    page.locator("#clawboard-shell-content").getByText("/Users/test/.openclaw/workspace-coding", { exact: true })
+  ).toBeVisible();
+  await expect(page.getByTestId("workspace-ide-frame")).toHaveAttribute(
+    "src",
+    /http:\/\/100\.91\.119\.30:13337\/\?folder=/
+  );
+
+  await navCodingLink.click();
+  await expect(page).toHaveURL(/\/workspaces\/coding$/);
+  await expect(page.getByTestId("workspace-ide-frame")).toHaveAttribute(
+    "src",
+    /workspace-coding/
+  );
+});
+
 test("unified view expands topics and tasks", async ({ page }) => {
   await page.goto("/u");
   await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
@@ -104,7 +133,7 @@ test("browser API calls use the configured mock API base by default in Playwrigh
 }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
   const directApiOrigin = new URL(apiBase).origin;
-  const webOrigin = "http://127.0.0.1:3050";
+  const webOrigin = "http://localhost:3050";
   const suffix = Date.now();
   const topicId = `topic-proxy-send-${suffix}`;
   const topicName = `Proxy Send ${suffix}`;
@@ -141,7 +170,7 @@ test("browser API calls use the configured mock API base by default in Playwrigh
     });
   });
 
-  await page.goto(`http://127.0.0.1:3050/u/topic/${topicId}/task/${taskId}?reveal=1`);
+  await page.goto(`http://localhost:3050/u/topic/${topicId}/task/${taskId}?reveal=1`);
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
 
   const composer = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
@@ -177,21 +206,21 @@ test("browser API calls use the configured mock API base by default in Playwrigh
 });
 
 test("explicit local loopback api base still uses same-origin proxy for browser calls", async ({ page }) => {
-  const webOrigin = "http://127.0.0.1:3050";
+  const webOrigin = "http://localhost:3050";
   let sameOriginConfigHits = 0;
   let directLoopbackHits = 0;
 
   await page.addInitScript(() => {
-    window.localStorage.setItem("clawboard.apiBase", "http://127.0.0.1:8010");
+    window.localStorage.setItem("clawboard.apiBase", "http://localhost:8010");
     window.localStorage.setItem("clawboard.token", "local-proxy-token");
   });
 
   page.on("request", (req) => {
     if (req.url().startsWith(`${webOrigin}/api/config`)) sameOriginConfigHits += 1;
-    if (req.url().startsWith("http://127.0.0.1:8010/api/config")) directLoopbackHits += 1;
+    if (req.url().startsWith("http://localhost:8010/api/config")) directLoopbackHits += 1;
   });
 
-  await page.route("http://127.0.0.1:8010/api/config", async (route) => {
+  await page.route("http://localhost:8010/api/config", async (route) => {
     directLoopbackHits += 1000;
     await route.abort();
   });

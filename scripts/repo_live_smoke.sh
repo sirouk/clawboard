@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="${CLAWBOARD_ENV_FILE:-$REPO_ROOT/.env}"
-LOCAL_API_BASE_DEFAULT="http://127.0.0.1:8010"
-LOCAL_WEB_BASE_DEFAULT="http://127.0.0.1:3010"
+LOCAL_API_BASE_DEFAULT="http://localhost:8010"
+LOCAL_WEB_BASE_DEFAULT="http://localhost:3010"
 
 read_env_value() {
   local key="$1"

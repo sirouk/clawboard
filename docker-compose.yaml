@@ -90,6 +90,8 @@ services:
       CLAWBOARD_SERVER_API_BASE: ${CLAWBOARD_SERVER_API_BASE:-http://api:8000}
       # Optional fallback header token for server-side proxy forwarding.
       CLAWBOARD_SERVER_API_TOKEN: ${CLAWBOARD_TOKEN:-}
+      # Internal companion URL for auto-authing the embedded code-server iframe.
+      CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL: ${CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL:-http://workspace-ide:8080}
     depends_on:
       - api
     ports:
@@ -112,6 +114,8 @@ services:
       CLAWBOARD_SERVER_API_BASE: ${CLAWBOARD_SERVER_API_BASE:-http://api:8000}
       # Optional fallback header token for server-side proxy forwarding.
       CLAWBOARD_SERVER_API_TOKEN: ${CLAWBOARD_TOKEN:-}
+      # Internal companion URL for auto-authing the embedded code-server iframe.
+      CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL: ${CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL:-http://workspace-ide:8080}
       # Docker Desktop file watching can be flaky; polling is slower but reliable.
       WATCHPACK_POLLING: ${CLAWBOARD_WEB_WATCHPACK_POLLING:-true}
       WATCHPACK_POLLING_INTERVAL: ${CLAWBOARD_WEB_WATCHPACK_POLLING_INTERVAL:-1000}
@@ -126,6 +130,27 @@ services:
       - .:/app
       - clawboard_web_node_modules:/app/node_modules
       - clawboard_web_next_cache:/app/.next
+    networks:
+      - edge
+
+  workspace-ide:
+    image: codercom/code-server:latest
+    env_file:
+      - .env
+    environment:
+      PASSWORD: ${CLAWBOARD_WORKSPACE_IDE_PASSWORD:-}
+      DOCKER_USER: ${USER:-coder}
+    command: >
+      --bind-addr 0.0.0.0:8080
+      --auth password
+      --disable-telemetry
+    ports:
+      - "${CLAWBOARD_WORKSPACE_IDE_PORT:-13337}:8080"
+    volumes:
+      - ${OPENCLAW_HOME:-/tmp/.openclaw}:${OPENCLAW_HOME:-/tmp/.openclaw}
+      - ./data/code-server/config:/home/coder/.config/code-server
+      - ./data/code-server/local:/home/coder/.local/share/code-server
+    restart: unless-stopped
     networks:
       - edge
 
