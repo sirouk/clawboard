@@ -1419,7 +1419,7 @@ test("main-agent execution lanes stay aligned across template, soul, and directi
   assert.match(readmeText, /orchestration/i);
 });
 
-test("specialist contracts document canonical clawboard repo paths", async () => {
+test("specialist contracts document dynamic clawboard repo resolution", async () => {
   const root = process.cwd();
   const codingAgentPath = path.join(root, "agent-templates", "coding", "AGENTS.md");
   const docsAgentPath = path.join(root, "agent-templates", "docs", "AGENTS.md");
@@ -1437,7 +1437,9 @@ test("specialist contracts document canonical clawboard repo paths", async () =>
     ]);
 
   for (const text of [codingAgentText, docsAgentText, codingDirectiveText, docsDirectiveText]) {
-    assert.match(text, /~\/\.openclaw\/workspace\/projects\/clawboard|projects\/clawboard/i);
+    assert.match(text, /configured OpenClaw workspaces|installation config/i);
+    assert.match(text, /explicit path from the (task|delegated task)|current working tree/i);
+    assert.match(text, /projects\/clawboard/i);
     assert.match(text, /Do not assume .*OPENCLAW_HOME.* set|Do not assume .*OPENCLAW_HOME.* exported/i);
   }
   for (const text of [codingAgentText, codingDirectiveText]) {
