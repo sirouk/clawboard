@@ -61,6 +61,8 @@ class OpenClawWorkspaceEndpointTests(unittest.TestCase):
                     "OPENCLAW_GATEWAY_IDENTITY_DIR": openclaw_home,
                     "OPENCLAW_CONFIG_PATH": str(config_path),
                     "CLAWBOARD_WORKSPACE_IDE_BASE_URL": "http://127.0.0.1:13337",
+                    "CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING": "http://127.0.0.1:13338",
+                    "CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING": "/workspace",
                     "CLAWBOARD_WORKSPACE_IDE_PROVIDER": "code-server",
                 },
                 clear=False,
@@ -83,7 +85,7 @@ class OpenClawWorkspaceEndpointTests(unittest.TestCase):
                 self.assertTrue(by_id["coding"]["preferred"])
                 self.assertEqual(
                     by_id["coding"]["ideUrl"],
-                    f"http://127.0.0.1:13337/?folder={openclaw_home}/workspace-coding",
+                    "http://127.0.0.1:13338/?folder=/workspace",
                 )
 
     def test_openclaw_workspaces_support_agent_filter(self):

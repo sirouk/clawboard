@@ -85,10 +85,13 @@ export function WorkspacesLive({ selectedAgentId }: { selectedAgentId?: string |
       setIdeSessionStatus("authorizing");
       setIdeSessionError(null);
       try {
-        const response = await fetch("/api/openclaw/workspaces/session", {
-          method: "POST",
-          cache: "no-store",
-        });
+        const response = await fetch(
+          `/api/openclaw/workspaces/session?agentId=${encodeURIComponent(String(selectedWorkspace.agentId || ""))}`,
+          {
+            method: "POST",
+            cache: "no-store",
+          }
+        );
         if (cancelled) return;
         if (response.ok) {
           setIdeSessionStatus("ready");

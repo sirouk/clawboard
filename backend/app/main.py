@@ -14020,28 +14020,52 @@ def _workspace_ide_base_url() -> str | None:
     return _normalize_http_base_url(os.getenv("CLAWBOARD_WORKSPACE_IDE_BASE_URL"))
 
 
+def _workspace_ide_agent_env_suffix(agent_id: str) -> str | None:
+    safe = re.sub(r"[^A-Z0-9]+", "_", str(agent_id or "").strip().upper()).strip("_")
+    return safe or None
+
+
+def _workspace_ide_base_url_for_agent(agent_id: str) -> str | None:
+    suffix = _workspace_ide_agent_env_suffix(agent_id)
+    if suffix:
+        override = _normalize_http_base_url(os.getenv(f"CLAWBOARD_WORKSPACE_IDE_BASE_URL_{suffix}"))
+        if override:
+            return override
+    return _workspace_ide_base_url()
+
+
+def _workspace_ide_folder_for_agent(agent_id: str, workspace_dir: str) -> str:
+    suffix = _workspace_ide_agent_env_suffix(agent_id)
+    if suffix:
+        override = _normalize_fs_path(os.getenv(f"CLAWBOARD_WORKSPACE_IDE_FOLDER_{suffix}"))
+        if override:
+            return override
+    return workspace_dir
+
+
 def _workspace_ide_url_for(agent_id: str, workspace_dir: str) -> str | None:
-    base_url = _workspace_ide_base_url()
+    base_url = _workspace_ide_base_url_for_agent(agent_id)
     if not base_url:
         return None
+    folder_target = _workspace_ide_folder_for_agent(agent_id, workspace_dir)
 
     template = str(os.getenv("CLAWBOARD_WORKSPACE_IDE_URL_TEMPLATE") or "").strip()
     if template:
         encoded_agent_id = quote(agent_id, safe="")
-        encoded_workspace = quote(workspace_dir, safe="/")
+        encoded_workspace = quote(folder_target, safe="/")
         return (
             template
             .replace("{agentId}", encoded_agent_id)
             .replace("{workspacePath}", encoded_workspace)
             .replace("{workspaceDir}", encoded_workspace)
-            .replace("{workspacePathRaw}", workspace_dir)
-            .replace("{workspaceDirRaw}", workspace_dir)
+            .replace("{workspacePathRaw}", folder_target)
+            .replace("{workspaceDirRaw}", folder_target)
         )
 
     query_key = str(os.getenv("CLAWBOARD_WORKSPACE_IDE_FOLDER_QUERY") or "folder").strip() or "folder"
     parts = urlsplit(base_url)
     query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != query_key]
-    query.append((query_key, workspace_dir))
+    query.append((query_key, folder_target))
     query_string = "&".join(
         f"{quote(str(key), safe='')}={quote(str(value), safe='/')}"
         for key, value in query

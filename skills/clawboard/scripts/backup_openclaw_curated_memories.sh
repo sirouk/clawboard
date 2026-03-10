@@ -216,6 +216,68 @@ as_bool() {
   esac
 }
 
+run_git_remote_auth() {
+  if [[ "$(lc "${AUTH_METHOD:-}")" == "ssh" ]]; then
+    GIT_SSH_COMMAND="ssh -i $DEPLOY_KEY_PATH -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" git "$@"
+    return $?
+  fi
+
+  local askpass=""
+  askpass="$(mktemp -t clawboard-git-askpass.XXXXXX)"
+  chmod 700 "$askpass"
+  cat >"$askpass" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  *Username*)
+    printf "%s" "${GITHUB_USER}"
+    ;;
+  *Password*)
+    printf "%s" "${GITHUB_PAT}"
+    ;;
+  *)
+    printf "%s" "${GITHUB_PAT}"
+    ;;
+esac
+SH
+
+  GIT_ASKPASS="$askpass" \
+  GIT_TERMINAL_PROMPT=0 \
+  GITHUB_USER="$GITHUB_USER" \
+  GITHUB_PAT="$GITHUB_PAT" \
+  git "$@"
+  local rc=$?
+  rm -f "$askpass"
+  return $rc
+}
+
+remote_branch_exists() {
+  run_git_remote_auth ls-remote --exit-code "$REMOTE_URL" "refs/heads/$BRANCH" >/dev/null 2>&1
+}
+
+clone_existing_backup_repo() {
+  local backup_parent backup_name tmp_clone
+  backup_parent="$(dirname "$BACKUP_DIR")"
+  backup_name="$(basename "$BACKUP_DIR")"
+  mkdir -p "$backup_parent"
+  tmp_clone="$(mktemp -d "$backup_parent/.${backup_name}.clone.XXXXXX")"
+
+  if ! run_git_remote_auth clone --branch "$BRANCH" "$REMOTE_URL" "$tmp_clone" >/dev/null 2>&1; then
+    rm -rf "$tmp_clone" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  if [[ -e "$BACKUP_DIR" && ! -d "$BACKUP_DIR/.git" ]]; then
+    if [[ -n "$(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 ! -name '.backup-lock' -print -quit 2>/dev/null)" ]]; then
+      rm -rf "$tmp_clone" >/dev/null 2>&1 || true
+      die "backupDir exists and is not an empty git repo: $BACKUP_DIR"
+    fi
+    rm -rf "$BACKUP_DIR/.backup-lock" >/dev/null 2>&1 || true
+    rmdir "$BACKUP_DIR" >/dev/null 2>&1 || true
+  fi
+
+  mv "$tmp_clone" "$BACKUP_DIR"
+}
+
 prompt_bool() {
   local prompt="$1"
   local current="${2:-false}"
@@ -1227,17 +1289,23 @@ fi
 printf "%s\n" "$$" > "$LOCK_DIR/pid"
 trap 'rm -rf "$LOCK_DIR" >/dev/null 2>&1 || true' EXIT
 
-# Ensure backup repo exists
-if [[ ! -d "$BACKUP_DIR/.git" ]]; then
-  (cd "$BACKUP_DIR" && git init -b "$BRANCH" >/dev/null)
-fi
-
 # Ensure remote is set
 REMOTE_URL=""
 if [[ "$(lc "${AUTH_METHOD:-}")" == "ssh" ]]; then
   REMOTE_URL="$REPO_SSH_URL"
 else
   REMOTE_URL="$REPO_URL"
+fi
+
+# Ensure backup repo exists.
+# If the remote branch already exists, clone it so local history stays connected.
+if [[ ! -d "$BACKUP_DIR/.git" ]]; then
+  if remote_branch_exists; then
+    clone_existing_backup_repo || die "failed to clone existing backup repo from $REMOTE_URL"
+  else
+    mkdir -p "$BACKUP_DIR"
+    (cd "$BACKUP_DIR" && git init -b "$BRANCH" >/dev/null)
+  fi
 fi
 
 if ! (cd "$BACKUP_DIR" && git remote get-url "$REMOTE_NAME" >/dev/null 2>&1); then
@@ -1635,6 +1703,9 @@ if [[ "$(lc "${AUTH_METHOD:-}")" == "ssh" ]]; then
       say "$out" >&2
       say "--- retry over ssh.github.com:443 ---" >&2
       say "$out2" >&2
+      if grep -Eqi 'fetch first|non-fast-forward' <<<"$out $out2"; then
+        die "git push failed because the remote branch already has commits that this local backup repo does not contain. Reclone $BACKUP_DIR from the remote (or move it aside) and rerun the backup."
+      fi
       die "git push failed (ssh). Confirm the Deploy Key was added AND 'Allow write access' is checked. If you're on a network blocking SSH, port 443 fallback may still be blocked."
     else
       set -e
@@ -1676,6 +1747,9 @@ SH
 
   if [[ $code -ne 0 ]]; then
     say "$out" >&2
+    if grep -Eqi 'fetch first|non-fast-forward' <<<"$out"; then
+      die "git push failed because the remote branch already has commits that this local backup repo does not contain. Reclone $BACKUP_DIR from the remote (or move it aside) and rerun the backup."
+    fi
     die "git push failed (pat)"
   fi
   say "Backed up and pushed changes to $REPO_URL"

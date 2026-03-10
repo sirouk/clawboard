@@ -658,7 +658,11 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
     "OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES",
     "CLAWBOARD_WORKSPACE_IDE_PROVIDER",
     "CLAWBOARD_WORKSPACE_IDE_PORT",
+    "CLAWBOARD_WORKSPACE_IDE_CODING_PORT",
     "CLAWBOARD_WORKSPACE_IDE_BASE_URL",
+    "CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING",
+    "CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING",
+    "CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING",
     "CLAWBOARD_WORKSPACE_IDE_PASSWORD",
     "CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS",
     "CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS",
@@ -674,16 +678,25 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   assert.match(envText, /^OPENCLAW_CHAT_TRANSPORT=auto$/m);
   assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_PROVIDER=code-server$/m);
   assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_PORT=13337$/m);
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_CODING_PORT=13338$/m);
   const publicWebUrl = envLines.find((line) => line.startsWith("CLAWBOARD_PUBLIC_WEB_URL="))?.split("=")[1] ?? "";
   const publicWebHost = new URL(publicWebUrl).hostname;
   assert.match(
     envText,
     new RegExp(`^CLAWBOARD_WORKSPACE_IDE_BASE_URL=http://${escapeRegex(publicWebHost)}:13337$`, "m")
   );
+  assert.match(
+    envText,
+    new RegExp(`^CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING=http://${escapeRegex(publicWebHost)}:13338$`, "m")
+  );
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING=http:\/\/workspace-ide-coding:8080$/m);
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING=\/workspace$/m);
   assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_PASSWORD=test-token$/m);
 
   const codeServerSettingsPath = path.join(installDir, "data", "code-server", "local", "User", "settings.json");
   const codeServerSettings = JSON.parse(await readFile(codeServerSettingsPath, "utf8"));
+  const codingCodeServerSettingsPath = path.join(installDir, "data", "code-server-coding", "local", "User", "settings.json");
+  const codingCodeServerSettings = JSON.parse(await readFile(codingCodeServerSettingsPath, "utf8"));
   assert.equal(codeServerSettings["chat.agent.enabled"], false);
   assert.equal(codeServerSettings["chat.agentsControl.enabled"], false);
   assert.equal(codeServerSettings["chat.disableAIFeatures"], true);
@@ -697,6 +710,7 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   assert.equal(codeServerSettings["workbench.preferredDarkColorTheme"], "Default Dark Modern");
   assert.equal(codeServerSettings["window.autoDetectColorScheme"], false);
   assert.equal(codeServerSettings["security.workspace.trust.enabled"], false);
+  assert.deepEqual(codingCodeServerSettings, codeServerSettings);
 });
 
 test("bootstrap_clawboard.sh: prefers Tailscale MagicDNS host for public access URLs", async () => {
@@ -760,6 +774,9 @@ test("bootstrap_clawboard.sh: prefers Tailscale MagicDNS host for public access 
   assert.match(envText, /^CLAWBOARD_PUBLIC_WEB_URL=http:\/\/magicbox\.tail77f45e\.ts\.net:3010$/m);
   assert.match(envText, /^CLAWBOARD_PUBLIC_API_BASE=http:\/\/magicbox\.tail77f45e\.ts\.net:8010$/m);
   assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_BASE_URL=http:\/\/magicbox\.tail77f45e\.ts\.net:13337$/m);
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING=http:\/\/magicbox\.tail77f45e\.ts\.net:13338$/m);
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING=http:\/\/workspace-ide-coding:8080$/m);
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING=\/workspace$/m);
   assert.match(envText, /^CLAWBOARD_ALLOWED_DEV_ORIGINS=magicbox\.tail77f45e\.ts\.net$/m);
   assert.doesNotMatch(envText, /^CLAWBOARD_PUBLIC_WEB_URL=http:\/\/100\.88\.77\.66:3010$/m);
   assert.match(
@@ -832,12 +849,16 @@ test("bootstrap_clawboard.sh: configures secure Tailscale HTTPS URLs when opted 
   assert.match(envText, /^CLAWBOARD_PUBLIC_WEB_URL=https:\/\/magicbox\.tail77f45e\.ts\.net$/m);
   assert.match(envText, /^CLAWBOARD_PUBLIC_API_BASE=https:\/\/magicbox\.tail77f45e\.ts\.net:8443$/m);
   assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_BASE_URL=https:\/\/magicbox\.tail77f45e\.ts\.net:10000$/m);
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING=https:\/\/magicbox\.tail77f45e\.ts\.net:10001$/m);
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING=http:\/\/workspace-ide-coding:8080$/m);
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING=\/workspace$/m);
   assert.match(envText, /^CLAWBOARD_ALLOWED_DEV_ORIGINS=magicbox\.tail77f45e\.ts\.net$/m);
 
   const tailscaleLog = await readFile(tailscaleLogPath, "utf8");
   assert.match(tailscaleLog, /^serve --bg --https=443 http:\/\/127\.0\.0\.1:3010$/m);
   assert.match(tailscaleLog, /^serve --bg --https=8443 http:\/\/127\.0\.0\.1:8010$/m);
   assert.match(tailscaleLog, /^serve --bg --https=10000 http:\/\/127\.0\.0\.1:13337$/m);
+  assert.match(tailscaleLog, /^serve --bg --https=10001 http:\/\/127\.0\.0\.1:13338$/m);
 });
 
 test("bootstrap_clawboard.sh: uses CLAWBOARD_TOKEN for API health and config writes", async () => {

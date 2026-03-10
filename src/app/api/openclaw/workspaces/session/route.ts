@@ -8,12 +8,29 @@ function normalizeBase(raw: string) {
   return String(raw || "").trim().replace(/\/+$/, "");
 }
 
-function resolveIdeBase() {
-  return normalizeBase(
-    process.env.CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL ||
-      process.env.CLAWBOARD_WORKSPACE_IDE_BASE_URL ||
-      "http://workspace-ide:8080",
-  );
+function workspaceIdeAgentEnvSuffix(agentId: string | null | undefined) {
+  const value = String(agentId || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return value || null;
+}
+
+function resolveIdeBase(agentId: string | null | undefined) {
+  const suffix = workspaceIdeAgentEnvSuffix(agentId);
+  const candidates = [
+    suffix ? process.env[`CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_${suffix}`] : null,
+    suffix ? process.env[`CLAWBOARD_WORKSPACE_IDE_BASE_URL_${suffix}`] : null,
+    process.env.CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL,
+    process.env.CLAWBOARD_WORKSPACE_IDE_BASE_URL,
+    "http://workspace-ide:8080",
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizeBase(candidate || "");
+    if (normalized) return normalized;
+  }
+  return "";
 }
 
 function resolveIdeAuthMode() {
@@ -32,7 +49,8 @@ function readCookieValues(response: Response) {
 }
 
 export async function POST(req: NextRequest) {
-  const base = resolveIdeBase();
+  const agentId = req.nextUrl.searchParams.get("agentId");
+  const base = resolveIdeBase(agentId);
   const authMode = resolveIdeAuthMode();
   if (!base) {
     return NextResponse.json({ detail: "Workspace IDE auth is not configured." }, { status: 503 });

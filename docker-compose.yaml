@@ -154,6 +154,27 @@ services:
     networks:
       - edge
 
+  workspace-ide-coding:
+    image: codercom/code-server:latest
+    env_file:
+      - .env
+    environment:
+      PASSWORD: ${CLAWBOARD_WORKSPACE_IDE_PASSWORD:-}
+      DOCKER_USER: ${USER:-coder}
+    command: >
+      --bind-addr 0.0.0.0:8080
+      --auth ${CLAWBOARD_WORKSPACE_IDE_AUTH:-password}
+      --disable-telemetry
+    ports:
+      - "${CLAWBOARD_WORKSPACE_IDE_CODING_PORT:-13338}:8080"
+    volumes:
+      - ${OPENCLAW_HOME:-/tmp/.openclaw}/workspace-coding:/workspace
+      - ./data/code-server-coding/config:/home/coder/.config/code-server
+      - ./data/code-server-coding/local:/home/coder/.local/share/code-server
+    restart: unless-stopped
+    networks:
+      - edge
+
   db:
     image: postgres:16
     environment:

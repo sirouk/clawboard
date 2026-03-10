@@ -1259,9 +1259,14 @@ WEB_URL="${CLAWBOARD_WEB_URL:-http://localhost:3010}"
 PUBLIC_API_BASE="${CLAWBOARD_PUBLIC_API_BASE:-}"
 PUBLIC_WEB_URL="${CLAWBOARD_PUBLIC_WEB_URL:-}"
 WORKSPACE_IDE_BASE_URL_VALUE="${CLAWBOARD_WORKSPACE_IDE_BASE_URL:-}"
+WORKSPACE_IDE_BASE_URL_CODING_VALUE="${CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING:-}"
+WORKSPACE_IDE_INTERNAL_BASE_URL_CODING_VALUE="${CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING:-http://workspace-ide-coding:8080}"
 WORKSPACE_IDE_PASSWORD_VALUE="${CLAWBOARD_WORKSPACE_IDE_PASSWORD:-}"
 WORKSPACE_IDE_PORT_VALUE="${CLAWBOARD_WORKSPACE_IDE_PORT:-13337}"
+WORKSPACE_IDE_CODING_PORT_VALUE="${CLAWBOARD_WORKSPACE_IDE_CODING_PORT:-13338}"
 WORKSPACE_IDE_PUBLIC_PORT_VALUE="${CLAWBOARD_WORKSPACE_IDE_PORT:-13337}"
+WORKSPACE_IDE_CODING_PUBLIC_PORT_VALUE="${CLAWBOARD_WORKSPACE_IDE_CODING_PORT:-13338}"
+WORKSPACE_IDE_FOLDER_CODING_VALUE="${CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING:-/workspace}"
 WORKSPACE_IDE_PROVIDER_VALUE="${CLAWBOARD_WORKSPACE_IDE_PROVIDER:-code-server}"
 OPENCLAW_BASE_URL_VALUE="${OPENCLAW_BASE_URL:-}"
 TOKEN="${CLAWBOARD_TOKEN:-}"
@@ -1277,6 +1282,7 @@ PUBLIC_API_BASE_EXPLICIT=false
 PUBLIC_WEB_URL_EXPLICIT=false
 OPENCLAW_BASE_URL_EXPLICIT=false
 WORKSPACE_IDE_BASE_URL_EXPLICIT=false
+WORKSPACE_IDE_BASE_URL_CODING_EXPLICIT=false
 if [ -n "${CLAWBOARD_API_URL+x}" ]; then
   API_URL_EXPLICIT=true
 fi
@@ -1291,6 +1297,9 @@ if [ -n "${CLAWBOARD_PUBLIC_WEB_URL+x}" ]; then
 fi
 if [ -n "${CLAWBOARD_WORKSPACE_IDE_BASE_URL+x}" ]; then
   WORKSPACE_IDE_BASE_URL_EXPLICIT=true
+fi
+if [ -n "${CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING+x}" ]; then
+  WORKSPACE_IDE_BASE_URL_CODING_EXPLICIT=true
 fi
 if [ -n "${OPENCLAW_BASE_URL+x}" ]; then
   OPENCLAW_BASE_URL_EXPLICIT=true
@@ -1327,6 +1336,7 @@ TAILSCALE_HTTPS_SETUP_MODE="${CLAWBOARD_TAILSCALE_HTTPS_SETUP:-ask}"
 TAILSCALE_HTTPS_WEB_PUBLIC_PORT="443"
 TAILSCALE_HTTPS_API_PUBLIC_PORT="8443"
 TAILSCALE_HTTPS_IDE_PUBLIC_PORT="10000"
+TAILSCALE_HTTPS_IDE_CODING_PUBLIC_PORT="10001"
 TAILSCALE_HTTPS_SELECTED=false
 TAILSCALE_HTTPS_HOST=""
 OPENCLAW_GATEWAY_DEVICE_AUTH_OVERRIDE="${CLAWBOARD_OPENCLAW_GATEWAY_USE_DEVICE_AUTH:-}"
@@ -2487,6 +2497,7 @@ configure_tailscale_https_routes() {
   local web_port="$2"
   local api_port="$3"
   local ide_port="$4"
+  local coding_ide_port="$5"
   [ -n "$host" ] || return 1
   if ! command -v tailscale >/dev/null 2>&1; then
     return 1
@@ -2500,9 +2511,13 @@ configure_tailscale_https_routes() {
   if ! tailscale serve --bg --https="$TAILSCALE_HTTPS_IDE_PUBLIC_PORT" "http://127.0.0.1:$ide_port" >/dev/null 2>&1; then
     return 1
   fi
+  if ! tailscale serve --bg --https="$TAILSCALE_HTTPS_IDE_CODING_PUBLIC_PORT" "http://127.0.0.1:$coding_ide_port" >/dev/null 2>&1; then
+    return 1
+  fi
   TAILSCALE_HTTPS_SELECTED=true
   TAILSCALE_HTTPS_HOST="$host"
   WORKSPACE_IDE_PUBLIC_PORT_VALUE="$TAILSCALE_HTTPS_IDE_PUBLIC_PORT"
+  WORKSPACE_IDE_CODING_PUBLIC_PORT_VALUE="$TAILSCALE_HTTPS_IDE_CODING_PUBLIC_PORT"
   return 0
 }
 
@@ -2539,7 +2554,7 @@ configure_access_urls() {
     if [ "$TAILSCALE_HTTPS_SETUP_MODE" = "always" ]; then
       if secure_tail_host="$(detect_tailscale_https_host)"; then
         if { [ -z "$PUBLIC_API_BASE" ] && is_local_host "$api_host"; } || { [ -z "$PUBLIC_WEB_URL" ] && is_local_host "$web_host"; }; then
-          if configure_tailscale_https_routes "$secure_tail_host" "$web_port" "$api_port" "$WORKSPACE_IDE_PORT_VALUE"; then
+          if configure_tailscale_https_routes "$secure_tail_host" "$web_port" "$api_port" "$WORKSPACE_IDE_PORT_VALUE" "$WORKSPACE_IDE_CODING_PORT_VALUE"; then
             apply_tailscale_https_urls "$secure_tail_host"
             secure_applied=true
           else
@@ -3868,19 +3883,26 @@ fi
 ensure_env_file "$INSTALL_DIR"
 
 # Keep workspace IDE state on host paths with deterministic ownership.
-mkdir -p "$INSTALL_DIR/data/code-server/config" "$INSTALL_DIR/data/code-server/local"
-chmod 700 "$INSTALL_DIR/data/code-server/config" "$INSTALL_DIR/data/code-server/local" 2>/dev/null || true
-mkdir -p "$INSTALL_DIR/data/code-server/local/User"
+mkdir -p \
+  "$INSTALL_DIR/data/code-server/config" \
+  "$INSTALL_DIR/data/code-server/local" \
+  "$INSTALL_DIR/data/code-server-coding/config" \
+  "$INSTALL_DIR/data/code-server-coding/local"
+chmod 700 \
+  "$INSTALL_DIR/data/code-server/config" \
+  "$INSTALL_DIR/data/code-server/local" \
+  "$INSTALL_DIR/data/code-server-coding/config" \
+  "$INSTALL_DIR/data/code-server-coding/local" 2>/dev/null || true
+mkdir -p "$INSTALL_DIR/data/code-server/local/User" "$INSTALL_DIR/data/code-server-coding/local/User"
 
-CODE_SERVER_SETTINGS_FILE="$INSTALL_DIR/data/code-server/local/User/settings.json"
 if command -v python3 >/dev/null 2>&1; then
-  python3 - "$CODE_SERVER_SETTINGS_FILE" <<'PY'
+  python3 - \
+    "$INSTALL_DIR/data/code-server/local/User/settings.json" \
+    "$INSTALL_DIR/data/code-server-coding/local/User/settings.json" <<'PY'
 import json
 import os
 import sys
 
-path = sys.argv[1]
-os.makedirs(os.path.dirname(path), exist_ok=True)
 defaults = {
     "chat.agent.enabled": False,
     "chat.agentsControl.enabled": False,
@@ -3897,25 +3919,27 @@ defaults = {
     "security.workspace.trust.enabled": False,
 }
 
-data = {}
-if os.path.exists(path):
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            parsed = json.load(handle)
-        if isinstance(parsed, dict):
-            data = parsed
-    except Exception:
-        data = {}
+for path in sys.argv[1:]:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                parsed = json.load(handle)
+            if isinstance(parsed, dict):
+                data = parsed
+        except Exception:
+            data = {}
 
-for key, value in defaults.items():
-    data[key] = value
+    for key, value in defaults.items():
+        data[key] = value
 
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(data, handle, indent=2, sort_keys=True)
-    handle.write("\n")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+        handle.write("\n")
 PY
-elif [ ! -f "$CODE_SERVER_SETTINGS_FILE" ]; then
-  cat >"$CODE_SERVER_SETTINGS_FILE" <<'EOF'
+elif [ ! -f "$INSTALL_DIR/data/code-server/local/User/settings.json" ]; then
+  cat >"$INSTALL_DIR/data/code-server/local/User/settings.json" <<'EOF'
 {
   "chat.agent.enabled": false,
   "chat.agentsControl.enabled": false,
@@ -3932,6 +3956,9 @@ elif [ ! -f "$CODE_SERVER_SETTINGS_FILE" ]; then
   "workbench.preferredDarkColorTheme": "Default Dark Modern"
 }
 EOF
+fi
+if [ ! -f "$INSTALL_DIR/data/code-server-coding/local/User/settings.json" ]; then
+  cp "$INSTALL_DIR/data/code-server/local/User/settings.json" "$INSTALL_DIR/data/code-server-coding/local/User/settings.json"
 fi
 
 if [ "$PUBLIC_API_BASE_EXPLICIT" = false ] && read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" >/dev/null 2>&1; then
@@ -3978,8 +4005,10 @@ upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" "$ACCESS_API_UR
 log_info "Writing CLAWBOARD_PUBLIC_WEB_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_WEB_URL" "$ACCESS_WEB_URL"
 WORKSPACE_IDE_PORT_VALUE="$(clamp_int "$WORKSPACE_IDE_PORT_VALUE" 1 65535 || echo "13337")"
+WORKSPACE_IDE_CODING_PORT_VALUE="$(clamp_int "$WORKSPACE_IDE_CODING_PORT_VALUE" 1 65535 || echo "13338")"
 if [ "$TAILSCALE_HTTPS_SELECTED" != true ]; then
   WORKSPACE_IDE_PUBLIC_PORT_VALUE="$WORKSPACE_IDE_PORT_VALUE"
+  WORKSPACE_IDE_CODING_PUBLIC_PORT_VALUE="$WORKSPACE_IDE_CODING_PORT_VALUE"
 fi
 WORKSPACE_IDE_PROVIDER_VALUE="$(printf "%s" "$WORKSPACE_IDE_PROVIDER_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
 case "$WORKSPACE_IDE_PROVIDER_VALUE" in
@@ -3998,13 +4027,36 @@ if [ "$WORKSPACE_IDE_BASE_URL_EXPLICIT" = false ]; then
     WORKSPACE_IDE_BASE_URL_VALUE="http://$IDE_HOST:$WORKSPACE_IDE_PUBLIC_PORT_VALUE"
   fi
 fi
+if [ "$WORKSPACE_IDE_BASE_URL_CODING_EXPLICIT" = false ]; then
+  IDE_HOST="$(extract_url_host "$ACCESS_WEB_URL")"
+  [ -n "$IDE_HOST" ] || IDE_HOST="localhost"
+  if [[ "$ACCESS_WEB_URL" =~ ^https:// ]]; then
+    WORKSPACE_IDE_BASE_URL_CODING_VALUE="https://$IDE_HOST:$WORKSPACE_IDE_CODING_PUBLIC_PORT_VALUE"
+  else
+    WORKSPACE_IDE_BASE_URL_CODING_VALUE="http://$IDE_HOST:$WORKSPACE_IDE_CODING_PUBLIC_PORT_VALUE"
+  fi
+fi
 WORKSPACE_IDE_BASE_URL_VALUE="$(normalize_http_url "$WORKSPACE_IDE_BASE_URL_VALUE")"
+WORKSPACE_IDE_BASE_URL_CODING_VALUE="$(normalize_http_url "$WORKSPACE_IDE_BASE_URL_CODING_VALUE")"
+WORKSPACE_IDE_INTERNAL_BASE_URL_CODING_VALUE="$(normalize_http_url "$WORKSPACE_IDE_INTERNAL_BASE_URL_CODING_VALUE")"
+WORKSPACE_IDE_FOLDER_CODING_VALUE="$(printf "%s" "$WORKSPACE_IDE_FOLDER_CODING_VALUE" | tr -d '\r')"
+if [ -z "$WORKSPACE_IDE_FOLDER_CODING_VALUE" ]; then
+  WORKSPACE_IDE_FOLDER_CODING_VALUE="/workspace"
+fi
 log_info "Writing CLAWBOARD_WORKSPACE_IDE_PROVIDER in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_PROVIDER" "$WORKSPACE_IDE_PROVIDER_VALUE"
 log_info "Writing CLAWBOARD_WORKSPACE_IDE_PORT in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_PORT" "$WORKSPACE_IDE_PORT_VALUE"
+log_info "Writing CLAWBOARD_WORKSPACE_IDE_CODING_PORT in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_CODING_PORT" "$WORKSPACE_IDE_CODING_PORT_VALUE"
 log_info "Writing CLAWBOARD_WORKSPACE_IDE_BASE_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_BASE_URL" "$WORKSPACE_IDE_BASE_URL_VALUE"
+log_info "Writing CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING" "$WORKSPACE_IDE_BASE_URL_CODING_VALUE"
+log_info "Writing CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING" "$WORKSPACE_IDE_INTERNAL_BASE_URL_CODING_VALUE"
+log_info "Writing CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING in $INSTALL_DIR/.env..."
+upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING" "$WORKSPACE_IDE_FOLDER_CODING_VALUE"
 log_info "Writing CLAWBOARD_WORKSPACE_IDE_PASSWORD in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_PASSWORD" "$WORKSPACE_IDE_PASSWORD_VALUE"
 if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SERVER_API_BASE" >/dev/null 2>&1; then

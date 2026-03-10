@@ -88,7 +88,7 @@ test("workspaces route loads embedded workspace surface with quick-switch chips"
   await expect(page).toHaveURL(/\/workspaces\/coding$/);
   await expect(page.getByTestId("workspace-ide-frame")).toHaveAttribute(
     "src",
-    /workspace-coding/
+    /13338\/\?folder=\/workspace$/
   );
   await expect(navCodingLink).toHaveAttribute("aria-current", "page");
   await expect(navMainLink).not.toHaveAttribute("aria-current", "page");

@@ -37,7 +37,7 @@ const openclawWorkspaces = [
     agentId: "coding",
     agentName: "Coding",
     workspaceDir: "/Users/test/.openclaw/workspace-coding",
-    ideUrl: "http://workspace-ide.localhost:13337/?folder=/Users/test/.openclaw/workspace-coding",
+    ideUrl: "http://workspace-ide-coding.localhost:13338/?folder=/workspace",
     preferred: true,
   },
   {
