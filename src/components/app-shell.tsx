@@ -11,7 +11,14 @@ import { CommandPalette } from "@/components/command-palette";
 import { DataProvider, useDataStore } from "@/components/data-provider";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { formatRelativeTime } from "@/lib/format";
-import { orderOpenClawWorkspaces, workspaceLabel, workspaceRoute } from "@/lib/openclaw-workspaces";
+import {
+  WORKSPACE_NAV_SYNC_EVENT,
+  orderOpenClawWorkspaces,
+  workspaceDirLabel,
+  workspaceDirPrefix,
+  workspaceLabel,
+  workspaceRoute,
+} from "@/lib/openclaw-workspaces";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 import { buildTaskUrl, buildTopicUrl, withRevealParam, withSpaceParam } from "@/lib/url";
@@ -213,6 +220,26 @@ const ACTIVE_SPACE_KEY = "clawboard.space.active";
 const NAV_SEARCH_TASKS_LIMIT = 5;
 const NAV_SEARCH_TOPICS_LIMIT = 5;
 
+function parseBoardPathIds(value: string | null | undefined) {
+  const cleanPath = String(value || "").split(/[?#]/, 1)[0] ?? "";
+  if (!cleanPath.startsWith("/u")) return { topicId: null as string | null, taskId: null as string | null };
+  const parts = cleanPath.split("/").filter(Boolean);
+  let topicId: string | null = null;
+  let taskId: string | null = null;
+  for (let i = 0; i < parts.length; i += 1) {
+    if (parts[i] === "topic" && parts[i + 1]) {
+      const raw = parts[i + 1] ?? "";
+      topicId = raw.includes("--") ? raw.slice(raw.lastIndexOf("--") + 2) : raw;
+      i += 1;
+    } else if (parts[i] === "task" && parts[i + 1]) {
+      const raw = parts[i + 1] ?? "";
+      taskId = raw.includes("--") ? raw.slice(raw.lastIndexOf("--") + 2) : raw;
+      i += 1;
+    }
+  }
+  return { topicId, taskId };
+}
+
 function statusIconColor(status: string) {
   switch (status) {
     case "CONNECTED":
@@ -300,37 +327,38 @@ function TaskNavRow({
   );
 }
 
+function normalizeWorkspaceAgentId(value: string | null | undefined) {
+  return String(value || "").trim().toLowerCase();
+}
+
 function WorkspaceNavRow({
   workspace,
+  pathLabel,
+  selected,
 }: {
   workspace: OpenClawWorkspace;
+  pathLabel: string;
+  selected: boolean;
 }) {
   const agentId = String(workspace.agentId || "").trim();
   const label = workspaceLabel(agentId, workspace.agentName);
-  const preferred = Boolean(workspace.preferred) || agentId === "coding";
   const href = workspaceRoute(agentId);
 
   return (
     <Link
       href={href}
       data-testid={`workspace-nav-${agentId}`}
+      aria-current={selected ? "page" : undefined}
       className={cn(
         "flex w-full items-center justify-between rounded-[var(--radius-sm)] border px-3 py-2 text-left text-xs transition",
-        preferred
-          ? "border-[rgba(77,171,158,0.34)] bg-[rgba(77,171,158,0.12)] text-[rgb(var(--claw-text))]"
+        selected
+          ? "border-[rgba(255,90,45,0.4)] bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.08))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.18)]"
           : "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
       )}
     >
       <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-2">
-          <span className="truncate font-semibold">{label}</span>
-          {preferred ? (
-            <span className="shrink-0 rounded-full border border-[rgba(77,171,158,0.35)] px-2 py-0.5 text-[9px] uppercase tracking-[0.16em] text-[rgb(var(--claw-accent-2))]">
-              Preferred
-            </span>
-          ) : null}
-        </span>
-        <span className="mt-1 block truncate font-mono text-[10px] text-[rgba(148,163,184,0.82)]">{workspace.workspaceDir}</span>
+        <span className="block truncate font-semibold">{label}</span>
+        <span className="mt-1 block truncate font-mono text-[10px] text-[rgba(148,163,184,0.82)]">{pathLabel}</span>
       </span>
       <span className="ml-3 shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.82)]">
         View
@@ -436,6 +464,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const activeSpaceIdStored = (useLocalStorageItem(ACTIVE_SPACE_KEY) ?? "").trim();
   useLocalStorageItem("clawboard.apiBase");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [browserPathname, setBrowserPathname] = useState(pathname);
   const headerRef = useRef<HTMLElement | null>(null);
   const topicBackedSpaceIds = useMemo(() => {
     const ids = new Set<string>();
@@ -562,10 +591,16 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   }, [allowedSpaceSet, selectedSpaceId, storeLogs, storeTaskById, storeTopicById]);
 
   const apiBase = getApiBase();
-  const isBoardRoute =
-    pathname === "/" || pathname === "/dashboard" || pathname === "/u" || pathname.startsWith("/u");
-  const showBoardTopics = isBoardRoute && boardTopicsExpanded && !collapsed;
+  const showBoardTopics = boardTopicsExpanded && !collapsed;
   const orderedWorkspaces = useMemo(() => orderOpenClawWorkspaces(resolvedWorkspaces), [resolvedWorkspaces]);
+  const workspaceDirPrefixValue = useMemo(() => workspaceDirPrefix(orderedWorkspaces), [orderedWorkspaces]);
+  const activeWorkspaceNavKey = useMemo(() => {
+    const segments = browserPathname.split("/").filter(Boolean);
+    if (segments[0] !== "workspaces") return "";
+    const fromRoute = normalizeWorkspaceAgentId(segments[1] ?? "");
+    if (fromRoute) return fromRoute;
+    return normalizeWorkspaceAgentId(orderedWorkspaces[0]?.agentId);
+  }, [browserPathname, orderedWorkspaces]);
   const showWorkspaceNav = !collapsed && workspacesExpanded && orderedWorkspaces.length > 0;
   const boardNavHref = useMemo(() => {
     const candidate = String(lastBoardUrlStored || "").trim();
@@ -573,6 +608,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     if (!candidate.startsWith("/u")) return "/u";
     return candidate;
   }, [lastBoardUrlStored]);
+  const activeBoardPath = useMemo(() => (pathname.startsWith("/u") ? pathname : boardNavHref), [boardNavHref, pathname]);
 
   const hasToken = token.trim().length > 0;
   const readOnly = tokenRequired && !hasToken;
@@ -603,6 +639,22 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
     setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    setBrowserPathname(pathname);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const syncPathname = () => setBrowserPathname(window.location.pathname);
+    syncPathname();
+    window.addEventListener("popstate", syncPathname);
+    window.addEventListener(WORKSPACE_NAV_SYNC_EVENT, syncPathname);
+    return () => {
+      window.removeEventListener("popstate", syncPathname);
+      window.removeEventListener(WORKSPACE_NAV_SYNC_EVENT, syncPathname);
+    };
   }, []);
 
   // Only surface the SSE disconnect indicator after we've connected at least once,
@@ -1075,24 +1127,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     [boardTopicReorderEnabled, commitBoardTopicReorder, setBoardTopicDropTargetId, topicsById]
   );
 
-  const activeBoardIds = useMemo(() => {
-    if (!pathname.startsWith("/u")) return { topicId: null as string | null, taskId: null as string | null };
-    const parts = pathname.split("/").filter(Boolean);
-    let topicId: string | null = null;
-    let taskId: string | null = null;
-    for (let i = 0; i < parts.length; i += 1) {
-      if (parts[i] === "topic" && parts[i + 1]) {
-        const raw = parts[i + 1] ?? "";
-        topicId = raw.includes("--") ? raw.slice(raw.lastIndexOf("--") + 2) : raw;
-        i += 1;
-      } else if (parts[i] === "task" && parts[i + 1]) {
-        const raw = parts[i + 1] ?? "";
-        taskId = raw.includes("--") ? raw.slice(raw.lastIndexOf("--") + 2) : raw;
-        i += 1;
-      }
-    }
-    return { topicId, taskId };
-  }, [pathname]);
+  const activeBoardIds = useMemo(() => parseBoardPathIds(activeBoardPath), [activeBoardPath]);
 
   const mostRecentTaskByTopicId = useMemo(() => {
     const activityByTaskId = new Map<string, string>();
@@ -1423,7 +1458,12 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                                 </div>
                                 <div className="space-y-2">
                                   {orderedWorkspaces.map((workspace) => (
-                                    <WorkspaceNavRow key={workspace.agentId} workspace={workspace} />
+                                    <WorkspaceNavRow
+                                      key={workspace.agentId}
+                                      workspace={workspace}
+                                      pathLabel={workspaceDirLabel(workspace.workspaceDir, workspaceDirPrefixValue)}
+                                      selected={normalizeWorkspaceAgentId(workspace.agentId) === activeWorkspaceNavKey}
+                                    />
                                   ))}
                                 </div>
                               </div>

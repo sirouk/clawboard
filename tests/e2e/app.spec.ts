@@ -1,9 +1,18 @@
 import { test, expect, type Page } from "@playwright/test";
 
 async function ensureBoardOptionsVisible(page: Page) {
-  const fullMessagesToggle = page.getByRole("button", { name: /Show full messages|Hide full messages/i });
-  if (await fullMessagesToggle.count()) return;
+  const fullMessagesToggle = page.getByRole("button", { name: /Show full messages|Hide full messages/i }).first();
   const optionsToggle = page.getByRole("button", { name: /View options|Hide options/i }).first();
+
+  await expect
+    .poll(async () => {
+      if (await fullMessagesToggle.count()) return "visible";
+      if (await optionsToggle.count()) return "toggle";
+      return "none";
+    })
+    .not.toBe("none");
+
+  if (await fullMessagesToggle.count()) return;
   await expect(optionsToggle).toBeVisible();
   await optionsToggle.click();
 }
@@ -47,30 +56,79 @@ test("graph route loads clawgraph view", async ({ page }) => {
 test("workspaces route loads embedded workspace surface with quick-switch chips", async ({ page }) => {
   await page.goto("/workspaces");
   await expect(page.getByRole("heading", { name: "Workspaces" }).first()).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Agent Workspaces" })).toBeVisible();
-  await expect(page.getByText("In Clawboard")).toBeVisible();
   await expect(page.getByTestId("workspace-chip-row")).toBeVisible();
   await expect(page.getByTestId("workspace-nav-toggle")).toHaveCount(0);
+  await expect(page.locator("[data-testid='workspace-chip-row'] a").first()).toContainText("main");
+  const navMainLink = page.getByTestId("workspace-nav-main");
   const navCodingLink = page.getByTestId("workspace-nav-coding");
+  await expect(navMainLink).toBeVisible();
   await expect(navCodingLink).toBeVisible();
-  await expect(navCodingLink).toHaveAttribute("href", "/workspaces/coding");
+  await expect(navMainLink).toHaveAttribute("href", "/workspaces/main");
+  await expect(navMainLink).toHaveAttribute("aria-current", "page");
+  await expect(navMainLink).toContainText("main");
+  await expect(navMainLink).toContainText("workspace");
+  await expect(navMainLink).not.toContainText("/Users/");
+  await expect(navMainLink).not.toContainText("Viewing");
+  await expect(navCodingLink).toContainText("workspace-coding");
+  await expect(navCodingLink).not.toContainText("/Users/");
+  await expect(navCodingLink).not.toContainText("Preferred");
+  await expect(navCodingLink).not.toHaveClass(/77,171,158/);
+  const mainLink = page.getByTestId("open-workspace-main");
+  await expect(mainLink).toBeVisible();
+  await expect(mainLink).toHaveAttribute("href", "/workspaces/main");
+  await expect(page.getByTestId("workspace-ide-frame")).toHaveAttribute(
+    "src",
+    /\?folder=/
+  );
+
   const codingLink = page.getByTestId("open-workspace-coding");
   await expect(codingLink).toBeVisible();
   await expect(codingLink).toHaveAttribute("href", "/workspaces/coding");
-  await expect(
-    page.locator("#clawboard-shell-content").getByText("/Users/test/.openclaw/workspace-coding", { exact: true })
-  ).toBeVisible();
-  await expect(page.getByTestId("workspace-ide-frame")).toHaveAttribute(
-    "src",
-    /http:\/\/100\.91\.119\.30:13337\/\?folder=/
-  );
-
-  await navCodingLink.click();
+  await codingLink.click();
   await expect(page).toHaveURL(/\/workspaces\/coding$/);
   await expect(page.getByTestId("workspace-ide-frame")).toHaveAttribute(
     "src",
     /workspace-coding/
   );
+  await expect(navCodingLink).toHaveAttribute("aria-current", "page");
+  await expect(navMainLink).not.toHaveAttribute("aria-current", "page");
+
+  await mainLink.click();
+  await expect(page).toHaveURL(/\/workspaces\/main$/);
+  await expect(page.getByTestId("workspace-ide-frame")).toHaveAttribute(
+    "src",
+    /\/workspace$/
+  );
+  await expect(navMainLink).toHaveAttribute("aria-current", "page");
+  await expect(navCodingLink).not.toHaveAttribute("aria-current", "page");
+  await expect(page.getByTestId("workspace-ide-frame-coding")).toHaveCount(1);
+});
+
+test("board nav stays expanded and keeps the last selected task highlighted off-board", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("clawboard.board.topics.tasksExpanded", JSON.stringify(["topic-1"]));
+  });
+
+  await page.goto("/u/topic/topic-1/task/task-1?reveal=1");
+
+  const sidebar = page.locator("aside[data-claw-shell-nav='1']");
+  const boardLink = sidebar.getByRole("link", { name: "Board", exact: true });
+  const topicRow = sidebar.locator("[data-board-topic-id='topic-1']").first();
+  const taskRow = sidebar.getByRole("button", { name: /Ship onboarding wizard/i }).first();
+
+  if ((await boardLink.getAttribute("aria-expanded")) !== "true") {
+    await boardLink.click();
+  }
+
+  await expect(boardLink).toHaveAttribute("aria-expanded", "true");
+  await expect(topicRow).toHaveClass(/border-\[rgba\(255,90,45,0\.45\)\]/);
+  await expect(taskRow).toHaveClass(/bg-\[rgba\(77,171,158,0\.16\)\]/);
+
+  await page.goto("/graph");
+  await expect(page.getByRole("heading", { name: "Clawgraph" })).toBeVisible();
+  await expect(boardLink).toHaveAttribute("aria-expanded", "true");
+  await expect(topicRow).toHaveClass(/border-\[rgba\(255,90,45,0\.45\)\]/);
+  await expect(taskRow).toHaveClass(/bg-\[rgba\(77,171,158,0\.16\)\]/);
 });
 
 test("unified view expands topics and tasks", async ({ page }) => {
@@ -109,6 +167,39 @@ test("unified board uses freeform composer and hides top-level new topic button"
   await expect(page.locator("[data-topic-card-id='topic-1'] > div[role='button']").first()).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByTestId("unified-composer-target-chip")).toContainText("New topic -> new task");
   await expect(page.getByTestId("unified-composer-send")).toContainText("Start new topic");
+});
+
+test("topic tag editor preserves typed labels and supports repeated enter commits", async ({ page }) => {
+  await page.goto("/u");
+  await page.getByRole("button", { name: "Expand topic Clawboard", exact: true }).click();
+  await page.getByTestId("rename-topic-topic-1").click();
+
+  const topicTagInput = page.getByTestId("rename-topic-tags-topic-1");
+  await expect(topicTagInput).toBeVisible();
+
+  await topicTagInput.fill("Road Map");
+  await topicTagInput.press("Enter");
+  await expect(topicTagInput).toHaveValue("Road Map, ");
+
+  await topicTagInput.type("API Sync");
+  await topicTagInput.press("Enter");
+  await expect(topicTagInput).toHaveValue("Road Map, API Sync, ");
+
+  const saveRequest = page.waitForRequest((req) => {
+    if (req.method() !== "POST" || !req.url().includes("/api/topics")) return false;
+    const payload = req.postDataJSON() as { id?: string } | null;
+    return payload?.id === "topic-1";
+  });
+
+  await topicTagInput.press("Enter");
+
+  const payload = (await saveRequest).postDataJSON() as { tags?: string[] };
+  expect(payload.tags).toEqual(["Road Map", "API Sync"]);
+
+  await expect(page.getByTestId("rename-topic-input-topic-1")).toHaveCount(0);
+
+  await page.getByTestId("rename-topic-topic-1").click();
+  await expect(page.getByTestId("rename-topic-tags-topic-1")).toHaveValue("Road Map, API Sync");
 });
 
 test("instance title updates live after config changes", async ({ page, request }) => {

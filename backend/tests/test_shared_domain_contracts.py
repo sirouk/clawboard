@@ -277,6 +277,30 @@ class SharedDomainContractTests(unittest.TestCase):
             ],
         )
 
+    def test_topic_upsert_preserves_freeform_tag_labels(self):
+        res = self.client.post(
+            "/api/topics",
+            headers=self.auth_headers,
+            json={
+                "name": "Freeform tags",
+                "tags": ["Road Map", "road-map", "API Sync"],
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertEqual(payload.get("tags"), ["Road Map", "API Sync"])
+
+        topic_id = payload.get("id")
+        self.assertTrue(topic_id, payload)
+
+        patched = self.client.patch(
+            f"/api/topics/{topic_id}",
+            headers=self.auth_headers,
+            json={"tags": ["Road Map", "API Sync", "Deep Work"]},
+        )
+        self.assertEqual(patched.status_code, 200, patched.text)
+        self.assertEqual(patched.json().get("tags"), ["Road Map", "API Sync", "Deep Work"])
+
     def test_log_contract_is_array_and_sorted_for_shared_read(self):
         with get_session() as session:
             session.add(

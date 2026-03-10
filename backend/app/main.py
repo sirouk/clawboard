@@ -492,15 +492,20 @@ def _normalize_tag_value(value: str | None) -> str | None:
     return slug or None
 
 
+def _clean_tag_label(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
 def _normalize_tags(values: list[str] | None) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for raw in values or []:
-        tag = _normalize_tag_value(raw)
+        label = _clean_tag_label(raw)
+        tag = _normalize_tag_value(label)
         if not tag or tag in seen:
             continue
         seen.add(tag)
-        out.append(tag)
+        out.append(label)
         if len(out) >= 32:
             break
     return out
@@ -13905,6 +13910,9 @@ def _openclaw_profile_workspace(base_dir: str, profile_name: str) -> str:
 
 def _friendly_agent_name(agent_id: str, raw_name: Any = None) -> str:
     provided = str(raw_name or "").strip()
+    normalized_agent_id = str(agent_id or "").strip().lower()
+    if normalized_agent_id == "main" and (not provided or provided.lower() == "main"):
+        return "main"
     if provided:
         return provided
     token = str(agent_id or "").strip().replace("-", " ").replace("_", " ")

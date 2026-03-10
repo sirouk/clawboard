@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import {
   useCallback,
@@ -53,6 +54,7 @@ import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "
 import { SnoozeModal } from "@/components/snooze-modal";
 import { useUnifiedExpansionState } from "@/components/unified-view-state";
 import { getInitialUnifiedUrlState, parseUnifiedUrlState } from "@/components/unified-view-url-state";
+import { workspaceRoute } from "@/lib/openclaw-workspaces";
 
 const STATUS_TONE: Record<string, "muted" | "accent" | "accent2" | "warning" | "success"> = {
   todo: "muted",
@@ -919,6 +921,36 @@ function normalizeTagValue(value: string) {
   return stripped.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
 }
 
+function normalizeTagKey(value: string) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (!raw) return "";
+  if (raw.startsWith("system:")) {
+    const suffix = raw.split(":", 2)[1]?.trim() ?? "";
+    return suffix ? `system:${suffix}` : "system";
+  }
+  const withDashes = raw.replace(/\s+/g, "-");
+  const stripped = withDashes.replace(/[^a-z0-9:_-]/g, "");
+  return stripped.replace(/:{2,}/g, ":").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function cleanTagLabel(value: string) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function dedupeTagLabels(values: Iterable<string>) {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const label = cleanTagLabel(raw);
+    const key = normalizeTagKey(label);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(label);
+    if (out.length >= 32) break;
+  }
+  return out;
+}
+
 function friendlySegmentLabel(value: string) {
   const segment = String(value ?? "").trim().toLowerCase();
   if (!segment) return "";
@@ -938,80 +970,59 @@ function friendlyTagLabel(value: string) {
     .join(" ");
 }
 
-function friendlyTagDraftLabel(value: string) {
-  const raw = String(value ?? "");
-  const trailingSeparator = /[-\s]+$/.test(raw);
-  const friendly = friendlyTagLabel(raw);
-  if (!friendly) return "";
-  return trailingSeparator ? `${friendly} ` : friendly;
-}
-
-function normalizeTagDraftInput(text: string) {
-  const raw = String(text ?? "");
-  const trailingComma = /,\s*$/.test(raw);
-  const parts = raw.split(",");
-  return parts
-    .map((part, index) => {
-      const isLast = index === parts.length - 1;
-      const isActiveQuery = isLast && !trailingComma;
-      return isActiveQuery ? friendlyTagDraftLabel(part) : friendlyTagLabel(part);
-    })
-    .join(", ");
-}
-
 function parseTags(text: string) {
-  return text
-    .split(",")
-    .map((t) => normalizeTagValue(t))
-    .filter(Boolean)
-    .slice(0, 32);
+  return dedupeTagLabels(String(text ?? "").split(","));
 }
 
 function formatTags(tags: string[] | undefined | null) {
-  const list = (tags ?? []).map((t) => friendlyTagLabel(String(t || ""))).filter(Boolean);
-  return list.join(", ");
+  return dedupeTagLabels(tags ?? []).join(", ");
 }
 
-function splitTagDraft(text: string) {
+function splitTagDraft(text: string, options?: { treatLastSegmentAsQuery?: boolean }) {
   const raw = String(text ?? "");
   const trailingComma = /,\s*$/.test(raw);
   const parts = raw.split(",");
-  const committedRaw = trailingComma ? parts : parts.slice(0, -1);
-  const committed = committedRaw.map((part) => normalizeTagValue(part)).filter(Boolean);
-  const queryRaw = trailingComma ? "" : parts[parts.length - 1] ?? "";
-  const query = normalizeTagValue(queryRaw);
-  return { committed, query };
+  const treatLastSegmentAsQuery = options?.treatLastSegmentAsQuery !== false;
+  const hasQuery = treatLastSegmentAsQuery && !trailingComma;
+  const committedRaw = hasQuery ? parts.slice(0, -1) : parts;
+  const committed = dedupeTagLabels(committedRaw);
+  const query = hasQuery ? cleanTagLabel(parts[parts.length - 1] ?? "") : "";
+  const queryKey = hasQuery ? normalizeTagKey(query) : "";
+  return { committed, query, queryKey };
+}
+
+function isTagDraftPending(text: string) {
+  return Boolean(splitTagDraft(text).queryKey);
 }
 
 function applyTagSuggestionToDraft(text: string, suggestion: string) {
   const { committed } = splitTagDraft(text);
-  const deduped = new Set<string>(committed);
-  deduped.add(suggestion);
-  const next = Array.from(deduped).slice(0, 32).map((entry) => friendlyTagLabel(entry)).filter(Boolean);
+  const next = dedupeTagLabels([...committed, suggestion]);
   return next.length > 0 ? `${next.join(", ")}, ` : "";
 }
 
 function commitTagDraftEntry(text: string) {
   const { committed, query } = splitTagDraft(text);
-  const deduped = new Set<string>(committed);
-  if (query) deduped.add(query);
-  const next = Array.from(deduped).slice(0, 32).map((entry) => friendlyTagLabel(entry)).filter(Boolean);
+  const next = dedupeTagLabels(query ? [...committed, query] : committed);
   return next.length > 0 ? `${next.join(", ")}, ` : "";
 }
 
 function tagSuggestionsForDraft(text: string, options: string[]) {
-  const { committed, query } = splitTagDraft(text);
-  if (!query) return [] as string[];
-  const committedSet = new Set(committed);
+  const { committed, queryKey } = splitTagDraft(text);
+  if (!queryKey) return [] as string[];
+  const committedSet = new Set(committed.map((entry) => normalizeTagKey(entry)).filter(Boolean));
   return options
-    .filter((candidate) => !committedSet.has(candidate) && candidate.includes(query))
     .map((candidate) => {
-      const exact = candidate === query ? 0 : 1;
-      const prefix = candidate.startsWith(query) ? 0 : 1;
-      return { candidate, exact, prefix, length: candidate.length };
+      const label = cleanTagLabel(candidate);
+      const key = normalizeTagKey(label);
+      if (!key || committedSet.has(key) || !key.includes(queryKey)) return null;
+      const exact = key === queryKey ? 0 : 1;
+      const prefix = key.startsWith(queryKey) ? 0 : 1;
+      return { label, key, exact, prefix, length: key.length };
     })
-    .sort((a, b) => a.exact - b.exact || a.prefix - b.prefix || a.length - b.length || a.candidate.localeCompare(b.candidate))
-    .map((item) => item.candidate)
+    .filter((item): item is { label: string; key: string; exact: number; prefix: number; length: number } => Boolean(item))
+    .sort((a, b) => a.exact - b.exact || a.prefix - b.prefix || a.length - b.length || a.key.localeCompare(b.key) || a.label.localeCompare(b.label))
+    .map((item) => item.label)
     .slice(0, 8);
 }
 
@@ -2315,6 +2326,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [topicNameDraft, setTopicNameDraft] = useState("");
   const [topicColorDraft, setTopicColorDraft] = useState("#FF8A4A");
   const [topicTagsDraft, setTopicTagsDraft] = useState("");
+  const [topicTagsPendingEntry, setTopicTagsPendingEntry] = useState(false);
+  const [debouncedTopicTagsDraft, setDebouncedTopicTagsDraft] = useState("");
   const { value: unifiedComposerDraft, setValue: setUnifiedComposerDraft } = usePersistentDraft("draft:unified:composer", {
     fallback: "",
   });
@@ -2448,21 +2461,27 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (!exists) setComposerTarget(null);
   }, [composerTarget, tasks, topics]);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedTopicTagsDraft(topicTagsDraft);
+    }, 180);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [topicTagsDraft]);
+
   const knownTopicTagOptions = useMemo(() => {
-    const seen = new Set<string>();
-    for (const tag of storeTopicTags ?? []) {
-      const normalized = normalizeTagValue(String(tag ?? ""));
-      if (!normalized || seen.has(normalized)) continue;
-      seen.add(normalized);
-    }
-    return Array.from(seen).sort((a, b) => a.localeCompare(b));
+    return dedupeTagLabels(storeTopicTags ?? []).sort(
+      (a, b) => normalizeTagKey(a).localeCompare(normalizeTagKey(b)) || a.localeCompare(b)
+    );
   }, [storeTopicTags]);
   const [taskNameDraft, setTaskNameDraft] = useState("");
   const [taskColorDraft, setTaskColorDraft] = useState("#4EA1FF");
   const [taskTagsDraft, setTaskTagsDraft] = useState("");
+  const [taskTagsPendingEntry, setTaskTagsPendingEntry] = useState(false);
   const topicRenameTagSuggestions = useMemo(
-    () => tagSuggestionsForDraft(topicTagsDraft, knownTopicTagOptions),
-    [knownTopicTagOptions, topicTagsDraft]
+    () => (topicTagsPendingEntry ? tagSuggestionsForDraft(debouncedTopicTagsDraft, knownTopicTagOptions) : []),
+    [debouncedTopicTagsDraft, knownTopicTagOptions, topicTagsPendingEntry]
   );
   const [activeTopicTagField, setActiveTopicTagField] = useState<"new-topic" | "rename-topic" | null>(null);
   const [renameSavingKey, setRenameSavingKey] = useState<string | null>(null);
@@ -4661,6 +4680,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         setTopicNameDraft("");
         setTopicColorDraft(currentColor);
         setTopicTagsDraft(formatTags(currentTags));
+        setTopicTagsPendingEntry(false);
         setDeleteArmedKey(null);
       }
       setRenameError(renameKey);
@@ -4727,6 +4747,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         setTopicNameDraft("");
         setTopicColorDraft(currentColor);
         setTopicTagsDraft("");
+        setTopicTagsPendingEntry(false);
         setActiveTopicTagField(null);
         setDeleteArmedKey(null);
       }
@@ -4772,6 +4793,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         setTaskNameDraft("");
         setTaskColorDraft(currentColor);
         setTaskTagsDraft(formatTags(currentTags));
+        setTaskTagsPendingEntry(false);
         setMoveTaskId(null);
         setDeleteArmedKey(null);
       }
@@ -4852,6 +4874,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         setTaskNameDraft("");
         setTaskColorDraft(currentColor);
         setTaskTagsDraft("");
+        setTaskTagsPendingEntry(false);
         setMoveTaskId(null);
         setDeleteArmedKey(null);
       }
@@ -4877,6 +4900,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setTopicNameDraft("");
     setTopicColorDraft(currentColor);
     setTopicTagsDraft("");
+    setTopicTagsPendingEntry(false);
     setActiveTopicTagField(null);
     setDeleteArmedKey(null);
     setRenameError(`topic:${topic.id}`);
@@ -4887,6 +4911,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setTaskNameDraft("");
     setTaskColorDraft(currentColor);
     setTaskTagsDraft("");
+    setTaskTagsPendingEntry(false);
     setMoveTaskId(null);
     setDeleteArmedKey(null);
     setRenameError(`task:${task.id}`);
@@ -6011,14 +6036,95 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     twoColumn ? "2-column board" : "1-column board",
   ].join(" · ");
   const unifiedComposerPlaceholder = mdUp
-    ? "Type a message. Pick a topic or task if you want to reuse one."
-    : "Type a message or pick a target.";
-  const composerIdleHint = mdUp
-    ? "Type to surface related topics and tasks before you send."
-    : "Type to surface related matches before you send.";
+    ? "Type a message. Pick a topic or task if you want to reuse one.\nEnter sends. Shift+Enter adds a newline."
+    : "Type a message or pick a target.\nEnter sends. Shift+Enter adds a newline.";
+  const renderTopicViewSelect = (className = "w-full") => (
+    <Select
+      value={topicView}
+      onChange={(event) => {
+        setLocalStorageItem(TOPIC_VIEW_KEY, event.target.value);
+        setPage(1);
+        pushUrl({ page: "1" }, "replace");
+      }}
+      className={className}
+    >
+      <option value="active">Active topics</option>
+      <option value="snoozed">Snoozed topics</option>
+      <option value="archived">Archived topics</option>
+      <option value="all">All topics</option>
+    </Select>
+  );
+  const renderStatusFilterSelect = (className = "w-full") => (
+    <Select value={statusFilter} onChange={(event) => updateStatusFilter(event.target.value)} className={className}>
+      <option value="all">All statuses</option>
+      <option value="todo">To Do</option>
+      <option value="doing">Doing</option>
+      <option value="blocked">Blocked</option>
+      <option value="done">Done</option>
+    </Select>
+  );
+  const renderDisplayOptionButtons = (className = "") => (
+    <>
+      <Button
+        variant="secondary"
+        size="sm"
+        className={cn(showDone ? "border-[rgba(255,90,45,0.5)]" : "opacity-85", className)}
+        onClick={toggleDoneVisibility}
+      >
+        {showDone ? "Hide done" : "Show done"}
+      </Button>
+      <Button
+        variant="secondary"
+        size="sm"
+        className={cn(showSnoozedTasks ? "border-[rgba(77,171,158,0.55)]" : "opacity-85", className)}
+        onClick={() => {
+          setLocalStorageItem(SHOW_SNOOZED_TASKS_KEY, showSnoozedTasks ? "false" : "true");
+        }}
+      >
+        {showSnoozedTasks ? "Hide snoozed" : "Show snoozed"}
+      </Button>
+      <Button
+        variant="secondary"
+        size="sm"
+        className={cn(showRaw ? "border-[rgba(255,90,45,0.5)]" : "opacity-85", className)}
+        onClick={toggleRawVisibility}
+      >
+        {showRaw ? "Hide full messages" : "Show full messages"}
+      </Button>
+      <Button
+        variant="secondary"
+        size="sm"
+        className={cn(showToolCalls ? "border-[rgba(255,90,45,0.5)]" : "opacity-85", className)}
+        onClick={toggleToolCallsVisibility}
+      >
+        {showToolCalls ? "Hide tool calls" : "Show tool calls"}
+      </Button>
+    </>
+  );
+  const renderBoardLayoutButtons = (className = "") => (
+    <>
+      <Button
+        variant="secondary"
+        size="sm"
+        className={cn(twoColumn ? "border-[rgba(255,90,45,0.5)]" : "opacity-85", className)}
+        onClick={toggleTwoColumn}
+        title={twoColumn ? "Switch to single column" : "Switch to two columns"}
+      >
+        {twoColumn ? "1 column" : "2 column"}
+      </Button>
+      <Button
+        variant="secondary"
+        size="sm"
+        className={cn(isEverythingExpanded ? "border-[rgba(255,90,45,0.5)]" : "opacity-85", className)}
+        onClick={toggleExpandAll}
+      >
+        {isEverythingExpanded ? "Collapse all" : "Expand all"}
+      </Button>
+    </>
+  );
 
   return (
-    <div className="space-y-4">
+    <div className={cn("space-y-4", pagedTopics.length > 0 ? "pb-24 md:pb-28" : "")}>
       <div
         className={cn(
           "space-y-3",
@@ -6027,124 +6133,77 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       >
         <div
           data-testid="unified-board-top-panel"
-          className="rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] bg-[rgba(12,15,20,0.72)] px-3 py-3 sm:px-4 sm:py-4"
+          className="space-y-3"
         >
           <div className="flex flex-col gap-3">
-            <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
-              <div className="grid gap-2 sm:grid-cols-2 lg:min-w-0 lg:flex-1 lg:max-w-[430px]">
-                <Select
-                  value={topicView}
-                  onChange={(event) => {
-                    setLocalStorageItem(TOPIC_VIEW_KEY, event.target.value);
-                    setPage(1);
-                    pushUrl({ page: "1" }, "replace");
-                  }}
-                  className="w-full"
-                >
-                  <option value="active">Active topics</option>
-                  <option value="snoozed">Snoozed topics</option>
-                  <option value="archived">Archived topics</option>
-                  <option value="all">All topics</option>
-                </Select>
-                <Select value={statusFilter} onChange={(event) => updateStatusFilter(event.target.value)} className="w-full">
-                  <option value="all">All statuses</option>
-                  <option value="todo">To Do</option>
-                  <option value="doing">Doing</option>
-                  <option value="blocked">Blocked</option>
-                  <option value="done">Done</option>
-                </Select>
+            <div className="hidden md:flex md:items-center md:gap-3 md:overflow-x-auto md:pb-1">
+              <div
+                role="group"
+                aria-label="Filters"
+                className="flex min-w-max items-center gap-2 rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(8,10,14,0.36)] px-2 py-2"
+              >
+                {renderTopicViewSelect("w-[210px]")}
+                {renderStatusFilterSelect("w-[188px]")}
               </div>
-              <div className="flex flex-col gap-2 lg:min-w-0 lg:items-end">
-                {!filtersDrawerOpen ? (
-                  <div className="hidden max-w-[560px] text-right text-xs text-[rgb(var(--claw-muted))] lg:block">
-                    {TOPIC_VIEW_LABELS[topicView]} · {statusFilter === "all" ? "All statuses" : STATUS_LABELS[statusFilter]} ·{" "}
-                    {displaySummary}
-                  </div>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={toggleFiltersDrawer}
-                  aria-expanded={filtersDrawerOpen}
-                  className={cn(
-                    "inline-flex items-center justify-between gap-3 rounded-full border px-3.5 py-2 text-sm font-medium transition",
-                    filtersDrawerOpen
-                      ? "border-[rgba(255,90,45,0.4)] bg-[rgba(255,90,45,0.1)] text-[rgb(var(--claw-text))]"
-                      : "border-[rgb(var(--claw-border))] bg-[rgba(8,10,14,0.42)] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
-                  )}
-                >
-                  <span>{filtersDrawerOpen ? "Hide options" : "View options"}</span>
-                  <span className="text-[10px] uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))]">
-                    {twoColumn ? "2 col" : "1 col"} {filtersDrawerOpen ? "▴" : "▾"}
-                  </span>
-                </button>
+              <div
+                role="group"
+                aria-label="Display"
+                className="flex min-w-max items-center gap-2 rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(8,10,14,0.36)] px-2 py-2"
+              >
+                {renderDisplayOptionButtons()}
+              </div>
+              <div
+                role="group"
+                aria-label="Board"
+                className="flex min-w-max items-center gap-2 rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(8,10,14,0.36)] px-2 py-2"
+              >
+                {renderBoardLayoutButtons()}
               </div>
             </div>
+            <div className="space-y-2.5 md:hidden">
+              <button
+                type="button"
+                onClick={toggleFiltersDrawer}
+                aria-expanded={filtersDrawerOpen}
+                className={cn(
+                  "inline-flex w-full items-center justify-between gap-3 rounded-full border px-3.5 py-2 text-sm font-medium transition",
+                  filtersDrawerOpen
+                    ? "border-[rgba(255,90,45,0.4)] bg-[rgba(255,90,45,0.1)] text-[rgb(var(--claw-text))]"
+                    : "border-[rgb(var(--claw-border))] bg-[rgba(8,10,14,0.42)] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
+                )}
+              >
+                <span>{filtersDrawerOpen ? "Hide options" : "View options"}</span>
+                <span className="text-[10px] uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))]">
+                  {twoColumn ? "2 col" : "1 col"} {filtersDrawerOpen ? "▴" : "▾"}
+                </span>
+              </button>
+            </div>
             {filtersDrawerOpen ? (
-              <div className="space-y-3 border-t border-[rgba(255,255,255,0.08)] pt-3">
+              <div className="space-y-3 border-t border-[rgba(255,255,255,0.08)] pt-3 md:hidden">
+                <div className="space-y-2">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))]">
+                    Filters
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {renderTopicViewSelect("w-full min-w-0")}
+                    {renderStatusFilterSelect("w-full min-w-0")}
+                  </div>
+                </div>
                 <div className="text-[11px] uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))]">
                   Display and board options
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className={cn(showDone ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                    onClick={toggleDoneVisibility}
-                  >
-                    {showDone ? "Hide done" : "Show done"}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className={cn(showSnoozedTasks ? "border-[rgba(77,171,158,0.55)]" : "opacity-85")}
-                    onClick={() => {
-                      setLocalStorageItem(SHOW_SNOOZED_TASKS_KEY, showSnoozedTasks ? "false" : "true");
-                    }}
-                  >
-                    {showSnoozedTasks ? "Hide snoozed" : "Show snoozed"}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className={cn(showRaw ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                    onClick={toggleRawVisibility}
-                  >
-                    {showRaw ? "Hide full messages" : "Show full messages"}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className={cn(showToolCalls ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                    onClick={toggleToolCallsVisibility}
-                  >
-                    {showToolCalls ? "Hide tool calls" : "Show tool calls"}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className={cn(twoColumn ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                    onClick={toggleTwoColumn}
-                    title={twoColumn ? "Switch to single column" : "Switch to two columns"}
-                  >
-                    {twoColumn ? "1 column" : "2 column"}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className={cn(isEverythingExpanded ? "border-[rgba(255,90,45,0.5)]" : "opacity-85")}
-                    onClick={toggleExpandAll}
-                  >
-                    {isEverythingExpanded ? "Collapse all" : "Expand all"}
-                  </Button>
+                <div className="grid grid-cols-2 gap-2">
+                  {renderDisplayOptionButtons("min-h-10 w-full justify-center px-2 text-center")}
+                  {renderBoardLayoutButtons("min-h-10 w-full justify-center px-2 text-center")}
                 </div>
-                <div className="text-xs text-[rgb(var(--claw-muted))] lg:hidden">{displaySummary}</div>
+                <div className="text-xs text-[rgb(var(--claw-muted))]">{displaySummary}</div>
               </div>
             ) : null}
             <div className="space-y-2 border-t border-[rgba(255,255,255,0.08)] pt-3">
           <div
             ref={unifiedComposerBoxRef}
             className={cn(
-              "relative rounded-[var(--radius-md)] border border-[rgba(255,255,255,0.12)] bg-[rgba(8,10,14,0.46)] px-2.5 py-2 transition",
+              "rounded-[var(--radius-md)] border border-[rgba(255,255,255,0.12)] bg-[rgba(8,10,14,0.46)] px-2.5 py-2 transition",
               "focus-within:border-[rgba(77,171,158,0.55)] focus-within:ring-2 focus-within:ring-[rgba(77,171,158,0.18)]"
             )}
           >
@@ -6186,138 +6245,140 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                   void sendUnifiedComposer();
                 }}
                 placeholder={unifiedComposerPlaceholder}
-                className="min-h-0 resize-none overflow-y-hidden border-0 bg-transparent p-1.5 pb-6 pr-[11.75rem] text-[15px] md:pb-6 md:pr-[13.25rem]"
+                className="min-h-0 w-full resize-none overflow-y-hidden border-0 bg-transparent p-1.5 text-[15px]"
                 style={{ minHeight: mdUp ? "42px" : "38px" }}
               />
-              <div className="pointer-events-none absolute bottom-2 left-3 right-[12.25rem] flex min-h-8 items-end md:right-[13.75rem]">
-                <div
-                  data-testid="unified-composer-target-chip"
-                  className={cn(
-                    "pointer-events-auto inline-flex max-w-full items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] text-[rgb(var(--claw-text))]",
-                    unifiedComposerIntent.kind === "task"
-                      ? "border-[rgba(77,171,158,0.55)] bg-[rgba(18,28,34,0.9)]"
-                      : unifiedComposerIntent.kind === "topic"
-                        ? "border-[rgba(255,90,45,0.42)] bg-[rgba(34,22,18,0.9)]"
-                        : "border-[rgba(148,163,184,0.35)] bg-[rgba(18,22,28,0.88)]"
-                  )}
-                >
-                  <span
+              <div className="mt-2 flex flex-col gap-2 border-t border-[rgba(255,255,255,0.08)] px-1.5 pt-2.5 sm:flex-row sm:items-end sm:justify-between">
+                <div className="min-w-0 flex-1">
+                  <div
+                    data-testid="unified-composer-target-chip"
                     className={cn(
-                      "rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                      "inline-flex max-w-full items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] text-[rgb(var(--claw-text))]",
                       unifiedComposerIntent.kind === "task"
-                        ? "bg-[rgba(77,171,158,0.16)] text-[rgb(var(--claw-accent-2))]"
+                        ? "border-[rgba(77,171,158,0.55)] bg-[rgba(18,28,34,0.9)]"
                         : unifiedComposerIntent.kind === "topic"
-                          ? "bg-[rgba(255,90,45,0.16)] text-[rgb(var(--claw-accent))]"
-                          : "bg-[rgba(148,163,184,0.16)] text-[rgb(var(--claw-muted))]"
+                          ? "border-[rgba(255,90,45,0.42)] bg-[rgba(34,22,18,0.9)]"
+                          : "border-[rgba(148,163,184,0.35)] bg-[rgba(18,22,28,0.88)]"
                     )}
                   >
-                    {unifiedComposerIntent.badge}
-                  </span>
-                  <span className="truncate">{unifiedComposerIntent.chipLabel}</span>
-                  {selectedComposerTarget ? (
+                    <span
+                      className={cn(
+                        "rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                        unifiedComposerIntent.kind === "task"
+                          ? "bg-[rgba(77,171,158,0.16)] text-[rgb(var(--claw-accent-2))]"
+                          : unifiedComposerIntent.kind === "topic"
+                            ? "bg-[rgba(255,90,45,0.16)] text-[rgb(var(--claw-accent))]"
+                            : "bg-[rgba(148,163,184,0.16)] text-[rgb(var(--claw-muted))]"
+                      )}
+                    >
+                      {unifiedComposerIntent.badge}
+                    </span>
+                    <span className="truncate">{unifiedComposerIntent.chipLabel}</span>
+                    {selectedComposerTarget ? (
+                      <button
+                        type="button"
+                        data-testid="unified-composer-target-clear"
+                        className="rounded border border-transparent px-1 text-[rgb(var(--claw-muted))] transition hover:border-[rgb(var(--claw-border))] hover:text-[rgb(var(--claw-text))]"
+                        onClick={() => {
+                          setComposerTarget(null);
+                          setUnifiedCancelNotice(null);
+                        }}
+                        aria-label="Clear selected send target"
+                        title="Clear selected send target"
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  {unifiedComposerHasContent ? (
                     <button
                       type="button"
-                      data-testid="unified-composer-target-clear"
-                      className="rounded border border-transparent px-1 text-[rgb(var(--claw-muted))] transition hover:border-[rgb(var(--claw-border))] hover:text-[rgb(var(--claw-text))]"
                       onClick={() => {
-                        setComposerTarget(null);
+                        clearUnifiedComposerSearch();
+                        setUnifiedComposerDraft('');
+                        clearUnifiedComposerAttachments();
+                        setUnifiedComposerError(null);
                         setUnifiedCancelNotice(null);
                       }}
-                      aria-label="Clear selected send target"
-                      title="Clear selected send target"
+                      aria-label="Clear composer"
+                      title="Clear composer"
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.94)] text-[rgb(var(--claw-muted))] transition hover:border-[rgba(255,90,45,0.45)] hover:text-[rgb(var(--claw-text))]"
                     >
-                      ×
+                      <CloseIcon />
                     </button>
                   ) : null}
-                </div>
-              </div>
-              <div className="absolute bottom-2 right-2 flex items-center gap-1.5">
-                {unifiedComposerHasContent ? (
+                  <input
+                    ref={unifiedComposerFileRef}
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={(event) => {
+                      addUnifiedComposerFiles(event.target.files ?? []);
+                      event.currentTarget.value = '';
+                    }}
+                  />
                   <button
                     type="button"
-                    onClick={() => {
-                      clearUnifiedComposerSearch();
-                      setUnifiedComposerDraft('');
-                      clearUnifiedComposerAttachments();
-                      setUnifiedComposerError(null);
-                      setUnifiedCancelNotice(null);
-                    }}
-                    aria-label="Clear composer"
-                    title="Clear composer"
-                    className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] bg-[rgba(14,17,22,0.94)] text-[rgb(var(--claw-muted))] transition hover:border-[rgba(255,90,45,0.45)] hover:text-[rgb(var(--claw-text))]"
-                  >
-                    <CloseIcon />
-                  </button>
-                ) : null}
-                <input
-                  ref={unifiedComposerFileRef}
-                  type="file"
-                  multiple
-                  className="hidden"
-                  onChange={(event) => {
-                    addUnifiedComposerFiles(event.target.files ?? []);
-                    event.currentTarget.value = '';
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={() => unifiedComposerFileRef.current?.click()}
-                  aria-label="Attach files"
-                  title="Attach files"
-                  className={cn(
-                    "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-muted))] transition",
-                    "border-[rgba(255,255,255,0.14)] bg-[rgba(12,14,18,0.86)] backdrop-blur",
-                    "hover:border-[rgba(255,90,45,0.4)] hover:text-[rgb(var(--claw-text))]"
-                  )}
-                >
-                  <PaperclipIcon />
-                </button>
-                {unifiedCancelTargetResponding ? (
-                  <button
-                    type="button"
-                    data-testid="unified-composer-stop"
-                    onClick={() => {
-                      setUnifiedCancelNotice(null);
-                      void cancelUnifiedComposerRun({ clearComposer: false });
-                    }}
-                    aria-label={
-                      unifiedCancelTarget?.reason === "selected"
-                        ? "Stop selected run"
-                        : unifiedCancelTarget?.reason === "revealed"
-                          ? "Stop revealed task run"
-                        : unifiedCancelTarget?.reason === "active"
-                          ? "Stop active chat run"
-                          : "Stop active chat run"
-                    }
-                    title={
-                      unifiedCancelTarget?.reason === "selected"
-                        ? "Stop selected run"
-                        : unifiedCancelTarget?.reason === "revealed"
-                          ? "Stop revealed task run"
-                        : unifiedCancelTarget?.reason === "active"
-                          ? "Stop active chat run"
-                          : "Stop active chat run"
-                    }
+                    onClick={() => unifiedComposerFileRef.current?.click()}
+                    aria-label="Attach files"
+                    title="Attach files"
                     className={cn(
-                      "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
-                      "border-[rgba(220,38,38,0.7)] bg-[rgba(220,38,38,0.25)] backdrop-blur",
-                      "hover:bg-[rgba(220,38,38,0.4)]"
+                      "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-muted))] transition",
+                      "border-[rgba(255,255,255,0.14)] bg-[rgba(12,14,18,0.86)] backdrop-blur",
+                      "hover:border-[rgba(255,90,45,0.4)] hover:text-[rgb(var(--claw-text))]"
                     )}
                   >
-                    <StopIcon />
+                    <PaperclipIcon />
                   </button>
-                ) : null}
-                {unifiedComposerHasText ? (
-                  <Button
-                    data-testid="unified-composer-send"
-                    size="sm"
-                    className="min-w-[9rem] justify-center"
-                    onClick={() => void sendUnifiedComposer()}
-                    disabled={unifiedComposerBusy}
-                  >
-                    {unifiedComposerIntent.submitLabel}
-                  </Button>
-                ) : null}
+                  {unifiedCancelTargetResponding ? (
+                    <button
+                      type="button"
+                      data-testid="unified-composer-stop"
+                      onClick={() => {
+                        setUnifiedCancelNotice(null);
+                        void cancelUnifiedComposerRun({ clearComposer: false });
+                      }}
+                      aria-label={
+                        unifiedCancelTarget?.reason === "selected"
+                          ? "Stop selected run"
+                          : unifiedCancelTarget?.reason === "revealed"
+                            ? "Stop revealed task run"
+                          : unifiedCancelTarget?.reason === "active"
+                            ? "Stop active chat run"
+                            : "Stop active chat run"
+                      }
+                      title={
+                        unifiedCancelTarget?.reason === "selected"
+                          ? "Stop selected run"
+                          : unifiedCancelTarget?.reason === "revealed"
+                            ? "Stop revealed task run"
+                          : unifiedCancelTarget?.reason === "active"
+                            ? "Stop active chat run"
+                            : "Stop active chat run"
+                      }
+                      className={cn(
+                        "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
+                        "border-[rgba(220,38,38,0.7)] bg-[rgba(220,38,38,0.25)] backdrop-blur",
+                        "hover:bg-[rgba(220,38,38,0.4)]"
+                      )}
+                    >
+                      <StopIcon />
+                    </button>
+                  ) : null}
+                  {unifiedComposerHasText ? (
+                    <Button
+                      data-testid="unified-composer-send"
+                      size="sm"
+                      className="min-w-[9rem] justify-center"
+                      onClick={() => void sendUnifiedComposer()}
+                      disabled={unifiedComposerBusy}
+                    >
+                      {unifiedComposerIntent.submitLabel}
+                    </Button>
+                  ) : null}
+                </div>
               </div>
             </div>
               <div className="flex flex-wrap items-start gap-3">
@@ -6350,9 +6411,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               {readOnly && (
                 <span className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add token to move tasks.</span>
               )}
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[rgb(var(--claw-muted))]">
-                <span>Enter sends. Shift+Enter adds a newline.</span>
-                {normalizedSearch ? (
+              {normalizedSearch ? (
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[rgb(var(--claw-muted))]">
                   <span>
                     {semanticSearch.loading
                       ? "Finding related topics, tasks, and messages…"
@@ -6361,13 +6421,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         : semanticSearch.error === "search_timeout"
                           ? "Match search timed out, using local fallback."
                           : semanticSearch.error
-                          ? "Match search unavailable, using local fallback."
-                          : "Finding matches…"}
+                            ? "Match search unavailable, using local fallback."
+                            : "Finding matches…"}
                   </span>
-                ) : (
-                  <span>{composerIdleHint}</span>
-                )}
-              </div>
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
@@ -6665,9 +6723,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                        />
 		                        <div className="relative">
 		                          <Input
+                                data-testid={`rename-topic-tags-${topic.id}`}
 		                            value={topicTagsDraft}
 		                            onClick={(event) => event.stopPropagation()}
-		                            onChange={(event) => setTopicTagsDraft(normalizeTagDraftInput(event.target.value))}
+		                            onChange={(event) => {
+                                  const nextValue = event.target.value;
+                                  setTopicTagsDraft(nextValue);
+                                  setTopicTagsPendingEntry(isTagDraftPending(nextValue));
+                                }}
 		                            onFocus={() => setActiveTopicTagField("rename-topic")}
 		                            onBlur={() =>
 		                              setActiveTopicTagField((current) => (current === "rename-topic" ? null : current))
@@ -6676,7 +6739,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                              if (event.key !== "Enter") return;
 		                              event.preventDefault();
 		                              event.stopPropagation();
-		                              setTopicTagsDraft(commitTagDraftEntry(topicTagsDraft));
+                                  if (topicTagsPendingEntry) {
+                                    setTopicTagsDraft(commitTagDraftEntry(topicTagsDraft));
+                                    setTopicTagsPendingEntry(false);
+                                    return;
+                                  }
+                                  void saveTopicRename(topic);
 		                            }}
 		                            placeholder="Tags (comma separated)"
 		                            className="h-9 w-[240px] max-w-[70vw]"
@@ -6687,15 +6755,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                                <button
 		                                  key={`rename-topic-tag-${suggestion}`}
 		                                  type="button"
-		                                  className="flex w-full items-center justify-between rounded-[var(--radius-xs)] px-2 py-1.5 text-left text-xs text-[rgb(var(--claw-text))] transition hover:bg-[rgb(var(--claw-panel-2))]"
+		                                  className="flex w-full items-center rounded-[var(--radius-xs)] px-2 py-1.5 text-left text-xs text-[rgb(var(--claw-text))] transition hover:bg-[rgb(var(--claw-panel-2))]"
 		                                  onMouseDown={(event) => {
 		                                    event.preventDefault();
 		                                    event.stopPropagation();
 		                                    setTopicTagsDraft(applyTagSuggestionToDraft(topicTagsDraft, suggestion));
+                                    setTopicTagsPendingEntry(false);
 		                                  }}
 		                                >
-		                                  <span>{friendlyTagLabel(suggestion)}</span>
-		                                  <span className="font-mono text-[10px] text-[rgb(var(--claw-muted))]">{suggestion}</span>
+                                  <span>{suggestion}</span>
 		                                </button>
 		                              ))}
 		                            </div>
@@ -6833,6 +6901,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                             setTopicNameDraft(topic.name);
                             setTopicColorDraft(topicColor);
                             setTopicTagsDraft(formatTags(topic.tags));
+                            setTopicTagsPendingEntry(false);
                             setActiveTopicTagField(null);
                             setDeleteArmedKey(null);
                             setRenameError(`topic:${topic.id}`);
@@ -7254,9 +7323,25 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                                    className="h-9 w-[280px] max-w-[68vw]"
 		                                  />
 		                                  <Input
+                                    data-testid={`rename-task-tags-${task.id}`}
 		                                    value={taskTagsDraft}
 		                                    onClick={(event) => event.stopPropagation()}
-		                                    onChange={(event) => setTaskTagsDraft(normalizeTagDraftInput(event.target.value))}
+		                                    onChange={(event) => {
+                                      const nextValue = event.target.value;
+                                      setTaskTagsDraft(nextValue);
+                                      setTaskTagsPendingEntry(isTagDraftPending(nextValue));
+                                    }}
+                                    onKeyDown={(event) => {
+                                      if (event.key !== "Enter") return;
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      if (taskTagsPendingEntry) {
+                                        setTaskTagsDraft(commitTagDraftEntry(taskTagsDraft));
+                                        setTaskTagsPendingEntry(false);
+                                        return;
+                                      }
+                                      void saveTaskRename(task);
+                                    }}
 		                                    placeholder="Tags (comma separated)"
 		                                    className="h-9 w-[240px] max-w-[68vw]"
 		                                  />
@@ -7445,6 +7530,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       setTaskNameDraft(task.title);
                                       setTaskColorDraft(taskColor);
                                       setTaskTagsDraft(formatTags(task.tags));
+                                      setTaskTagsPendingEntry(false);
                                       setMoveTaskId(null);
                                       setDeleteArmedKey(null);
                                       setRenameError(`task:${task.id}`);
@@ -7680,6 +7766,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                         setTaskNameDraft(task.title);
                                         setTaskColorDraft(taskColor);
                                         setTaskTagsDraft(formatTags(task.tags));
+                                        setTaskTagsPendingEntry(false);
                                         setMoveTaskId(null);
                                         setDeleteArmedKey(null);
                                         setRenameError(`task:${task.id}`);
@@ -7813,15 +7900,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       {taskWorkspaceAttention.workspace.workspaceDir}
                                     </div>
                                   </div>
-                                  <a
-                                    href={taskWorkspaceAttention.workspace.ideUrl ?? "#"}
-                                    target="_blank"
-                                    rel="noreferrer"
+                                  <Link
+                                    href={workspaceRoute(taskWorkspaceAttention.agentId)}
                                     data-testid={`task-chat-workspace-link-${task.id}`}
                                     className="inline-flex h-8 shrink-0 items-center justify-center rounded-full border border-[rgba(77,171,158,0.35)] bg-[rgba(77,171,158,0.14)] px-3 text-[11px] font-semibold text-[rgb(var(--claw-text))] transition hover:border-[rgba(255,90,45,0.35)] hover:text-[rgb(var(--claw-text))]"
                                   >
                                     {taskWorkspaceAttention.label}
-                                  </a>
+                                  </Link>
                                 </div>
                               ) : null}
                               {taskChatAllLogs.length === 0 &&
@@ -8130,15 +8215,22 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         </div>
       )}
 
-      <div className="mt-8 flex justify-center border-t border-[rgba(255,255,255,0.06)] pt-8 pb-12">
-        <ColorShuffleTrigger 
-          topics={topics} 
-          tasks={tasks} 
-          onTopicsUpdate={setTopics} 
-          onTasksUpdate={setTasks} 
-          token={token}
-        />
-      </div>
+      {pagedTopics.length > 0 ? (
+        <div
+          className="pointer-events-none fixed inset-x-0 z-30 flex justify-center px-4"
+          style={{ bottom: "max(1rem, env(safe-area-inset-bottom))" }}
+        >
+          <div className="pointer-events-auto">
+            <ColorShuffleTrigger
+              topics={topics}
+              tasks={tasks}
+              onTopicsUpdate={setTopics}
+              onTasksUpdate={setTasks}
+              token={token}
+            />
+          </div>
+        </div>
+      ) : null}
 
       <SnoozeModal
         open={Boolean(snoozeTarget)}

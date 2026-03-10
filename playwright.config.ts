@@ -37,7 +37,7 @@ export default defineConfig({
           timeout: 120_000,
         },
         {
-          command: `NEXT_PUBLIC_CLAWBOARD_API_BASE=${mockApiBase} NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN= npm run build && NEXT_PUBLIC_CLAWBOARD_API_BASE=${mockApiBase} NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN= PORT=${webPort} npm run start`,
+          command: `NEXT_PUBLIC_CLAWBOARD_API_BASE=${mockApiBase} NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN= CLAWBOARD_WORKSPACE_IDE_AUTH=none npm run build && NEXT_PUBLIC_CLAWBOARD_API_BASE=${mockApiBase} NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN= CLAWBOARD_WORKSPACE_IDE_AUTH=none PORT=${webPort} npm run start`,
           url: baseURL,
           reuseExistingServer: reuseServer,
           timeout: 120_000,

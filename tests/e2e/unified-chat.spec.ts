@@ -125,8 +125,11 @@ test("task chat surfaces the coding workspace when coding activity lands in the 
   const workspaceLink = page.getByTestId(`task-chat-workspace-link-${taskId}`);
   await expect(workspaceLink).toBeVisible();
   await expect(workspaceLink).toContainText("Open coding workspace");
-  await expect(workspaceLink).toHaveAttribute("target", "_blank");
-  await expect(workspaceLink).toHaveAttribute("href", /workspace-coding/);
+  await expect(workspaceLink).toHaveAttribute("href", "/workspaces/coding");
+
+  await workspaceLink.click();
+  await expect(page).toHaveURL(/\/workspaces\/coding$/);
+  await expect(page.getByTestId("workspace-ide-frame")).toBeVisible();
 });
 
 test("board controls can show hidden tool/system chat rows", async ({ page, request }) => {

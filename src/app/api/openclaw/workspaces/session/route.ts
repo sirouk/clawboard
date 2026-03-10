@@ -16,6 +16,11 @@ function resolveIdeBase() {
   );
 }
 
+function resolveIdeAuthMode() {
+  const value = String(process.env.CLAWBOARD_WORKSPACE_IDE_AUTH || "password").trim().toLowerCase();
+  return value === "none" ? "none" : "password";
+}
+
 function readCookieValues(response: Response) {
   const headers = response.headers as Headers & {
     getSetCookie?: () => string[];
@@ -27,10 +32,20 @@ function readCookieValues(response: Response) {
 }
 
 export async function POST(req: NextRequest) {
+  const base = resolveIdeBase();
+  const authMode = resolveIdeAuthMode();
+  if (!base) {
+    return NextResponse.json({ detail: "Workspace IDE auth is not configured." }, { status: 503 });
+  }
+  if (authMode === "none") {
+    const response = NextResponse.json({ ok: true, provider: "code-server" });
+    response.headers.set("cache-control", "no-store");
+    return response;
+  }
+
   const authError = requireToken(req, { allowLoopback: true });
   if (authError) return authError;
 
-  const base = resolveIdeBase();
   const password = String(process.env.CLAWBOARD_WORKSPACE_IDE_PASSWORD || "").trim();
   if (!base || !password) {
     return NextResponse.json({ detail: "Workspace IDE auth is not configured." }, { status: 503 });

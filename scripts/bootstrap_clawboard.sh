@@ -1261,6 +1261,7 @@ PUBLIC_WEB_URL="${CLAWBOARD_PUBLIC_WEB_URL:-}"
 WORKSPACE_IDE_BASE_URL_VALUE="${CLAWBOARD_WORKSPACE_IDE_BASE_URL:-}"
 WORKSPACE_IDE_PASSWORD_VALUE="${CLAWBOARD_WORKSPACE_IDE_PASSWORD:-}"
 WORKSPACE_IDE_PORT_VALUE="${CLAWBOARD_WORKSPACE_IDE_PORT:-13337}"
+WORKSPACE_IDE_PUBLIC_PORT_VALUE="${CLAWBOARD_WORKSPACE_IDE_PORT:-13337}"
 WORKSPACE_IDE_PROVIDER_VALUE="${CLAWBOARD_WORKSPACE_IDE_PROVIDER:-code-server}"
 OPENCLAW_BASE_URL_VALUE="${OPENCLAW_BASE_URL:-}"
 TOKEN="${CLAWBOARD_TOKEN:-}"
@@ -1322,6 +1323,12 @@ OPENCLAW_HEAP_SETUP_MODE="${CLAWBOARD_OPENCLAW_HEAP_SETUP:-ask}"
 OPENCLAW_HEAP_SETUP_STATUS="not-run"
 OPENCLAW_HEAP_TARGET=""
 OPENCLAW_HEAP_MB="${CLAWBOARD_OPENCLAW_MAX_OLD_SPACE_MB:-6144}"
+TAILSCALE_HTTPS_SETUP_MODE="${CLAWBOARD_TAILSCALE_HTTPS_SETUP:-ask}"
+TAILSCALE_HTTPS_WEB_PUBLIC_PORT="443"
+TAILSCALE_HTTPS_API_PUBLIC_PORT="8443"
+TAILSCALE_HTTPS_IDE_PUBLIC_PORT="10000"
+TAILSCALE_HTTPS_SELECTED=false
+TAILSCALE_HTTPS_HOST=""
 OPENCLAW_GATEWAY_DEVICE_AUTH_OVERRIDE="${CLAWBOARD_OPENCLAW_GATEWAY_USE_DEVICE_AUTH:-}"
 APPLY_AGENT_DIRECTIVES_SETTING="${CLAWBOARD_APPLY_AGENT_DIRECTIVES:-1}"
 SKIP_AGENT_DIRECTIVES=false
@@ -1437,6 +1444,8 @@ while [ $# -gt 0 ]; do
     --skip-obsidian-memory-setup) OBSIDIAN_MEMORY_SETUP_MODE="never"; shift ;;
     --setup-openclaw-heap) OPENCLAW_HEAP_SETUP_MODE="always"; shift ;;
     --skip-openclaw-heap-setup) OPENCLAW_HEAP_SETUP_MODE="never"; shift ;;
+    --setup-tailscale-https) TAILSCALE_HTTPS_SETUP_MODE="always"; shift ;;
+    --skip-tailscale-https-setup) TAILSCALE_HTTPS_SETUP_MODE="never"; shift ;;
     --skip-local-memory-setup) SKIP_LOCAL_MEMORY_SETUP=true; shift ;;
     --apply-agent-directives) SKIP_AGENT_DIRECTIVES=false; shift ;;
     --skip-agent-directives) SKIP_AGENT_DIRECTIVES=true; shift ;;
@@ -1479,6 +1488,8 @@ Environment overrides:
                               Offer/run Obsidian + memory tuning setup during bootstrap (default: ask)
   CLAWBOARD_OPENCLAW_HEAP_SETUP=<ask|always|never>
                               Offer/run OpenClaw launcher heap tuning at bootstrap end (default: ask)
+  CLAWBOARD_TAILSCALE_HTTPS_SETUP=<ask|always|never>
+                              Prefer secure Tailscale Serve URLs when MagicDNS + HTTPS are available (default: ask)
   CLAWBOARD_OPENCLAW_MAX_OLD_SPACE_MB=<int>
                               Heap size for launcher patch (default: 6144)
   CLAWBOARD_SKIP_LOCAL_MEMORY_SETUP=<0|1>
@@ -1546,6 +1557,10 @@ Environment overrides:
                       Apply OpenClaw launcher heap tuning at the end of bootstrap (interactive)
   --skip-openclaw-heap-setup
                       Skip the OpenClaw launcher heap tuning prompt
+  --setup-tailscale-https
+                      Configure secure Tailscale Serve URLs when MagicDNS + HTTPS are available
+  --skip-tailscale-https-setup
+                      Do not offer or configure secure Tailscale Serve URLs
   --skip-local-memory-setup
                       Skip local memory/model setup during bootstrap
   --apply-agent-directives
@@ -1629,6 +1644,14 @@ case "$(printf "%s" "$OPENCLAW_HEAP_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" i
   *)
     log_warn "Invalid OpenClaw heap setup mode: $OPENCLAW_HEAP_SETUP_MODE (expected ask|always|never). Using ask."
     OPENCLAW_HEAP_SETUP_MODE="ask"
+    ;;
+esac
+
+case "$(printf "%s" "$TAILSCALE_HTTPS_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" in
+  ask|always|never) TAILSCALE_HTTPS_SETUP_MODE="$(printf "%s" "$TAILSCALE_HTTPS_SETUP_MODE" | tr '[:upper:]' '[:lower:]')" ;;
+  *)
+    log_warn "Invalid Tailscale HTTPS setup mode: $TAILSCALE_HTTPS_SETUP_MODE (expected ask|always|never). Using ask."
+    TAILSCALE_HTTPS_SETUP_MODE="ask"
     ;;
 esac
 
@@ -2104,9 +2127,10 @@ run_env_connection_wizard() {
     return
   fi
 
-  local api_port web_port tail_ip profile_choice default_profile
+  local api_port web_port tail_host profile_choice default_profile
   local default_web_access default_api_access host_default host_input
   local custom_web custom_api internal_api_default internal_web_default openclaw_default
+  local secure_tail_host secure_tail_choice secure_tail_applied
 
   api_port="$(extract_url_port "$API_URL" "8010")"
   web_port="$(extract_url_port "$WEB_URL" "3010")"
@@ -2131,11 +2155,17 @@ run_env_connection_wizard() {
     else
       default_profile="3"
     fi
+  elif [ "$TAILSCALE_HTTPS_SETUP_MODE" != "never" ] && secure_tail_host="$(detect_tailscale_https_host)"; then
+    default_profile="2"
   fi
 
   printf "\nConnection setup for %s/.env:\n" "$INSTALL_DIR" > /dev/tty
   printf "  1) Local machine only (localhost)\n" > /dev/tty
-  printf "  2) LAN/Tailscale access from other devices\n" > /dev/tty
+  printf "  2) LAN/Tailscale access from other devices" > /dev/tty
+  if [ -n "${secure_tail_host:-}" ]; then
+    printf " (secure Tailscale HTTPS recommended)" > /dev/tty
+  fi
+  printf "\n" > /dev/tty
   printf "  3) Custom domain/proxy URLs\n" > /dev/tty
   printf "  4) Keep current values\n" > /dev/tty
   printf "Select [1-4] (default: %s): " "$default_profile" > /dev/tty
@@ -2153,34 +2183,64 @@ run_env_connection_wizard() {
       if [ "$PUBLIC_API_BASE_EXPLICIT" = false ]; then ACCESS_API_URL="$default_api_access"; fi
       ;;
     2)
-      host_default="$(extract_url_host "$ACCESS_WEB_URL")"
-      if is_local_host "$host_default"; then
-        if tail_ip="$(detect_tailscale_ipv4)"; then
-          host_default="$tail_ip"
-        else
-          host_default="localhost"
-        fi
+      secure_tail_applied=false
+      if [ "$TAILSCALE_HTTPS_SETUP_MODE" != "never" ] && [ -z "${secure_tail_host:-}" ]; then
+        secure_tail_host="$(detect_tailscale_https_host || true)"
       fi
-      if [ "$PUBLIC_WEB_URL_EXPLICIT" = false ] || [ "$PUBLIC_API_BASE_EXPLICIT" = false ]; then
-        host_input="$(prompt_with_default_tty "Hostname/IP for browser access" "$host_default")"
-        host_input="$(trim_whitespace "$host_input")"
-        if [ -z "$host_input" ]; then
-          host_input="$host_default"
+      if [ -n "${secure_tail_host:-}" ]; then
+        if [ "$TAILSCALE_HTTPS_SETUP_MODE" = "always" ]; then
+          secure_tail_choice="y"
+        else
+          printf "\nSecure Tailscale HTTPS is available on %s.\n" "$secure_tail_host" > /dev/tty
+          printf "This avoids browser insecure-context issues for the embedded IDE.\n" > /dev/tty
+          printf "Configure secure Tailscale URLs now? [Y/n]: " > /dev/tty
+          read -r secure_tail_choice < /dev/tty || secure_tail_choice=""
         fi
-        host_input="${host_input#http://}"
-        host_input="${host_input#https://}"
-        host_input="${host_input%%/*}"
-        host_input="${host_input#\[}"
-        host_input="${host_input%\]}"
-        host_input="${host_input%%:*}"
-        if [ -z "$host_input" ]; then
-          host_input="$host_default"
+        case "$(printf "%s" "${secure_tail_choice:-}" | tr '[:upper:]' '[:lower:]')" in
+          ""|y|yes)
+            if configure_tailscale_https_routes "$secure_tail_host" "$web_port" "$api_port" "$WORKSPACE_IDE_PORT_VALUE"; then
+              apply_tailscale_https_urls "$secure_tail_host"
+              secure_tail_applied=true
+              printf "Using secure Tailscale URLs:\n" > /dev/tty
+              printf "  Web: %s\n" "$(build_https_url "$secure_tail_host" "$TAILSCALE_HTTPS_WEB_PUBLIC_PORT")" > /dev/tty
+              printf "  API: %s\n" "$(build_https_url "$secure_tail_host" "$TAILSCALE_HTTPS_API_PUBLIC_PORT")" > /dev/tty
+              printf "  IDE: %s\n" "$(build_https_url "$secure_tail_host" "$TAILSCALE_HTTPS_IDE_PUBLIC_PORT")" > /dev/tty
+            else
+              log_warn "Tailscale HTTPS is available on $secure_tail_host but bootstrap could not configure tailscale serve automatically. Falling back to non-secure access URLs."
+            fi
+            ;;
+        esac
+      fi
+      if [ "$secure_tail_applied" = false ]; then
+        host_default="$(extract_url_host "$ACCESS_WEB_URL")"
+        if is_local_host "$host_default"; then
+          if tail_host="$(detect_tailscale_access_host)"; then
+            host_default="$tail_host"
+          else
+            host_default="localhost"
+          fi
         fi
-        if [ "$PUBLIC_WEB_URL_EXPLICIT" = false ]; then
-          ACCESS_WEB_URL="$(normalize_http_url "http://$host_input:$web_port")"
-        fi
-        if [ "$PUBLIC_API_BASE_EXPLICIT" = false ]; then
-          ACCESS_API_URL="$(normalize_http_url "http://$host_input:$api_port")"
+        if [ "$PUBLIC_WEB_URL_EXPLICIT" = false ] || [ "$PUBLIC_API_BASE_EXPLICIT" = false ]; then
+          host_input="$(prompt_with_default_tty "Hostname/IP for browser access" "$host_default")"
+          host_input="$(trim_whitespace "$host_input")"
+          if [ -z "$host_input" ]; then
+            host_input="$host_default"
+          fi
+          host_input="${host_input#http://}"
+          host_input="${host_input#https://}"
+          host_input="${host_input%%/*}"
+          host_input="${host_input#\[}"
+          host_input="${host_input%\]}"
+          host_input="${host_input%%:*}"
+          if [ -z "$host_input" ]; then
+            host_input="$host_default"
+          fi
+          if [ "$PUBLIC_WEB_URL_EXPLICIT" = false ]; then
+            ACCESS_WEB_URL="$(normalize_http_url "http://$host_input:$web_port")"
+          fi
+          if [ "$PUBLIC_API_BASE_EXPLICIT" = false ]; then
+            ACCESS_API_URL="$(normalize_http_url "http://$host_input:$api_port")"
+          fi
         fi
       fi
       ;;
@@ -2307,10 +2367,161 @@ detect_tailscale_ipv4() {
   echo "$ip"
 }
 
+detect_tailscale_magicdns_host() {
+  if ! command -v tailscale >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  local host
+  host="$(
+    tailscale status --json 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+
+candidates = []
+cert_domains = payload.get("CertDomains")
+if isinstance(cert_domains, list):
+    for raw in cert_domains:
+        value = str(raw or "").strip().rstrip(".")
+        if value:
+            candidates.append(value)
+
+self_info = payload.get("Self")
+if isinstance(self_info, dict):
+    dns_name = str(self_info.get("DNSName") or "").strip().rstrip(".")
+    if dns_name:
+        candidates.append(dns_name)
+
+for candidate in candidates:
+    if candidate.endswith(".ts.net"):
+        print(candidate)
+        raise SystemExit(0)
+
+raise SystemExit(1)
+'
+  )"
+  if [ -z "$host" ]; then
+    return 1
+  fi
+  echo "$host"
+}
+
+detect_tailscale_access_host() {
+  local host
+  if host="$(detect_tailscale_magicdns_host)"; then
+    echo "$host"
+    return 0
+  fi
+  detect_tailscale_ipv4
+}
+
+detect_tailscale_https_host() {
+  if ! command -v tailscale >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  local host
+  host="$(
+    tailscale status --json 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+
+candidates = []
+cert_domains = payload.get("CertDomains")
+if isinstance(cert_domains, list):
+    for raw in cert_domains:
+        value = str(raw or "").strip().rstrip(".")
+        if value and value.endswith(".ts.net"):
+            candidates.append(value)
+
+if not candidates:
+    self_info = payload.get("Self")
+    capabilities = []
+    if isinstance(self_info, dict):
+        raw_caps = self_info.get("Capabilities")
+        if isinstance(raw_caps, list):
+            capabilities = [str(item or "").strip().lower() for item in raw_caps]
+        dns_name = str(self_info.get("DNSName") or "").strip().rstrip(".")
+        if dns_name and dns_name.endswith(".ts.net") and any(cap.endswith("https") or cap == "https" for cap in capabilities):
+            candidates.append(dns_name)
+
+for candidate in candidates:
+    print(candidate)
+    raise SystemExit(0)
+
+raise SystemExit(1)
+'
+  )"
+  if [ -z "$host" ]; then
+    return 1
+  fi
+  echo "$host"
+}
+
+build_https_url() {
+  local host="$1"
+  local port="$2"
+  local url="https://$host"
+  if [ "$port" != "443" ]; then
+    url="$url:$port"
+  fi
+  echo "$url"
+}
+
+configure_tailscale_https_routes() {
+  local host="$1"
+  local web_port="$2"
+  local api_port="$3"
+  local ide_port="$4"
+  [ -n "$host" ] || return 1
+  if ! command -v tailscale >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! tailscale serve --bg --https="$TAILSCALE_HTTPS_WEB_PUBLIC_PORT" "http://127.0.0.1:$web_port" >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! tailscale serve --bg --https="$TAILSCALE_HTTPS_API_PUBLIC_PORT" "http://127.0.0.1:$api_port" >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! tailscale serve --bg --https="$TAILSCALE_HTTPS_IDE_PUBLIC_PORT" "http://127.0.0.1:$ide_port" >/dev/null 2>&1; then
+    return 1
+  fi
+  TAILSCALE_HTTPS_SELECTED=true
+  TAILSCALE_HTTPS_HOST="$host"
+  WORKSPACE_IDE_PUBLIC_PORT_VALUE="$TAILSCALE_HTTPS_IDE_PUBLIC_PORT"
+  return 0
+}
+
+apply_tailscale_https_urls() {
+  local host="$1"
+  [ -n "$host" ] || return 1
+  if [ "$PUBLIC_WEB_URL_EXPLICIT" = false ]; then
+    ACCESS_WEB_URL="$(build_https_url "$host" "$TAILSCALE_HTTPS_WEB_PUBLIC_PORT")"
+  fi
+  if [ "$PUBLIC_API_BASE_EXPLICIT" = false ]; then
+    ACCESS_API_URL="$(build_https_url "$host" "$TAILSCALE_HTTPS_API_PUBLIC_PORT")"
+  fi
+}
+
 configure_access_urls() {
-  local api_port web_port api_host web_host tail_ip answer
+  local api_port web_port api_host web_host tail_host answer secure_tail_host secure_applied
   ACCESS_API_URL="$API_URL"
   ACCESS_WEB_URL="$WEB_URL"
+  secure_applied=false
 
   if [ -n "$PUBLIC_API_BASE" ]; then
     ACCESS_API_URL="$PUBLIC_API_BASE"
@@ -2325,19 +2536,40 @@ configure_access_urls() {
   web_host="$(extract_url_host "$WEB_URL")"
 
   if [ "$AUTO_DETECT_ACCESS_URL" = true ]; then
-    if tail_ip="$(detect_tailscale_ipv4)"; then
-      if [ -z "$PUBLIC_API_BASE" ] && is_local_host "$api_host"; then
-        ACCESS_API_URL="http://$tail_ip:$api_port"
+    if [ "$TAILSCALE_HTTPS_SETUP_MODE" = "always" ]; then
+      if secure_tail_host="$(detect_tailscale_https_host)"; then
+        if { [ -z "$PUBLIC_API_BASE" ] && is_local_host "$api_host"; } || { [ -z "$PUBLIC_WEB_URL" ] && is_local_host "$web_host"; }; then
+          if configure_tailscale_https_routes "$secure_tail_host" "$web_port" "$api_port" "$WORKSPACE_IDE_PORT_VALUE"; then
+            apply_tailscale_https_urls "$secure_tail_host"
+            secure_applied=true
+          else
+            log_warn "Tailscale HTTPS is available on $secure_tail_host but bootstrap could not configure tailscale serve automatically. Falling back to non-secure access URLs."
+          fi
+        fi
       fi
-      if [ -z "$PUBLIC_WEB_URL" ] && is_local_host "$web_host"; then
-        ACCESS_WEB_URL="http://$tail_ip:$web_port"
+    fi
+
+    if [ "$secure_applied" = false ]; then
+      if tail_host="$(detect_tailscale_access_host)"; then
+        if [ -z "$PUBLIC_API_BASE" ] && is_local_host "$api_host"; then
+          ACCESS_API_URL="http://$tail_host:$api_port"
+        fi
+        if [ -z "$PUBLIC_WEB_URL" ] && is_local_host "$web_host"; then
+          ACCESS_WEB_URL="http://$tail_host:$web_port"
+        fi
+      else
+        if [ -z "$PUBLIC_API_BASE" ] && is_local_host "$api_host"; then
+          ACCESS_API_URL="http://localhost:$api_port"
+        fi
+        if [ -z "$PUBLIC_WEB_URL" ] && is_local_host "$web_host"; then
+          ACCESS_WEB_URL="http://localhost:$web_port"
+        fi
       fi
-    else
-      if [ -z "$PUBLIC_API_BASE" ] && is_local_host "$api_host"; then
-        ACCESS_API_URL="http://localhost:$api_port"
-      fi
-      if [ -z "$PUBLIC_WEB_URL" ] && is_local_host "$web_host"; then
-        ACCESS_WEB_URL="http://localhost:$web_port"
+    fi
+
+    if [ "$TAILSCALE_HTTPS_SETUP_MODE" = "ask" ] && [ "$PROMPT_ACCESS_URL" = false ]; then
+      if secure_tail_host="$(detect_tailscale_https_host)"; then
+        log_info "Tailscale HTTPS is available via $(build_https_url "$secure_tail_host" "$TAILSCALE_HTTPS_WEB_PUBLIC_PORT"). Re-run with --setup-tailscale-https to use secure browser URLs."
       fi
     fi
   fi
@@ -3650,8 +3882,17 @@ import sys
 path = sys.argv[1]
 os.makedirs(os.path.dirname(path), exist_ok=True)
 defaults = {
+    "chat.agent.enabled": False,
+    "chat.agentsControl.enabled": False,
+    "chat.disableAIFeatures": True,
+    "chat.viewSessions.enabled": False,
+    "files.autoSave": "off",
+    "git.autofetch": False,
+    "scm.defaultViewMode": "tree",
     "workbench.colorTheme": "Default Dark Modern",
     "workbench.preferredDarkColorTheme": "Default Dark Modern",
+    "workbench.startupEditor": "none",
+    "workbench.welcomePage.walkthroughs.openOnInstall": False,
     "window.autoDetectColorScheme": False,
     "security.workspace.trust.enabled": False,
 }
@@ -3676,8 +3917,17 @@ PY
 elif [ ! -f "$CODE_SERVER_SETTINGS_FILE" ]; then
   cat >"$CODE_SERVER_SETTINGS_FILE" <<'EOF'
 {
+  "chat.agent.enabled": false,
+  "chat.agentsControl.enabled": false,
+  "chat.disableAIFeatures": true,
+  "chat.viewSessions.enabled": false,
+  "files.autoSave": "off",
+  "git.autofetch": false,
+  "scm.defaultViewMode": "tree",
   "security.workspace.trust.enabled": false,
   "window.autoDetectColorScheme": false,
+  "workbench.startupEditor": "none",
+  "workbench.welcomePage.walkthroughs.openOnInstall": false,
   "workbench.colorTheme": "Default Dark Modern",
   "workbench.preferredDarkColorTheme": "Default Dark Modern"
 }
@@ -3728,6 +3978,9 @@ upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" "$ACCESS_API_UR
 log_info "Writing CLAWBOARD_PUBLIC_WEB_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_WEB_URL" "$ACCESS_WEB_URL"
 WORKSPACE_IDE_PORT_VALUE="$(clamp_int "$WORKSPACE_IDE_PORT_VALUE" 1 65535 || echo "13337")"
+if [ "$TAILSCALE_HTTPS_SELECTED" != true ]; then
+  WORKSPACE_IDE_PUBLIC_PORT_VALUE="$WORKSPACE_IDE_PORT_VALUE"
+fi
 WORKSPACE_IDE_PROVIDER_VALUE="$(printf "%s" "$WORKSPACE_IDE_PROVIDER_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
 case "$WORKSPACE_IDE_PROVIDER_VALUE" in
   code-server|"") ;;
@@ -3740,9 +3993,9 @@ if [ "$WORKSPACE_IDE_BASE_URL_EXPLICIT" = false ]; then
   IDE_HOST="$(extract_url_host "$ACCESS_WEB_URL")"
   [ -n "$IDE_HOST" ] || IDE_HOST="localhost"
   if [[ "$ACCESS_WEB_URL" =~ ^https:// ]]; then
-    WORKSPACE_IDE_BASE_URL_VALUE="https://$IDE_HOST:$WORKSPACE_IDE_PORT_VALUE"
+    WORKSPACE_IDE_BASE_URL_VALUE="https://$IDE_HOST:$WORKSPACE_IDE_PUBLIC_PORT_VALUE"
   else
-    WORKSPACE_IDE_BASE_URL_VALUE="http://$IDE_HOST:$WORKSPACE_IDE_PORT_VALUE"
+    WORKSPACE_IDE_BASE_URL_VALUE="http://$IDE_HOST:$WORKSPACE_IDE_PUBLIC_PORT_VALUE"
   fi
 fi
 WORKSPACE_IDE_BASE_URL_VALUE="$(normalize_http_url "$WORKSPACE_IDE_BASE_URL_VALUE")"
@@ -3815,6 +4068,9 @@ upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" "$WEB_HOT_RELOAD
 if [ -n "$ALLOWED_DEV_ORIGINS_OVERRIDE" ]; then
   log_info "Writing CLAWBOARD_ALLOWED_DEV_ORIGINS in $INSTALL_DIR/.env..."
   upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_ALLOWED_DEV_ORIGINS" "$ALLOWED_DEV_ORIGINS_OVERRIDE"
+elif ! read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_ALLOWED_DEV_ORIGINS" >/dev/null 2>&1 && [ -n "$(extract_url_host "$ACCESS_WEB_URL")" ] && ! is_local_host "$(extract_url_host "$ACCESS_WEB_URL")"; then
+  log_info "Writing CLAWBOARD_ALLOWED_DEV_ORIGINS=$(extract_url_host "$ACCESS_WEB_URL") in $INSTALL_DIR/.env..."
+  upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_ALLOWED_DEV_ORIGINS" "$(extract_url_host "$ACCESS_WEB_URL")"
 elif ! read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_ALLOWED_DEV_ORIGINS" >/dev/null 2>&1 && [ -t 0 ]; then
   echo ""
   echo "Optional: add extra allowed dev origins/hosts for the Next dev server."

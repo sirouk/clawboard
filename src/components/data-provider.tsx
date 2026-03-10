@@ -65,10 +65,19 @@ type DataContextValue = {
 const DataContext = createContext<DataContextValue | null>(null);
 
 function normalizeTagValue(value: string) {
-  const lowered = String(value ?? "").toLowerCase();
-  const withDashes = lowered.replace(/\s+/g, "-");
-  const stripped = withDashes.replace(/[^a-z0-9-]/g, "");
-  return stripped.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (!raw) return "";
+  if (raw.startsWith("system:")) {
+    const suffix = raw.split(":", 2)[1]?.trim() ?? "";
+    return suffix ? `system:${suffix}` : "system";
+  }
+  const withDashes = raw.replace(/\s+/g, "-");
+  const stripped = withDashes.replace(/[^a-z0-9:_-]/g, "");
+  return stripped.replace(/:{2,}/g, ":").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function cleanTagLabel(value: string) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
 function clipNotificationText(value: string, max = 140) {
@@ -1002,15 +1011,18 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   }, [chatSeenByKey, hydrated, logs, notificationsEnabled, taskById, topicById, topics]);
 
   const topicTags = useMemo(() => {
-    const seen = new Set<string>();
+    const labels = new Map<string, string>();
     for (const topic of topics) {
       for (const rawTag of topic.tags ?? []) {
-        const normalized = normalizeTagValue(String(rawTag ?? ""));
-        if (!normalized || seen.has(normalized)) continue;
-        seen.add(normalized);
+        const label = cleanTagLabel(String(rawTag ?? ""));
+        const normalized = normalizeTagValue(label);
+        if (!normalized || labels.has(normalized)) continue;
+        labels.set(normalized, label);
       }
     }
-    return Array.from(seen).sort((a, b) => a.localeCompare(b));
+    return Array.from(labels.values()).sort(
+      (a, b) => normalizeTagValue(a).localeCompare(normalizeTagValue(b)) || a.localeCompare(b)
+    );
   }, [topics]);
 
   const value = useMemo(

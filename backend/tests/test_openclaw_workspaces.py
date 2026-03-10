@@ -75,6 +75,8 @@ class OpenClawWorkspaceEndpointTests(unittest.TestCase):
 
                 rows = payload.get("workspaces") or []
                 by_id = {row["agentId"]: row for row in rows}
+                self.assertEqual(by_id["main"]["agentName"], "main")
+                self.assertEqual(by_id["coding"]["agentName"], "Coding")
                 self.assertEqual(by_id["main"]["workspaceDir"], f"{openclaw_home}/workspace")
                 self.assertEqual(by_id["coding"]["workspaceDir"], f"{openclaw_home}/workspace-coding")
                 self.assertEqual(by_id["docs"]["workspaceDir"], f"{openclaw_home}/workspace-docs")

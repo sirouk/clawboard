@@ -454,6 +454,48 @@ exit 0
   );
 }
 
+async function makeTailscaleStub(
+  binDir,
+  {
+    dnsName = "test-host.tail77f45e.ts.net.",
+    certDomain = "test-host.tail77f45e.ts.net",
+    ip = "100.64.12.34",
+  } = {}
+) {
+  const statusJson = JSON.stringify({
+    Self: { DNSName: dnsName },
+    CertDomains: [certDomain],
+  });
+  return makeStub(
+    binDir,
+    "tailscale",
+    `
+stub_log_file="\${TAILSCALE_STUB_LOG_FILE:-}"
+
+log_stub_call() {
+  if [[ -n "$stub_log_file" ]]; then
+    mkdir -p "$(dirname "$stub_log_file")"
+    printf '%s\\n' "$*" >> "$stub_log_file"
+  fi
+}
+
+if [[ "$#" -ge 2 && "$1" == "status" && "$2" == "--json" ]]; then
+  printf '%s\\n' '${statusJson}'
+  exit 0
+fi
+if [[ "$#" -ge 2 && "$1" == "ip" && "$2" == "-4" ]]; then
+  printf '%s\\n' '${ip}'
+  exit 0
+fi
+if [[ "$#" -ge 4 && "$1" == "serve" && "$2" == "--bg" && "$3" == --https=* ]]; then
+  log_stub_call "$*"
+  exit 0
+fi
+exit 1
+`
+  );
+}
+
 async function seedBootstrapInstallTree(installDir, { includePlugin = true, includeSpecialists = false } = {}) {
   await mkdir(path.join(installDir, ".git"), { recursive: true });
   await mkdir(path.join(installDir, "skills", "clawboard"), { recursive: true });
@@ -642,10 +684,160 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
 
   const codeServerSettingsPath = path.join(installDir, "data", "code-server", "local", "User", "settings.json");
   const codeServerSettings = JSON.parse(await readFile(codeServerSettingsPath, "utf8"));
+  assert.equal(codeServerSettings["chat.agent.enabled"], false);
+  assert.equal(codeServerSettings["chat.agentsControl.enabled"], false);
+  assert.equal(codeServerSettings["chat.disableAIFeatures"], true);
+  assert.equal(codeServerSettings["chat.viewSessions.enabled"], false);
+  assert.equal(codeServerSettings["files.autoSave"], "off");
+  assert.equal(codeServerSettings["git.autofetch"], false);
+  assert.equal(codeServerSettings["scm.defaultViewMode"], "tree");
+  assert.equal(codeServerSettings["workbench.startupEditor"], "none");
+  assert.equal(codeServerSettings["workbench.welcomePage.walkthroughs.openOnInstall"], false);
   assert.equal(codeServerSettings["workbench.colorTheme"], "Default Dark Modern");
   assert.equal(codeServerSettings["workbench.preferredDarkColorTheme"], "Default Dark Modern");
   assert.equal(codeServerSettings["window.autoDetectColorScheme"], false);
   assert.equal(codeServerSettings["security.workspace.trust.enabled"], false);
+});
+
+test("bootstrap_clawboard.sh: prefers Tailscale MagicDNS host for public access URLs", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-magicdns-"));
+  const repoRoot = path.join(tmp, "repo");
+  const installDir = path.join(tmp, "install");
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const binDir = path.join(tmp, "bin");
+
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
+  await seedBootstrapInstallTree(installDir, { includePlugin: false });
+
+  await makeOpenClawStub(binDir);
+  await makeTailscaleStub(binDir, {
+    dnsName: "magicbox.tail77f45e.ts.net.",
+    certDomain: "magicbox.tail77f45e.ts.net",
+    ip: "100.88.77.66",
+  });
+  await makeStub(binDir, "curl", "exit 0");
+
+  const bootstrapPath = path.join(repoRoot, "scripts");
+  await mkdir(bootstrapPath, { recursive: true });
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), path.join(bootstrapPath, "bootstrap_clawboard.sh"));
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_openclaw.sh"), path.join(bootstrapPath, "bootstrap_openclaw.sh"));
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    CLAWBOARD_TOKEN: "test-token",
+  };
+
+  const res = await run(
+    [
+      "bash",
+      path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+      "--dir",
+      installDir,
+      "--skip-docker",
+      "--skip-plugin",
+      "--skip-memory-backup-setup",
+      "--no-access-url-prompt",
+      "--no-color",
+      "--integration-level",
+      "write",
+    ],
+    {
+      cwd: repoRoot,
+      env,
+    }
+  );
+  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+
+  const envText = await readFile(path.join(installDir, ".env"), "utf8");
+  assert.match(envText, /^CLAWBOARD_PUBLIC_WEB_URL=http:\/\/magicbox\.tail77f45e\.ts\.net:3010$/m);
+  assert.match(envText, /^CLAWBOARD_PUBLIC_API_BASE=http:\/\/magicbox\.tail77f45e\.ts\.net:8010$/m);
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_BASE_URL=http:\/\/magicbox\.tail77f45e\.ts\.net:13337$/m);
+  assert.match(envText, /^CLAWBOARD_ALLOWED_DEV_ORIGINS=magicbox\.tail77f45e\.ts\.net$/m);
+  assert.doesNotMatch(envText, /^CLAWBOARD_PUBLIC_WEB_URL=http:\/\/100\.88\.77\.66:3010$/m);
+  assert.match(
+    res.stdout,
+    /Tailscale HTTPS is available via https:\/\/magicbox\.tail77f45e\.ts\.net\. Re-run with --setup-tailscale-https to use secure browser URLs\./
+  );
+});
+
+test("bootstrap_clawboard.sh: configures secure Tailscale HTTPS URLs when opted in", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-tailscale-https-"));
+  const repoRoot = path.join(tmp, "repo");
+  const installDir = path.join(tmp, "install");
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const binDir = path.join(tmp, "bin");
+  const tailscaleLogPath = path.join(tmp, "tailscale.log");
+
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
+  await seedBootstrapInstallTree(installDir, { includePlugin: false });
+
+  await makeOpenClawStub(binDir);
+  await makeTailscaleStub(binDir, {
+    dnsName: "magicbox.tail77f45e.ts.net.",
+    certDomain: "magicbox.tail77f45e.ts.net",
+    ip: "100.88.77.66",
+  });
+  await makeStub(binDir, "curl", "exit 0");
+
+  const bootstrapPath = path.join(repoRoot, "scripts");
+  await mkdir(bootstrapPath, { recursive: true });
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), path.join(bootstrapPath, "bootstrap_clawboard.sh"));
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_openclaw.sh"), path.join(bootstrapPath, "bootstrap_openclaw.sh"));
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    CLAWBOARD_TOKEN: "test-token",
+    CLAWBOARD_TAILSCALE_HTTPS_SETUP: "always",
+    TAILSCALE_STUB_LOG_FILE: tailscaleLogPath,
+  };
+
+  const res = await run(
+    [
+      "bash",
+      path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+      "--dir",
+      installDir,
+      "--skip-docker",
+      "--skip-plugin",
+      "--skip-memory-backup-setup",
+      "--no-access-url-prompt",
+      "--no-color",
+      "--integration-level",
+      "write",
+    ],
+    {
+      cwd: repoRoot,
+      env,
+    }
+  );
+  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+
+  const envText = await readFile(path.join(installDir, ".env"), "utf8");
+  assert.match(envText, /^CLAWBOARD_PUBLIC_WEB_URL=https:\/\/magicbox\.tail77f45e\.ts\.net$/m);
+  assert.match(envText, /^CLAWBOARD_PUBLIC_API_BASE=https:\/\/magicbox\.tail77f45e\.ts\.net:8443$/m);
+  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_BASE_URL=https:\/\/magicbox\.tail77f45e\.ts\.net:10000$/m);
+  assert.match(envText, /^CLAWBOARD_ALLOWED_DEV_ORIGINS=magicbox\.tail77f45e\.ts\.net$/m);
+
+  const tailscaleLog = await readFile(tailscaleLogPath, "utf8");
+  assert.match(tailscaleLog, /^serve --bg --https=443 http:\/\/127\.0\.0\.1:3010$/m);
+  assert.match(tailscaleLog, /^serve --bg --https=8443 http:\/\/127\.0\.0\.1:8010$/m);
+  assert.match(tailscaleLog, /^serve --bg --https=10000 http:\/\/127\.0\.0\.1:13337$/m);
 });
 
 test("bootstrap_clawboard.sh: uses CLAWBOARD_TOKEN for API health and config writes", async () => {
