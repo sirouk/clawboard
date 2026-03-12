@@ -1079,17 +1079,18 @@ PY
 
   run_cfg_set "${base}.subagents.allowAgents" "$allow_agents_json" json true
 
-  # Explicit allow: delegation + memory + Clawboard ledger tools.
+  # Explicit allow: delegation + memory + Clawboard ledger + image inspection for staged attachments.
   # cron allows durable one-shot follow-up jobs per delegation.
+  # image lets main inspect screenshot-style attachments directly inside its own workspace.
   # clawboard_* tools allow reading/writing the external task ledger for restart-resilient state recovery.
   run_cfg_set "${base}.tools.allow" \
-    '["sessions_spawn","sessions_list","sessions_send","session_status","memory_search","memory_get","cron","clawboard_search","clawboard_update_task","clawboard_context","clawboard_get_task"]' \
+    '["sessions_spawn","sessions_list","sessions_send","session_status","memory_search","memory_get","cron","image","clawboard_search","clawboard_update_task","clawboard_context","clawboard_get_task"]' \
     json true
 
   # Deny filesystem, runtime, web, UI, gateway, nodes, messaging.
   # Note: group:automation (cron+gateway) is split — gateway denied, cron allowed above.
   run_cfg_set "${base}.tools.deny" \
-    '["group:fs","group:runtime","group:web","group:ui","gateway","group:nodes","group:messaging","image"]' \
+    '["group:fs","group:runtime","group:web","group:ui","gateway","group:nodes","group:messaging"]' \
     json true
 
   run_cfg_set "${base}.tools.elevated.enabled" false json true

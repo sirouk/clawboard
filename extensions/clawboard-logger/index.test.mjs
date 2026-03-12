@@ -8,6 +8,16 @@ test("index module can be imported", async () => {
   assert.ok(typeof indexModule.default === "function");
 });
 
+test("sanitizeRetrievedContextBlock strips nested wrappers and reply directives", async () => {
+  const { sanitizeRetrievedContextBlock } = await import("./index.js");
+  assert.equal(
+    sanitizeRetrievedContextBlock(
+      "[CLAWBOARD_CONTEXT_BEGIN]\nKeep this\n[[reply_to_current]]\nConversation info (untrusted metadata): {\"x\":1}\n[CLAWBOARD_CONTEXT_END]"
+    ),
+    "Keep this"
+  );
+});
+
 test("resolveBoardTaskPatchId falls back to the current board task id for loose task matches", async () => {
   const { resolveBoardTaskPatchId } = await import("./index.js");
   assert.equal(
@@ -119,4 +129,41 @@ test("agent_end fallback still logs the final board assistant reply after an ear
   } finally {
     global.fetch = originalFetch;
   }
+});
+
+test("register skips duplicate hook registration on the same API instance", async () => {
+  const warnings = [];
+  const handlers = new Map();
+  const plugin = (await import("./index.js")).default;
+  const api = {
+    pluginConfig: {
+      baseUrl: "http://clawboard.local",
+      token: "test-token",
+      enabled: true,
+    },
+    logger: {
+      warn(message) {
+        warnings.push(String(message));
+      },
+      info() {},
+      debug() {},
+      error() {},
+    },
+    on(name, handler) {
+      handlers.set(name, handler);
+    },
+    registerTool() {},
+  };
+
+  plugin(api);
+  const firstHandlerCount = handlers.size;
+  assert.ok(firstHandlerCount > 0);
+
+  plugin(api);
+
+  assert.equal(handlers.size, firstHandlerCount);
+  assert.equal(
+    warnings.some((message) => message.includes("skipping duplicate hooks")),
+    true
+  );
 });

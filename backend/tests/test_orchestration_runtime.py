@@ -24,6 +24,7 @@ try:
     from fastapi import BackgroundTasks
     from sqlmodel import select
 
+    from app import background as background_module  # noqa: E402
     from app import main as main_module  # noqa: E402
     from app.db import get_session, init_db  # noqa: E402
     from app.models import (  # noqa: E402
@@ -71,6 +72,21 @@ class OrchestrationRuntimeTests(unittest.TestCase):
             for row in session.exec(select(Topic)).all():
                 session.delete(row)
             session.commit()
+
+    def test_orchestration_poll_seconds_clamps_and_warns_once(self):
+        with main_module._ENV_CLAMP_WARNING_LOCK:
+            main_module._ENV_CLAMP_WARNED.discard("CLAWBOARD_ORCHESTRATION_POLL_SECONDS")
+
+        with patch.dict(
+            main_module.os.environ,
+            {"CLAWBOARD_ORCHESTRATION_POLL_SECONDS": "3600"},
+            clear=False,
+        ), patch.object(background_module.logger, "warning") as warning_mock:
+            self.assertEqual(main_module._orchestration_poll_seconds(), 300.0)
+            self.assertEqual(main_module._orchestration_poll_seconds(), 300.0)
+
+        warning_mock.assert_called_once()
+        self.assertEqual(warning_mock.call_args.args[1], "CLAWBOARD_ORCHESTRATION_POLL_SECONDS")
 
     def _openclaw_chat(self, *, session_key: str, message: str) -> str:
         payload = OpenClawChatRequest(

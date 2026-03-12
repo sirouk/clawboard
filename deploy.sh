@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${CLAWBOARD_ENV_FILE:-$ROOT_DIR/.env}"
 DATA_DIR="$ROOT_DIR/data"
+WORKSPACE_IDE_SERVICES=(workspace-ide workspace-ide-coding)
 
 COMPOSE_CMD=()
 if docker compose version >/dev/null 2>&1; then
@@ -18,6 +19,10 @@ compose() {
     exit 1
   fi
   "${COMPOSE_CMD[@]}" "$@"
+}
+
+ensure_workspace_ide_services() {
+  compose up -d "${WORKSPACE_IDE_SERVICES[@]}"
 }
 
 memory_index_output_has_errors() {
@@ -210,6 +215,7 @@ up() {
     done
 
     compose --profile dev up -d "${services[@]}"
+    ensure_workspace_ide_services
     return
   fi
 
@@ -230,10 +236,12 @@ up() {
       fi
     done
     compose up -d "${services[@]}"
+    ensure_workspace_ide_services
     return
   fi
 
   compose up -d
+  ensure_workspace_ide_services
 }
 
 rebuild() {
@@ -264,6 +272,7 @@ rebuild() {
     # No build needed for web-dev (runs from node base image + bind mount), but --build
     # is harmless and keeps api/classifier up to date when requested.
     compose --profile dev up -d --build --force-recreate "${services[@]}"
+    ensure_workspace_ide_services
     return
   fi
 
@@ -283,19 +292,23 @@ rebuild() {
       fi
     done
     compose up -d --build --force-recreate "${services[@]}"
+    ensure_workspace_ide_services
     return
   fi
 
   compose up -d --build --force-recreate
+  ensure_workspace_ide_services
 }
 
 fresh() {
   down
   if is_web_hot_reload_enabled; then
     compose --profile dev up -d --build --force-recreate api classifier qdrant web-dev
+    ensure_workspace_ide_services
     return
   fi
   compose up -d --build --force-recreate
+  ensure_workspace_ide_services
 }
 
 down() {
@@ -315,6 +328,7 @@ nuke() {
 }
 
 restart() {
+  ensure_workspace_ide_services
   if [ "$#" -gt 0 ]; then
     if is_web_hot_reload_enabled; then
       local args=("$@")

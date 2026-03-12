@@ -1488,11 +1488,28 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 captured["content"] = content
                 return _FakeResponse()
 
+        workspaces_root = root / "workspaces"
+        main_workspace = workspaces_root / "main"
+        coding_workspace = workspaces_root / "coding"
+        main_workspace.mkdir(parents=True)
+        coding_workspace.mkdir(parents=True)
+
         with patch.object(main_module, "ATTACHMENTS_DIR", str(root)), patch.object(
             main_module.event_hub, "publish", side_effect=_publish_collector(published)
         ), patch.object(main_module.httpx, "Client", side_effect=lambda **kwargs: _FakeClient(**kwargs)) as client_mock, patch.object(
             main_module, "gateway_rpc", new=AsyncMock(return_value={"ok": True})
-        ) as rpc_mock, patch.object(main_module, "_schedule_openclaw_assistant_log_check", return_value=None):
+        ) as rpc_mock, patch.object(
+            main_module,
+            "_resolve_openclaw_agent_workspaces",
+            return_value=[
+                {"agentId": "main", "workspaceDir": str(main_workspace)},
+                {"agentId": "coding", "workspaceDir": str(coding_workspace)},
+            ],
+        ), patch.dict(
+            os.environ,
+            {"CLAWBOARD_OPENCLAW_ATTACHMENT_MODEL": "chutes/moonshotai/Kimi-K2.5-TEE"},
+            clear=False,
+        ), patch.object(main_module, "_schedule_openclaw_assistant_log_check", return_value=None):
             main_module._run_openclaw_chat(
                 "request-chat-002",
                 base_url="http://localhost:18789",
@@ -1519,7 +1536,11 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                 ],
             )
 
-        rpc_mock.assert_not_called()
+        rpc_mock.assert_awaited_once()
+        patch_args = rpc_mock.await_args
+        self.assertEqual(patch_args.args[0], "sessions.patch")
+        self.assertEqual(patch_args.args[1]["key"], "clawboard:task:topic-chat-002:task-chat-002")
+        self.assertEqual(patch_args.args[1]["model"], "chutes/moonshotai/Kimi-K2.5-TEE")
         client_mock.assert_called_once()
         self.assertEqual(captured.get("method"), "POST")
         self.assertEqual(captured.get("url"), "http://localhost:18789/v1/responses")
@@ -1533,7 +1554,18 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         content = items[0].get("content") or []
         self.assertEqual(content[0].get("type"), "input_text")
-        self.assertEqual(content[0].get("text"), "send with attachment")
+        content_text = content[0].get("text") or ""
+        self.assertTrue(content_text.startswith("send with attachment\n\n[Clawboard attachment context]"))
+        self.assertIn("Staged path in every agent workspace:", content_text)
+        self.assertIn("Exact workspace-relative file paths:", content_text)
+        self.assertIn("If you delegate this work", content_text)
+        relative_dir = main_module._openclaw_attachment_stage_relative_dir(
+            session_key="clawboard:task:topic-chat-002:task-chat-002",
+            request_id="request-chat-002",
+        )
+        self.assertIn(relative_dir, content_text)
+        self.assertIn(f"{relative_dir}/notes.txt", content_text)
+        self.assertIn(f"{relative_dir}/diagram.png", content_text)
         self.assertEqual(content[1].get("type"), "input_file")
         self.assertEqual(content[1].get("source", {}).get("filename"), "notes.txt")
         self.assertEqual(content[1].get("source", {}).get("media_type"), "text/plain")
@@ -1541,6 +1573,16 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(content[2].get("type"), "input_image")
         self.assertEqual(content[2].get("source", {}).get("media_type"), "image/png")
         self.assertEqual(base64.b64decode(content[2].get("source", {}).get("data") or ""), image_bytes)
+        staged_relative = Path(*relative_dir.split("/"))
+        staged_main_dir = main_workspace / staged_relative
+        staged_coding_dir = coding_workspace / staged_relative
+        self.assertEqual((staged_main_dir / "notes.txt").read_bytes(), attachment_bytes)
+        self.assertEqual((staged_main_dir / "diagram.png").read_bytes(), image_bytes)
+        self.assertEqual((staged_coding_dir / "notes.txt").read_bytes(), attachment_bytes)
+        self.assertEqual((staged_coding_dir / "diagram.png").read_bytes(), image_bytes)
+        manifest = json.loads((staged_main_dir / ".manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest.get("relativeDir"), relative_dir)
+        self.assertEqual([item.get("fileName") for item in manifest.get("files") or []], ["notes.txt", "diagram.png"])
 
     def test_chat_002aa_plain_board_message_uses_openresponses_when_transport_auto(self):
         published: list[dict] = []
@@ -4259,6 +4301,35 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         typing_events = [event for event in published if str(event.get("type") or "") == "openclaw.typing"]
         self.assertTrue(typing_events)
         self.assertFalse(bool((typing_events[-1].get("data") or {}).get("typing")))
+
+    def test_chat_009_session_lock_cache_prunes_stale_and_overflow_entries(self):
+        with patch.dict(
+            main_module.os.environ,
+            {
+                "OPENCLAW_CHAT_SESSION_LOCK_TTL_SECONDS": "60",
+                "OPENCLAW_CHAT_SESSION_LOCK_MAX_ENTRIES": "32",
+            },
+            clear=False,
+        ):
+            with main_module._OPENCLAW_CHAT_SESSION_LOCKS_GUARD:
+                main_module._OPENCLAW_CHAT_SESSION_LOCKS.clear()
+                for idx in range(40):
+                    main_module._OPENCLAW_CHAT_SESSION_LOCKS[f"session-{idx:02d}"] = {
+                        "lock": threading.Lock(),
+                        "refs": 0,
+                        "lastUsedMonotonic": float(idx),
+                    }
+                main_module._OPENCLAW_CHAT_SESSION_LOCKS["session-active"] = {
+                    "lock": threading.Lock(),
+                    "refs": 1,
+                    "lastUsedMonotonic": 0.0,
+                }
+                main_module._openclaw_chat_prune_session_locks_locked(200.0)
+
+                self.assertLessEqual(len(main_module._OPENCLAW_CHAT_SESSION_LOCKS), 32)
+                self.assertIn("session-active", main_module._OPENCLAW_CHAT_SESSION_LOCKS)
+                self.assertNotIn("session-00", main_module._OPENCLAW_CHAT_SESSION_LOCKS)
+                self.assertNotIn("session-39", main_module._OPENCLAW_CHAT_SESSION_LOCKS)
 
 if __name__ == "__main__":
     unittest.main()

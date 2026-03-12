@@ -17,6 +17,9 @@ const DEFAULT_CONTEXT_FETCH_RETRIES = 1;
 const DEFAULT_CONTEXT_CACHE_TTL_MS = 45_000;
 const DEFAULT_CONTEXT_CACHE_MAX_ENTRIES = 120;
 const DEFAULT_CONTEXT_CACHE_FRESH_MS = 2500;
+const DEFAULT_POST_TIMEOUT_MS = 8000;
+const DEFAULT_BOARD_SCOPE_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const DEFAULT_BOARD_SCOPE_CACHE_MAX_ENTRIES = 4096;
 const CLAWBOARD_CONTEXT_BEGIN = "[CLAWBOARD_CONTEXT_BEGIN]";
 const CLAWBOARD_CONTEXT_END = "[CLAWBOARD_CONTEXT_END]";
 const IGNORE_SESSION_PREFIXES = getIgnoreSessionPrefixesFromEnv(process.env);
@@ -24,6 +27,7 @@ const IGNORE_SESSION_PREFIXES = getIgnoreSessionPrefixesFromEnv(process.env);
 const BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS = envInt("CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS", 48, 1, 168) * 60 * 60 * 1000;
 const OPENCLAW_REQUEST_ID_PREFIX = "occhat-";
 const OPENCLAW_DAY_SECONDS = 24 * 60 * 60;
+const CLAWBOARD_LOGGER_REGISTERED_SYMBOL = Symbol.for("clawboard.logger.registered");
 const REPLY_DIRECTIVE_TAG_RE = /(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*/gi;
 function envInt(name, fallback, min, max) {
     const raw = (process.env[name] ?? "").trim();
@@ -183,13 +187,27 @@ function isRetryableFetchError(err) {
         message.includes("etimedout") ||
         message.includes("enotfound"));
 }
+function stripClawboardWrapperArtifacts(content) {
+    let text = content ?? "";
+    text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\]\s*/gi, "");
+    text = text.replace(/\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
+    text = text.replace(/^\s*Conversation info \(untrusted metadata\)\s*:\s*```(?:json)?\s*[\s\S]*?```\s*/gim, "");
+    text = text.replace(/^\s*Conversation info \(untrusted metadata\)\s*:\s*\{[\s\S]*?\}\s*/gim, "");
+    text = text.replace(REPLY_DIRECTIVE_TAG_RE, " ");
+    return text;
+}
+function sanitizeRetrievedContextBlock(content) {
+    let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
+    text = stripClawboardWrapperArtifacts(text);
+    text = text.replace(/[ \t]{2,}/g, " ");
+    text = text.replace(/\n{3,}/g, "\n\n");
+    return text.trim();
+}
 function sanitizeMessageContent(content) {
     let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
     text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\][\s\S]*?\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
-    text = text.replace(/^\s*Conversation info \(untrusted metadata\)\s*:\s*```(?:json)?\s*[\s\S]*?```\s*/i, "");
-    text = text.replace(/^\s*Conversation info \(untrusted metadata\)\s*:\s*\{[\s\S]*?\}\s*/i, "");
+    text = stripClawboardWrapperArtifacts(text);
     text = text.replace(/Clawboard continuity hook is active for this turn\.[\s\S]*?Prioritize curated user notes when present\.\s*/gi, "");
-    text = text.replace(REPLY_DIRECTIVE_TAG_RE, " ");
     text = text.replace(/^\s*summary\s*[:\-]\s*/gim, "");
     text = text.replace(/^\[Discord [^\]]+\]\s*/gim, "");
     // OpenClaw/CLI transcripts sometimes include a local-time prefix like:
@@ -438,6 +456,7 @@ async function ensureDir(filePath) {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
 }
 export default function register(api) {
+    const registrationState = api;
     const rawConfig = (api.pluginConfig ?? {});
     const enabled = rawConfig.enabled !== false;
     const debug = rawConfig.debug === true;
@@ -448,6 +467,9 @@ export default function register(api) {
     const baseUrlCandidates = buildBaseUrlCandidates(baseUrl, configuredFallbacks);
     const token = rawConfig.token;
     const queuePath = rawConfig.queuePath ?? DEFAULT_QUEUE;
+    const postTimeoutMs = typeof rawConfig.postTimeoutMs === "number" && Number.isFinite(rawConfig.postTimeoutMs)
+        ? Math.max(500, Math.min(60_000, Math.floor(rawConfig.postTimeoutMs)))
+        : envInt("CLAWBOARD_LOGGER_POST_TIMEOUT_MS", DEFAULT_POST_TIMEOUT_MS, 500, 60_000);
     const useQueue = rawConfig.queue === true;
     const ingestPath = rawConfig.ingestPath ?? (useQueue ? "/api/ingest" : "/api/log");
     const defaultTopicId = rawConfig.defaultTopicId;
@@ -488,6 +510,12 @@ export default function register(api) {
     const contextUseCacheOnFailure = typeof rawConfig.contextUseCacheOnFailure === "boolean"
         ? rawConfig.contextUseCacheOnFailure
         : envBool("CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE", true);
+    const boardScopeCacheTtlMs = typeof rawConfig.boardScopeCacheTtlMs === "number" && Number.isFinite(rawConfig.boardScopeCacheTtlMs)
+        ? Math.max(0, Math.min(7 * 24 * 60 * 60 * 1000, Math.floor(rawConfig.boardScopeCacheTtlMs)))
+        : envInt("CLAWBOARD_LOGGER_BOARD_SCOPE_CACHE_TTL_MS", DEFAULT_BOARD_SCOPE_CACHE_TTL_MS, 0, 7 * 24 * 60 * 60 * 1000);
+    const boardScopeCacheMaxEntries = typeof rawConfig.boardScopeCacheMaxEntries === "number" && Number.isFinite(rawConfig.boardScopeCacheMaxEntries)
+        ? Math.max(32, Math.min(20_000, Math.floor(rawConfig.boardScopeCacheMaxEntries)))
+        : envInt("CLAWBOARD_LOGGER_BOARD_SCOPE_CACHE_MAX_ENTRIES", DEFAULT_BOARD_SCOPE_CACHE_MAX_ENTRIES, 32, 20_000);
     const contextFallbackModes = Array.isArray(rawConfig.contextFallbackModes)
         ? parseContextModes(rawConfig.contextFallbackModes.join(","))
         : parseContextModes(process.env.CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES, []);
@@ -520,6 +548,11 @@ export default function register(api) {
         api.logger.warn("[clawboard-logger] baseUrl missing; plugin disabled");
         return;
     }
+    if (registrationState[CLAWBOARD_LOGGER_REGISTERED_SYMBOL]) {
+        api.logger.warn("[clawboard-logger] register() called more than once for the same API instance; skipping duplicate hooks");
+        return;
+    }
+    registrationState[CLAWBOARD_LOGGER_REGISTERED_SYMBOL] = true;
     let flushing = false;
     let flushTimer;
     const topicCache = new Map();
@@ -654,12 +687,22 @@ export default function register(api) {
         }
     }
     let queueDb;
+    let queueDbPromise;
     async function getQueueDb() {
         if (queueDb)
             return queueDb;
-        await ensureDir(queuePath);
-        queueDb = new SqliteQueue(queuePath);
-        return queueDb;
+        if (queueDbPromise)
+            return queueDbPromise;
+        queueDbPromise = (async () => {
+            await ensureDir(queuePath);
+            const db = new SqliteQueue(queuePath);
+            queueDb = db;
+            return db;
+        })().catch((err) => {
+            queueDbPromise = undefined;
+            throw err;
+        });
+        return queueDbPromise;
     }
     function ensureIdempotencyKey(payload) {
         const existing = payload.idempotencyKey;
@@ -771,6 +814,42 @@ export default function register(api) {
     }
     const boardScopeBySession = new Map();
     const boardScopeByAgent = new Map();
+    function pruneBoardScopeMap(cache, now = nowMs()) {
+        if (cache.size === 0)
+            return;
+        if (boardScopeCacheTtlMs > 0) {
+            for (const [key, value] of cache.entries()) {
+                if (now - value.updatedAt > boardScopeCacheTtlMs)
+                    cache.delete(key);
+            }
+        }
+        if (cache.size <= boardScopeCacheMaxEntries)
+            return;
+        const sorted = Array.from(cache.entries()).sort((a, b) => a[1].updatedAt - b[1].updatedAt);
+        const overflow = cache.size - boardScopeCacheMaxEntries;
+        for (let idx = 0; idx < overflow; idx += 1) {
+            const row = sorted[idx];
+            if (!row)
+                break;
+            cache.delete(row[0]);
+        }
+    }
+    function pruneBoardScopeCaches(now = nowMs()) {
+        pruneBoardScopeMap(boardScopeBySession, now);
+        pruneBoardScopeMap(boardScopeByAgent, now);
+    }
+    function readFreshBoardScope(cache, key, now = nowMs()) {
+        if (!key)
+            return undefined;
+        const entry = cache.get(key);
+        if (!entry)
+            return undefined;
+        if (boardScopeCacheTtlMs > 0 && now - entry.updatedAt > boardScopeCacheTtlMs) {
+            cache.delete(key);
+            return undefined;
+        }
+        return entry;
+    }
     function normalizeId(value) {
         const text = typeof value === "string" ? value.trim() : "";
         return text || undefined;
@@ -845,6 +924,7 @@ export default function register(api) {
     }
     function rememberBoardScope(scope, opts) {
         const stamped = { ...scope, updatedAt: nowMs() };
+        pruneBoardScopeCaches(stamped.updatedAt);
         const sessionKeys = opts?.sessionKeys ?? [];
         for (const rawKey of sessionKeys) {
             const key = normalizeId(rawKey);
@@ -859,6 +939,7 @@ export default function register(api) {
                 continue;
             boardScopeByAgent.set(agentId, stamped);
         }
+        pruneBoardScopeCaches(stamped.updatedAt);
         if (agentIds.length > 0) {
             getQueueDb()
                 .then((db) => {
@@ -1236,9 +1317,10 @@ export default function register(api) {
         const subagentSessionCandidates = subagent
             ? uniqueSessionCandidates([normalizedSessionKey, ctxSessionKey, metaSessionKey].flatMap((candidate) => requestSessionKeys(candidate)))
             : [];
+        const now = nowMs();
         // Direct board scope from any supplied session key always wins.
         for (const candidate of sessionCandidates) {
-            const cached = candidate ? boardScopeBySession.get(candidate) : undefined;
+            const cached = readFreshBoardScope(boardScopeBySession, candidate, now);
             if (cached?.topicId) {
                 rememberBoardScope(cached, {
                     sessionKeys: sessionCandidates,
@@ -1270,9 +1352,8 @@ export default function register(api) {
         // for that child session (in-memory or persisted by session key from sessions_spawn).
         // This prevents unrelated background/cron subagents from being pulled into a user's board chat.
         if (subagent) {
-            const now = nowMs();
             const exact = subagentSessionCandidates
-                .map((candidate) => (candidate ? boardScopeBySession.get(candidate) : undefined))
+                .map((candidate) => readFreshBoardScope(boardScopeBySession, candidate, now))
                 .find((scope) => Boolean(scope && now - scope.updatedAt <= BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS));
             let inherited = exact;
             let inheritedFromDb = false;
@@ -1424,7 +1505,7 @@ export default function register(api) {
     async function postLog(payload) {
         const idempotencyKey = ensureIdempotencyKey(payload);
         const controller = new AbortController();
-        const t = setTimeout(() => controller.abort(), 8000);
+        const t = setTimeout(() => controller.abort(), postTimeoutMs);
         try {
             const res = await fetchWithBaseUrlFallback({
                 pathname: ingestPath,
@@ -2153,9 +2234,16 @@ export default function register(api) {
             }
             const block = payload.block;
             if (typeof block === "string" && block.trim().length > 0) {
+                const sanitizedBlock = clip(sanitizeRetrievedContextBlock(block), contextMaxChars);
+                if (!sanitizedBlock) {
+                    return {
+                        status: res.status,
+                        error: "empty_block",
+                    };
+                }
                 return {
                     status: res.status,
-                    block: block.trim(),
+                    block: sanitizedBlock,
                 };
             }
             return {
@@ -3702,4 +3790,4 @@ export default function register(api) {
     }
 }
 // Export utility functions for testing
-export { normalizeBaseUrl, sanitizeMessageContent, summarize, dedupeFingerprint, truncateRaw, clip, normalizeWhitespace, tokenSet, lexicalSimilarity, normalizeTaskIdentity, resolveBoardTaskPatchId, };
+export { normalizeBaseUrl, sanitizeRetrievedContextBlock, sanitizeMessageContent, summarize, dedupeFingerprint, truncateRaw, clip, normalizeWhitespace, tokenSet, lexicalSimilarity, normalizeTaskIdentity, resolveBoardTaskPatchId, };

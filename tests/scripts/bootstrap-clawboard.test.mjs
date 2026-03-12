@@ -1610,7 +1610,9 @@ test("delegation supervision cadence stays aligned across templates and setup sc
   assert.match(setupText, /do not restate or paraphrase the full body|do not parrot it back/i);
   assert.match(setupText, /current task thread/i);
   assert.match(setupText, /"sessions_spawn","sessions_list","sessions_send","session_status"/i);
+  assert.match(setupText, /"memory_search","memory_get","cron","image","clawboard_search"/i);
   assert.doesNotMatch(setupText, /"sessions_history"/i);
+  assert.doesNotMatch(setupText, /"group:nodes","group:messaging","image"/i);
   assert.match(setupText, /Delegation tools: sessions_spawn, session_status, sessions_list, sessions_send, cron/i);
   assert.match(setupText, /memoryFlush\.enabled true json false/i);
   assert.match(setupText, /memory\.backend=qmd.*memory-only source/i);

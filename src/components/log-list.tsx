@@ -44,6 +44,7 @@ const SUMMARY_TRUNCATE_LIMIT = 96;
 
 type ToolEventKind = "call" | "result" | "error";
 type ToolEvent = { kind: ToolEventKind; toolName: string };
+type SourceMetaItem = { key: string; label: string; value: string; abbreviate?: boolean };
 
 const TOOL_EVENT_RE = /^(Tool call|Tool result|Tool error)\s*:\s*(.+)\s*$/i;
 
@@ -198,6 +199,56 @@ function CopyPill({ value, className }: { value: string; className?: string }) {
         </svg>
       )}
       <span className="leading-none">{state === "copied" ? "Copied" : "Copy"}</span>
+    </button>
+  );
+}
+
+function abbreviateMiddle(value: string, head: number, tail: number) {
+  const text = String(value ?? "");
+  if (!text) return "";
+  if (text.length <= head + tail + 1) return text;
+  return `${text.slice(0, Math.max(0, head)).trimEnd()}...${text.slice(Math.max(0, text.length - tail)).trimStart()}`;
+}
+
+function SourceMetaInlineItem({ item }: { item: SourceMetaItem }) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const displayValue = item.abbreviate ? abbreviateMiddle(item.value, 18, 10) : item.value;
+  const copyTitle = copied ? `${item.label} copied` : `Copy ${item.label}`;
+
+  return (
+    <button
+      type="button"
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void (async () => {
+          try {
+            await writeClipboardText(item.value);
+            setCopied(true);
+          } finally {
+            if (timerRef.current != null) window.clearTimeout(timerRef.current);
+            timerRef.current = window.setTimeout(() => setCopied(false), 1200);
+          }
+        })();
+      }}
+      className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 font-mono text-[rgba(226,232,240,0.82)] transition ${
+        copied
+          ? "border-[rgba(77,171,158,0.35)] bg-[rgba(77,171,158,0.08)]"
+          : "border-transparent bg-transparent hover:border-[rgba(255,255,255,0.12)] hover:bg-[rgba(255,255,255,0.04)]"
+      }`}
+      title={`${copyTitle}: ${item.value}`}
+      aria-label={`${copyTitle}: ${item.value}`}
+    >
+      <span className="shrink-0 font-sans uppercase tracking-[0.14em] text-[rgba(148,163,184,0.78)]">{item.label}:</span>
+      <span className="shrink-0 whitespace-nowrap">{displayValue}</span>
     </button>
   );
 }
@@ -1208,12 +1259,27 @@ const LogRow = memo(function LogRow({
   const audienceLabel = String(entry.source?.audienceLabel ?? "").trim();
   const flowLabel = speakerLabel && audienceLabel ? `${speakerLabel} -> ${audienceLabel}` : "";
   const conversationLaneLabel = flowLabel || (isUser ? "You" : agentLabel || "Assistant");
-  const sourceMetaParts = [
-    flowLabel ? `flow: ${flowLabel}` : null,
-    entry.source?.channel ? `channel: ${entry.source.channel}` : null,
-    entry.source?.sessionKey ? `session: ${entry.source.sessionKey}` : null,
-    entry.source?.messageId ? `msg: ${entry.source.messageId}` : null,
-  ].filter(Boolean);
+  const sourceMetaItems = [
+    flowLabel ? { key: "flow", label: "flow", value: flowLabel } : null,
+    entry.source?.channel ? { key: "channel", label: "channel", value: String(entry.source.channel) } : null,
+    entry.source?.sessionKey
+      ? {
+          key: "session",
+          label: "session",
+          value: String(entry.source.sessionKey),
+          abbreviate: true,
+        }
+      : null,
+    entry.source?.messageId
+      ? {
+          key: "msg",
+          label: "msg",
+          value: String(entry.source.messageId),
+          abbreviate: true,
+        }
+      : null,
+  ].filter((item): item is SourceMetaItem => Boolean(item));
+  const sourceMetaParts = sourceMetaItems.map((item) => `${item.label}: ${item.value}`);
   const sourceMeta = sourceMetaParts.length > 0 ? sourceMetaParts.join(" · ") : null;
   const editTopicValue = editTopicId || "";
   const editTopicNullable = editTopicId ? editTopicId : null;
@@ -1274,6 +1340,19 @@ const LogRow = memo(function LogRow({
       isUser && isConversation && scopeTaskId === null && Boolean(scopeTopicId) && typeof onReplayClassifier === "function";
     const hiddenToolCallsLabel =
       hiddenToolCallsBefore === 1 ? "1 tool call" : `${hiddenToolCallsBefore} tool calls`;
+    const chatFooterButtonClass = "!h-7 !px-2.5 !text-[12px]";
+    const chatFooterCopyClass = "!h-7 !px-2.5 !py-1 !text-[9px] !tracking-[0.14em]";
+    const chatSourceMetaInline = !editOpen && sourceMetaItems.length > 0 ? (
+      <div className="min-w-0 flex-1 overflow-x-auto overscroll-x-contain text-[10px] leading-4 text-[rgb(var(--claw-muted))]">
+        <div className={`flex w-max min-w-full ${isUser ? "justify-end" : "justify-start"}`}>
+          <div className="inline-flex min-w-max items-center gap-1.5 whitespace-nowrap">
+            {sourceMetaItems.map((item) => (
+              <SourceMetaInlineItem key={item.key} item={item} />
+            ))}
+          </div>
+        </div>
+      </div>
+    ) : null;
 
     return (
       <div
@@ -1357,98 +1436,98 @@ const LogRow = memo(function LogRow({
 	                )}
 	              </div>
 
-              <div className={`mt-2 flex flex-wrap items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
-                <CopyPill value={copyValue || messageSource || chatBubbleText} />
-                {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen ? (
-                  <>
-                    {showReplay && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={readOnly || replayStatus === "running"}
-                        title={
-                          readOnly
-                            ? "Read-only mode. Add token in Setup to replay classification."
-                            : replayStatus === "running"
-                              ? "Rechecking..."
-                              : "Re-run the classifier for this message bundle"
-                        }
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          if (readOnly) return;
-                          if (replayStatus === "running") return;
-                          setReplayStatus("running");
-                          setReplayError(null);
-                          void (async () => {
-                            try {
-                              const result = await onReplayClassifier(entry.id);
-                              if (!result.ok) {
+              <div className={`mt-2 flex w-full min-w-0 items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
+                {isUser ? chatSourceMetaInline : null}
+                <div className={`flex shrink-0 items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
+                  <CopyPill value={copyValue || messageSource || chatBubbleText} className={chatFooterCopyClass} />
+                  {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen ? (
+                    <>
+                      {showReplay && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className={chatFooterButtonClass}
+                          disabled={readOnly || replayStatus === "running"}
+                          title={
+                            readOnly
+                              ? "Read-only mode. Add token in Setup to replay classification."
+                              : replayStatus === "running"
+                                ? "Rechecking..."
+                                : "Re-run the classifier for this message bundle"
+                          }
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            if (readOnly) return;
+                            if (replayStatus === "running") return;
+                            setReplayStatus("running");
+                            setReplayError(null);
+                            void (async () => {
+                              try {
+                                const result = await onReplayClassifier(entry.id);
+                                if (!result.ok) {
+                                  setReplayStatus("failed");
+                                  setReplayError(result.error ?? "Failed to replay classifier.");
+                                  return;
+                                }
+                                setReplayStatus("queued");
+                                window.setTimeout(() => setReplayStatus("idle"), 1400);
+                              } catch {
                                 setReplayStatus("failed");
-                                setReplayError(result.error ?? "Failed to replay classifier.");
-                                return;
+                                setReplayError("Failed to replay classifier.");
                               }
-                              setReplayStatus("queued");
-                              window.setTimeout(() => setReplayStatus("idle"), 1400);
-                            } catch {
-                              setReplayStatus("failed");
-                              setReplayError("Failed to replay classifier.");
-                            }
-                          })();
-                        }}
-                      >
-                        {replayStatus === "running" ? "Rechecking..." : replayStatus === "queued" ? "Queued" : "Recheck tasks"}
-                      </Button>
-                    )}
-                    {allowEdit && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={readOnly}
-                        title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
-                        onClick={() => {
-                          setEditOpen(true);
-                          setDeleteArmed(false);
-                          setDeleteStatus(null);
-                          setPurgeArmed(false);
-                          setPurgeStatus(null);
-                          setEditTopicId(entry.topicId ?? "");
-                          setEditTaskId(entry.taskId ?? "");
-                          setEditContent(entry.content ?? "");
-                          setEditSummary(entry.summary ?? "");
-                          setEditStatus(null);
-                          void ensureTasksForTopic(entry.topicId ?? null);
-                        }}
-                      >
-                        Edit
-                      </Button>
-                    )}
-                    {allowNotes && entry.type !== "note" && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => {
-                          setNoteDraftKey(entry.id);
-                          setNoteOpen(true);
-                        }}
-                      >
-                        Add note
-                      </Button>
-                    )}
-                  </>
-                ) : null}
+                            })();
+                          }}
+                        >
+                          {replayStatus === "running" ? "Rechecking..." : replayStatus === "queued" ? "Queued" : "Recheck tasks"}
+                        </Button>
+                      )}
+                      {allowEdit && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className={chatFooterButtonClass}
+                          disabled={readOnly}
+                          title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
+                          onClick={() => {
+                            setEditOpen(true);
+                            setDeleteArmed(false);
+                            setDeleteStatus(null);
+                            setPurgeArmed(false);
+                            setPurgeStatus(null);
+                            setEditTopicId(entry.topicId ?? "");
+                            setEditTaskId(entry.taskId ?? "");
+                            setEditContent(entry.content ?? "");
+                            setEditSummary(entry.summary ?? "");
+                            setEditStatus(null);
+                            void ensureTasksForTopic(entry.topicId ?? null);
+                          }}
+                        >
+                          Edit
+                        </Button>
+                      )}
+                      {allowNotes && entry.type !== "note" && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className={chatFooterButtonClass}
+                          onClick={() => {
+                            setNoteDraftKey(entry.id);
+                            setNoteOpen(true);
+                          }}
+                        >
+                          Add note
+                        </Button>
+                      )}
+                    </>
+                  ) : null}
+                </div>
+                {!isUser ? chatSourceMetaInline : null}
               </div>
               {showReplay && replayStatus === "failed" && replayError ? (
                 <p className={`mt-1 text-xs ${isUser ? "text-right" : "text-left"} text-[rgb(var(--claw-warning))]`}>
                   {replayError}
                 </p>
-              ) : null}
-              {!editOpen && sourceMeta ? (
-                <div className={`mt-2 ${isUser ? "flex justify-end" : "flex justify-start"}`}>
-                  <div className="min-w-0 max-w-full overflow-x-auto text-xs text-[rgb(var(--claw-muted))]">
-                    <span className="inline-block whitespace-nowrap font-mono">{sourceMeta}</span>
-                  </div>
-                </div>
               ) : null}
 
               {allowNotes && entry.type !== "note" && noteOpen && (
@@ -1830,45 +1909,50 @@ const LogRow = memo(function LogRow({
 	              ) : null}
 	            </div>
 
-            <div className="mt-2 flex flex-wrap items-center justify-start gap-2">
-              <CopyPill value={copyValue || messageSource || chatBubbleText} />
-              {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen ? (
-                <>
-                  {allowEdit && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={readOnly}
-                      title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
-                      onClick={() => {
-                        setEditOpen(true);
-                        setDeleteArmed(false);
-                        setDeleteStatus(null);
-                        setEditTopicId(entry.topicId ?? "");
-                        setEditTaskId(entry.taskId ?? "");
-                        setEditContent(entry.content ?? "");
-                        setEditSummary(entry.summary ?? "");
-                        setEditStatus(null);
-                        void ensureTasksForTopic(entry.topicId ?? null);
-                      }}
-                    >
-                      Edit
-                    </Button>
-                  )}
-                  {allowNotes && entry.type !== "note" && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        setNoteDraftKey(entry.id);
-                        setNoteOpen(true);
-                      }}
-                    >
-                      Add note
-                    </Button>
-                  )}
-                </>
-              ) : null}
+            <div className="mt-2 flex w-full max-w-[78%] min-w-0 items-center gap-2 justify-start">
+              <div className="flex shrink-0 items-center gap-2">
+                <CopyPill value={copyValue || messageSource || chatBubbleText} className={chatFooterCopyClass} />
+                {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen ? (
+                  <>
+                    {allowEdit && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className={chatFooterButtonClass}
+                        disabled={readOnly}
+                        title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
+                        onClick={() => {
+                          setEditOpen(true);
+                          setDeleteArmed(false);
+                          setDeleteStatus(null);
+                          setEditTopicId(entry.topicId ?? "");
+                          setEditTaskId(entry.taskId ?? "");
+                          setEditContent(entry.content ?? "");
+                          setEditSummary(entry.summary ?? "");
+                          setEditStatus(null);
+                          void ensureTasksForTopic(entry.topicId ?? null);
+                        }}
+                      >
+                        Edit
+                      </Button>
+                    )}
+                    {allowNotes && entry.type !== "note" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className={chatFooterButtonClass}
+                        onClick={() => {
+                          setNoteDraftKey(entry.id);
+                          setNoteOpen(true);
+                        }}
+                      >
+                        Add note
+                      </Button>
+                    )}
+                  </>
+                ) : null}
+              </div>
+              {chatSourceMetaInline}
             </div>
 
             {allowNotes && entry.type !== "note" && noteOpen && (

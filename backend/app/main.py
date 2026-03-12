@@ -104,6 +104,200 @@ from .openclaw_gateway import gateway_rpc
 from .events import event_hub
 from .clawgraph import build_clawgraph
 from .vector_search import dense_candidate_ids, semantic_search
+from . import dispatch as dispatch_module
+from .background import (  # noqa: F401 – re-exported for use throughout this module
+    _BACKGROUND_STOP_EVENT,
+    _BACKGROUND_THREADS,
+    _BACKGROUND_THREADS_LOCK,
+    _BACKGROUND_ERROR_LOG_LOCK,
+    _BACKGROUND_ERROR_LOG_LAST_AT,
+    _ENV_CLAMP_WARNING_LOCK,
+    _ENV_CLAMP_WARNED,
+    _background_sleep,
+    _start_background_thread,
+    _log_background_worker_exception,
+    _warn_env_clamp_once,
+)
+from .text_processing import (  # noqa: F401
+    _normalize_label,
+    _OPENCLAW_UNTRUSTED_METADATA_PREFIX_RE,
+    _OPENCLAW_UNTRUSTED_METADATA_FENCED_RE,
+    _OPENCLAW_UNTRUSTED_METADATA_JSON_DECODER,
+    _CLAWBOARD_CONTEXT_BLOCK_RE,
+    _CLAWBOARD_CONTEXT_HEURISTIC_RE,
+    _extract_openclaw_untrusted_metadata_wrapper,
+    _is_injected_clawboard_context_artifact,
+    _coerce_safe_text,
+    _sanitize_json_textish,
+    _sanitize_log_text,
+    _preserve_markdown_text,
+    _search_query_tokens,
+    _direct_label_match_boost,
+    _extract_query_snippet,
+    _safe_log_attr_text,
+    _is_command_log,
+    _clip,
+    _escape_sql_like_term,
+    _chunked_values,
+    _is_search_row_encoding_error,
+    _exec_search_rows_resilient,
+    _combined_log_text,
+    _is_tool_trace_text,
+    _is_memory_action_text,
+    _is_subagent_session_key,
+    _session_key_supports_bundle_tool_scoping,
+    _is_subagent_scaffold_text,
+    _is_heartbeat_control_plane_text,
+    _is_control_plane_conversation_payload,
+    _is_tool_call_log,
+    _log_reindex_text,
+    _is_memory_action_log,
+    _log_allowed_for_semantic_search,
+    _enqueue_log_reindex,
+    _session_keys_equivalent,
+    _log_matches_session,
+)
+from .spaces import (  # noqa: F401
+    DEFAULT_SPACE_ID,
+    DEFAULT_SPACE_NAME,
+    SPACE_DEFAULT_VISIBILITY_KEY,
+    _normalize_space_id,
+    _normalize_connectivity,
+    _space_default_visibility,
+    _seed_missing_space_connectivity,
+    _ensure_default_space,
+    _list_spaces,
+    _parse_space_ids_csv,
+    _allowed_space_ids_for_source,
+    _resolve_allowed_space_ids,
+    _normalize_tag_value,
+    _clean_tag_label,
+    _normalize_tags,
+    _space_id_for_topic,
+    _space_id_for_task,
+    _space_id_from_log_scope,
+    _infer_space_id_from_session_key,
+    _resolve_source_space_id,
+    _publish_space_upserted,
+    _space_display_name_from_id,
+    _space_id_from_label,
+    _ensure_space_row,
+    _topic_space_candidates_from_tags,
+    _topic_space_ids,
+    _topic_matches_allowed_spaces,
+    _task_matches_allowed_spaces,
+    _load_topics_by_ids,
+    _load_tasks_by_ids,
+    _load_related_maps_for_logs,
+    _log_matches_allowed_spaces,
+    _propagate_topic_space,
+    _allowed_space_ids_cache_key,
+    _resolve_space_id_from_topic_tags,
+)
+from .resolver import (  # noqa: F401
+    _normalize_hex_color,
+    _auto_pick_color,
+    _label_similarity,
+    _find_similar_topic,
+    _find_similar_task,
+    _resolver_float_env,
+    _resolver_topic_similarity_threshold,
+    _resolver_task_similarity_threshold,
+    _resolver_semantic_topic_score_threshold,
+    _resolver_semantic_task_score_threshold,
+    _resolver_fallback_mode,
+    _resolver_clean_name,
+    _resolver_title_case_token,
+    _resolver_terms_from_message,
+    _resolver_derive_topic_name,
+    _resolver_derive_task_title,
+    _resolver_pick_semantic_topic_id,
+    _resolver_pick_semantic_task,
+    _resolver_recent_routing_hints,
+    _next_sort_index_for_new_topic,
+    _next_sort_index_for_new_task,
+)
+from .precompile import (  # noqa: F401
+    PRECOMPILE_ENABLED,
+    PRECOMPILE_TTL_SECONDS,
+    PRECOMPILE_MAX_KEYS,
+    PRECOMPILE_WARM_ON_STARTUP,
+    PRECOMPILE_WARM_LISTENER_ENABLED,
+    PRECOMPILE_WARM_MIN_INTERVAL_SECONDS,
+    _PRECOMPILE_WARM_TRIGGER_EVENTS,
+    _PRECOMPILE_CACHE_LOCK,
+    _PRECOMPILE_CACHE,
+    _PRECOMPILE_KEY_LOCKS,
+    _precompile_cache_key,
+    _precompile_key_lock,
+    _precompile_cache_get,
+    _precompile_cache_set,
+    _get_or_build_precompiled,
+)
+from .dispatch import (  # noqa: F401
+    _openclaw_chat_dispatch_enabled,
+    _openclaw_chat_dispatch_poll_seconds,
+    _openclaw_chat_dispatch_workers,
+    _openclaw_chat_dispatch_hot_window_seconds,
+    _openclaw_chat_dispatch_stale_processing_seconds,
+    _openclaw_chat_dispatch_max_retry_delay_seconds,
+    _openclaw_chat_dispatch_max_attempts,
+    _openclaw_chat_dispatch_recovery_lookback_seconds,
+    _openclaw_chat_dispatch_recovery_max_rows,
+    _openclaw_chat_dispatch_recovery_interval_seconds,
+    _openclaw_chat_dispatch_auto_quarantine_enabled,
+    _openclaw_chat_dispatch_auto_quarantine_seconds,
+    _openclaw_chat_dispatch_auto_quarantine_limit,
+    _openclaw_chat_dispatch_auto_quarantine_synthetic_only,
+    _iso_after_seconds,
+    _openclaw_chat_dispatch_backoff_seconds,
+    _openclaw_chat_dispatch_is_terminal_error,
+    _enqueue_openclaw_chat_dispatch,
+    _openclaw_chat_dispatch_claim_next_job,
+    _openclaw_chat_dispatch_mark_sent,
+    _openclaw_chat_dispatch_mark_retry,
+    _openclaw_chat_dispatch_mark_failed,
+    _openclaw_chat_dispatch_recover_stale_processing_jobs as _dispatch_recover_stale_processing_jobs,
+    _openclaw_chat_dispatch_auto_quarantine_stale_rows,
+    _openclaw_chat_dispatch_resolve_attachments,
+    _recover_openclaw_chat_dispatch_queue,
+    _openclaw_chat_dispatch_wakeup,
+    _openclaw_chat_dispatch_worker,
+    _OPENCLAW_CHAT_SESSION_LOCKS,
+    _OPENCLAW_CHAT_SESSION_LOCKS_GUARD,
+    _OPENCLAW_CHAT_DISPATCH_PROCESS_STARTED_AT_ISO,
+    _openclaw_chat_dispatch_session_key,
+    _openclaw_chat_session_lock_ttl_seconds,
+    _openclaw_chat_session_lock_max_entries,
+    _openclaw_chat_prune_session_locks_locked,
+    _openclaw_chat_acquire_session_lock,
+    _openclaw_chat_release_session_lock,
+    _OPENCLAW_CHAT_DISPATCH_WAKEUP,
+    _openclaw_chat_dispatch_row_looks_synthetic,
+)
+from .attachments import (  # noqa: F401
+    ATTACHMENTS_DIR,
+    ATTACHMENT_MAX_FILES,
+    ATTACHMENT_MAX_BYTES,
+    ATTACHMENT_ALLOWED_MIME_TYPES,
+    ATTACHMENT_IMAGE_MIME_TYPES,
+    ATTACHMENT_TEXT_MIME_TYPES,
+    OPENCLAW_EXTRACTED_TEXT_LIMIT,
+    OPENCLAW_RESPONSES_MAX_BODY_BYTES,
+    OPENCLAW_RESPONSES_INPUT_FILE_MAX_BYTES,
+    OPENCLAW_RESPONSES_INPUT_IMAGE_MAX_BYTES,
+    OPENCLAW_RESPONSES_FILE_MIME_TYPES,
+    REINDEX_QUEUE_PATH,
+    _sanitize_attachment_filename,
+    _normalize_mime_type,
+    _infer_mime_type_from_filename,
+    _decode_text_attachment,
+    _extract_pdf_text,
+    _verify_attachment_magic,
+    _validate_attachment_mime_type,
+    _attachments_root,
+    enqueue_reindex_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -264,627 +458,24 @@ def create_id(prefix: str) -> str:
     return f"{prefix}-{uuid4()}"
 
 
-DEFAULT_SPACE_ID = (os.getenv("CLAWBOARD_DEFAULT_SPACE_ID", "space-default") or "space-default").strip() or "space-default"
-DEFAULT_SPACE_NAME = (os.getenv("CLAWBOARD_DEFAULT_SPACE_NAME", "Default") or "Default").strip() or "Default"
-# Legacy key supported only for one-way migration compatibility.
-SPACE_DEFAULT_VISIBILITY_KEY = "__claw_default_visible"
+def _openclaw_chat_dispatch_recover_stale_processing_jobs(now_dt: datetime) -> int:
+    """Compatibility wrapper so main-module patches still affect dispatch recovery helpers."""
+    previous = dispatch_module._OPENCLAW_CHAT_DISPATCH_PROCESS_STARTED_AT_ISO
+    dispatch_module._OPENCLAW_CHAT_DISPATCH_PROCESS_STARTED_AT_ISO = _OPENCLAW_CHAT_DISPATCH_PROCESS_STARTED_AT_ISO
+    try:
+        return _dispatch_recover_stale_processing_jobs(now_dt)
+    finally:
+        dispatch_module._OPENCLAW_CHAT_DISPATCH_PROCESS_STARTED_AT_ISO = previous
 
 
-def _normalize_space_id(value: str | None) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
+# Override _attachments_root to use this module's ATTACHMENTS_DIR so tests
+# that patch main_module.ATTACHMENTS_DIR continue to work.
+def _attachments_root() -> Path:
+    return Path(ATTACHMENTS_DIR)
 
 
-def _normalize_connectivity(value: Any) -> dict[str, bool]:
-    if not isinstance(value, dict):
-        return {}
-    out: dict[str, bool] = {}
-    for raw_key, raw_value in value.items():
-        key = _normalize_space_id(str(raw_key))
-        if not key:
-            continue
-        if key == SPACE_DEFAULT_VISIBILITY_KEY:
-            continue
-        out[key] = bool(raw_value)
-    return out
 
-
-def _space_default_visibility(space: Space | None) -> bool:
-    if not space:
-        return True
-    raw = getattr(space, "defaultVisible", None)
-    if isinstance(raw, bool):
-        return raw
-    if raw is not None:
-        return bool(raw)
-    # Legacy fallback when serving very old rows before migration has run.
-    legacy = getattr(space, "connectivity", None)
-    if isinstance(legacy, dict) and SPACE_DEFAULT_VISIBILITY_KEY in legacy:
-        return bool(legacy.get(SPACE_DEFAULT_VISIBILITY_KEY))
-    return True
-
-
-def _seed_missing_space_connectivity(
-    session: Any,
-    *,
-    spaces: list[Space] | None = None,
-    seed_space_ids: set[str] | None = None,
-    stamp: str | None = None,
-) -> list[Space]:
-    """Seed missing explicit connectivity entries from target defaultVisible.
-
-    This is a one-time expansion strategy: once an edge exists in connectivity, runtime
-    visibility resolution relies on that explicit edge only. If `seed_space_ids` is
-    provided, only edges touching those spaces are auto-initialized.
-    """
-
-    rows = list(spaces) if spaces is not None else session.exec(select(Space)).all()
-    by_id: dict[str, Space] = {
-        str(item.id): item for item in rows if str(getattr(item, "id", "") or "").strip()
-    }
-    if not by_id:
-        return []
-
-    valid_ids = set(by_id.keys())
-    seeded_ids = (
-        {space_id for space_id in (seed_space_ids or set()) if space_id in valid_ids}
-        if seed_space_ids is not None
-        else None
-    )
-    next_stamp = stamp or now_iso()
-    touched: list[Space] = []
-
-    for source_id, source_row in by_id.items():
-        current = _normalize_connectivity(getattr(source_row, "connectivity", None))
-        next_connectivity: dict[str, bool] = {}
-        changed = False
-
-        for target_id, enabled in current.items():
-            if target_id == source_id:
-                changed = True
-                continue
-            if target_id not in valid_ids:
-                changed = True
-                continue
-            next_connectivity[target_id] = bool(enabled)
-
-        for target_id, target_row in by_id.items():
-            if target_id == source_id:
-                continue
-            if target_id in next_connectivity:
-                continue
-            if seeded_ids is not None and source_id not in seeded_ids and target_id not in seeded_ids:
-                continue
-            next_connectivity[target_id] = _space_default_visibility(target_row)
-            changed = True
-
-        if not changed and next_connectivity == current:
-            continue
-
-        source_row.connectivity = next_connectivity
-        source_row.updatedAt = next_stamp
-        session.add(source_row)
-        touched.append(source_row)
-
-    return touched
-
-
-def _ensure_default_space(session: Any) -> Space:
-    row = session.get(Space, DEFAULT_SPACE_ID)
-    if row:
-        changed = False
-        resolved_default_visible = _space_default_visibility(row)
-        if not str(getattr(row, "name", "") or "").strip():
-            row.name = DEFAULT_SPACE_NAME
-            changed = True
-        normalized = _normalize_connectivity(getattr(row, "connectivity", None))
-        if normalized != (row.connectivity or {}):
-            row.connectivity = normalized
-            changed = True
-        if not isinstance(getattr(row, "defaultVisible", None), bool):
-            row.defaultVisible = resolved_default_visible
-            changed = True
-        if changed:
-            row.updatedAt = now_iso()
-            session.add(row)
-            session.commit()
-            session.refresh(row)
-        return row
-
-    stamp = now_iso()
-    row = Space(
-        id=DEFAULT_SPACE_ID,
-        name=DEFAULT_SPACE_NAME,
-        color=None,
-        defaultVisible=True,
-        connectivity={},
-        createdAt=stamp,
-        updatedAt=stamp,
-    )
-    session.add(row)
-    session.commit()
-    session.refresh(row)
-    return row
-
-
-def _list_spaces(session: Any) -> list[Space]:
-    _ensure_default_space(session)
-    touched = False
-    for topic in session.exec(select(Topic)).all():
-        for resolved_space_id, label in _topic_space_candidates_from_tags(getattr(topic, "tags", None)):
-            if session.get(Space, resolved_space_id):
-                continue
-            _ensure_space_row(
-                session,
-                space_id=resolved_space_id,
-                name=label if resolved_space_id != DEFAULT_SPACE_ID else DEFAULT_SPACE_NAME,
-            )
-            touched = True
-    if touched:
-        session.commit()
-    spaces = session.exec(select(Space)).all()
-    if not spaces:
-        spaces = [_ensure_default_space(session)]
-    return spaces
-
-
-def _parse_space_ids_csv(value: str | None) -> set[str] | None:
-    if value is None:
-        return None
-    parts = [part.strip() for part in str(value).split(",")]
-    ids = {part for part in parts if part}
-    return ids
-
-
-def _allowed_space_ids_for_source(session: Any, source_space_id: str | None) -> set[str]:
-    spaces = _list_spaces(session)
-    by_id: dict[str, Space] = {str(item.id): item for item in spaces if str(getattr(item, "id", "")).strip()}
-    if not by_id:
-        return {DEFAULT_SPACE_ID}
-
-    normalized_source = _normalize_space_id(source_space_id)
-    source_id = normalized_source if normalized_source in by_id else DEFAULT_SPACE_ID
-    source_row = by_id.get(source_id) or by_id.get(DEFAULT_SPACE_ID) or next(iter(by_id.values()))
-    source_id = str(source_row.id)
-
-    toggles = _normalize_connectivity(getattr(source_row, "connectivity", None))
-    allowed = {source_id}
-    for candidate_id in by_id.keys():
-        if candidate_id == source_id:
-            continue
-        if bool(toggles.get(candidate_id)):
-            allowed.add(candidate_id)
-    return allowed
-
-
-def _resolve_allowed_space_ids(
-    session: Any,
-    *,
-    source_space_id: str | None = None,
-    allowed_space_ids_raw: str | None = None,
-) -> set[str] | None:
-    explicit = _parse_space_ids_csv(allowed_space_ids_raw)
-    normalized = _normalize_space_id(source_space_id)
-    if explicit is not None:
-        if normalized:
-            baseline = _allowed_space_ids_for_source(session, normalized)
-            return explicit & baseline
-        return explicit
-    if not normalized:
-        return None
-    return _allowed_space_ids_for_source(session, normalized)
-
-
-def _normalize_tag_value(value: str | None) -> str | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    lowered = raw.lower()
-    if lowered.startswith("system:"):
-        suffix = lowered.split(":", 1)[1].strip()
-        return f"system:{suffix}" if suffix else "system"
-    slug = re.sub(r"\s+", "-", lowered)
-    slug = re.sub(r"[^a-z0-9:_-]+", "", slug)
-    slug = re.sub(r":{2,}", ":", slug)
-    slug = re.sub(r"-{2,}", "-", slug).strip("-")
-    return slug or None
-
-
-def _clean_tag_label(value: str | None) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip()
-
-
-def _normalize_tags(values: list[str] | None) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for raw in values or []:
-        label = _clean_tag_label(raw)
-        tag = _normalize_tag_value(label)
-        if not tag or tag in seen:
-            continue
-        seen.add(tag)
-        out.append(label)
-        if len(out) >= 32:
-            break
-    return out
-
-
-def _space_id_for_topic(topic: Topic | None) -> str:
-    if not topic:
-        return DEFAULT_SPACE_ID
-    normalized = _normalize_space_id(getattr(topic, "spaceId", None))
-    return normalized or DEFAULT_SPACE_ID
-
-
-def _space_id_for_task(task: Task | None) -> str:
-    if not task:
-        return DEFAULT_SPACE_ID
-    normalized = _normalize_space_id(getattr(task, "spaceId", None))
-    return normalized or DEFAULT_SPACE_ID
-
-
-def _space_id_from_log_scope(entry: LogEntry | None) -> str | None:
-    if not entry:
-        return None
-    source = getattr(entry, "source", None)
-    if isinstance(source, dict):
-        scoped = _normalize_space_id(source.get("boardScopeSpaceId"))
-        if scoped:
-            return scoped
-    return _normalize_space_id(getattr(entry, "spaceId", None))
-
-
-def _infer_space_id_from_session_key(session: Any, session_key: str | None) -> str | None:
-    normalized_session_key = str(session_key or "").strip()
-    if not normalized_session_key:
-        return None
-
-    board_topic_id, board_task_id = _parse_board_session_key(normalized_session_key)
-    base_session_key = normalized_session_key.split("|", 1)[0].strip()
-    session_candidates = [normalized_session_key]
-    if base_session_key and base_session_key != normalized_session_key:
-        session_candidates.append(base_session_key)
-
-    if DATABASE_URL.startswith("sqlite"):
-        session_expr = func.json_extract(LogEntry.source, "$.sessionKey")
-    else:
-        session_expr = LogEntry.source["sessionKey"].as_string()
-    for candidate in session_candidates:
-        query = (
-            select(LogEntry)
-            .where(session_expr == candidate)
-            .order_by(
-                LogEntry.createdAt.desc(),
-                (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
-            )
-            .limit(12)
-        )
-        rows = session.exec(query).all()
-        for row in rows:
-            scoped = _space_id_from_log_scope(row)
-            if scoped:
-                return scoped
-
-    if base_session_key:
-        query = (
-            select(LogEntry)
-            .where(session_expr.like(f"{base_session_key}|%"))
-            .order_by(
-                LogEntry.createdAt.desc(),
-                (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
-            )
-            .limit(20)
-        )
-        rows = session.exec(query).all()
-        for row in rows:
-            scoped = _space_id_from_log_scope(row)
-            if scoped:
-                return scoped
-
-    if board_task_id:
-        task = session.get(Task, board_task_id)
-        if task:
-            return _space_id_for_task(task)
-    if board_topic_id:
-        topic = session.get(Topic, board_topic_id)
-        if topic:
-            return _space_id_for_topic(topic)
-
-    for candidate in session_candidates:
-        memory = session.get(SessionRoutingMemory, candidate)
-        if not memory:
-            continue
-        task_id = str(getattr(memory, "taskId", "") or "").strip()
-        if task_id:
-            task = session.get(Task, task_id)
-            if task:
-                return _space_id_for_task(task)
-        topic_id = str(getattr(memory, "topicId", "") or "").strip()
-        if topic_id:
-            topic = session.get(Topic, topic_id)
-            if topic:
-                return _space_id_for_topic(topic)
-
-    return None
-
-
-def _resolve_source_space_id(
-    session: Any,
-    *,
-    explicit_space_id: str | None = None,
-    session_key: str | None = None,
-) -> str | None:
-    normalized_explicit = _normalize_space_id(explicit_space_id)
-    if normalized_explicit:
-        return normalized_explicit
-    return _infer_space_id_from_session_key(session, session_key)
-
-
-def _publish_space_upserted(space: Space | None) -> None:
-    if not space:
-        return
-    event_hub.publish({"type": "space.upserted", "data": space.model_dump(), "eventTs": space.updatedAt})
-
-
-def _space_display_name_from_id(space_id: str | None) -> str:
-    normalized_id = _normalize_space_id(space_id) or DEFAULT_SPACE_ID
-    if normalized_id == DEFAULT_SPACE_ID:
-        return DEFAULT_SPACE_NAME
-    base = re.sub(r"^space[-_]+", "", normalized_id, flags=re.IGNORECASE)
-    label = re.sub(r"[-_]+", " ", base).strip()
-    if not label:
-        return normalized_id
-    return " ".join(part.capitalize() for part in label.split(" "))
-
-
-def _space_id_from_label(label: str | None) -> str:
-    raw = str(label or "").strip()
-    if not raw:
-        return DEFAULT_SPACE_ID
-    slug = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
-    if not slug:
-        return DEFAULT_SPACE_ID
-    if slug in {"default", "global", "all", "all-spaces"}:
-        return DEFAULT_SPACE_ID
-    return f"space-{slug}"
-
-
-def _ensure_space_row(session: Any, *, space_id: str, name: str | None = None) -> Space:
-    normalized_id = _normalize_space_id(space_id) or DEFAULT_SPACE_ID
-    if normalized_id == DEFAULT_SPACE_ID:
-        return _ensure_default_space(session)
-
-    row = session.get(Space, normalized_id)
-    normalized_name = " ".join(str(name or "").split()).strip()
-    if row:
-        if normalized_name and row.name != normalized_name:
-            row.name = normalized_name
-            row.updatedAt = now_iso()
-            session.add(row)
-        return row
-
-    stamp = now_iso()
-    row = Space(
-        id=normalized_id,
-        name=normalized_name or _space_display_name_from_id(normalized_id),
-        color=None,
-        defaultVisible=True,
-        connectivity={},
-        createdAt=stamp,
-        updatedAt=stamp,
-    )
-    session.add(row)
-    known_spaces = session.exec(select(Space)).all()
-    if not any(str(getattr(item, "id", "") or "").strip() == normalized_id for item in known_spaces):
-        known_spaces.append(row)
-    _seed_missing_space_connectivity(session, spaces=known_spaces, seed_space_ids={normalized_id})
-    return row
-
-
-def _topic_space_candidates_from_tags(tags: list[str] | None) -> list[tuple[str, str]]:
-    out: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for raw_tag in tags or []:
-        tag = str(raw_tag or "").strip()
-        if not tag:
-            continue
-        lowered = tag.lower()
-        if lowered.startswith("system:"):
-            continue
-        if lowered.startswith("space:"):
-            tag = tag.split(":", 1)[1].strip()
-            if not tag:
-                continue
-        label = " ".join(tag.split()).strip()
-        if not label:
-            continue
-        resolved_space_id = _space_id_from_label(label)
-        if resolved_space_id in seen:
-            continue
-        seen.add(resolved_space_id)
-        out.append((resolved_space_id, label))
-    return out
-
-
-def _resolve_space_id_from_topic_tags(
-    session: Any,
-    tags: list[str] | None,
-    *,
-    fallback_space_id: str | None = None,
-) -> str:
-    _ensure_default_space(session)
-    candidates = _topic_space_candidates_from_tags(tags)
-    for resolved_space_id, label in candidates:
-        _ensure_space_row(
-            session,
-            space_id=resolved_space_id,
-            name=label if resolved_space_id != DEFAULT_SPACE_ID else DEFAULT_SPACE_NAME,
-        )
-    if candidates:
-        return candidates[0][0]
-
-    fallback = _normalize_space_id(fallback_space_id) or DEFAULT_SPACE_ID
-    if fallback == DEFAULT_SPACE_ID:
-        _ensure_default_space(session)
-        return DEFAULT_SPACE_ID
-    if session.get(Space, fallback):
-        return fallback
-    return DEFAULT_SPACE_ID
-
-
-def _topic_space_ids(topic: Topic | None) -> set[str]:
-    if not topic:
-        return {DEFAULT_SPACE_ID}
-    out = {_space_id_for_topic(topic)}
-    for resolved_space_id, _label in _topic_space_candidates_from_tags(getattr(topic, "tags", None)):
-        out.add(resolved_space_id)
-    return out or {DEFAULT_SPACE_ID}
-
-
-def _topic_matches_allowed_spaces(topic: Topic | None, allowed_space_ids: set[str]) -> bool:
-    return bool(_topic_space_ids(topic) & allowed_space_ids)
-
-
-def _task_matches_allowed_spaces(task: Task | None, allowed_space_ids: set[str], topic_by_id: dict[str, Topic]) -> bool:
-    if not task:
-        return False
-    if _space_id_for_task(task) in allowed_space_ids:
-        return True
-    topic_id = str(getattr(task, "topicId", "") or "").strip()
-    if not topic_id:
-        return False
-    topic = topic_by_id.get(topic_id)
-    if not topic:
-        return False
-    return _topic_matches_allowed_spaces(topic, allowed_space_ids)
-
-
-def _load_topics_by_ids(session: Any, topic_ids: Iterable[str]) -> dict[str, Topic]:
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for raw in topic_ids:
-        topic_id = str(raw or "").strip()
-        if not topic_id or topic_id in seen:
-            continue
-        seen.add(topic_id)
-        normalized.append(topic_id)
-    if not normalized:
-        return {}
-    out: dict[str, Topic] = {}
-    for chunk in _chunked_values(normalized, 300):
-        rows = session.exec(select(Topic).where(Topic.id.in_(chunk))).all()
-        for row in rows:
-            row_id = str(getattr(row, "id", "") or "").strip()
-            if row_id:
-                out[row_id] = row
-    return out
-
-
-def _load_tasks_by_ids(session: Any, task_ids: Iterable[str]) -> dict[str, Task]:
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for raw in task_ids:
-        task_id = str(raw or "").strip()
-        if not task_id or task_id in seen:
-            continue
-        seen.add(task_id)
-        normalized.append(task_id)
-    if not normalized:
-        return {}
-    out: dict[str, Task] = {}
-    for chunk in _chunked_values(normalized, 300):
-        rows = session.exec(select(Task).where(Task.id.in_(chunk))).all()
-        for row in rows:
-            row_id = str(getattr(row, "id", "") or "").strip()
-            if row_id:
-                out[row_id] = row
-    return out
-
-
-def _load_related_maps_for_logs(
-    session: Any,
-    logs: Iterable[LogEntry],
-    *,
-    seeded_topics: dict[str, Topic] | None = None,
-    seeded_tasks: dict[str, Task] | None = None,
-) -> tuple[dict[str, Topic], dict[str, Task]]:
-    topic_by_id: dict[str, Topic] = dict(seeded_topics or {})
-    task_by_id: dict[str, Task] = dict(seeded_tasks or {})
-
-    missing_task_ids: set[str] = set()
-    missing_topic_ids: set[str] = set()
-
-    for entry in logs:
-        task_id = str(getattr(entry, "taskId", "") or "").strip()
-        if task_id and task_id not in task_by_id:
-            missing_task_ids.add(task_id)
-        topic_id = str(getattr(entry, "topicId", "") or "").strip()
-        if topic_id and topic_id not in topic_by_id:
-            missing_topic_ids.add(topic_id)
-
-    if missing_task_ids:
-        loaded_tasks = _load_tasks_by_ids(session, missing_task_ids)
-        task_by_id.update(loaded_tasks)
-        for task in loaded_tasks.values():
-            topic_id = str(getattr(task, "topicId", "") or "").strip()
-            if topic_id and topic_id not in topic_by_id:
-                missing_topic_ids.add(topic_id)
-
-    if missing_topic_ids:
-        loaded_topics = _load_topics_by_ids(session, missing_topic_ids)
-        topic_by_id.update(loaded_topics)
-
-    return topic_by_id, task_by_id
-
-
-def _log_matches_allowed_spaces(
-    entry: LogEntry | None,
-    allowed_space_ids: set[str],
-    topic_by_id: dict[str, Topic],
-    task_by_id: dict[str, Task],
-) -> bool:
-    if not entry:
-        return False
-
-    direct_space_id = _normalize_space_id(getattr(entry, "spaceId", None)) or DEFAULT_SPACE_ID
-    if direct_space_id in allowed_space_ids:
-        return True
-
-    task_id = str(getattr(entry, "taskId", "") or "").strip()
-    if task_id:
-        task = task_by_id.get(task_id)
-        if task and _task_matches_allowed_spaces(task, allowed_space_ids, topic_by_id):
-            return True
-
-    topic_id = str(getattr(entry, "topicId", "") or "").strip()
-    if topic_id:
-        topic = topic_by_id.get(topic_id)
-        if topic and _topic_matches_allowed_spaces(topic, allowed_space_ids):
-            return True
-
-    return False
-
-
-def _propagate_topic_space(session: Any, topic: Topic, *, stamp: str) -> None:
-    topic_space_id = _space_id_for_topic(topic)
-    scoped_tasks = session.exec(select(Task).where(Task.topicId == topic.id)).all()
-    for scoped_task in scoped_tasks:
-        if _space_id_for_task(scoped_task) == topic_space_id:
-            continue
-        scoped_task.spaceId = topic_space_id
-        scoped_task.updatedAt = stamp
-        session.add(scoped_task)
-    scoped_logs = session.exec(select(LogEntry).where(LogEntry.topicId == topic.id)).all()
-    for scoped_log in scoped_logs:
-        current_log_space = _normalize_space_id(getattr(scoped_log, "spaceId", None)) or DEFAULT_SPACE_ID
-        if current_log_space == topic_space_id:
-            continue
-        scoped_log.spaceId = topic_space_id
-        scoped_log.updatedAt = stamp
-        session.add(scoped_log)
-
+# --- spaces: moved to .spaces module ---
 
 REINDEX_QUEUE_PATH = os.getenv("CLAWBOARD_REINDEX_QUEUE_PATH", "./data/reindex-queue.jsonl")
 SEARCH_INCLUDE_TOOL_CALL_LOGS = str(os.getenv("CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS", "0") or "").strip().lower() in {
@@ -1058,109 +649,8 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-PRECOMPILE_ENABLED = _env_flag("CLAWBOARD_PRECOMPILE_ENABLED", True)
-PRECOMPILE_TTL_SECONDS = max(1.0, float(os.getenv("CLAWBOARD_PRECOMPILE_TTL_SECONDS", "8") or "8"))
-PRECOMPILE_MAX_KEYS = max(8, int(os.getenv("CLAWBOARD_PRECOMPILE_MAX_KEYS", "32") or "32"))
-PRECOMPILE_WARM_ON_STARTUP = _env_flag("CLAWBOARD_PRECOMPILE_WARM_ON_STARTUP", True)
-PRECOMPILE_WARM_LISTENER_ENABLED = _env_flag("CLAWBOARD_PRECOMPILE_WARM_LISTENER_ENABLED", True)
-PRECOMPILE_WARM_MIN_INTERVAL_SECONDS = max(
-    0.25,
-    float(os.getenv("CLAWBOARD_PRECOMPILE_WARM_MIN_INTERVAL_SECONDS", "1.5") or "1.5"),
-)
-_PRECOMPILE_WARM_TRIGGER_EVENTS = {
-    "space.upserted",
-    "topic.upserted",
-    "topic.deleted",
-    "task.upserted",
-    "task.deleted",
-    "log.appended",
-    "log.patched",
-    "log.deleted",
-    "draft.upserted",
-}
-_PRECOMPILE_CACHE_LOCK = threading.Lock()
-_PRECOMPILE_CACHE: dict[str, dict[str, Any]] = {}
-_PRECOMPILE_KEY_LOCKS: dict[str, threading.Lock] = {}
 
-
-def _precompile_cache_key(namespace: str, parts: Iterable[str]) -> str:
-    normalized = [str(part).strip() for part in parts]
-    return f"{namespace}|{'|'.join(normalized)}"
-
-
-def _precompile_key_lock(cache_key: str) -> threading.Lock:
-    with _PRECOMPILE_CACHE_LOCK:
-        lock = _PRECOMPILE_KEY_LOCKS.get(cache_key)
-        if lock is None:
-            lock = threading.Lock()
-            _PRECOMPILE_KEY_LOCKS[cache_key] = lock
-        return lock
-
-
-def _precompile_cache_get(cache_key: str, revision: str) -> Any | None:
-    if not PRECOMPILE_ENABLED:
-        return None
-    now_mono = time.monotonic()
-    with _PRECOMPILE_CACHE_LOCK:
-        entry = _PRECOMPILE_CACHE.get(cache_key)
-        if not entry:
-            return None
-        if str(entry.get("revision") or "") != revision:
-            _PRECOMPILE_CACHE.pop(cache_key, None)
-            return None
-        expires_at = float(entry.get("expiresAtMonotonic") or 0.0)
-        if expires_at < now_mono:
-            _PRECOMPILE_CACHE.pop(cache_key, None)
-            return None
-        return entry.get("payload")
-
-
-def _precompile_cache_set(cache_key: str, revision: str, payload: Any) -> None:
-    if not PRECOMPILE_ENABLED:
-        return
-    now_mono = time.monotonic()
-    with _PRECOMPILE_CACHE_LOCK:
-        _PRECOMPILE_CACHE[cache_key] = {
-            "revision": revision,
-            "payload": payload,
-            "builtAtMonotonic": now_mono,
-            "expiresAtMonotonic": now_mono + PRECOMPILE_TTL_SECONDS,
-        }
-        if len(_PRECOMPILE_CACHE) <= PRECOMPILE_MAX_KEYS:
-            return
-        # Keep eviction deterministic: remove the oldest built entries first.
-        overflow = len(_PRECOMPILE_CACHE) - PRECOMPILE_MAX_KEYS
-        oldest = sorted(
-            _PRECOMPILE_CACHE.items(),
-            key=lambda item: float(item[1].get("builtAtMonotonic") or 0.0),
-        )
-        for stale_key, _entry in oldest[:overflow]:
-            _PRECOMPILE_CACHE.pop(stale_key, None)
-            _PRECOMPILE_KEY_LOCKS.pop(stale_key, None)
-
-
-def _get_or_build_precompiled(
-    *,
-    namespace: str,
-    key_parts: list[str],
-    revision: str,
-    build_fn: Callable[[], Any],
-) -> tuple[Any, bool]:
-    if not PRECOMPILE_ENABLED:
-        return build_fn(), False
-    cache_key = _precompile_cache_key(namespace, key_parts)
-    cached = _precompile_cache_get(cache_key, revision)
-    if cached is not None:
-        return cached, True
-    lock = _precompile_key_lock(cache_key)
-    with lock:
-        cached = _precompile_cache_get(cache_key, revision)
-        if cached is not None:
-            return cached, True
-        payload = build_fn()
-        _precompile_cache_set(cache_key, revision, payload)
-        return payload, False
-
+# --- precompile: moved to .precompile module ---
 
 def _allowed_space_ids_cache_key(allowed_space_ids: set[str] | None) -> str:
     if allowed_space_ids is None:
@@ -1514,220 +1004,8 @@ SLASH_COMMANDS = {
     "/delete",
 }
 
-ATTACHMENTS_DIR = os.getenv("CLAWBOARD_ATTACHMENTS_DIR", "./data/attachments").strip() or "./data/attachments"
-ATTACHMENT_MAX_FILES = int(os.getenv("CLAWBOARD_ATTACHMENT_MAX_FILES", "8") or "8")
-ATTACHMENT_MAX_BYTES = int(os.getenv("CLAWBOARD_ATTACHMENT_MAX_BYTES", str(10 * 1024 * 1024)) or str(10 * 1024 * 1024))
-ATTACHMENT_ALLOWED_MIME_TYPES = {
-    mt.strip().lower()
-    for mt in (
-        os.getenv(
-            "CLAWBOARD_ATTACHMENT_ALLOWED_MIME_TYPES",
-            ",".join(
-                [
-                    "image/png",
-                    "image/jpeg",
-                    "image/gif",
-                    "image/webp",
-                    "application/pdf",
-                    "text/plain",
-                    "text/markdown",
-                    "application/json",
-                    "text/csv",
-                    "audio/mpeg",
-                    "audio/wav",
-                    "audio/x-wav",
-                    "audio/mp4",
-                    "audio/webm",
-                    "audio/ogg",
-                ]
-            ),
-        )
-        or ""
-    ).split(",")
-    if mt.strip()
-}
-ATTACHMENT_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
-ATTACHMENT_TEXT_MIME_TYPES = {"text/plain", "text/markdown", "text/csv", "application/json"}
-OPENCLAW_EXTRACTED_TEXT_LIMIT = int(os.getenv("OPENCLAW_EXTRACTED_TEXT_LIMIT", "15000") or "15000")
-OPENCLAW_RESPONSES_MAX_BODY_BYTES = int(
-    os.getenv("OPENCLAW_RESPONSES_MAX_BODY_BYTES", str(20 * 1024 * 1024)) or str(20 * 1024 * 1024)
-)
-OPENCLAW_RESPONSES_INPUT_FILE_MAX_BYTES = int(
-    os.getenv("OPENCLAW_RESPONSES_INPUT_FILE_MAX_BYTES", str(5 * 1024 * 1024)) or str(5 * 1024 * 1024)
-)
-OPENCLAW_RESPONSES_INPUT_IMAGE_MAX_BYTES = int(
-    os.getenv("OPENCLAW_RESPONSES_INPUT_IMAGE_MAX_BYTES", str(10 * 1024 * 1024)) or str(10 * 1024 * 1024)
-)
-OPENCLAW_RESPONSES_FILE_MIME_TYPES = {
-    "text/plain",
-    "text/markdown",
-    "text/csv",
-    "application/json",
-    "application/pdf",
-}
 
-
-def _sanitize_attachment_filename(name: str) -> str:
-    # Prevent path traversal + keep filenames readable.
-    text = (name or "").replace("\\", "/").split("/")[-1].strip()
-    text = re.sub(r"[\x00-\x1f\x7f]+", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text:
-        return "attachment"
-    if len(text) > 180:
-        root, dot, ext = text.rpartition(".")
-        if dot and ext and len(ext) <= 12:
-            root = root[: 180 - (len(ext) + 1)].rstrip()
-            text = f"{root}.{ext}"
-        else:
-            text = text[:180].rstrip()
-    return text
-
-
-def _normalize_mime_type(value: str | None) -> str:
-    raw = (value or "").strip().lower()
-    if raw == "image/jpg":
-        return "image/jpeg"
-    return raw
-
-
-def _infer_mime_type_from_filename(filename: str) -> str:
-    name = (filename or "").strip().lower()
-    _, dot, ext = name.rpartition(".")
-    if not dot or not ext:
-        return ""
-    ext = f".{ext}"
-    mapping = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-        ".pdf": "application/pdf",
-        ".txt": "text/plain",
-        ".md": "text/markdown",
-        ".markdown": "text/markdown",
-        ".json": "application/json",
-        ".csv": "text/csv",
-        ".mp3": "audio/mpeg",
-        ".wav": "audio/wav",
-        ".m4a": "audio/mp4",
-        ".mp4": "audio/mp4",
-        ".webm": "audio/webm",
-        ".ogg": "audio/ogg",
-    }
-    return mapping.get(ext, "")
-
-
-def _decode_text_attachment(data: bytes, *, limit: int = OPENCLAW_EXTRACTED_TEXT_LIMIT) -> str:
-    if not data:
-        return ""
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        text = data.decode("utf-8", errors="replace")
-    return _clip(text.strip(), limit)
-
-
-def _extract_pdf_text(data: bytes, *, limit: int = OPENCLAW_EXTRACTED_TEXT_LIMIT) -> str:
-    """Best-effort PDF text extraction. Returns empty string if unavailable/failed."""
-    if not data:
-        return ""
-    try:
-        from pypdf import PdfReader  # type: ignore
-    except Exception:
-        return ""
-    try:
-        reader = PdfReader(BytesIO(data))
-        parts: list[str] = []
-        used = 0
-        for page in reader.pages:
-            if used >= limit:
-                break
-            try:
-                text = page.extract_text() or ""
-            except Exception:
-                text = ""
-            text = text.strip()
-            if not text:
-                continue
-            remaining = limit - used
-            if remaining <= 0:
-                break
-            if len(text) > remaining:
-                text = text[:remaining]
-            parts.append(text)
-            used += len(text)
-        return _clip("\n\n".join(parts).strip(), limit)
-    except Exception:
-        return ""
-
-
-def _verify_attachment_magic(path: Path, mime_type: str, filename: str) -> None:
-    """Best-effort content sniffing to catch obvious MIME spoofing."""
-    mt = _normalize_mime_type(mime_type)
-    try:
-        head = path.read_bytes()[:64]
-    except Exception:
-        return
-
-    if mt == "application/pdf":
-        if not head.startswith(b"%PDF-"):
-            raise HTTPException(status_code=400, detail=f"Attachment is not a valid PDF: {filename}.")
-        return
-
-    if mt == "image/png":
-        if not head.startswith(b"\x89PNG\r\n\x1a\n"):
-            raise HTTPException(status_code=400, detail=f"Attachment is not a valid PNG: {filename}.")
-        return
-
-    if mt == "image/jpeg":
-        if not head.startswith(b"\xff\xd8\xff"):
-            raise HTTPException(status_code=400, detail=f"Attachment is not a valid JPEG: {filename}.")
-        return
-
-    if mt == "image/gif":
-        if not (head.startswith(b"GIF87a") or head.startswith(b"GIF89a")):
-            raise HTTPException(status_code=400, detail=f"Attachment is not a valid GIF: {filename}.")
-        return
-
-    if mt == "image/webp":
-        if not (head.startswith(b"RIFF") and len(head) >= 12 and head[8:12] == b"WEBP"):
-            raise HTTPException(status_code=400, detail=f"Attachment is not a valid WebP: {filename}.")
-        return
-
-    if mt.startswith("text/") or mt == "application/json":
-        # Keep this permissive: allow UTF-8 text and reject obvious binary blobs.
-        if b"\x00" in head:
-            raise HTTPException(status_code=400, detail=f"Attachment appears to be binary: {filename}.")
-        return
-
-def _validate_attachment_mime_type(mime_type: str) -> None:
-    if not mime_type:
-        raise HTTPException(status_code=400, detail="Attachment MIME type missing.")
-    if mime_type not in ATTACHMENT_ALLOWED_MIME_TYPES:
-        allowed = ", ".join(sorted(ATTACHMENT_ALLOWED_MIME_TYPES))
-        raise HTTPException(status_code=400, detail=f"Attachment type not allowed: {mime_type}. Allowed: {allowed}")
-
-
-def _attachments_root() -> Path:
-    root = Path(ATTACHMENTS_DIR).expanduser()
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def enqueue_reindex_request(payload: dict) -> None:
-    try:
-        queue_path = os.path.abspath(REINDEX_QUEUE_PATH)
-        queue_dir = os.path.dirname(queue_path)
-        if queue_dir:
-            os.makedirs(queue_dir, exist_ok=True)
-        with open(queue_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({**payload, "requestedAt": now_iso()}) + "\n")
-    except Exception:
-        # Non-fatal: classifier can still reseed embeddings during normal runs.
-        pass
-
+# --- attachments: moved to .attachments module ---
 
 def _normalize_label(value: str | None) -> str:
     if not value:
@@ -1745,488 +1023,8 @@ def _normalize_label(value: str | None) -> str:
     return text
 
 
-_OPENCLAW_UNTRUSTED_METADATA_PREFIX_RE = re.compile(
-    r"^\s*conversation info\s*\(untrusted metadata\)\s*:\s*",
-    flags=re.IGNORECASE,
-)
-_OPENCLAW_UNTRUSTED_METADATA_FENCED_RE = re.compile(
-    r"^\s*```(?:json)?\s*(\{[\s\S]*?\})\s*```",
-    flags=re.IGNORECASE,
-)
-_OPENCLAW_UNTRUSTED_METADATA_JSON_DECODER = json.JSONDecoder()
-_CLAWBOARD_CONTEXT_BLOCK_RE = re.compile(
-    r"\[CLAWBOARD_CONTEXT_BEGIN\][\s\S]*?\[CLAWBOARD_CONTEXT_END\]\s*",
-    flags=re.IGNORECASE,
-)
-_CLAWBOARD_CONTEXT_HEURISTIC_RE = re.compile(
-    r"clawboard continuity hook is active for this turn\.[\s\S]*?clawboard context \(layered\)\s*:\s*",
-    flags=re.IGNORECASE,
-)
 
-
-def _extract_openclaw_untrusted_metadata_wrapper(value: str | None) -> tuple[dict[str, Any] | None, str]:
-    raw = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not raw:
-        return (None, "")
-    if not _OPENCLAW_UNTRUSTED_METADATA_PREFIX_RE.match(raw):
-        return (None, raw)
-
-    remainder = _OPENCLAW_UNTRUSTED_METADATA_PREFIX_RE.sub("", raw, count=1).lstrip()
-    metadata: dict[str, Any] | None = None
-    body = remainder
-
-    fenced = _OPENCLAW_UNTRUSTED_METADATA_FENCED_RE.match(remainder)
-    if fenced:
-        candidate = str(fenced.group(1) or "").strip()
-        if candidate:
-            try:
-                parsed = json.loads(candidate)
-                if isinstance(parsed, dict):
-                    metadata = parsed
-            except Exception:
-                metadata = None
-        body = remainder[fenced.end() :].strip()
-    elif remainder.startswith("{"):
-        try:
-            parsed, idx = _OPENCLAW_UNTRUSTED_METADATA_JSON_DECODER.raw_decode(remainder)
-            if isinstance(parsed, dict):
-                metadata = parsed
-                body = remainder[idx:].strip()
-        except Exception:
-            metadata = None
-
-    return (metadata, body)
-
-
-def _is_injected_clawboard_context_artifact(value: str | None) -> bool:
-    raw = str(value or "").strip()
-    if not raw:
-        return False
-    lower = raw.lower()
-    if "[clawboard_context_begin]" in lower and "[clawboard_context_end]" in lower:
-        return True
-    # Backward-compatible heuristic for legacy context wrappers that may not preserve tags.
-    if (
-        "clawboard continuity hook is active for this turn" in lower
-        and ("clawboard context (layered):" in lower or "use this clawboard retrieval context" in lower)
-    ):
-        return True
-    return False
-
-
-def _coerce_safe_text(value: Any | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        text = value.decode("utf-8", errors="replace")
-    else:
-        text = str(value)
-    if not text:
-        return ""
-    text = text.replace("\x00", "")
-    try:
-        return text.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
-    except Exception:
-        return text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
-
-
-def _sanitize_json_textish(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, (str, bytes)):
-        return _coerce_safe_text(value)
-    if isinstance(value, dict):
-        normalized: dict[str, Any] = {}
-        for key, item in value.items():
-            normalized[str(_coerce_safe_text(key) or "")] = _sanitize_json_textish(item)
-        return normalized
-    if isinstance(value, (list, tuple, set)):
-        return [_sanitize_json_textish(item) for item in value]
-    return _coerce_safe_text(value)
-
-
-def _sanitize_log_text(value: str | None) -> str:
-    """Sanitize text for search indexing and summaries. Collapses whitespace."""
-    if not value:
-        return ""
-    text = _coerce_safe_text(value).replace("\r\n", "\n").replace("\r", "\n").strip()
-    _, text = _extract_openclaw_untrusted_metadata_wrapper(text)
-    text = _CLAWBOARD_CONTEXT_BLOCK_RE.sub(" ", text)
-    text = _CLAWBOARD_CONTEXT_HEURISTIC_RE.sub(" ", text)
-    text = re.sub(
-        r"(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*",
-        " ",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(r"^\s*summary\s*[:\-]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r"^\[Discord [^\]]+\]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r"\[message[_\s-]?id:[^\]]+\]", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def _preserve_markdown_text(value: str | None) -> str:
-    """Sanitize text for message content while preserving markdown formatting (newlines, indentation).
-    
-    This function performs the same metadata/context cleanup as _sanitize_log_text but
-    preserves newlines and significant whitespace needed for markdown rendering.
-    """
-    if not value:
-        return ""
-    text = _coerce_safe_text(value).replace("\r\n", "\n").replace("\r", "\n").strip()
-    _, text = _extract_openclaw_untrusted_metadata_wrapper(text)
-    text = _CLAWBOARD_CONTEXT_BLOCK_RE.sub("\n", text)  # Preserve line breaks
-    text = _CLAWBOARD_CONTEXT_HEURISTIC_RE.sub("\n", text)  # Preserve line breaks
-    text = re.sub(
-        r"(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*",
-        "\n",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(r"^\s*summary\s*[:\-]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r"^\[Discord [^\]]+\]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r"\[message[_\s-]?id:[^\]]+\]", "", text, flags=re.IGNORECASE)
-    # Preserve newlines and indentation - only collapse multiple consecutive newlines
-    text = re.sub(r"\n{3,}", "\n\n", text)  # Max 2 consecutive newlines (one blank line)
-    return text
-
-
-def _search_query_tokens(value: str | None) -> set[str]:
-    normalized = _sanitize_log_text(value).lower()
-    if not normalized:
-        return set()
-    words = re.findall(r"[a-z0-9][a-z0-9'/_:-]*", normalized)
-    return {token for token in words if len(token) > 1}
-
-
-def _direct_label_match_boost(label: str | None, normalized_query: str, query_tokens: set[str]) -> float:
-    cleaned_label = _sanitize_log_text(label).lower()
-    if not cleaned_label:
-        return 0.0
-    label_tokens = _search_query_tokens(cleaned_label)
-    if not label_tokens:
-        return 0.0
-
-    if normalized_query and normalized_query in cleaned_label:
-        if len(query_tokens) >= 2:
-            return max(0.0, SEARCH_DIRECT_LABEL_EXACT_BOOST + 0.04)
-        return max(0.0, SEARCH_DIRECT_LABEL_EXACT_BOOST)
-
-    if len(query_tokens) == 1:
-        query_token = next(iter(query_tokens))
-        if query_token in label_tokens:
-            return max(0.0, SEARCH_DIRECT_LABEL_EXACT_BOOST)
-        if len(query_token) >= 3 and any(token.startswith(query_token) for token in label_tokens):
-            return max(0.0, SEARCH_DIRECT_LABEL_PREFIX_BOOST)
-        return 0.0
-
-    overlap = len(query_tokens & label_tokens)
-    if query_tokens and overlap >= len(query_tokens):
-        return max(0.0, SEARCH_DIRECT_LABEL_COVERAGE_BOOST)
-    if len(query_tokens) >= 3 and overlap >= 2:
-        return max(0.0, SEARCH_DIRECT_LABEL_COVERAGE_BOOST * 0.6)
-    return 0.0
-
-
-def _extract_query_snippet(value: str | None, terms: list[str], *, radius: int = 220, cap: int = 720) -> str:
-    cleaned = _sanitize_log_text(value)
-    if not cleaned:
-        return ""
-    hay = cleaned.lower()
-    first_pos = -1
-    for term in terms:
-        pos = hay.find(term.lower())
-        if pos >= 0 and (first_pos < 0 or pos < first_pos):
-            first_pos = pos
-    if first_pos < 0:
-        return _clip(cleaned, cap)
-    start = max(0, first_pos - max(40, radius))
-    end = min(len(cleaned), first_pos + max(80, radius))
-    snippet = cleaned[start:end].strip()
-    if start > 0:
-        snippet = f"…{snippet}"
-    if end < len(cleaned):
-        snippet = f"{snippet}…"
-    return _clip(snippet, cap)
-
-
-def _safe_log_attr_text(entry: LogEntry, field: str) -> str:
-    """Return a log field without triggering ORM lazy-load queries for deferred columns."""
-    name = str(field or "").strip()
-    if not name:
-        return ""
-    try:
-        state = sa_inspect(entry)
-        unloaded = getattr(state, "unloaded", None)
-        if unloaded and name in unloaded:
-            return ""
-    except Exception:
-        pass
-    try:
-        return _coerce_safe_text(getattr(entry, name) or "")
-    except Exception:
-        return ""
-
-
-def _is_command_log(entry: LogEntry) -> bool:
-    if getattr(entry, "type", None) != "conversation":
-        return False
-    text = _sanitize_log_text(
-        _safe_log_attr_text(entry, "content")
-        or _safe_log_attr_text(entry, "summary")
-        or _safe_log_attr_text(entry, "raw")
-        or ""
-    )
-    if not text.startswith("/"):
-        return False
-    command = text.split(None, 1)[0].lower()
-    if command in SLASH_COMMANDS:
-        return True
-    # For better forwardslash command support, match any single-word /token
-    # unless it is clearly just markdown formatting (like / in a path).
-    return bool(re.fullmatch(r"/[a-z0-9_-]{2,}", command))
-
-
-def _clip(value: str, limit: int) -> str:
-    if len(value) <= limit:
-        return value
-    return value[: limit - 1].rstrip() + "…"
-
-
-def _escape_sql_like_term(value: str | None) -> str:
-    token = str(value or "")
-    return token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def _chunked_values(values: list[str], chunk_size: int) -> Iterable[list[str]]:
-    size = max(1, int(chunk_size or 1))
-    for index in range(0, len(values), size):
-        chunk = values[index : index + size]
-        if chunk:
-            yield chunk
-
-
-def _is_search_row_encoding_error(exc: Exception) -> bool:
-    lowered = str(exc or "").lower()
-    return "invalid byte sequence" in lowered or "characternotinrepertoire" in lowered
-
-
-def _exec_search_rows_resilient(
-    session: Any,
-    ids: list[str],
-    build_query: Callable[[list[str]], Any],
-    *,
-    label: str,
-) -> list[Any]:
-    clean_ids = [str(item or "").strip() for item in ids if str(item or "").strip()]
-    if not clean_ids:
-        return []
-    try:
-        return list(session.exec(build_query(clean_ids)).all())
-    except DataError as exc:
-        if not _is_search_row_encoding_error(exc):
-            raise
-        try:
-            session.rollback()
-        except Exception:
-            pass
-        if len(clean_ids) == 1:
-            logger.warning("search skipping malformed UTF-8 row during %s fetch: %s", label, clean_ids[0])
-            return []
-        midpoint = max(1, len(clean_ids) // 2)
-        rows: list[Any] = []
-        for retry_ids in (clean_ids[:midpoint], clean_ids[midpoint:]):
-            if not retry_ids:
-                continue
-            with get_session() as retry_session:
-                rows.extend(_exec_search_rows_resilient(retry_session, retry_ids, build_query, label=label))
-        return rows
-
-
-def _combined_log_text(content: str | None, summary: str | None, raw: str | None) -> str:
-    parts = [
-        _sanitize_log_text(content or ""),
-        _sanitize_log_text(summary or ""),
-        _sanitize_log_text(raw or ""),
-    ]
-    return " ".join(part for part in parts if part).strip()
-
-
-def _is_tool_trace_text(content: str | None, summary: str | None, raw: str | None) -> bool:
-    combined = _combined_log_text(content, summary, raw).lower()
-    if not combined:
-        return False
-    return (
-        "tool call:" in combined
-        or "tool result:" in combined
-        or "tool error:" in combined
-    )
-
-
-def _is_memory_action_text(content: str | None, summary: str | None, raw: str | None) -> bool:
-    combined = _combined_log_text(content, summary, raw).lower()
-    if not combined:
-        return False
-    if "tool call:" in combined or "tool result:" in combined or "tool error:" in combined:
-        if re.search(r"\bmemory[_-]?(search|get|query|fetch|retrieve|read|write|store|list|prune|delete)\b", combined):
-            return True
-    return False
-
-
-def _is_subagent_session_key(session_key: str | None) -> bool:
-    key = str(session_key or "").strip().lower()
-    if not key:
-        return False
-    base = key.split("|", 1)[0].strip()
-    return ":subagent:" in base
-
-
-def _session_key_supports_bundle_tool_scoping(session_key: str | None) -> bool:
-    base = str(session_key or "").strip().lower().split("|", 1)[0].strip()
-    if not base:
-        return False
-    if base.startswith("channel:"):
-        return True
-    if base.startswith("clawboard:task:"):
-        return True
-    return ":clawboard:task:" in base
-
-
-def _is_subagent_scaffold_text(content: str | None, summary: str | None, raw: str | None) -> bool:
-    combined = _combined_log_text(content, summary, raw)
-    if not combined:
-        return False
-    return bool(re.match(r"^\s*\[subagent context\]", combined, flags=re.IGNORECASE))
-
-
-def _is_heartbeat_control_plane_text(content: str | None, summary: str | None, raw: str | None) -> bool:
-    combined = _combined_log_text(content, summary, raw)
-    if not combined:
-        return False
-    if re.match(r"^\s*\[cron:[^\]]+\]", combined, flags=re.IGNORECASE):
-        return True
-    if re.match(r"^\s*heartbeat\s*:", combined, flags=re.IGNORECASE):
-        return True
-    if re.match(r"^\s*heartbeat_ok\s*$", combined, flags=re.IGNORECASE):
-        return True
-    return bool(re.search(r"heartbeat and watchdog recovery check", combined, flags=re.IGNORECASE))
-
-
-def _is_control_plane_conversation_payload(
-    *,
-    content: str | None,
-    summary: str | None,
-    raw: str | None,
-    source_channel: str | None,
-    source_session_key: str | None,
-) -> bool:
-    channel = str(source_channel or "").strip().lower()
-    session_key = str(source_session_key or "").strip().lower()
-    is_main_session = (session_key.split("|", 1)[0].strip() == "agent:main:main")
-    if channel in {"heartbeat", "cron-event"}:
-        return True
-    if not is_main_session:
-        return False
-    return _is_heartbeat_control_plane_text(content, summary, raw)
-
-
-def _is_tool_call_log(entry: LogEntry) -> bool:
-    if getattr(entry, "type", None) != "action":
-        return False
-    return _is_tool_trace_text(
-        _safe_log_attr_text(entry, "content"),
-        _safe_log_attr_text(entry, "summary"),
-        _safe_log_attr_text(entry, "raw"),
-    )
-
-
-def _log_reindex_text(entry: LogEntry) -> str:
-    log_type = str(getattr(entry, "type", "") or "")
-    if log_type in ("system", "import"):
-        return ""
-    if not SEARCH_INCLUDE_TOOL_CALL_LOGS and _is_tool_call_log(entry):
-        return ""
-    if _is_memory_action_log(entry) or _is_command_log(entry):
-        return ""
-    parts = [
-        _sanitize_log_text(_safe_log_attr_text(entry, "summary")),
-        _sanitize_log_text(_safe_log_attr_text(entry, "content")),
-        _sanitize_log_text(_safe_log_attr_text(entry, "raw")),
-    ]
-    text = " ".join(part for part in parts if part)
-    return _clip(text, 1200)
-
-
-def _is_memory_action_log(entry: LogEntry) -> bool:
-    if getattr(entry, "type", None) != "action":
-        return False
-    combined = " ".join(
-        part
-        for part in [
-            _safe_log_attr_text(entry, "summary"),
-            _safe_log_attr_text(entry, "content"),
-            _safe_log_attr_text(entry, "raw"),
-        ]
-        if part
-    ).lower()
-    if "tool call:" in combined or "tool result:" in combined or "tool error:" in combined:
-        if re.search(r"\bmemory[_-]?(search|get|query|fetch|retrieve|read|write|store|list|prune|delete)\b", combined):
-            return True
-    return False
-
-
-def _log_allowed_for_semantic_search(entry: LogEntry) -> bool:
-    log_type = str(getattr(entry, "type", "") or "")
-    if log_type in ("system", "import"):
-        return False
-    if not SEARCH_INCLUDE_TOOL_CALL_LOGS and _is_tool_call_log(entry):
-        return False
-    if _is_memory_action_log(entry) or _is_command_log(entry):
-        return False
-    return True
-
-
-def _enqueue_log_reindex(entry: LogEntry) -> None:
-    text = _log_reindex_text(entry)
-    if not text:
-        enqueue_reindex_request({"op": "delete", "kind": "log", "id": entry.id})
-        return
-    enqueue_reindex_request({"op": "upsert", "kind": "log", "id": entry.id, "text": text, "topicId": entry.topicId})
-
-
-def _session_keys_equivalent(source_key: str | None, target_key: str | None) -> bool:
-    lhs = str(source_key or "").strip()
-    rhs = str(target_key or "").strip()
-    if not lhs or not rhs:
-        return False
-    if lhs == rhs:
-        return True
-
-    lhs_base = lhs.split("|", 1)[0].strip()
-    rhs_base = rhs.split("|", 1)[0].strip()
-    if not lhs_base or not rhs_base:
-        return False
-    if lhs_base == rhs_base:
-        return True
-    if lhs.startswith(f"{rhs_base}|") or rhs.startswith(f"{lhs_base}|"):
-        return True
-
-    # Board sessions can be wrapped by agent prefixes
-    # (`agent:main:clawboard:task:*`, etc.).
-    lhs_topic, lhs_task = _parse_board_session_key(lhs)
-    rhs_topic, rhs_task = _parse_board_session_key(rhs)
-    return bool(lhs_topic and rhs_topic and lhs_topic == rhs_topic and lhs_task == rhs_task)
-
-
-def _log_matches_session(entry: LogEntry, session_key: str) -> bool:
-    source = getattr(entry, "source", None)
-    if not isinstance(source, dict):
-        return False
-    source_key = str(source.get("sessionKey") or "").strip()
-    target_key = str(session_key or "").strip()
-    return _session_keys_equivalent(source_key, target_key)
-
+# --- text_processing: moved to .text module ---
 
 def _normalize_hex_color(value: str | None) -> str | None:
     if value is None:
@@ -2311,292 +1109,8 @@ def _find_similar_task(
     return None
 
 
-_RESOLVER_NAME_STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "as",
-    "at",
-    "be",
-    "but",
-    "by",
-    "for",
-    "from",
-    "help",
-    "i",
-    "in",
-    "into",
-    "is",
-    "it",
-    "me",
-    "my",
-    "of",
-    "on",
-    "or",
-    "please",
-    "the",
-    "to",
-    "with",
-}
 
-
-def _resolver_float_env(name: str, fallback: float, minimum: float, maximum: float) -> float:
-    raw = str(os.getenv(name) or "").strip()
-    value = fallback
-    if raw:
-        try:
-            value = float(raw)
-        except Exception:
-            value = fallback
-    return max(minimum, min(maximum, value))
-
-
-def _resolver_topic_similarity_threshold() -> float:
-    return _resolver_float_env("CLAWBOARD_RESOLVER_TOPIC_SIM_THRESHOLD", 0.80, 0.40, 0.98)
-
-
-def _resolver_task_similarity_threshold() -> float:
-    return _resolver_float_env("CLAWBOARD_RESOLVER_TASK_SIM_THRESHOLD", 0.88, 0.45, 0.99)
-
-
-def _resolver_semantic_topic_score_threshold() -> float:
-    return _resolver_float_env("CLAWBOARD_RESOLVER_SEMANTIC_TOPIC_THRESHOLD", 0.78, 0.35, 0.98)
-
-
-def _resolver_semantic_task_score_threshold() -> float:
-    return _resolver_float_env("CLAWBOARD_RESOLVER_SEMANTIC_TASK_THRESHOLD", 0.80, 0.35, 0.99)
-
-
-def _resolver_fallback_mode() -> str:
-    raw = str(os.getenv("CLAWBOARD_RESOLVER_FALLBACK_MODE") or "deterministic").strip().lower()
-    if raw in {"deterministic", "strict"}:
-        return raw
-    return "deterministic"
-
-
-def _resolver_clean_name(value: str | None, *, fallback: str, max_chars: int = 72) -> str:
-    text = _sanitize_log_text(value or "")
-    if not text:
-        return fallback
-    text = re.sub(r"[\s\-–—_:;|]+", " ", text).strip()
-    if not text:
-        return fallback
-    if len(text) <= max_chars:
-        return text
-    return _clip(text, max_chars)
-
-
-def _resolver_title_case_token(token: str, force_capitalize: bool) -> str:
-    raw = str(token or "").strip()
-    if not raw:
-        return ""
-    if re.fullmatch(r"[A-Z0-9]{2,}", raw):
-        return raw
-    lower = raw.lower()
-    if not force_capitalize and lower in _RESOLVER_NAME_STOPWORDS:
-        return lower
-    return lower[:1].upper() + lower[1:]
-
-
-def _resolver_terms_from_message(message: str, *, limit: int = 10) -> list[str]:
-    cleaned = _sanitize_log_text(message)
-    if not cleaned:
-        return []
-    sentence = cleaned.split("\n", 1)[0]
-    sentence = re.split(r"[.!?]", sentence, 1)[0]
-    sentence = re.sub(r"^[\-*#>\d.()\[\]\s]+", "", sentence).strip()
-    if not sentence:
-        sentence = cleaned
-    tokens = [
-        re.sub(r"^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$", "", part).strip()
-        for part in sentence.split(" ")
-    ]
-    out: list[str] = []
-    seen: set[str] = set()
-    for token in tokens:
-        if not token:
-            continue
-        key = token.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(token)
-        if len(out) >= limit:
-            break
-    return out
-
-
-def _resolver_derive_topic_name(message: str, *, context_payload: dict[str, Any] | None = None) -> str:
-    semantic = ((context_payload or {}).get("data") or {}).get("semantic") if isinstance((context_payload or {}).get("data"), dict) else None
-    if isinstance(semantic, dict):
-        topics = semantic.get("topics")
-        if isinstance(topics, list):
-            top = topics[0] if topics else None
-            if isinstance(top, dict):
-                top_name = _resolver_clean_name(str(top.get("name") or "").strip(), fallback="", max_chars=72)
-                top_score = float(top.get("score") or 0.0) if top.get("score") is not None else 0.0
-                if top_name and top_score >= _resolver_semantic_topic_score_threshold():
-                    return top_name
-
-    terms = _resolver_terms_from_message(message, limit=10)
-    if not terms:
-        return "Untitled Topic"
-    keyword_terms = [term for term in terms if term.lower() not in _RESOLVER_NAME_STOPWORDS]
-    chosen = (keyword_terms or terms)[:6]
-    titled = " ".join(
-        _resolver_title_case_token(token, idx == 0 or idx == len(chosen) - 1)
-        for idx, token in enumerate(chosen)
-    ).strip()
-    return _resolver_clean_name(titled, fallback="Untitled Topic", max_chars=72)
-
-
-def _resolver_derive_task_title(message: str, *, context_payload: dict[str, Any] | None = None) -> str:
-    semantic = ((context_payload or {}).get("data") or {}).get("semantic") if isinstance((context_payload or {}).get("data"), dict) else None
-    if isinstance(semantic, dict):
-        tasks = semantic.get("tasks")
-        if isinstance(tasks, list):
-            top = tasks[0] if tasks else None
-            if isinstance(top, dict):
-                top_title = _resolver_clean_name(str(top.get("title") or "").strip(), fallback="", max_chars=84)
-                top_score = float(top.get("score") or 0.0) if top.get("score") is not None else 0.0
-                if top_title and top_score >= _resolver_semantic_task_score_threshold():
-                    return top_title
-
-    terms = _resolver_terms_from_message(message, limit=12)
-    if not terms:
-        return "New Task"
-    keyword_terms = [term for term in terms if term.lower() not in _RESOLVER_NAME_STOPWORDS]
-    chosen = (keyword_terms or terms)[:8]
-    titled = " ".join(
-        _resolver_title_case_token(token, idx == 0 or idx == len(chosen) - 1)
-        for idx, token in enumerate(chosen)
-    ).strip()
-    return _resolver_clean_name(titled, fallback="New Task", max_chars=84)
-
-
-def _resolver_pick_semantic_topic_id(
-    session: Any,
-    *,
-    context_payload: dict[str, Any] | None,
-    source_space_id: str | None,
-) -> str | None:
-    data = (context_payload or {}).get("data")
-    if not isinstance(data, dict):
-        return None
-    semantic = data.get("semantic")
-    if not isinstance(semantic, dict):
-        return None
-    topics = semantic.get("topics")
-    if not isinstance(topics, list):
-        return None
-    threshold = _resolver_semantic_topic_score_threshold()
-    for row in topics:
-        if not isinstance(row, dict):
-            continue
-        candidate_id = str(row.get("id") or "").strip()
-        if not candidate_id:
-            continue
-        score = float(row.get("score") or 0.0) if row.get("score") is not None else 0.0
-        if score < threshold:
-            continue
-        topic = session.get(Topic, candidate_id)
-        if not topic:
-            continue
-        if source_space_id and _space_id_for_topic(topic) != source_space_id:
-            continue
-        return topic.id
-    return None
-
-
-def _resolver_pick_semantic_task(
-    session: Any,
-    *,
-    topic_id: str,
-    context_payload: dict[str, Any] | None,
-) -> Task | None:
-    data = (context_payload or {}).get("data")
-    if not isinstance(data, dict):
-        return None
-    semantic = data.get("semantic")
-    if not isinstance(semantic, dict):
-        return None
-    tasks = semantic.get("tasks")
-    if not isinstance(tasks, list):
-        return None
-    threshold = _resolver_semantic_task_score_threshold()
-    for row in tasks:
-        if not isinstance(row, dict):
-            continue
-        candidate_id = str(row.get("id") or "").strip()
-        if not candidate_id:
-            continue
-        score = float(row.get("score") or 0.0) if row.get("score") is not None else 0.0
-        if score < threshold:
-            continue
-        task = session.get(Task, candidate_id)
-        if not task:
-            continue
-        if str(getattr(task, "topicId", "") or "").strip() != topic_id:
-            continue
-        return task
-    return None
-
-
-def _resolver_recent_routing_hints(
-    session: Any,
-    *,
-    selected_topic_id: str | None,
-    selected_task_id: str | None,
-    limit: int = 16,
-) -> list[dict[str, Any]]:
-    rows = session.exec(
-        select(SessionRoutingMemory).order_by(SessionRoutingMemory.updatedAt.desc()).limit(64)
-    ).all()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        items = list(getattr(row, "items", None) or [])
-        for item in reversed(items):
-            if not isinstance(item, dict):
-                continue
-            topic_id = str(item.get("topicId") or "").strip()
-            task_id = str(item.get("taskId") or "").strip()
-            if selected_topic_id and topic_id and topic_id != selected_topic_id:
-                continue
-            if selected_task_id and task_id and task_id != selected_task_id:
-                continue
-            out.append(
-                {
-                    "ts": str(item.get("ts") or "").strip(),
-                    "topicId": topic_id or None,
-                    "topicName": str(item.get("topicName") or "").strip() or None,
-                    "taskId": task_id or None,
-                    "taskTitle": str(item.get("taskTitle") or "").strip() or None,
-                    "anchor": _clip(_sanitize_log_text(str(item.get("anchor") or "")), 220) or None,
-                }
-            )
-            if len(out) >= max(1, limit):
-                return out
-    return out
-
-
-def _next_sort_index_for_new_topic(session, pinned: bool) -> int:
-    """Return a sortIndex that places new topics at the top of their pinned group."""
-    topics = session.exec(select(Topic)).all()
-    indices = [int(getattr(topic, "sortIndex", 0)) for topic in topics if bool(getattr(topic, "pinned", False)) == pinned]
-    if not indices:
-        return 0
-    return min(indices) - 1
-
-
-def _next_sort_index_for_new_task(session, topic_id: str | None, pinned: bool) -> int:
-    """Return a sortIndex that places new tasks at the top of their pinned group within the topic."""
-    tasks = session.exec(select(Task)).all()
-    scoped = [task for task in tasks if task.topicId == topic_id]
-    indices = [int(getattr(task, "sortIndex", 0)) for task in scoped if bool(getattr(task, "pinned", False)) == pinned]
-    if not indices:
-        return 0
-    return min(indices) - 1
-
+# --- resolver: moved to .resolver module ---
 
 def _warm_precompiled_defaults() -> None:
     if not PRECOMPILE_ENABLED:
@@ -2655,7 +1169,7 @@ def _warm_precompiled_defaults() -> None:
                 build_fn=lambda: _build_metrics_payload(session),
             )
     except Exception:
-        # Best-effort warmup only.
+        logger.exception("precompile warmup failed")
         return
 
 
@@ -2669,12 +1183,12 @@ def _precompile_warm_worker() -> None:
     pending = False
     next_warm_at = 0.0
     try:
-        while True:
+        while not _BACKGROUND_STOP_EVENT.is_set():
             timeout = 30.0
             if pending:
                 timeout = max(0.05, next_warm_at - time.monotonic())
             try:
-                _event_id, payload = subscriber.get(timeout=timeout)
+                _event_id, payload = subscriber.get(timeout=min(timeout, 1.0))
             except queue.Empty:
                 if pending and time.monotonic() >= next_warm_at:
                     _warm_precompiled_defaults()
@@ -2693,55 +1207,64 @@ def _precompile_warm_worker() -> None:
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    _BACKGROUND_STOP_EVENT.clear()
+    with _BACKGROUND_THREADS_LOCK:
+        _BACKGROUND_THREADS.clear()
     if PRECOMPILE_ENABLED and PRECOMPILE_WARM_LISTENER_ENABLED:
-        thread = threading.Thread(target=_precompile_warm_worker, daemon=True)
-        thread.start()
+        _start_background_thread(target=_precompile_warm_worker, name="clawboard-precompile-warm")
     elif PRECOMPILE_ENABLED and PRECOMPILE_WARM_ON_STARTUP:
-        thread = threading.Thread(target=_warm_precompiled_defaults, daemon=True)
-        thread.start()
+        _start_background_thread(target=_warm_precompiled_defaults, name="clawboard-precompile-startup")
     if os.getenv("CLAWBOARD_INGEST_MODE", "").lower() == "queue":
-        thread = threading.Thread(target=_queue_worker, daemon=True)
-        thread.start()
+        _start_background_thread(target=_queue_worker, name="clawboard-ingest-queue-worker")
     if os.getenv("CLAWBOARD_DISABLE_SNOOZE_WORKER", "").strip() != "1":
-        thread = threading.Thread(target=_snooze_worker, daemon=True)
-        thread.start()
+        _start_background_thread(target=_snooze_worker, name="clawboard-snooze-worker")
     if os.getenv("CLAWBOARD_DISABLE_SESSION_ROUTING_GC", "").strip() != "1":
-        thread = threading.Thread(target=_session_routing_gc_worker, daemon=True)
-        thread.start()
+        _start_background_thread(target=_session_routing_gc_worker, name="clawboard-session-routing-gc")
     if os.getenv("CLAWBOARD_DISABLE_OPENCLAW_REQUEST_ROUTE_GC", "").strip() != "1":
-        thread = threading.Thread(target=_openclaw_request_route_gc_worker, daemon=True)
-        thread.start()
+        _start_background_thread(target=_openclaw_request_route_gc_worker, name="clawboard-openclaw-request-route-gc")
     if os.getenv("OPENCLAW_CHAT_ASSISTANT_LOG_RECOVERY_DISABLE", "").strip() != "1":
-        thread = threading.Thread(
+        _start_background_thread(
             target=_recover_openclaw_assistant_log_checks,
             name="clawboard-openclaw-watchdog-recover",
-            daemon=True,
         )
-        thread.start()
     if _openclaw_chat_dispatch_enabled():
         worker_count = _openclaw_chat_dispatch_workers()
         for worker_index in range(worker_count):
-            thread = threading.Thread(
+            _start_background_thread(
                 target=_openclaw_chat_dispatch_worker,
                 kwargs={"worker_index": worker_index + 1},
                 name=f"clawboard-openclaw-dispatch-{worker_index + 1}",
-                daemon=True,
             )
-            thread.start()
     if _openclaw_gateway_history_sync_enabled():
-        thread = threading.Thread(
+        _start_background_thread(
             target=_openclaw_gateway_history_sync_worker,
             name="clawboard-openclaw-history-sync",
-            daemon=True,
         )
-        thread.start()
     if _orchestration_enabled():
-        thread = threading.Thread(
+        _start_background_thread(
             target=_orchestration_worker,
             name="clawboard-orchestration-worker",
-            daemon=True,
         )
-        thread.start()
+
+
+@app.on_event("shutdown")
+def on_shutdown() -> None:
+    _BACKGROUND_STOP_EVENT.set()
+    _OPENCLAW_CHAT_DISPATCH_WAKEUP.set()
+    try:
+        event_hub.publish({"type": "clawboard.shutdown"})
+    except Exception:
+        pass
+    try:
+        _shutdown_openclaw_assistant_log_watchdog()
+    except Exception:
+        logger.exception("failed to stop OpenClaw assistant-log watchdog during shutdown")
+    with _BACKGROUND_THREADS_LOCK:
+        threads = list(_BACKGROUND_THREADS)
+    for thread in threads:
+        if not thread.is_alive():
+            continue
+        thread.join(timeout=2.0)
 
 
 @app.get("/api/health")
@@ -2752,7 +1275,7 @@ def health() -> dict:
 def _queue_worker() -> None:
     poll_interval = float(os.getenv("CLAWBOARD_QUEUE_POLL_SECONDS", "1.5"))
     batch_size = int(os.getenv("CLAWBOARD_QUEUE_BATCH", "25"))
-    while True:
+    while not _BACKGROUND_STOP_EVENT.is_set():
         try:
             with get_session() as session:
                 pending = session.exec(
@@ -2777,621 +1300,20 @@ def _queue_worker() -> None:
                     session.add(job)
                 session.commit()
         except Exception:
-            pass
-        time.sleep(poll_interval)
+            _log_background_worker_exception("clawboard-ingest-queue-worker")
+        if _background_sleep(poll_interval):
+            break
 
 
-def _openclaw_chat_dispatch_enabled() -> bool:
-    return os.getenv("OPENCLAW_CHAT_DISPATCH_DISABLE", "").strip() != "1"
 
+# --- dispatch_main: moved to .dispatch module ---
 
-def _openclaw_chat_dispatch_poll_seconds() -> float:
-    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_POLL_SECONDS", "1.0").strip()
-    try:
-        value = float(raw)
-    except Exception:
-        value = 1.0
-    return max(0.2, min(30.0, value))
 
-
-def _openclaw_chat_dispatch_workers() -> int:
-    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_WORKERS", "4").strip()
-    try:
-        value = int(raw)
-    except Exception:
-        value = 4
-    return max(1, min(32, value))
-
-
-def _openclaw_chat_dispatch_hot_window_seconds() -> int:
-    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_HOT_WINDOW_SECONDS", "900").strip()
-    try:
-        value = int(raw)
-    except Exception:
-        value = 900
-    return max(30, min(604800, value))
-
-
-def _openclaw_chat_dispatch_stale_processing_seconds() -> float:
-    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_STALE_PROCESSING_SECONDS", "180").strip()
-    try:
-        value = float(raw)
-    except Exception:
-        value = 180.0
-    return max(10.0, min(86400.0, value))
-
-
-def _openclaw_chat_dispatch_max_retry_delay_seconds() -> float:
-    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_MAX_RETRY_DELAY_SECONDS", "300").strip()
-    try:
-        value = float(raw)
-    except Exception:
-        value = 300.0
-    return max(5.0, min(86400.0, value))
-
-
-def _openclaw_chat_dispatch_max_attempts() -> int:
-    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_MAX_ATTEMPTS", "0").strip()
-    try:
-        value = int(raw)
-    except Exception:
-        value = 0
-    return max(0, min(100000, value))
-
-
-def _openclaw_chat_dispatch_recovery_lookback_seconds() -> int:
-    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_RECOVERY_LOOKBACK_SECONDS", "604800").strip()
-    try:
-        value = int(raw)
-    except Exception:
-        value = 604800
-    return max(300, min(2592000, value))
-
-
-def _openclaw_chat_dispatch_recovery_max_rows() -> int:
-    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_RECOVERY_MAX_ROWS", "5000").strip()
-    try:
-        value = int(raw)
-    except Exception:
-        value = 5000
-    return max(100, min(50000, value))
-
-
-def _openclaw_chat_dispatch_recovery_interval_seconds() -> float:
-    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_RECOVERY_INTERVAL_SECONDS", "300").strip()
-    try:
-        value = float(raw)
-    except Exception:
-        value = 300.0
-    return max(30.0, min(3600.0, value))
-
-
-def _openclaw_chat_dispatch_auto_quarantine_enabled() -> bool:
-    return os.getenv("OPENCLAW_CHAT_DISPATCH_AUTO_QUARANTINE_DISABLE", "").strip() != "1"
-
-
-def _openclaw_chat_dispatch_auto_quarantine_seconds() -> int:
-    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_AUTO_QUARANTINE_SECONDS", "21600").strip()
-    try:
-        value = int(raw)
-    except Exception:
-        value = 21600
-    return max(0, min(60 * 60 * 24 * 30, value))
-
-
-def _openclaw_chat_dispatch_auto_quarantine_limit() -> int:
-    raw = os.getenv("OPENCLAW_CHAT_DISPATCH_AUTO_QUARANTINE_LIMIT", "200").strip()
-    try:
-        value = int(raw)
-    except Exception:
-        value = 200
-    return max(10, min(5000, value))
-
-
-def _openclaw_chat_dispatch_auto_quarantine_synthetic_only() -> bool:
-    return os.getenv("OPENCLAW_CHAT_DISPATCH_AUTO_QUARANTINE_SYNTHETIC_ONLY", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-
-
-def _iso_after_seconds(base: datetime, seconds: float) -> str:
-    # Accept both positive and negative offsets (used for future schedules and past cutoffs).
-    return (base + timedelta(seconds=float(seconds or 0.0))).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
-    )
-
-
-def _openclaw_chat_dispatch_backoff_seconds(attempts: int) -> float:
-    exponent = max(0, min(12, int(attempts or 0) - 1))
-    delay = float(2**exponent)
-    return max(1.0, min(_openclaw_chat_dispatch_max_retry_delay_seconds(), delay))
-
-
-def _openclaw_chat_dispatch_is_terminal_error(error_text: str) -> bool:
-    text = str(error_text or "").strip().lower()
-    if not text:
-        return False
-    if re.search(r"\btool(?:\s+error)?\b[^\n]{0,120}\bnot found\b", text):
-        return True
-    status_match = re.search(r"\b([1-5]\d{2})\s+status code\b", text)
-    if status_match:
-        try:
-            status_code = int(status_match.group(1))
-        except Exception:
-            status_code = 0
-        if status_code in {
-            400,
-            401,
-            403,
-            404,
-            405,
-            406,
-            407,
-            409,
-            410,
-            411,
-            412,
-            413,
-            414,
-            415,
-            416,
-            422,
-            423,
-            424,
-            426,
-            428,
-            431,
-            451,
-        }:
-            return True
-    terminal_tokens = [
-        "attachment missing on disk",
-        "unable to read attachment",
-        "attachment metadata missing",
-        "openclaw gateway token is required",
-        "openclaw_base_url is not configured",
-        "tool not found",
-        "unknown tool",
-        "unknown method",
-        "invalid params",
-        "invalid request",
-        "validation error",
-    ]
-    return any(token in text for token in terminal_tokens)
-
-
-def _enqueue_openclaw_chat_dispatch(
-    *,
-    request_id: str,
-    session_key: str,
-    agent_id: str,
-    sent_at: str,
-    message: str,
-    attachment_ids: list[str] | None = None,
-    session: Any | None = None,
-) -> None:
-    rid = str(request_id or "").strip()
-    key = str(session_key or "").strip()
-    msg = str(message or "")
-    if not rid or not key or not msg:
-        raise RuntimeError("dispatch queue requires request_id, session_key, and message")
-    attachment_list = [str(att_id).strip() for att_id in (attachment_ids or []) if str(att_id).strip()]
-    stamp = now_iso()
-    def _build_row() -> OpenClawChatDispatchQueue:
-        return OpenClawChatDispatchQueue(
-            requestId=rid,
-            sessionKey=key,
-            agentId=str(agent_id or "main").strip() or "main",
-            sentAt=normalize_iso(sent_at) or stamp,
-            message=msg,
-            attachmentIds=attachment_list,
-            status="pending",
-            attempts=0,
-            nextAttemptAt=stamp,
-            claimedAt=None,
-            completedAt=None,
-            lastError=None,
-            createdAt=stamp,
-            updatedAt=stamp,
-        )
-
-    if session is not None:
-        try:
-            with session.begin_nested():
-                existing = session.exec(
-                    select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == rid).limit(1)
-                ).first()
-                if existing is not None:
-                    return
-                session.add(_build_row())
-                session.flush()
-        except IntegrityError:
-            return
-        _openclaw_chat_dispatch_wakeup()
-        return
-
-    with get_session() as write_session:
-        existing = write_session.exec(
-            select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == rid).limit(1)
-        ).first()
-        if existing is not None:
-            return
-        row = _build_row()
-        write_session.add(row)
-        try:
-            write_session.commit()
-            _openclaw_chat_dispatch_wakeup()
-        except IntegrityError:
-            write_session.rollback()
-
-
-_OPENCLAW_CHAT_DISPATCH_CLAIM_LOCK = threading.Lock()
-_OPENCLAW_CHAT_DISPATCH_PROCESS_STARTED_AT_ISO = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
-    "+00:00", "Z"
-)
-
-
-def _openclaw_chat_dispatch_claim_next_job(now_iso_value: str) -> dict[str, Any] | None:
-    with _OPENCLAW_CHAT_DISPATCH_CLAIM_LOCK:
-        with get_session() as session:
-            prior = aliased(OpenClawChatDispatchQueue)
-            hot_cutoff_iso = _iso_after_seconds(datetime.now(timezone.utc), -float(_openclaw_chat_dispatch_hot_window_seconds()))
-            cold_backlog_rank = case((OpenClawChatDispatchQueue.sentAt < hot_cutoff_iso, 1), else_=0)
-            voice_rank = case((OpenClawChatDispatchQueue.message.like("/voice%"), 0), (OpenClawChatDispatchQueue.message.like("/skill%"), 0), else_=1)
-            retry_rank = case((OpenClawChatDispatchQueue.status == "pending", 0), else_=1)
-            has_prior_undelivered = exists(
-                select(1)
-                .select_from(prior)
-                .where(prior.sessionKey == OpenClawChatDispatchQueue.sessionKey)
-                .where(prior.id < OpenClawChatDispatchQueue.id)
-                .where(prior.status.in_(["pending", "retry", "processing"]))
-            )
-            row = session.exec(
-                select(OpenClawChatDispatchQueue)
-                .where(OpenClawChatDispatchQueue.status.in_(["pending", "retry"]))
-                .where(OpenClawChatDispatchQueue.nextAttemptAt <= now_iso_value)
-                .where(~has_prior_undelivered)
-                .order_by(
-                    voice_rank.asc(),
-                    retry_rank.asc(),
-                    cold_backlog_rank.asc(),
-                    OpenClawChatDispatchQueue.nextAttemptAt.asc(),
-                    OpenClawChatDispatchQueue.createdAt.asc(),
-                    OpenClawChatDispatchQueue.id.asc(),
-                )
-                .limit(1)
-            ).first()
-            if row is None:
-                return None
-            row.status = "processing"
-            row.attempts = int(row.attempts or 0) + 1
-            row.claimedAt = now_iso_value
-            row.updatedAt = now_iso_value
-            session.add(row)
-            session.commit()
-            return {
-                "id": int(row.id),
-                "requestId": str(row.requestId or ""),
-                "sessionKey": str(row.sessionKey or ""),
-                "agentId": str(row.agentId or "main"),
-                "sentAt": str(row.sentAt or ""),
-                "message": str(row.message or ""),
-                "attachmentIds": list(row.attachmentIds or []),
-                "attempts": int(row.attempts or 0),
-            }
-
-
-def _openclaw_chat_dispatch_mark_sent(job_id: int, now_iso_value: str) -> None:
-    with get_session() as session:
-        row = session.get(OpenClawChatDispatchQueue, job_id)
-        if row is None:
-            return
-        row.status = "sent"
-        row.completedAt = now_iso_value
-        row.claimedAt = None
-        row.lastError = None
-        row.updatedAt = now_iso_value
-        session.add(row)
-        session.commit()
-
-
-def _openclaw_chat_dispatch_mark_retry(job_id: int, *, error: str, now_dt: datetime) -> None:
-    with get_session() as session:
-        row = session.get(OpenClawChatDispatchQueue, job_id)
-        if row is None:
-            return
-        attempts = int(row.attempts or 0)
-        delay_seconds = _openclaw_chat_dispatch_backoff_seconds(attempts)
-        row.status = "retry"
-        row.nextAttemptAt = _iso_after_seconds(now_dt, delay_seconds)
-        row.claimedAt = None
-        row.lastError = _clip(str(error or "").strip(), 1600)
-        row.updatedAt = now_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-        session.add(row)
-        session.commit()
-
-
-def _openclaw_chat_dispatch_mark_failed(job_id: int, *, error: str, now_iso_value: str) -> None:
-    with get_session() as session:
-        row = session.get(OpenClawChatDispatchQueue, job_id)
-        if row is None:
-            return
-        row.status = "failed"
-        row.completedAt = now_iso_value
-        row.claimedAt = None
-        row.lastError = _clip(str(error or "").strip(), 1600)
-        row.updatedAt = now_iso_value
-        session.add(row)
-        session.commit()
-
-
-def _openclaw_chat_dispatch_recover_stale_processing_jobs(now_dt: datetime) -> int:
-    now_iso_value = now_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    cutoff_iso = _iso_after_seconds(now_dt, -_openclaw_chat_dispatch_stale_processing_seconds())
-    process_started_iso = str(_OPENCLAW_CHAT_DISPATCH_PROCESS_STARTED_AT_ISO or "").strip()
-    stale_predicates = [OpenClawChatDispatchQueue.claimedAt < cutoff_iso]
-    if process_started_iso:
-        # Any claim older than this process start belongs to a previous worker lifecycle.
-        stale_predicates.append(OpenClawChatDispatchQueue.claimedAt < process_started_iso)
-    with get_session() as session:
-        rows = session.exec(
-            select(OpenClawChatDispatchQueue)
-            .where(OpenClawChatDispatchQueue.status == "processing")
-            .where(OpenClawChatDispatchQueue.claimedAt.is_not(None))
-            .where(or_(*stale_predicates))
-            .order_by(OpenClawChatDispatchQueue.claimedAt.asc())
-            .limit(200)
-        ).all()
-        if not rows:
-            return 0
-        for row in rows:
-            row.status = "retry"
-            row.nextAttemptAt = now_iso_value
-            row.claimedAt = None
-            if not str(row.lastError or "").strip():
-                row.lastError = "Recovered stale processing dispatch row after restart/crash."
-            row.updatedAt = now_iso_value
-            session.add(row)
-        session.commit()
-        return len(rows)
-
-
-def _openclaw_chat_dispatch_auto_quarantine_stale_rows(now_dt: datetime) -> int:
-    """Fail stale synthetic/test rows so they cannot permanently block hot traffic."""
-    if not _openclaw_chat_dispatch_auto_quarantine_enabled():
-        return 0
-    older_than_seconds = _openclaw_chat_dispatch_auto_quarantine_seconds()
-    if older_than_seconds <= 0:
-        return 0
-    cutoff_iso = _iso_after_seconds(now_dt, -float(older_than_seconds))
-    stamp = now_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    synthetic_only = _openclaw_chat_dispatch_auto_quarantine_synthetic_only()
-    reason = "auto_quarantined:stale_dispatch_backlog"
-    quarantined = 0
-
-    with get_session() as session:
-        rows = session.exec(
-            select(OpenClawChatDispatchQueue)
-            .where(OpenClawChatDispatchQueue.status.in_(["pending", "retry", "processing"]))
-            .where(OpenClawChatDispatchQueue.createdAt <= cutoff_iso)
-            .order_by(OpenClawChatDispatchQueue.createdAt.asc(), OpenClawChatDispatchQueue.id.asc())
-            .limit(_openclaw_chat_dispatch_auto_quarantine_limit())
-        ).all()
-        if not rows:
-            return 0
-        for row in rows:
-            if synthetic_only and not _openclaw_chat_dispatch_row_looks_synthetic(row):
-                continue
-            row.status = "failed"
-            row.completedAt = stamp
-            row.claimedAt = None
-            row.nextAttemptAt = stamp
-            row.lastError = reason
-            row.updatedAt = stamp
-            session.add(row)
-            quarantined += 1
-        if quarantined > 0:
-            session.commit()
-    return quarantined
-
-
-def _openclaw_chat_dispatch_resolve_attachments(attachment_ids: list[str]) -> list[dict[str, Any]] | None:
-    ids = [str(att_id).strip() for att_id in attachment_ids if str(att_id).strip()]
-    if not ids:
-        return None
-    unique_ids: list[str] = []
-    seen: set[str] = set()
-    for att_id in ids:
-        if att_id in seen:
-            continue
-        seen.add(att_id)
-        unique_ids.append(att_id)
-    with get_session() as session:
-        rows = session.exec(select(Attachment).where(Attachment.id.in_(unique_ids))).all()
-    by_id = {row.id: row for row in rows}
-    missing = [att_id for att_id in unique_ids if att_id not in by_id]
-    if missing:
-        raise RuntimeError(f"attachment metadata missing: {', '.join(missing)}")
-    attachments_task: list[dict[str, Any]] = []
-    for att_id in unique_ids:
-        row = by_id[att_id]
-        attachments_task.append(
-            {
-                "id": row.id,
-                "fileName": row.fileName,
-                "mimeType": _normalize_mime_type(row.mimeType),
-                "sizeBytes": row.sizeBytes,
-                "storagePath": row.storagePath,
-            }
-        )
-    return attachments_task
-
-
-def _recover_openclaw_chat_dispatch_queue() -> int:
-    lookback_seconds = _openclaw_chat_dispatch_recovery_lookback_seconds()
-    max_rows = _openclaw_chat_dispatch_recovery_max_rows()
-    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=lookback_seconds)).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
-    )
-    recovered = 0
-    with get_session() as session:
-        rows = (
-            session.exec(
-                select(LogEntry)
-                .where(LogEntry.type == "conversation")
-                .where(func.lower(func.coalesce(LogEntry.agentId, "")) == "user")
-                .where(LogEntry.createdAt >= cutoff)
-                .order_by(LogEntry.createdAt.desc())
-                .limit(max_rows)
-            ).all()
-        )
-        for row in rows:
-            source = row.source if isinstance(row.source, dict) else None
-            if not source:
-                continue
-            if str(source.get("channel") or "").strip().lower() != "openclaw":
-                continue
-            request_id = str(source.get("requestId") or source.get("messageId") or "").strip()
-            session_key = str(source.get("sessionKey") or "").strip()
-            if not request_id or not session_key:
-                continue
-            if not request_id.lower().startswith("occhat-"):
-                continue
-            existing = session.exec(
-                select(OpenClawChatDispatchQueue.id).where(OpenClawChatDispatchQueue.requestId == request_id).limit(1)
-            ).first()
-            if existing is not None:
-                continue
-            if _openclaw_watchdog_has_terminal_system_log(session, request_id):
-                continue
-            if _openclaw_watchdog_has_assistant_by_request(session, request_id, row.createdAt):
-                continue
-            attachment_ids: list[str] = []
-            if isinstance(row.attachments, list):
-                for attachment_meta in row.attachments:
-                    if not isinstance(attachment_meta, dict):
-                        continue
-                    att_id = str(attachment_meta.get("id") or "").strip()
-                    if att_id:
-                        attachment_ids.append(att_id)
-            queue_row = OpenClawChatDispatchQueue(
-                requestId=request_id,
-                sessionKey=session_key,
-                agentId=str(source.get("agentId") or "main").strip() or "main",
-                sentAt=normalize_iso(str(row.createdAt or "")) or now_iso(),
-                message=str(row.content or ""),
-                attachmentIds=attachment_ids,
-                status="pending",
-                attempts=0,
-                nextAttemptAt=now_iso(),
-                claimedAt=None,
-                completedAt=None,
-                lastError=None,
-                createdAt=now_iso(),
-                updatedAt=now_iso(),
-            )
-            session.add(queue_row)
-            recovered += 1
-        if recovered > 0:
-            session.commit()
-    return recovered
-
-
-_OPENCLAW_CHAT_DISPATCH_MAINTENANCE_LOCK = threading.Lock()
-_OPENCLAW_CHAT_DISPATCH_LAST_RECOVERY_AT = 0.0
-_OPENCLAW_CHAT_DISPATCH_WAKEUP = threading.Event()
-
-
-def _openclaw_chat_dispatch_wakeup() -> None:
-    """Signal all dispatch workers that a new job is available, bypassing the poll interval."""
-    _OPENCLAW_CHAT_DISPATCH_WAKEUP.set()
-
-
-def _openclaw_chat_dispatch_worker(*, worker_index: int = 1) -> None:
-    global _OPENCLAW_CHAT_DISPATCH_LAST_RECOVERY_AT
-    poll_seconds = _openclaw_chat_dispatch_poll_seconds()
-    max_attempts = _openclaw_chat_dispatch_max_attempts()
-
-    while True:
-        job: dict[str, Any] | None = None
-        now_dt = datetime.now(timezone.utc)
-        now_iso_value = now_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-        try:
-            now_mono = time.monotonic()
-            if _OPENCLAW_CHAT_DISPATCH_MAINTENANCE_LOCK.acquire(blocking=False):
-                try:
-                    _openclaw_chat_dispatch_auto_quarantine_stale_rows(now_dt)
-                    _openclaw_chat_dispatch_recover_stale_processing_jobs(now_dt)
-                    if now_mono - _OPENCLAW_CHAT_DISPATCH_LAST_RECOVERY_AT >= _openclaw_chat_dispatch_recovery_interval_seconds():
-                        _recover_openclaw_chat_dispatch_queue()
-                        _OPENCLAW_CHAT_DISPATCH_LAST_RECOVERY_AT = now_mono
-                finally:
-                    _OPENCLAW_CHAT_DISPATCH_MAINTENANCE_LOCK.release()
-
-            job = _openclaw_chat_dispatch_claim_next_job(now_iso_value)
-            if job is None:
-                _OPENCLAW_CHAT_DISPATCH_WAKEUP.wait(timeout=poll_seconds)
-                _OPENCLAW_CHAT_DISPATCH_WAKEUP.clear()
-                continue
-
-            base_url = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789").strip().rstrip("/")
-            gateway_token = (os.getenv("OPENCLAW_GATEWAY_TOKEN") or "").strip()
-            if not base_url:
-                raise RuntimeError("OPENCLAW_BASE_URL is not configured")
-            if not gateway_token:
-                raise RuntimeError("OPENCLAW_GATEWAY_TOKEN is required")
-
-            attachments = _openclaw_chat_dispatch_resolve_attachments(list(job.get("attachmentIds") or []))
-            _run_openclaw_chat(
-                str(job.get("requestId") or ""),
-                base_url=base_url,
-                token=gateway_token,
-                session_key=str(job.get("sessionKey") or ""),
-                agent_id=str(job.get("agentId") or "main"),
-                sent_at=str(job.get("sentAt") or ""),
-                message=str(job.get("message") or ""),
-                attachments=attachments,
-                dispatch_attempt=int(job.get("attempts") or 1),
-                raise_on_error=True,
-                log_errors=False,
-            )
-            _openclaw_chat_dispatch_mark_sent(int(job.get("id") or 0), now_iso_value)
-            time.sleep(0.05)
-            continue
-        except Exception as exc:
-            error_text = _clip(str(exc) or type(exc).__name__, 1600)
-            try:
-                if job is not None and int(job.get("id") or 0) > 0:
-                    attempts = int(job.get("attempts", 0) or 0)
-                    exhausted = max_attempts > 0 and attempts >= max_attempts
-                    terminal = exhausted or _openclaw_chat_dispatch_is_terminal_error(error_text)
-                    if terminal:
-                        _openclaw_chat_dispatch_mark_failed(int(job.get("id") or 0), error=error_text, now_iso_value=now_iso_value)
-                        detail = f"OpenClaw durable dispatch failed. requestId={str(job.get('requestId') or '')}"
-                        if exhausted:
-                            detail = (
-                                "OpenClaw durable dispatch exhausted retry attempts "
-                                f"({attempts}/{max_attempts}). requestId={str(job.get('requestId') or '')}"
-                            )
-                        _log_openclaw_chat_error(
-                            session_key=str(job.get("sessionKey") or ""),
-                            request_id=str(job.get("requestId") or ""),
-                            detail=detail,
-                            raw=error_text,
-                        )
-                    else:
-                        _openclaw_chat_dispatch_mark_retry(int(job.get("id") or 0), error=error_text, now_dt=now_dt)
-            except Exception:
-                pass
-            time.sleep(poll_seconds)
-
+# --- dispatch_remaining: moved to .dispatch module ---
 
 def _snooze_worker() -> None:
     poll_interval = float(os.getenv("CLAWBOARD_SNOOZE_POLL_SECONDS", "15"))
-    while True:
+    while not _BACKGROUND_STOP_EVENT.is_set():
         try:
             now = now_iso()
             with get_session() as session:
@@ -3422,8 +1344,9 @@ def _snooze_worker() -> None:
                     for task in due_tasks:
                         event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
         except Exception:
-            pass
-        time.sleep(poll_interval)
+            _log_background_worker_exception("clawboard-snooze-worker")
+        if _background_sleep(poll_interval):
+            break
 
 
 def _session_routing_gc_worker() -> None:
@@ -3438,7 +1361,7 @@ def _session_routing_gc_worker() -> None:
         return
     batch_size = int(os.getenv("CLAWBOARD_SESSION_ROUTING_GC_BATCH", "500"))
     # Best-effort: run forever, never crash the API.
-    while True:
+    while not _BACKGROUND_STOP_EVENT.is_set():
         try:
             cutoff_dt = datetime.now(timezone.utc) - timedelta(days=ttl_days)
             cutoff = cutoff_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -3456,8 +1379,9 @@ def _session_routing_gc_worker() -> None:
                         session.delete(row)
                     session.commit()
         except Exception:
-            pass
-        time.sleep(poll_interval)
+            _log_background_worker_exception("clawboard-session-routing-gc")
+        if _background_sleep(poll_interval):
+            break
 
 
 def _openclaw_request_route_gc_worker() -> None:
@@ -3467,7 +1391,7 @@ def _openclaw_request_route_gc_worker() -> None:
     if ttl_days <= 0:
         return
     batch_size = int(os.getenv("CLAWBOARD_OPENCLAW_REQUEST_ROUTE_GC_BATCH", "1000"))
-    while True:
+    while not _BACKGROUND_STOP_EVENT.is_set():
         try:
             cutoff_dt = datetime.now(timezone.utc) - timedelta(days=ttl_days)
             cutoff = cutoff_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -3485,8 +1409,9 @@ def _openclaw_request_route_gc_worker() -> None:
                         session.delete(row)
                     session.commit()
         except Exception:
-            pass
-        time.sleep(poll_interval)
+            _log_background_worker_exception("clawboard-openclaw-request-route-gc")
+        if _background_sleep(poll_interval):
+            break
 
 
 def _idempotency_key(payload: LogAppend, header_key: str | None) -> str | None:
@@ -6677,25 +4602,8 @@ def download_attachment(attachment_id: str):
     )
 
 
-_OPENCLAW_CHAT_SESSION_LOCKS: dict[str, threading.Lock] = {}
-_OPENCLAW_CHAT_SESSION_LOCKS_GUARD = threading.Lock()
 
-
-def _openclaw_chat_dispatch_session_key(session_key: str) -> str:
-    base_key = (str(session_key or "").split("|", 1)[0] or "").strip()
-    return base_key or str(session_key or "").strip()
-
-
-def _openclaw_chat_acquire_session_lock(session_key: str) -> threading.Lock:
-    key = _openclaw_chat_dispatch_session_key(session_key)
-    with _OPENCLAW_CHAT_SESSION_LOCKS_GUARD:
-        existing = _OPENCLAW_CHAT_SESSION_LOCKS.get(key)
-        if existing is not None:
-            return existing
-        lock = threading.Lock()
-        _OPENCLAW_CHAT_SESSION_LOCKS[key] = lock
-        return lock
-
+# --- session_locks: moved to .session module ---
 
 _ORCHESTRATION_TERMINAL_ITEM_STATUSES = {"done", "failed", "cancelled"}
 _ORCHESTRATION_ACTIVE_RUN_STATUSES = {"running", "stalled"}
@@ -6811,7 +4719,16 @@ def _orchestration_poll_seconds() -> float:
         value = float(raw)
     except Exception:
         return 5.0
-    return max(2.0, min(300.0, value))
+    clamped = max(2.0, min(300.0, value))
+    if clamped != value:
+        _warn_env_clamp_once(
+            "CLAWBOARD_ORCHESTRATION_POLL_SECONDS",
+            raw,
+            clamped=clamped,
+            min_value=2.0,
+            max_value=300.0,
+        )
+    return clamped
 
 
 def _orchestration_completed_subagent_follow_up_grace_seconds() -> float:
@@ -9658,12 +7575,13 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
 
 def _orchestration_worker() -> None:
     poll_seconds = _orchestration_poll_seconds()
-    while True:
+    while not _BACKGROUND_STOP_EVENT.is_set():
         try:
             _orchestration_tick_once()
         except Exception:
-            pass
-        time.sleep(poll_seconds)
+            _log_background_worker_exception("clawboard-orchestration-worker")
+        if _background_sleep(poll_seconds):
+            break
 
 
 def _orchestration_context_snapshot(session: Any, *, session_key: str | None, limit: int = 3) -> list[dict[str, Any]]:
@@ -9741,6 +7659,7 @@ def _run_openclaw_chat(
 
     Clawboard is an external client of the OpenClaw Gateway.
     """
+    dispatch_message = message
 
     def _prepare_dispatch_attachments() -> list[dict[str, Any]]:
         prepared: list[dict[str, Any]] = []
@@ -9768,6 +7687,7 @@ def _run_openclaw_chat(
                     "mimeType": mime_type,
                     "fileName": filename,
                     "sizeBytes": len(data_bytes),
+                    "dataBytes": data_bytes,
                     "content": base64.b64encode(data_bytes).decode("ascii"),
                 }
             )
@@ -9788,7 +7708,7 @@ def _run_openclaw_chat(
         *,
         require_agent_visible_files: bool,
     ) -> None:
-        content_parts: list[dict[str, Any]] = [{"type": "input_text", "text": message}]
+        content_parts: list[dict[str, Any]] = [{"type": "input_text", "text": dispatch_message}]
         for prepared in prepared_attachments:
             mime_type = _normalize_mime_type(str(prepared.get("mimeType") or "application/octet-stream"))
             filename = _sanitize_attachment_filename(str(prepared.get("fileName") or "attachment"))
@@ -9967,7 +7887,7 @@ def _run_openclaw_chat(
         "idempotencyKey": _openclaw_chat_request_id_with_suffix(request_id, suffix=dispatch_retry_suffix),
     }
     send_timeout_seconds = _openclaw_chat_send_rpc_timeout_seconds()
-    lock = _openclaw_chat_acquire_session_lock(session_key)
+    lock_key, lock = _openclaw_chat_acquire_session_lock(session_key)
     lock.acquire()
     typing_stopped = False
 
@@ -10030,6 +7950,24 @@ def _run_openclaw_chat(
         except RuntimeError as exc:
             detail = f"OpenClaw chat failed: {exc}. requestId={request_id}"
             return _handle_failure(detail=detail, raw=str(exc), cause=exc)
+
+        if prepared_attachments:
+            try:
+                _ensure_openclaw_attachment_model_for_dispatch(
+                    session_key=session_key,
+                    agent_id=agent_id,
+                    attachments=prepared_attachments,
+                )
+                stage_info = _stage_openclaw_chat_attachments_for_agents(
+                    request_id=request_id,
+                    session_key=session_key,
+                    attachments=prepared_attachments,
+                )
+                dispatch_message = f"{message}\n\n{_build_openclaw_attachment_handoff_note(stage_info)}"
+            except Exception as exc:
+                raw = str(exc or "")
+                detail = f"OpenClaw chat failed: {raw or exc}. requestId={request_id}"
+                return _handle_failure(detail=detail, raw=raw, cause=exc)
 
         prefer_openresponses = _openclaw_chat_should_use_openresponses(
             is_board_session=is_board_session,
@@ -10320,7 +8258,7 @@ def _run_openclaw_chat(
         # openclaw.thread_work active:false terminal signals.
         # We intentionally do not force typing:false here so long-running accepted/in-flight
         # requests stay visible until a true terminal signal appears.
-        lock.release()
+        _openclaw_chat_release_session_lock(lock_key, lock)
 
 
 def _openclaw_chat_send_state(payload: Any) -> tuple[str | None, str | None]:
@@ -11236,13 +9174,22 @@ class _OpenClawAssistantLogWatchdog:
         self._heap: list[tuple[float, str, str, str, float, float]] = []
         self._thread = threading.Thread(target=self._run, name="clawboard-openclaw-watchdog", daemon=True)
         self._started = False
+        self._stopping = False
 
     def start(self) -> None:
         with self._cv:
             if self._started:
                 return
             self._started = True
+            self._stopping = False
             self._thread.start()
+
+    def stop(self) -> None:
+        with self._cv:
+            self._stopping = True
+            self._cv.notify_all()
+        if self._thread.is_alive():
+            self._thread.join(timeout=2.0)
 
     def schedule(
         self,
@@ -11275,8 +9222,10 @@ class _OpenClawAssistantLogWatchdog:
     def _run(self) -> None:
         while True:
             with self._cv:
-                while not self._heap:
+                while not self._heap and not self._stopping:
                     self._cv.wait()
+                if self._stopping:
+                    return
                 due, base_key, request_id, sent_at, poll_seconds, idle_seconds = self._heap[0]
                 now = time.time()
                 if due > now:
@@ -11301,7 +9250,7 @@ class _OpenClawAssistantLogWatchdog:
                         idle_seconds=idle_seconds,
                     )
             except Exception:
-                # Never crash the watchdog thread.
+                _log_background_worker_exception("clawboard-openclaw-watchdog")
                 try:
                     self.schedule(
                         session_key=base_key,
@@ -11558,6 +9507,15 @@ def _get_openclaw_assistant_log_watchdog() -> _OpenClawAssistantLogWatchdog:
             _OPENCLAW_ASSISTANT_LOG_WATCHDOG = _OpenClawAssistantLogWatchdog()
             _OPENCLAW_ASSISTANT_LOG_WATCHDOG.start()
         return _OPENCLAW_ASSISTANT_LOG_WATCHDOG
+
+
+def _shutdown_openclaw_assistant_log_watchdog() -> None:
+    global _OPENCLAW_ASSISTANT_LOG_WATCHDOG
+    with _OPENCLAW_ASSISTANT_LOG_WATCHDOG_LOCK:
+        watchdog = _OPENCLAW_ASSISTANT_LOG_WATCHDOG
+        _OPENCLAW_ASSISTANT_LOG_WATCHDOG = None
+    if watchdog is not None:
+        watchdog.stop()
 
 
 def _schedule_openclaw_assistant_log_check(
@@ -13203,7 +11161,7 @@ def _openclaw_gateway_history_sync_worker() -> None:
     error_streak = 0
     degraded_streak = 0
     sleep_seconds = float(poll_seconds)
-    while True:
+    while not _BACKGROUND_STOP_EVENT.is_set():
         try:
             stats = _sync_openclaw_gateway_history_once()
             failed_sessions = int((stats or {}).get("failedSessions") or 0)
@@ -13246,7 +11204,8 @@ def _openclaw_gateway_history_sync_worker() -> None:
             error_streak = min(8, error_streak + 1)
             degraded_streak = 0
             sleep_seconds = min(max_backoff, float(poll_seconds) * float(2 ** error_streak))
-        time.sleep(max(5.0, float(sleep_seconds)))
+        if _background_sleep(max(5.0, float(sleep_seconds))):
+            break
 
 
 def _resolve_board_send_target(
@@ -13993,6 +11952,251 @@ def _resolve_openclaw_agent_workspaces() -> list[dict[str, Any]]:
     return ordered
 
 
+def _openclaw_agent_env_suffix(agent_id: str) -> str | None:
+    safe = re.sub(r"[^A-Z0-9]+", "_", str(agent_id or "").strip().upper()).strip("_")
+    return safe or None
+
+
+def _openclaw_model_config_values(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        value = raw.strip()
+        return [value] if value else []
+    if not isinstance(raw, dict):
+        return []
+    values: list[str] = []
+    primary = str(raw.get("primary") or "").strip()
+    if primary:
+        values.append(primary)
+    fallbacks = raw.get("fallbacks")
+    if isinstance(fallbacks, list):
+        for item in fallbacks:
+            value = str(item or "").strip()
+            if value:
+                values.append(value)
+    return values
+
+
+def _split_model_ref(raw: Any) -> tuple[str, str] | None:
+    text = str(raw or "").strip()
+    if not text or "/" not in text:
+        return None
+    provider, model = text.split("/", 1)
+    provider = provider.strip()
+    model = model.strip()
+    if not provider or not model:
+        return None
+    return provider, model
+
+
+def _openclaw_model_supports_image(cfg: dict[str, Any], raw_model_ref: Any) -> bool:
+    parsed = _split_model_ref(raw_model_ref)
+    if not parsed:
+        return False
+    provider, model_id = parsed
+    providers_cfg = cfg.get("models") if isinstance(cfg.get("models"), dict) else {}
+    providers = providers_cfg.get("providers") if isinstance(providers_cfg.get("providers"), dict) else {}
+    provider_entry = None
+    for key, value in providers.items():
+        if str(key or "").strip().lower() == provider.lower() and isinstance(value, dict):
+            provider_entry = value
+            break
+    if not isinstance(provider_entry, dict):
+        return False
+    catalog = provider_entry.get("models")
+    if not isinstance(catalog, list):
+        return False
+    for entry in catalog:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = str(entry.get("id") or "").strip()
+        if entry_id.lower() != model_id.lower():
+            continue
+        inputs = entry.get("input")
+        if not isinstance(inputs, list):
+            return False
+        return any(str(item or "").strip().lower() == "image" for item in inputs)
+    return False
+
+
+def _openclaw_chat_attachments_require_vision(attachments: list[dict[str, Any]] | None) -> bool:
+    if not attachments:
+        return False
+    for attachment in attachments:
+        mime_type = _normalize_mime_type(str(attachment.get("mimeType") or ""))
+        if mime_type in ATTACHMENT_IMAGE_MIME_TYPES or mime_type == "application/pdf":
+            return True
+    return False
+
+
+def _resolve_openclaw_attachment_model_ref(agent_id: str, attachments: list[dict[str, Any]] | None) -> str | None:
+    if not _openclaw_chat_attachments_require_vision(attachments):
+        return None
+    suffix = _openclaw_agent_env_suffix(agent_id)
+    env_candidates: list[str] = []
+    if suffix:
+        specific = str(os.getenv(f"CLAWBOARD_OPENCLAW_ATTACHMENT_MODEL_{suffix}") or "").strip()
+        if specific:
+            env_candidates.append(specific)
+    generic = str(os.getenv("CLAWBOARD_OPENCLAW_ATTACHMENT_MODEL") or "").strip()
+    if generic:
+        env_candidates.append(generic)
+    if env_candidates:
+        return env_candidates[0]
+
+    cfg = _read_openclaw_install_config()
+    agents_cfg = cfg.get("agents") if isinstance(cfg.get("agents"), dict) else {}
+    defaults_cfg = agents_cfg.get("defaults") if isinstance(agents_cfg.get("defaults"), dict) else {}
+    image_model_values = _openclaw_model_config_values(defaults_cfg.get("imageModel"))
+    if image_model_values:
+        return image_model_values[0]
+
+    for candidate in _openclaw_model_config_values(defaults_cfg.get("model")):
+        if _openclaw_model_supports_image(cfg, candidate):
+            return candidate
+    return None
+
+
+def _safe_openclaw_attachment_path_token(raw: Any, *, fallback: str) -> str:
+    text = str(raw or "").strip()
+    normalized = re.sub(r"[^a-z0-9._-]+", "-", text.lower()).strip("._-")
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:10] if text else ""
+    if len(normalized) > 48:
+        normalized = normalized[:48].rstrip("._-")
+    if not normalized:
+        normalized = fallback
+    if digest:
+        return f"{normalized}-{digest}"
+    return normalized
+
+
+def _openclaw_attachment_stage_relative_dir(*, session_key: str, request_id: str) -> str:
+    session_token = _safe_openclaw_attachment_path_token(session_key, fallback="session")
+    request_token = _safe_openclaw_attachment_path_token(request_id, fallback="request")
+    return "/".join([".", ".openclaw", "clawboard-attachments", session_token, request_token])
+
+
+def _stage_openclaw_chat_attachments_for_agents(
+    *,
+    request_id: str,
+    session_key: str,
+    attachments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    relative_dir = _openclaw_attachment_stage_relative_dir(session_key=session_key, request_id=request_id)
+    relative_parts = [part for part in relative_dir.split("/") if part and part != "."]
+    files_manifest: list[dict[str, Any]] = []
+    for attachment in attachments:
+        filename = _sanitize_attachment_filename(str(attachment.get("fileName") or "attachment"))
+        files_manifest.append(
+            {
+                "id": str(attachment.get("id") or "").strip(),
+                "fileName": filename,
+                "mimeType": _normalize_mime_type(str(attachment.get("mimeType") or "application/octet-stream")),
+                "sizeBytes": int(attachment.get("sizeBytes") or 0),
+                "relativePath": f"{relative_dir}/{filename}",
+            }
+        )
+
+    manifest = {
+        "requestId": request_id,
+        "sessionKey": session_key,
+        "relativeDir": relative_dir,
+        "files": files_manifest,
+    }
+    manifest_text = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+
+    staged_workspaces: list[dict[str, str]] = []
+    seen_workspaces: set[str] = set()
+    for row in _resolve_openclaw_agent_workspaces():
+        workspace_dir = _normalize_fs_path(row.get("workspaceDir"))
+        if not workspace_dir:
+            continue
+        workspace_key = workspace_dir.lower() if os.name == "nt" else workspace_dir
+        if workspace_key in seen_workspaces:
+            continue
+        seen_workspaces.add(workspace_key)
+        target_dir = Path(workspace_dir, *relative_parts)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for attachment in attachments:
+            filename = _sanitize_attachment_filename(str(attachment.get("fileName") or "attachment"))
+            data_bytes = attachment.get("dataBytes")
+            if not isinstance(data_bytes, (bytes, bytearray)):
+                raise RuntimeError(f"attachment staging missing bytes ({attachment.get('id') or filename})")
+            target_path = target_dir / filename
+            target_path.write_bytes(bytes(data_bytes))
+        (target_dir / ".manifest.json").write_text(manifest_text, encoding="utf-8")
+        staged_workspaces.append(
+            {
+                "agentId": str(row.get("agentId") or "").strip() or "main",
+                "workspaceDir": workspace_dir,
+            }
+        )
+
+    if not staged_workspaces:
+        raise RuntimeError("unable to stage attachments into any OpenClaw workspace")
+
+    return {
+        "relativeDir": relative_dir,
+        "manifestRelativePath": f"{relative_dir}/.manifest.json",
+        "files": files_manifest,
+        "workspaces": staged_workspaces,
+    }
+
+
+def _build_openclaw_attachment_handoff_note(stage_info: dict[str, Any]) -> str:
+    files = stage_info.get("files") if isinstance(stage_info.get("files"), list) else []
+    file_summary = ", ".join(
+        str(item.get("fileName") or "").strip()
+        for item in files
+        if isinstance(item, dict) and str(item.get("fileName") or "").strip()
+    )
+    relative_paths = [
+        str(item.get("relativePath") or "").strip()
+        for item in files
+        if isinstance(item, dict) and str(item.get("relativePath") or "").strip()
+    ]
+    lines = [
+        "[Clawboard attachment context]",
+        f"Staged path in every agent workspace: {stage_info.get('relativeDir')}",
+        f"Manifest: {stage_info.get('manifestRelativePath')}",
+        "If you need to inspect an image attachment directly, use the image tool on the exact workspace-relative file path below.",
+        "If you delegate this work, include the same exact file path (or staged directory) in the subagent task so the child can inspect the files from its own workspace.",
+    ]
+    if file_summary:
+        lines.insert(3, f"Files: {file_summary}")
+    if relative_paths:
+        insert_at = 4 if file_summary else 3
+        lines[insert_at:insert_at] = ["Exact workspace-relative file paths:", *[f"- {path}" for path in relative_paths]]
+    return "\n".join(lines)
+
+
+def _ensure_openclaw_attachment_model_for_dispatch(
+    *,
+    session_key: str,
+    agent_id: str,
+    attachments: list[dict[str, Any]] | None,
+) -> str | None:
+    if not _openclaw_chat_attachments_require_vision(attachments):
+        return None
+    model_ref = _resolve_openclaw_attachment_model_ref(agent_id, attachments)
+    if not model_ref:
+        raise RuntimeError(
+            "image attachments require a vision-capable OpenClaw model; set agents.defaults.imageModel.primary "
+            "or CLAWBOARD_OPENCLAW_ATTACHMENT_MODEL"
+        )
+    asyncio.run(
+        gateway_rpc(
+            "sessions.patch",
+            {
+                "key": session_key,
+                "model": model_ref,
+            },
+            scopes=["operator.admin"],
+            timeout_seconds=min(8.0, _openclaw_chat_send_rpc_timeout_seconds()),
+        )
+    )
+    return model_ref
+
+
 def _normalize_http_base_url(raw: Any) -> str | None:
     text = str(raw or "").strip()
     if not text:
@@ -14202,42 +12406,9 @@ def openclaw_chat_dispatch_status():
     }
 
 
-_OPENCLAW_CHAT_DISPATCH_SYNTHETIC_MARKERS = (
-    "topic-smoke",
-    "topic-live-",
-    "topic-debug",
-    "topic-canary",
-    "durable-smoke",
-    "restart-canary",
-    "hot-canary",
-    "priority-check",
-    "synthetic",
-    "e2e",
-    "probe",
-)
 
+# --- dispatch_synthetic: moved to .dispatch module ---
 
-def _openclaw_chat_dispatch_row_looks_synthetic(row: OpenClawChatDispatchQueue) -> bool:
-    haystack_parts = [
-        str(getattr(row, "sessionKey", "") or "").lower(),
-        str(getattr(row, "message", "") or "").lower(),
-        str(getattr(row, "requestId", "") or "").lower(),
-    ]
-    for part in haystack_parts:
-        if not part:
-            continue
-        for marker in _OPENCLAW_CHAT_DISPATCH_SYNTHETIC_MARKERS:
-            if marker in part:
-                return True
-    return False
-
-
-@app.post(
-    "/api/openclaw/chat-dispatch/quarantine",
-    response_model=OpenClawChatDispatchQuarantineResponse,
-    dependencies=[Depends(require_token)],
-    tags=["openclaw"],
-)
 def openclaw_chat_dispatch_quarantine(
     payload: OpenClawChatDispatchQuarantineRequest = Body(...),
 ):

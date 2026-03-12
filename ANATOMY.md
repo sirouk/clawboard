@@ -4,6 +4,11 @@ This document is a full implementation map of how Clawboard works today: user-fa
 
 It is intended to be read with code open.
 
+Documentation contract:
+- `README.md` gives the concise orchestration gist.
+- `ANATOMY.md` is the qualified, exhaustive system reference.
+- Claims here should trace to live code, config, or tests when possible; if something is inferred, unknown, or blocked, that status should be stated explicitly instead of being implied as covered.
+
 ## Question
 
 How does Clawboard work end-to-end, including every major user path, every scope/visibility rule, and the exact code paths between UI actions, APIs, classifiers, retrieval, and realtime updates?

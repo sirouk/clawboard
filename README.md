@@ -6,6 +6,14 @@ It captures activity, organizes it into useful structure, and feeds the right co
 OpenClaw stays the agent runtime.
 Clawboard adds durable memory, classification, retrieval, and operator-facing UI.
 
+## Documentation Contract
+
+- `README.md` is the short orchestration map: what Clawboard is, how it fits beside OpenClaw, and the main runtime flow.
+- `ANATOMY.md` is the exhaustive implementation reference: the qualified end-to-end detail, code-path map, invariants, recovery paths, and explicit unknowns/blockers.
+
+Read this file first for the gist.
+Read `ANATOMY.md` when you need the full, checked system picture.
+
 ## Why It Exists
 
 - Keep long-running agent work coherent across sessions.

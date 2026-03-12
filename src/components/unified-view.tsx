@@ -1193,6 +1193,18 @@ function normalizeAgentToken(value: string | undefined | null) {
   return String(value ?? "").trim().toLowerCase();
 }
 
+function hasActiveTextSelectionWithin(root: HTMLElement | null) {
+  if (!root || typeof window === "undefined") return false;
+  const selection = window.getSelection?.();
+  if (!selection || selection.rangeCount < 1 || selection.isCollapsed) return false;
+  if (!selection.toString().trim()) return false;
+  const anchorNode = selection.anchorNode;
+  const focusNode = selection.focusNode;
+  if (anchorNode && root.contains(anchorNode)) return true;
+  if (focusNode && root.contains(focusNode)) return true;
+  return false;
+}
+
 function deriveTaskWorkspaceAttention(
   entries: LogEntry[],
   workspaceByAgentId: Map<string, OpenClawWorkspace>
@@ -1416,6 +1428,7 @@ function SwipeRevealRow({
               // but still allow desktop right-click-open inside no-swipe containers
               // like Topic chat timelines.
               if (target?.closest("button, a, input, textarea, select")) return;
+              if (hasActiveTextSelectionWithin(event.currentTarget)) return;
               if (typeof window !== "undefined" && !window.matchMedia("(min-width: 768px)").matches) return;
               event.preventDefault();
               event.stopPropagation();
@@ -5344,30 +5357,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   ]);
 
   const toggleTaskExpanded = (topicId: string, taskId: string) => {
-    if (!mdUp) {
-      const isTaskTarget = mobileLayer === "chat" && mobileChatTarget?.taskId === taskId;
-      if (!isTaskTarget) {
-        setExpandedTopics((prev) => {
-          if (prev.has(topicId)) return prev;
-          const next = new Set(prev);
-          next.add(topicId);
-          return next;
-        });
-        setExpandedTasks((prev) => {
-          if (prev.has(taskId)) return prev;
-          const next = new Set(prev);
-          next.add(taskId);
-          return next;
-        });
-        openMobileTaskChat(topicId, taskId);
-        pushUrl({
-          topics: Array.from(new Set([...expandedTopicsSafe, topicId])),
-          tasks: Array.from(new Set([...expandedTasksSafe, taskId])),
-        });
-        return;
-      }
-    }
-
     const next = new Set(expandedTasksSafe);
     const nextTopics = new Set(expandedTopicsSafe);
     if (next.has(taskId)) {
@@ -5377,9 +5366,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       next.add(taskId);
       nextTopics.add(topicId);
       scheduleScrollChatToBottom(`task:${taskId}`);
-      if (!mdUp) {
-        openMobileTaskChat(topicId, taskId);
-      }
     }
     setExpandedTopics(nextTopics);
     setExpandedTasks(next);

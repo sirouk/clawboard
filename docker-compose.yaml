@@ -13,16 +13,18 @@ services:
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-clawboard_embeddings}
       QDRANT_API_KEY: ${QDRANT_API_KEY:-}
-      OPENCLAW_GATEWAY_IDENTITY_DIR: /root/.openclaw
+      OPENCLAW_GATEWAY_IDENTITY_DIR: ${OPENCLAW_HOME:-/tmp/.openclaw}
       # CLAWBOARD_TOKEN is read from .env via env_file
     volumes:
       - ./data:/app/data
-      - ${HOME}/.openclaw:/root/.openclaw:ro
+      - ${OPENCLAW_HOME:-/tmp/.openclaw}:${OPENCLAW_HOME:-/tmp/.openclaw}
     ports:
       - "8010:8000"
     depends_on:
-      - db
-      - qdrant
+      db:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - edge
@@ -54,8 +56,10 @@ services:
       QDRANT_DIM: ${QDRANT_DIM:-384}
       QDRANT_API_KEY: ${QDRANT_API_KEY:-}
     depends_on:
-      - api
-      - qdrant
+      api:
+        condition: service_started
+      qdrant:
+        condition: service_healthy
     volumes:
       - ./data:/data
       - ${HOME}/.openclaw/memory:/data/openclaw-memory:ro
@@ -94,8 +98,11 @@ services:
       CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL: ${CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL:-http://workspace-ide:8080}
     depends_on:
       - api
+      - workspace-ide
+      - workspace-ide-coding
     ports:
       - "3010:3000"
+    restart: unless-stopped
     networks:
       - edge
 
@@ -121,6 +128,8 @@ services:
       WATCHPACK_POLLING_INTERVAL: ${CLAWBOARD_WEB_WATCHPACK_POLLING_INTERVAL:-1000}
     depends_on:
       - api
+      - workspace-ide
+      - workspace-ide-coding
     ports:
       - "3010:3000"
     working_dir: /app
@@ -185,6 +194,12 @@ services:
       - ./data/postgres:/var/lib/postgresql/data
     expose:
       - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-clawboard} -d ${POSTGRES_DB:-clawboard} -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     networks:
       - core
 
@@ -194,6 +209,17 @@ services:
       - ./data/qdrant:/qdrant/storage
     expose:
       - "6333"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /readyz HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && timeout 2 cat <&3 | grep -q \"200 OK\"'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
     networks:
       - core
 

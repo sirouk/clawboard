@@ -2,10 +2,7 @@ import type {
   OpenClawPluginApi,
 } from "openclaw/plugin-sdk";
 
-import fs from "node:fs/promises";
 import crypto from "node:crypto";
-import path from "node:path";
-import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
 
 import {
@@ -13,624 +10,91 @@ import {
   isBoardSessionKey,
   parseBoardSessionKey,
 } from "./session-key.js";
-import { getIgnoreSessionPrefixesFromEnv, shouldIgnoreSessionKey } from "./ignore-session.js";
+import { shouldIgnoreSessionKey } from "./ignore-session.js";
 
-type HookEvent = {
-  [key: string]: unknown;
-};
+import type {
+  BoardScope,
+  ClawboardLoggerConfig,
+  ContextMode,
+  HookEvent,
+  PluginHookAgentContext,
+  PluginHookAgentEndEvent,
+  PluginHookAfterToolCallEvent,
+  PluginHookBeforeAgentStartEvent,
+  PluginHookBeforeMessageWriteEvent,
+  PluginHookBeforeToolCallEvent,
+  PluginHookContextBase,
+  PluginHookMessageContext,
+  PluginHookMessageReceivedEvent,
+  PluginHookMessageSentEvent,
+  PluginHookToolContext,
+  PluginHookToolResultPersistEvent,
+  QueryParamValue,
+  RoutingScope,
+  ActorFlow,
+} from "./types.js";
 
-type PluginHookBeforeAgentStartEvent = HookEvent & {
-  prompt?: string;
-  messages?: unknown[];
-};
+import {
+  BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS,
+  CLAWBOARD_CONTEXT_BEGIN,
+  CLAWBOARD_CONTEXT_END,
+  CLAWBOARD_LOGGER_REGISTERED_SYMBOL,
+  DEFAULT_BOARD_SCOPE_CACHE_MAX_ENTRIES,
+  DEFAULT_BOARD_SCOPE_CACHE_TTL_MS,
+  DEFAULT_CONTEXT_CACHE_FRESH_MS,
+  DEFAULT_CONTEXT_CACHE_MAX_ENTRIES,
+  DEFAULT_CONTEXT_CACHE_TTL_MS,
+  DEFAULT_CONTEXT_FETCH_RETRIES,
+  DEFAULT_CONTEXT_FETCH_TIMEOUT_MS,
+  DEFAULT_CONTEXT_LOG_LIMIT,
+  DEFAULT_CONTEXT_MAX_CHARS,
+  DEFAULT_CONTEXT_TASK_LIMIT,
+  DEFAULT_CONTEXT_TOPIC_LIMIT,
+  DEFAULT_POST_TIMEOUT_MS,
+  DEFAULT_QUEUE,
+  IGNORE_SESSION_PREFIXES,
+  OPENCLAW_REQUEST_ID_MAX_ENTRIES,
+  OPENCLAW_REQUEST_ID_PREFIX,
+  OPENCLAW_REQUEST_ID_TTL_MS,
+} from "./constants.js";
 
-type PluginHookMessageReceivedEvent = HookEvent & {
-  content?: string;
-  metadata?: {
-    sessionKey?: string;
-    [key: string]: unknown;
-  };
-  sessionKey?: string;
-};
-
-type PluginHookMessageSentEvent = HookEvent & {
-  content?: string;
-  metadata?: {
-    sessionKey?: string;
-    [key: string]: unknown;
-  };
-  sessionKey?: string;
-};
-
-type PluginHookBeforeToolCallEvent = HookEvent & {
-  toolName?: string;
-  input?: unknown;
-};
-
-type PluginHookAfterToolCallEvent = HookEvent & {
-  toolName?: string;
-  input?: unknown;
-  output?: unknown;
-  error?: unknown;
-};
-
-type PluginHookToolResultPersistEvent = HookEvent & {
-  toolName?: string;
-  toolCallId?: string;
-  message?: unknown;
-  metadata?: {
-    sessionKey?: string;
-    [key: string]: unknown;
-  };
-  sessionKey?: string;
-  isSynthetic?: boolean;
-};
-
-type PluginHookBeforeMessageWriteEvent = HookEvent & {
-  message?: unknown;
-  metadata?: {
-    sessionKey?: string;
-    [key: string]: unknown;
-  };
-  sessionKey?: string;
-};
-
-type PluginHookAgentEndEvent = HookEvent & {
-  output?: unknown;
-  message?: string;
-  messages?: unknown[];
-};
-
-type PluginHookContextBase = {
-  agentId?: string;
-  sessionKey?: string;
-  channelId?: string;
-  conversationId?: string;
-  accountId?: string;
-  messageProvider?: string;
-  provider?: string;
-  [key: string]: unknown;
-};
-
-type PluginHookMessageContext = PluginHookContextBase;
-type PluginHookToolContext = PluginHookContextBase;
-type PluginHookAgentContext = PluginHookContextBase;
-
-type BoardScope = {
-  topicId: string;
-  taskId?: string;
-  kind: "task";
-  sessionKey: string;
-  inherited: boolean;
-  updatedAt: number;
-};
-
-type RoutingScope = {
-  topicId?: string;
-  taskId?: string;
-  boardScope?: BoardScope;
-};
-
-type ActorFlow = {
-  speakerId?: string;
-  speakerLabel?: string;
-  audienceId?: string;
-  audienceLabel?: string;
-};
-
-type ClawboardLoggerConfig = {
-  baseUrl: string;
-  /** Optional fallback base URLs used when baseUrl has transient network failures. */
-  baseUrlFallbacks?: string[];
-  token?: string;
-  enabled?: boolean;
-  debug?: boolean;
-  queuePath?: string;
-  /**
-   * Optional: send logs to /api/ingest for async queueing (server-side).
-   * Note: this is independent of the plugin's local durable queue.
-   */
-  queue?: boolean;
-  /** Optional: override ingest path (default /api/log or /api/ingest when queue=true). */
-  ingestPath?: string;
-  /** Optional: force all logs into a single topic. */
-  defaultTopicId?: string;
-  /** Optional: force all logs into a single task. */
-  defaultTaskId?: string;
-  /** Optional: additional hook names to register with generic capture handlers. */
-  extraHooks?: string[];
-  /** When true (default), auto-create a topic per OpenClaw sessionKey and attach logs to it. */
-  autoTopicBySession?: boolean;
-  /** When true (default), prepend retrieved Clawboard context before agent start. */
-  contextAugment?: boolean;
-  /**
-   * Context retrieval mode (passed to Clawboard `/api/context`):
-   * - auto: Layer A always, Layer B conditional
-   * - cheap: Layer A only
-   * - full: Layer A + Layer B
-   * - patient: like full, but server may use larger bounded recall limits
-   */
-  contextMode?: "auto" | "cheap" | "full" | "patient";
-  /** Timeout (ms) for context GET calls (e.g. `/api/context`, `/api/search`) in before_agent_start. */
-  contextFetchTimeoutMs?: number;
-  /** Hard cap for prepended context characters. */
-  contextMaxChars?: number;
-  /** Max topics to include in context block. */
-  contextTopicLimit?: number;
-  /** Max tasks to include in context block. */
-  contextTaskLimit?: number;
-  /** Max recent conversation entries to include in context block. */
-  contextLogLimit?: number;
-  /** Retries per mode when context fetch fails (default 1). */
-  contextFetchRetries?: number;
-  /**
-   * Ordered fallback modes when primary mode fails.
-   * Example: ["full","auto","cheap"]
-   */
-  contextFallbackModes?: Array<"auto" | "cheap" | "full" | "patient">;
-  /** Cache TTL for context blocks (ms). */
-  contextCacheTtlMs?: number;
-  /** Max in-memory cached context blocks. */
-  contextCacheMaxEntries?: number;
-  /** If true, return cached context when live fetch fails. */
-  contextUseCacheOnFailure?: boolean;
-  /**
-   * When true, allow the agent to use OpenClaw memory_search/memory_get alongside
-   * Clawboard retrieval context/tools for recall.
-   */
-  enableOpenClawMemorySearch?: boolean;
-  /**
-   * Deprecated backward-compatibility alias for older configs.
-   * Prefer `enableOpenClawMemorySearch`.
-   */
-  disableOpenClawMemorySearch?: boolean;
-};
-
-type ContextMode = "auto" | "cheap" | "full" | "patient";
-
-const DEFAULT_QUEUE = path.join(os.homedir(), ".openclaw", "clawboard-queue.sqlite");
-const SUMMARY_MAX = 72;
-const RAW_MAX = 5000;
-const DEFAULT_CONTEXT_MAX_CHARS = 2200;
-const DEFAULT_CONTEXT_TOPIC_LIMIT = 3;
-const DEFAULT_CONTEXT_TASK_LIMIT = 3;
-const DEFAULT_CONTEXT_LOG_LIMIT = 6;
-const DEFAULT_CONTEXT_FETCH_TIMEOUT_MS = 3000;
-const DEFAULT_CONTEXT_FETCH_RETRIES = 1;
-const DEFAULT_CONTEXT_CACHE_TTL_MS = 45_000;
-const DEFAULT_CONTEXT_CACHE_MAX_ENTRIES = 120;
-const DEFAULT_CONTEXT_CACHE_FRESH_MS = 2500;
-const CLAWBOARD_CONTEXT_BEGIN = "[CLAWBOARD_CONTEXT_BEGIN]";
-const CLAWBOARD_CONTEXT_END = "[CLAWBOARD_CONTEXT_END]";
-const IGNORE_SESSION_PREFIXES = getIgnoreSessionPrefixesFromEnv(process.env);
-/** Longer TTL when resolving subagent scope from DB so long-running subagents stay aligned. Configurable via CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS (default 48). */
-const BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS =
-  envInt("CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS", 48, 1, 168) * 60 * 60 * 1000;
-const OPENCLAW_REQUEST_ID_PREFIX = "occhat-";
-const OPENCLAW_DAY_SECONDS = 24 * 60 * 60;
-const REPLY_DIRECTIVE_TAG_RE =
-  /(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*/gi;
-
-function envInt(name: string, fallback: number, min: number, max: number) {
-  const raw = (process.env[name] ?? "").trim();
-  const parsed = Number.parseInt(raw, 10);
-  const value = Number.isFinite(parsed) ? parsed : fallback;
-  return Math.max(min, Math.min(max, value));
-}
-
-function envBool(name: string, fallback: boolean) {
-  const raw = (process.env[name] ?? "").trim().toLowerCase();
-  if (!raw) return fallback;
-  if (["1", "true", "yes", "on"].includes(raw)) return true;
-  if (["0", "false", "no", "off"].includes(raw)) return false;
-  return fallback;
-}
-
-function isContextMode(value: string): value is ContextMode {
-  return value === "auto" || value === "cheap" || value === "full" || value === "patient";
-}
-
-function parseContextModes(
-  value: string | undefined | null,
-  fallback: ContextMode[] = [],
-) {
-  const input = typeof value === "string" ? value : "";
-  if (!input.trim()) return [...fallback];
-  const items = input
-    .split(",")
-    .map((item) => item.trim().toLowerCase())
-    .filter((item): item is ContextMode => Boolean(item) && isContextMode(item));
-  if (items.length === 0) return [...fallback];
-  const seen = new Set<string>();
-  const deduped: ContextMode[] = [];
-  for (const mode of items) {
-    if (seen.has(mode)) continue;
-    seen.add(mode);
-    deduped.push(mode);
-  }
-  return deduped;
-}
-
-function parseHookNameList(value: string | undefined | null) {
-  const input = typeof value === "string" ? value : "";
-  if (!input.trim()) return [];
-  const seen = new Set<string>();
-  const hooks: string[] = [];
-  for (const item of input.split(",")) {
-    const name = item.trim();
-    if (!name) continue;
-    if (!/^[a-z0-9_]+$/i.test(name)) continue;
-    const lowered = name.toLowerCase();
-    if (seen.has(lowered)) continue;
-    seen.add(lowered);
-    hooks.push(lowered);
-  }
-  return hooks;
-}
-
-const OPENCLAW_REQUEST_ID_TTL_MS =
-  envInt("OPENCLAW_REQUEST_ID_TTL_SECONDS", 7 * OPENCLAW_DAY_SECONDS, 5 * 60, 90 * OPENCLAW_DAY_SECONDS) * 1000;
-const OPENCLAW_REQUEST_ID_MAX_ENTRIES = envInt("OPENCLAW_REQUEST_ID_MAX_ENTRIES", 5000, 200, 50000);
-
-function normalizeBaseUrl(url: string) {
-  return url.replace(/\/$/, "");
-}
-
-function normalizeBaseUrlCandidate(value: string | undefined | null) {
-  const raw = String(value ?? "").trim();
-  if (!raw) return "";
-  try {
-    const parsed = new URL(raw);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
-    parsed.search = "";
-    parsed.hash = "";
-    return normalizeBaseUrl(parsed.toString());
-  } catch {
-    return "";
-  }
-}
-
-function parseBaseUrlList(value: string | undefined | null) {
-  const raw = String(value ?? "").trim();
-  if (!raw) return [];
-  const parts = raw.split(",").map((item) => normalizeBaseUrlCandidate(item)).filter(Boolean);
-  const seen = new Set<string>();
-  const deduped: string[] = [];
-  for (const part of parts) {
-    if (seen.has(part)) continue;
-    seen.add(part);
-    deduped.push(part);
-  }
-  return deduped;
-}
-
-function isLoopbackHost(hostname: string) {
-  const host = String(hostname ?? "").trim().toLowerCase();
-  return host === "localhost" || host === "127.0.0.1" || host === "::1";
-}
-
-function defaultLoopbackFallbacks(baseUrl: string) {
-  try {
-    const parsed = new URL(baseUrl);
-    if (isLoopbackHost(parsed.hostname)) return [];
-    const protocol = parsed.protocol;
-    const port = parsed.port ? `:${parsed.port}` : "";
-    const pathname = parsed.pathname && parsed.pathname !== "/" ? parsed.pathname.replace(/\/$/, "") : "";
-    return [
-      `${protocol}//127.0.0.1${port}${pathname}`,
-      `${protocol}//localhost${port}${pathname}`,
-    ].map((item) => normalizeBaseUrlCandidate(item)).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-function buildBaseUrlCandidates(primaryBaseUrl: string, explicitFallbacks: string[]) {
-  const primary = normalizeBaseUrlCandidate(primaryBaseUrl);
-  if (!primary) return [];
-  const candidates = [primary, ...explicitFallbacks, ...defaultLoopbackFallbacks(primary)];
-  const seen = new Set<string>();
-  const deduped: string[] = [];
-  for (const candidate of candidates) {
-    const normalized = normalizeBaseUrlCandidate(candidate);
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    deduped.push(normalized);
-  }
-  return deduped;
-}
-
-function isRetryableFetchError(err: unknown) {
-  if (!(err instanceof Error)) return false;
-  const message = String(err.message || "").toLowerCase();
-  const cause = (err as unknown as { cause?: unknown }).cause;
-  let code = "";
-  if (cause && typeof cause === "object") {
-    const maybe = (cause as { code?: unknown }).code;
-    if (typeof maybe === "string") code = maybe.toUpperCase();
-  }
-  if (
-    code === "ECONNREFUSED" ||
-    code === "ECONNRESET" ||
-    code === "ETIMEDOUT" ||
-    code === "ENOTFOUND" ||
-    code === "EHOSTUNREACH" ||
-    code === "UND_ERR_CONNECT_TIMEOUT" ||
-    code === "UND_ERR_SOCKET"
-  ) {
-    return true;
-  }
-  return (
-    message.includes("fetch failed") ||
-    message.includes("econnrefused") ||
-    message.includes("econnreset") ||
-    message.includes("etimedout") ||
-    message.includes("enotfound")
-  );
-}
-
-type QueryParamValue = string | number | boolean | undefined | null;
-
-function sanitizeMessageContent(content: string) {
-  let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
-  text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\][\s\S]*?\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
-  text = text.replace(/^\s*Conversation info \(untrusted metadata\)\s*:\s*```(?:json)?\s*[\s\S]*?```\s*/i, "");
-  text = text.replace(/^\s*Conversation info \(untrusted metadata\)\s*:\s*\{[\s\S]*?\}\s*/i, "");
-  text = text.replace(
-    /Clawboard continuity hook is active for this turn\.[\s\S]*?Prioritize curated user notes when present\.\s*/gi,
-    "",
-  );
-  text = text.replace(REPLY_DIRECTIVE_TAG_RE, " ");
-  text = text.replace(/^\s*summary\s*[:\-]\s*/gim, "");
-  text = text.replace(/^\[Discord [^\]]+\]\s*/gim, "");
-  // OpenClaw/CLI transcripts sometimes include a local-time prefix like:
-  // "[Sun 2026-02-08 09:01 EST] ..." which pollutes classifier/search signals.
-  text = text.replace(/^\[[A-Za-z]{3}\s+\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?\s+[A-Za-z]{2,5}\]\s*/gim, "");
-  text = text.replace(/\[message[_\s-]?id:[^\]]+\]/gi, "");
-  text = text.replace(/[ \t]{2,}/g, " ");
-  text = text.replace(/\n{3,}/g, "\n\n");
-  return text.trim();
-}
-
-function shouldSuppressReplyDirectivesForSession(sessionKey: string | undefined) {
-  return Boolean(sessionKey && isBoardSessionKey(sessionKey));
-}
-
-function summarize(content: string) {
-  const trimmed = sanitizeMessageContent(content).replace(/\s+/g, " ");
-  if (!trimmed) return "";
-  if (trimmed.length <= SUMMARY_MAX) return trimmed;
-  return `${trimmed.slice(0, SUMMARY_MAX - 1).trim()}…`;
-}
-
-function dedupeFingerprint(content: string) {
-  const normalized = sanitizeMessageContent(content).replace(/\s+/g, " ").trim().toLowerCase();
-  if (!normalized) return "empty";
-  return `${normalized.slice(0, 220)}|${normalized.length}`;
-}
-
-function truncateRaw(content: string) {
-  if (content.length <= RAW_MAX) return content;
-  return `${content.slice(0, RAW_MAX - 1)}…`;
-}
-
-function clip(text: string, limit: number) {
-  const value = (text ?? "").trim();
-  if (value.length <= limit) return value;
-  return `${value.slice(0, limit - 1).trim()}…`;
-}
-
-function normalizeWhitespace(value: string) {
-  return (value ?? "").replace(/\s+/g, " ").trim();
-}
-
-function tokenSet(value: string) {
-  const normalized = normalizeWhitespace(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]+/g, " ");
-  const stop = new Set([
-    "the",
-    "and",
-    "for",
-    "with",
-    "that",
-    "this",
-    "from",
-    "into",
-    "about",
-    "where",
-    "what",
-    "when",
-    "have",
-    "has",
-    "been",
-    "were",
-    "is",
-    "are",
-    "to",
-    "of",
-    "on",
-    "in",
-    "a",
-    "an",
-  ]);
-  return new Set(
-    normalized
-      .split(" ")
-      .map((item) => item.trim())
-      .filter((item) => item.length > 2 && !stop.has(item))
-  );
-}
-
-function lexicalSimilarity(a: string, b: string) {
-  const sa = tokenSet(a);
-  const sb = tokenSet(b);
-  if (sa.size === 0 || sb.size === 0) return 0;
-  let inter = 0;
-  for (const token of sa) {
-    if (sb.has(token)) inter += 1;
-  }
-  const union = sa.size + sb.size - inter;
-  if (union <= 0) return 0;
-  return inter / union;
-}
-
-function normalizeTaskIdentity(value: string | undefined | null) {
-  const normalized = typeof value === "string" ? value.trim() : "";
-  if (!normalized) return "";
-  return normalized.replace(/^task[-_:]?/i, "");
-}
-
-function resolveBoardTaskPatchId(
-  requestedId: string | undefined | null,
-  sessionKey: string | undefined | null,
-  fallbackTaskId?: string | undefined | null
-) {
-  const requested = typeof requestedId === "string" ? requestedId.trim() : "";
-  const route = parseBoardSessionKey(sessionKey);
-  const sessionTaskId =
-    route?.kind === "task"
-      ? route.taskId
-      : (typeof fallbackTaskId === "string" ? fallbackTaskId.trim() : "");
-  if (!requested) return sessionTaskId || undefined;
-  if (!sessionTaskId) return requested;
-  if (requested === sessionTaskId) return requested;
-  if (normalizeTaskIdentity(requested) === normalizeTaskIdentity(sessionTaskId)) return sessionTaskId;
-  if (!/^task[-_:]/i.test(requested)) return sessionTaskId;
-  return requested;
-}
-
-function extractTextLoose(value: unknown, depth = 0): string | undefined {
-  if (!value || depth > 4) return undefined;
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) {
-    const parts = value
-      .map((entry) => extractTextLoose(entry, depth + 1))
-      .filter((entry): entry is string => Boolean(entry));
-    return parts.length ? parts.join("\n") : undefined;
-  }
-  if (typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    const keys = ["text", "content", "value", "message", "output_text", "input_text"];
-    const parts: string[] = [];
-    for (const key of keys) {
-      const extracted = extractTextLoose(obj[key], depth + 1);
-      if (extracted) parts.push(extracted);
-    }
-    return parts.length ? parts.join("\n") : undefined;
-  }
-  return undefined;
-}
-
-function latestUserInput(prompt: string | undefined, messages: unknown[] | undefined) {
-  if (Array.isArray(messages)) {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const message = messages[i] as { role?: unknown; content?: unknown };
-      if (typeof message?.role !== "string" || message.role !== "user") continue;
-      const text = extractTextLoose(message.content);
-      const clean = sanitizeMessageContent(text ?? "");
-      if (clean) return clean;
-    }
-  }
-  const fallback = sanitizeMessageContent(prompt ?? "");
-  return clip(fallback, 1000);
-}
-
-function isClassifierPayloadText(content: string) {
-  const text = content.trim();
-  if (!text) return false;
-  if (!text.startsWith("{") && !text.startsWith("```")) return false;
-  const markers = ["\"window\"", "\"candidateTopics\"", "\"candidateTasks\"", "\"instructions\"", "\"summaries\""];
-  if (markers.some((marker) => text.includes(marker))) return true;
-
-  // Some classifier/control payloads are smaller and don't include the "window" schema,
-  // but still shouldn't be logged as chat content.
-  const controlMarkers = ["\"createTopic\"", "\"createTask\"", "\"topicId\"", "\"taskId\""];
-  let hits = 0;
-  for (const marker of controlMarkers) {
-    if (text.includes(marker)) hits += 1;
-  }
-  return hits >= 2;
-}
-
-function normalizeChannelId(value: string | undefined | null) {
-  return String(value ?? "").trim().toLowerCase();
-}
-
-function isMainAgentSessionKey(value: string | undefined | null) {
-  const key = String(value ?? "").trim();
-  if (!key) return false;
-  const base = key.split("|", 1)[0] ?? key;
-  return base.trim().toLowerCase() === "agent:main:main";
-}
-
-function isHeartbeatControlPlaneText(
-  content: string,
-  params?: {
-    sessionKey?: string | null;
-    channelId?: string | null;
-  },
-) {
-  const clean = sanitizeMessageContent(content).trim();
-  if (!clean) return false;
-  const channel = normalizeChannelId(params?.channelId);
-  const mainAgentSession = isMainAgentSessionKey(params?.sessionKey);
-
-  if (channel === "heartbeat" || channel === "cron-event") return true;
-  if (/^\[cron:[^\]]+\]/i.test(clean)) return true;
-  if (/^\s*heartbeat\s*:/i.test(clean)) return mainAgentSession || channel === "heartbeat";
-  if (/^\s*heartbeat_ok\s*$/i.test(clean)) return mainAgentSession || channel === "heartbeat";
-  if (mainAgentSession && /heartbeat and watchdog recovery check/i.test(clean)) return true;
-  return false;
-}
-
-function isSubagentScaffoldText(content: string, sessionKey: string | undefined | null) {
-  const clean = sanitizeMessageContent(content).trim();
-  if (!clean) return false;
-  if (!/^\s*\[subagent context\]/i.test(clean)) return false;
-  const key = String(sessionKey ?? "").trim().toLowerCase();
-  return key.includes(":subagent:");
-}
-
-function shouldSuppressNonSemanticConversation(
-  content: string,
-  params?: {
-    sessionKey?: string | null;
-    channelId?: string | null;
-  },
-) {
-  const sessionKey = params?.sessionKey ?? undefined;
-  if (isSubagentScaffoldText(content, sessionKey)) return true;
-  if (isHeartbeatControlPlaneText(content, params)) return true;
-  return false;
-}
-
-function redact(value: unknown, depth = 0): unknown {
-  if (depth > 4) return "[redacted-depth]";
-  if (value === null || value === undefined) return value;
-  if (typeof value === "string") return truncateRaw(value);
-  if (typeof value === "number" || typeof value === "boolean") return value;
-  if (Array.isArray(value)) return value.map((entry) => redact(entry, depth + 1));
-  if (typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    const output: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(obj)) {
-      if (/token|secret|password|key|auth/i.test(key)) {
-        output[key] = "[redacted]";
-      } else {
-        output[key] = redact(val, depth + 1);
-      }
-    }
-    return output;
-  }
-  return "[unserializable]";
-}
-
-async function ensureDir(filePath: string) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-}
+import {
+  buildBaseUrlCandidates,
+  clip,
+  dedupeFingerprint,
+  ensureDir,
+  envBool,
+  envInt,
+  extractTextLoose,
+  isClassifierPayloadText,
+  isContextMode,
+  isRetryableFetchError,
+  latestUserInput,
+  lexicalSimilarity,
+  normalizeBaseUrl,
+  normalizeBaseUrlCandidate,
+  normalizeChannelId,
+  normalizeTaskIdentity,
+  normalizeWhitespace,
+  parseBaseUrlList,
+  parseContextModes,
+  parseHookNameList,
+  redact,
+  resolveBoardTaskPatchId,
+  sanitizeMessageContent,
+  sanitizeRetrievedContextBlock,
+  isHeartbeatControlPlaneText,
+  isSubagentScaffoldText,
+  shouldSuppressNonSemanticConversation,
+  shouldSuppressReplyDirectivesForSession,
+  summarize,
+  truncateRaw,
+} from "./strings.js";
 
 export default function register(api: OpenClawPluginApi) {
+  const registrationState = api as OpenClawPluginApi & {
+    [CLAWBOARD_LOGGER_REGISTERED_SYMBOL]?: boolean;
+  };
   const rawConfig = (api.pluginConfig ?? {}) as Partial<ClawboardLoggerConfig>;
   const enabled = rawConfig.enabled !== false;
   const debug = rawConfig.debug === true;
@@ -641,6 +105,10 @@ export default function register(api: OpenClawPluginApi) {
   const baseUrlCandidates = buildBaseUrlCandidates(baseUrl, configuredFallbacks);
   const token = rawConfig.token;
   const queuePath = rawConfig.queuePath ?? DEFAULT_QUEUE;
+  const postTimeoutMs =
+    typeof rawConfig.postTimeoutMs === "number" && Number.isFinite(rawConfig.postTimeoutMs)
+      ? Math.max(500, Math.min(60_000, Math.floor(rawConfig.postTimeoutMs)))
+      : envInt("CLAWBOARD_LOGGER_POST_TIMEOUT_MS", DEFAULT_POST_TIMEOUT_MS, 500, 60_000);
   const useQueue = rawConfig.queue === true;
   const ingestPath = (rawConfig.ingestPath as string | undefined) ?? (useQueue ? "/api/ingest" : "/api/log");
   const defaultTopicId = rawConfig.defaultTopicId;
@@ -691,6 +159,24 @@ export default function register(api: OpenClawPluginApi) {
     typeof rawConfig.contextUseCacheOnFailure === "boolean"
       ? rawConfig.contextUseCacheOnFailure
       : envBool("CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE", true);
+  const boardScopeCacheTtlMs =
+    typeof rawConfig.boardScopeCacheTtlMs === "number" && Number.isFinite(rawConfig.boardScopeCacheTtlMs)
+      ? Math.max(0, Math.min(7 * 24 * 60 * 60 * 1000, Math.floor(rawConfig.boardScopeCacheTtlMs)))
+      : envInt(
+          "CLAWBOARD_LOGGER_BOARD_SCOPE_CACHE_TTL_MS",
+          DEFAULT_BOARD_SCOPE_CACHE_TTL_MS,
+          0,
+          7 * 24 * 60 * 60 * 1000,
+        );
+  const boardScopeCacheMaxEntries =
+    typeof rawConfig.boardScopeCacheMaxEntries === "number" && Number.isFinite(rawConfig.boardScopeCacheMaxEntries)
+      ? Math.max(32, Math.min(20_000, Math.floor(rawConfig.boardScopeCacheMaxEntries)))
+      : envInt(
+          "CLAWBOARD_LOGGER_BOARD_SCOPE_CACHE_MAX_ENTRIES",
+          DEFAULT_BOARD_SCOPE_CACHE_MAX_ENTRIES,
+          32,
+          20_000,
+        );
   const contextFallbackModes: ContextMode[] = Array.isArray(rawConfig.contextFallbackModes)
     ? parseContextModes(rawConfig.contextFallbackModes.join(","))
     : parseContextModes(process.env.CLAWBOARD_LOGGER_CONTEXT_FALLBACK_MODES, []);
@@ -725,6 +211,12 @@ export default function register(api: OpenClawPluginApi) {
     api.logger.warn("[clawboard-logger] baseUrl missing; plugin disabled");
     return;
   }
+
+  if (registrationState[CLAWBOARD_LOGGER_REGISTERED_SYMBOL]) {
+    api.logger.warn("[clawboard-logger] register() called more than once for the same API instance; skipping duplicate hooks");
+    return;
+  }
+  registrationState[CLAWBOARD_LOGGER_REGISTERED_SYMBOL] = true;
 
   let flushing = false;
   let flushTimer: ReturnType<typeof setInterval> | undefined;
@@ -893,12 +385,21 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   let queueDb: SqliteQueue | undefined;
+  let queueDbPromise: Promise<SqliteQueue> | undefined;
 
   async function getQueueDb() {
     if (queueDb) return queueDb;
-    await ensureDir(queuePath);
-    queueDb = new SqliteQueue(queuePath);
-    return queueDb;
+    if (queueDbPromise) return queueDbPromise;
+    queueDbPromise = (async () => {
+      await ensureDir(queuePath);
+      const db = new SqliteQueue(queuePath);
+      queueDb = db;
+      return db;
+    })().catch((err) => {
+      queueDbPromise = undefined;
+      throw err;
+    });
+    return queueDbPromise;
   }
 
   function ensureIdempotencyKey(payload: Record<string, unknown>) {
@@ -1021,6 +522,43 @@ export default function register(api: OpenClawPluginApi) {
   const boardScopeBySession = new Map<string, BoardScope>();
   const boardScopeByAgent = new Map<string, BoardScope>();
 
+  function pruneBoardScopeMap(cache: Map<string, BoardScope>, now = nowMs()) {
+    if (cache.size === 0) return;
+    if (boardScopeCacheTtlMs > 0) {
+      for (const [key, value] of cache.entries()) {
+        if (now - value.updatedAt > boardScopeCacheTtlMs) cache.delete(key);
+      }
+    }
+    if (cache.size <= boardScopeCacheMaxEntries) return;
+    const sorted = Array.from(cache.entries()).sort((a, b) => a[1].updatedAt - b[1].updatedAt);
+    const overflow = cache.size - boardScopeCacheMaxEntries;
+    for (let idx = 0; idx < overflow; idx += 1) {
+      const row = sorted[idx];
+      if (!row) break;
+      cache.delete(row[0]);
+    }
+  }
+
+  function pruneBoardScopeCaches(now = nowMs()) {
+    pruneBoardScopeMap(boardScopeBySession, now);
+    pruneBoardScopeMap(boardScopeByAgent, now);
+  }
+
+  function readFreshBoardScope(
+    cache: Map<string, BoardScope>,
+    key: string | undefined,
+    now = nowMs(),
+  ): BoardScope | undefined {
+    if (!key) return undefined;
+    const entry = cache.get(key);
+    if (!entry) return undefined;
+    if (boardScopeCacheTtlMs > 0 && now - entry.updatedAt > boardScopeCacheTtlMs) {
+      cache.delete(key);
+      return undefined;
+    }
+    return entry;
+  }
+
   function normalizeId(value: string | undefined | null) {
     const text = typeof value === "string" ? value.trim() : "";
     return text || undefined;
@@ -1099,6 +637,7 @@ export default function register(api: OpenClawPluginApi) {
     },
   ) {
     const stamped: BoardScope = { ...scope, updatedAt: nowMs() };
+    pruneBoardScopeCaches(stamped.updatedAt);
     const sessionKeys = opts?.sessionKeys ?? [];
     for (const rawKey of sessionKeys) {
       const key = normalizeId(rawKey);
@@ -1111,6 +650,7 @@ export default function register(api: OpenClawPluginApi) {
       if (!agentId) continue;
       boardScopeByAgent.set(agentId, stamped);
     }
+    pruneBoardScopeCaches(stamped.updatedAt);
     if (agentIds.length > 0) {
       getQueueDb()
         .then((db) => {
@@ -1491,9 +1031,10 @@ export default function register(api: OpenClawPluginApi) {
           [normalizedSessionKey, ctxSessionKey, metaSessionKey].flatMap((candidate) => requestSessionKeys(candidate)),
         )
       : [];
+    const now = nowMs();
     // Direct board scope from any supplied session key always wins.
     for (const candidate of sessionCandidates) {
-      const cached = candidate ? boardScopeBySession.get(candidate) : undefined;
+      const cached = readFreshBoardScope(boardScopeBySession, candidate, now);
       if (cached?.topicId) {
         rememberBoardScope(cached, {
           sessionKeys: sessionCandidates,
@@ -1526,9 +1067,8 @@ export default function register(api: OpenClawPluginApi) {
     // for that child session (in-memory or persisted by session key from sessions_spawn).
     // This prevents unrelated background/cron subagents from being pulled into a user's board chat.
     if (subagent) {
-      const now = nowMs();
       const exact = subagentSessionCandidates
-        .map((candidate) => (candidate ? boardScopeBySession.get(candidate) : undefined))
+        .map((candidate) => readFreshBoardScope(boardScopeBySession, candidate, now))
         .find((scope) => Boolean(scope && now - scope.updatedAt <= BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS));
       let inherited: BoardScope | undefined = exact;
       let inheritedFromDb = false;
@@ -1687,7 +1227,7 @@ export default function register(api: OpenClawPluginApi) {
   async function postLog(payload: Record<string, unknown>) {
     const idempotencyKey = ensureIdempotencyKey(payload);
     const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), 8000);
+    const t = setTimeout(() => controller.abort(), postTimeoutMs);
     try {
       const res = await fetchWithBaseUrlFallback({
         pathname: ingestPath,
@@ -2446,9 +1986,16 @@ export default function register(api: OpenClawPluginApi) {
       }
       const block = (payload as { block?: unknown }).block;
       if (typeof block === "string" && block.trim().length > 0) {
+        const sanitizedBlock = clip(sanitizeRetrievedContextBlock(block), contextMaxChars);
+        if (!sanitizedBlock) {
+          return {
+            status: res.status,
+            error: "empty_block",
+          };
+        }
         return {
           status: res.status,
-          block: block.trim(),
+          block: sanitizedBlock,
         };
       }
       return {
@@ -4083,9 +3630,10 @@ export default function register(api: OpenClawPluginApi) {
   }
 }
 
-// Export utility functions for testing
+// Re-export utility functions for testing
 export {
   normalizeBaseUrl,
+  sanitizeRetrievedContextBlock,
   sanitizeMessageContent,
   summarize,
   dedupeFingerprint,
@@ -4096,4 +3644,4 @@ export {
   lexicalSimilarity,
   normalizeTaskIdentity,
   resolveBoardTaskPatchId,
-};
+} from "./strings.js";

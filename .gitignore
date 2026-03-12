@@ -17,6 +17,7 @@
 /.perf-audit/
 /.nyc_output/
 /htmlcov/
+clawboard-*-tests-*/
 
 # next.js
 /.next/
@@ -35,6 +36,7 @@ __pycache__/
 *.py[cod]
 backend/.venv/
 backend/data/
+fastembed_cache/
 
 # local private memory / exports
 /memory/
