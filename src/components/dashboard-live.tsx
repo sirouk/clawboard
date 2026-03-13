@@ -10,17 +10,17 @@ import type { LogEntry } from "@/lib/types";
 import { useDataStore } from "@/components/data-provider";
 
 export function DashboardLive() {
-  const { tasks, logs, topics } = useDataStore();
+  const { logs, topics } = useDataStore();
 
   const sortedLogs = useMemo(() => [...logs].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)), [logs]);
   const sortedTopics = useMemo(() => [...topics].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1)), [topics]);
 
-  const openTasks = tasks.filter((task) => task.status !== "done");
-  const doingTasks = tasks.filter((task) => task.status === "doing");
-  const blockedTasks = tasks.filter((task) => task.status === "blocked");
+  const openTopics = topics.filter((topic) => topic.status !== "done" && topic.status !== "archived");
+  const doingTopics = topics.filter((topic) => topic.status === "doing");
+  const blockedTopics = topics.filter((topic) => topic.status === "blocked");
 
   const buildLogUrl = (entry: LogEntry) => {
-    const topicId = String(entry.taskId ?? entry.topicId ?? "").trim();
+    const topicId = String(entry.topicId ?? "").trim();
     if (topicId) {
       const topic = topics.find((item) => item.id === topicId);
       if (topic) return withRevealParam(buildTopicUrl(topic, topics));
@@ -33,10 +33,10 @@ export function DashboardLive() {
 			<div className="space-y-8">
 	      <div className="grid gap-4 lg:grid-cols-4">
 	        <Link href={UNIFIED_BASE} className="block">
-	          <Card className="h-full">
+            <Card className="h-full">
 	            <CardHeader>
               <h2 className="text-lg font-semibold">Active Topics</h2>
-              <Badge tone="accent">{openTasks.length}</Badge>
+              <Badge tone="accent">{openTopics.length}</Badge>
             </CardHeader>
             <p className="text-sm text-[rgb(var(--claw-muted))]">Topics not marked done.</p>
           </Card>
@@ -45,7 +45,7 @@ export function DashboardLive() {
           <Card className="h-full">
             <CardHeader>
               <h2 className="text-lg font-semibold">Doing</h2>
-              <Badge tone="accent2">{doingTasks.length}</Badge>
+              <Badge tone="accent2">{doingTopics.length}</Badge>
             </CardHeader>
             <p className="text-sm text-[rgb(var(--claw-muted))]">Currently in progress.</p>
           </Card>
@@ -54,7 +54,7 @@ export function DashboardLive() {
           <Card className="h-full">
             <CardHeader>
               <h2 className="text-lg font-semibold">Blocked</h2>
-              <Badge tone="warning">{blockedTasks.length}</Badge>
+              <Badge tone="warning">{blockedTopics.length}</Badge>
             </CardHeader>
             <p className="text-sm text-[rgb(var(--claw-muted))]">Needs attention to unblock.</p>
           </Card>
@@ -130,7 +130,7 @@ export function DashboardLive() {
             <h2 className="text-lg font-semibold">Now</h2>
             <Badge tone="accent2">Next actions</Badge>
           </CardHeader>
-          <NowPanel tasks={openTasks} topics={topics} allowStatusUpdate={false} linkEntireCard />
+          <NowPanel tasks={openTopics} topics={topics} allowStatusUpdate={false} linkEntireCard />
         </Card>
 
         <Card>
@@ -140,16 +140,16 @@ export function DashboardLive() {
           </CardHeader>
           <div className="space-y-3 text-sm text-[rgb(var(--claw-muted))]">
             <div className="flex items-center justify-between">
-              <span>Open tasks</span>
-              <span className="text-[rgb(var(--claw-text))]">{openTasks.length}</span>
+              <span>Open topics</span>
+              <span className="text-[rgb(var(--claw-text))]">{openTopics.length}</span>
             </div>
             <div className="flex items-center justify-between">
               <span>Doing now</span>
-              <span className="text-[rgb(var(--claw-text))]">{doingTasks.length}</span>
+              <span className="text-[rgb(var(--claw-text))]">{doingTopics.length}</span>
             </div>
             <div className="flex items-center justify-between">
               <span>Blocked</span>
-              <span className="text-[rgb(var(--claw-text))]">{blockedTasks.length}</span>
+              <span className="text-[rgb(var(--claw-text))]">{blockedTopics.length}</span>
             </div>
             <div className="flex items-center justify-between">
               <span>Topics active</span>

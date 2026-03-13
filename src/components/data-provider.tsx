@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Draft, LogEntry, Space, Task, Topic } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
+import { loadBoardSnapshot, saveBoardSnapshot } from "@/lib/board-cache";
 import { useLiveUpdates, type ConnectionInfo } from "@/lib/use-live-updates";
 import { LiveEvent, mergeById, mergeLogs, maxTimestamp, removeById, upsertById } from "@/lib/live-utils";
 import { normalizeBoardSessionKey } from "@/lib/board-session";
@@ -194,12 +195,10 @@ type ChangesPayload = {
   cursor?: unknown;
   spaces?: unknown;
   topics?: unknown;
-  tasks?: unknown;
   logs?: unknown;
   drafts?: unknown;
   deletedLogIds?: unknown;
   deletedTopics?: unknown;
-  deletedTasks?: unknown;
   openclawTyping?: unknown;
   openclawThreadWork?: unknown;
 };
@@ -319,45 +318,34 @@ function readNotificationClickDataFromSearchParams(searchParams: URLSearchParams
   return out;
 }
 
-function topicToTask(topic: Topic): Task | null {
-  const parentId = String(topic.parentId ?? "").trim();
-  if (!parentId) return null;
-  return {
-    ...topic,
-    title: topic.name,
-    topicId: parentId,
-  };
-}
-
 function taskToTopic(task: Task, fallback?: Topic): Topic {
   const name = String(task.title ?? task.name ?? fallback?.name ?? "").trim();
-  const parentId = String(task.topicId ?? task.parentId ?? fallback?.parentId ?? "").trim();
   return {
     ...(fallback ?? {}),
     ...task,
     name: name || fallback?.name || "",
-    parentId: parentId || null,
   };
+}
+
+function isValidTopicRow(topic: Topic | null | undefined): topic is Topic {
+  return Boolean(
+    topic &&
+      String(topic.id ?? "").trim() &&
+      String(topic.name ?? "").trim() &&
+      String(topic.updatedAt ?? topic.createdAt ?? "").trim()
+  );
 }
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [topics, setTopics] = useState<Topic[]>([]);
-  const tasks: Task[] = useMemo(
-    () =>
-      topics
-        .map(topicToTask)
-        .filter((topic): topic is Task => Boolean(topic)),
-    [topics]
-  );
+  const tasks: Task[] = useMemo(() => [], []);
   const setTasks: React.Dispatch<React.SetStateAction<Task[]>> = useCallback((next) => {
     setTopics((previousTopics) => {
-      const previousTasks = previousTopics.map(topicToTask).filter((topic): topic is Task => Boolean(topic));
+      const previousTasks: Task[] = [];
       const resolvedTasks = typeof next === "function" ? next(previousTasks) : next;
-      const previousTaskIds = new Set(previousTasks.map((task) => task.id));
       const previousById = new Map(previousTopics.map((topic) => [topic.id, topic]));
-      const staticTopics = previousTopics.filter((topic) => !previousTaskIds.has(topic.id));
-      return [...staticTopics, ...resolvedTasks.map((task) => taskToTopic(task, previousById.get(task.id)))];
+      return mergeById(previousTopics, resolvedTasks.map((task) => taskToTopic(task, previousById.get(task.id))));
     });
   }, []);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -382,14 +370,15 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const unsnoozedTaskBadges = useMemo(() => ({}), []);
   const chatSeenByKey = useMemo(() => parseStringMap(chatSeenRaw), [chatSeenRaw]);
   const notificationsEnabled = useMemo(() => notificationsEnabledRaw !== "false", [notificationsEnabledRaw]);
+  const safeTopics = useMemo(() => topics.filter(isValidTopicRow), [topics]);
   const activeUnsnoozedTopicCount = useMemo(() => {
-    const validTopicIds = new Set(topics.map((topic) => topic.id));
+    const validTopicIds = new Set(safeTopics.map((topic) => topic.id));
     let count = 0;
     for (const topicId of Object.keys(unsnoozedTopicBadges)) {
       if (validTopicIds.has(topicId)) count += 1;
     }
     return count;
-  }, [topics, unsnoozedTopicBadges]);
+  }, [safeTopics, unsnoozedTopicBadges]);
   const unreadMessageCount = useMemo(() => {
     const seenAtMs = new Map<string, number>();
     for (const [chatKey, seenAt] of Object.entries(chatSeenByKey)) {
@@ -553,6 +542,23 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     return "reconnecting";
   }, [browserOnline, sseConnected]);
 
+  useEffect(() => {
+    let active = true;
+    void loadBoardSnapshot().then((snapshot) => {
+      if (!active || !snapshot) return;
+      setSpaces((prev) => (prev.length > 0 ? prev : snapshot.spaces));
+      setTopics((prev) => (prev.length > 0 ? prev : snapshot.topics));
+      setLogs((prev) => (prev.length > 0 ? prev : snapshot.logs));
+      setDrafts((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.drafts));
+      setOpenclawTyping((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.openclawTyping));
+      setOpenclawThreadWork((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.openclawThreadWork));
+      setHydrated(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const reconcile = useCallback(async (since?: string) => {
     const params = new URLSearchParams();
     if (since) params.set("since", since);
@@ -573,7 +579,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     if (!payload) return;
     const cursor = String(payload.cursor ?? "").trim() || undefined;
     const deletedTopics = Array.isArray(payload.deletedTopics) ? (payload.deletedTopics as DeletedEntityRef[]) : [];
-    const deletedTasks = Array.isArray(payload.deletedTasks) ? (payload.deletedTasks as DeletedEntityRef[]) : [];
     const typingSignals = Array.isArray(payload.openclawTyping) ? (payload.openclawTyping as TypingSignalSnapshot[]) : [];
     const threadWorkSignals = Array.isArray(payload.openclawThreadWork)
       ? (payload.openclawThreadWork as ThreadWorkSignalSnapshot[])
@@ -592,9 +597,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         );
       } else if (deletedTopics.length > 0) {
         setTopics((prev) => applyDeletedEntityTombstones(prev, deletedTopics));
-      }
-      if (deletedTasks.length > 0) {
-        setTopics((prev) => applyDeletedEntityTombstones(prev, deletedTasks));
       }
       if (Array.isArray(payload.logs)) {
         setLogs((prev) => {
@@ -631,9 +633,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       } else if (deletedTopics.length > 0) {
         setTopics((prev) => applyDeletedEntityTombstones(prev, deletedTopics));
       }
-      if (deletedTasks.length > 0) {
-        setTopics((prev) => applyDeletedEntityTombstones(prev, deletedTasks));
-      }
       if (Array.isArray(payload.logs)) setLogs((prev) => mergeLogs(prev, payload.logs as LogEntry[]));
       if (Array.isArray(payload.deletedLogIds) && payload.deletedLogIds.length > 0) {
         const deleted = new Set(payload.deletedLogIds.map((id: unknown) => String(id ?? "").trim()).filter(Boolean));
@@ -658,7 +657,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       maxTimestamp([
         ...((payload.spaces as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
         ...((payload.topics as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
-        ...((payload.tasks as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
         ...((payload.logs as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
         ...((payload.drafts as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
       ]);
@@ -763,7 +761,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     reconcile,
   });
 
-  const topicById = useMemo(() => new Map(topics.map((topic) => [topic.id, topic])), [topics]);
+  const topicById = useMemo(() => new Map(safeTopics.map((topic) => [topic.id, topic])), [safeTopics]);
   const knownLogIdsRef = useRef<Set<string> | null>(null);
   const prevTopicStatusRef = useRef<Map<string, { status: string; snoozedUntil: string | null }> | null>(null);
   const seededSeenMapRef = useRef(false);
@@ -793,7 +791,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!hydrated) return;
-    const validTopicIds = new Set(topics.map((topic) => topic.id));
+    const validTopicIds = new Set(safeTopics.map((topic) => topic.id));
     const staleTopicIds = Object.keys(unsnoozedTopicBadges).filter((topicId) => !validTopicIds.has(topicId));
     if (staleTopicIds.length === 0) return;
     const updated: Record<string, number> = { ...unsnoozedTopicBadges };
@@ -804,7 +802,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     const tags = staleTopicIds.map((topicId) => unsnoozedTopicTag(topicId));
     if (Object.keys(updated).length === 0) tags.push(UNSNOOZE_TOPICS_SUMMARY_TAG);
     void closePwaNotificationsByTag(tags);
-  }, [hydrated, topics, unsnoozedTopicBadges]);
+  }, [hydrated, safeTopics, unsnoozedTopicBadges]);
 
   useEffect(() => {
     if (Object.keys(unsnoozedTopicBadges).length > 0) return;
@@ -821,7 +819,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     const next = new Map<string, { status: string; snoozedUntil: string | null }>();
     const additions: Topic[] = [];
 
-    for (const topic of topics) {
+    for (const topic of safeTopics) {
       let status = String(topic.status ?? "active").trim().toLowerCase();
       if (status === "paused") status = "snoozed";
       const snoozedUntil = topic.snoozedUntil ? String(topic.snoozedUntil) : null;
@@ -854,7 +852,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     if (additions.length === 1) {
       const topic = additions[0];
-      const url = `${buildTopicUrl(topic, topics)}?focus=1`;
+      const url = `${buildTopicUrl(topic, safeTopics)}?focus=1`;
       void showPwaNotification(
         {
           title: `Topic unsnoozed: ${topic.name}`,
@@ -877,7 +875,20 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       },
       notificationsEnabled
     );
-  }, [notificationsEnabled, topics, unsnoozedTopicBadges]);
+  }, [notificationsEnabled, safeTopics, unsnoozedTopicBadges]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    void saveBoardSnapshot({
+      spaces,
+      topics: safeTopics,
+      logs,
+      drafts,
+      openclawTyping,
+      openclawThreadWork,
+      cachedAt: new Date().toISOString(),
+    });
+  }, [drafts, hydrated, logs, openclawThreadWork, openclawTyping, safeTopics, spaces]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -918,7 +929,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         const topicId = chatKey.slice("topic:".length).trim();
         const topic = topicById.get(topicId);
         if (topic) {
-          const url = `${buildTopicUrl(topic, topics)}?focus=1`;
+          const url = `${buildTopicUrl(topic, safeTopics)}?focus=1`;
           void showPwaNotification(
             {
               title: `Topic Chat: ${topic.name}`,
@@ -948,11 +959,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       },
       notificationsEnabled
     );
-  }, [chatSeenByKey, hydrated, logs, notificationsEnabled, topicById, topics]);
+  }, [chatSeenByKey, hydrated, logs, notificationsEnabled, safeTopics, topicById]);
 
   const topicTags = useMemo(() => {
     const labels = new Map<string, string>();
-    for (const topic of topics) {
+    for (const topic of safeTopics) {
       for (const rawTag of topic.tags ?? []) {
         const label = cleanTagLabel(String(rawTag ?? ""));
         const normalized = normalizeTagValue(label);
@@ -963,12 +974,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     return Array.from(labels.values()).sort(
       (a, b) => normalizeTagValue(a).localeCompare(normalizeTagValue(b)) || a.localeCompare(b)
     );
-  }, [topics]);
+  }, [safeTopics]);
 
   const value = useMemo(
     () => ({
       spaces,
-      topics,
+      topics: safeTopics,
       topicTags,
       tasks,
       logs,
@@ -999,7 +1010,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }),
     [
       spaces,
-      topics,
+      safeTopics,
       topicTags,
       tasks,
       logs,

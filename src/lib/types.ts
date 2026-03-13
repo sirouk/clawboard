@@ -15,7 +15,6 @@ export type Topic = {
   dueDate?: string | null;
   snoozedUntil?: string | null;
   tags?: string[];
-  parentId?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -49,8 +48,6 @@ export type LogEntry = {
   id: string;
   spaceId?: string;
   topicId: string | null;
-  /** @deprecated Tasks merged into Topics. Kept for backward compat with old data. */
-  taskId?: string | null;
   relatedLogId?: string | null;
   idempotencyKey?: string | null;
   type: "note" | "conversation" | "action" | "system" | "import";

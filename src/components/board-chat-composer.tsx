@@ -11,7 +11,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { Button, TextArea } from "@/components/ui";
+import { TextArea } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { apiFetch } from "@/lib/api";
 import { useLocalStorageItem } from "@/lib/local-storage";
@@ -122,7 +122,6 @@ type BoardChatComposerProps = {
   spaceId?: string;
   disabled?: boolean;
   placeholder?: string;
-  helperText?: string;
   variant?: "panel" | "seamless";
   dense?: boolean;
   className?: string;
@@ -199,7 +198,6 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     spaceId,
     disabled,
     placeholder,
-    helperText,
     variant = "panel",
     dense = false,
     className,
@@ -765,6 +763,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
   // the conversation without waiting for Stop/typing to clear.
   const hardDisabled = Boolean(disabled || readOnly);
   const sendDisabled = hardDisabled || sending || draft.trim().length === 0;
+  const showSendButton = isInFlight || variant !== "seamless" || draft.trim().length > 0;
   const wordCount = useMemo(() => {
     const text = draft.trim();
     if (!text) return 0;
@@ -889,14 +888,17 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
             event.target.value = "";
           }}
         />
-        <div className={cn("relative", dense ? "" : "")}>
+        <div className="relative">
           <TextArea
             ref={textareaRef}
             className={cn(
               "resize-none",
+              variant === "seamless"
+                ? "rounded-[24px] border-[rgba(255,255,255,0.14)] bg-[rgba(9,11,15,0.72)] shadow-[0_12px_32px_rgba(0,0,0,0.18)] focus:border-[rgba(255,90,45,0.38)] focus:ring-[rgba(255,90,45,0.14)]"
+                : "",
               dense
-                ? "min-h-[48px] max-md:max-h-[156px] max-md:pb-11 max-md:pr-24 md:min-h-[60px]"
-                : "min-h-[62px] overflow-hidden"
+                ? "min-h-[48px] max-md:max-h-[156px] max-md:pb-11 max-md:pr-24 md:min-h-[60px] md:pb-11 md:pr-24"
+                : "min-h-[62px] overflow-hidden pb-11 pr-24"
             )}
             value={draft}
             onChange={(e) => {
@@ -976,38 +978,40 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
               if (cmd) applyCommand(cmd);
             }}
           />
-          {dense ? (
-            <div className="absolute bottom-2.5 right-2.5 z-10 flex items-center gap-2">
+          <div className="absolute bottom-2.5 right-2.5 z-10 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={hardDisabled}
+              aria-label="Attach files"
+              title="Attach files"
+              className={cn(
+                "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-muted))] transition",
+                "border-[rgba(255,255,255,0.14)] bg-[rgba(12,14,18,0.86)] backdrop-blur",
+                "hover:border-[rgba(255,90,45,0.4)] hover:text-[rgb(var(--claw-text))]",
+                "disabled:cursor-not-allowed disabled:opacity-50"
+              )}
+            >
+              <PaperclipIcon />
+            </button>
+            {isInFlight ? (
               <button
                 type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={hardDisabled}
-                aria-label="Attach files"
-                title="Attach files"
+                onClick={() => {
+                  void stopSending();
+                }}
+                aria-label="Stop"
+                title="Stop generation"
                 className={cn(
-                  "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-muted))] transition",
-                  "border-[rgba(255,255,255,0.14)] bg-[rgba(12,14,18,0.86)] backdrop-blur",
-                  "hover:border-[rgba(255,90,45,0.4)] hover:text-[rgb(var(--claw-text))]",
-                  "disabled:cursor-not-allowed disabled:opacity-50"
+                  "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
+                  "border-[rgba(220,38,38,0.7)] bg-[rgba(220,38,38,0.25)] backdrop-blur",
+                  "hover:bg-[rgba(220,38,38,0.4)]"
                 )}
               >
-                <PaperclipIcon />
+                <StopIcon />
               </button>
-              {isInFlight ? (
-                <button
-                  type="button"
-                  onClick={() => { void stopSending(); }}
-                  aria-label="Stop"
-                  title="Stop generation"
-                  className={cn(
-                    "inline-flex h-8 w-8 items-center justify-center rounded-full border text-[rgb(var(--claw-text))] transition",
-                    "border-[rgba(220,38,38,0.7)] bg-[rgba(220,38,38,0.25)] backdrop-blur",
-                    "hover:bg-[rgba(220,38,38,0.4)]"
-                  )}
-                >
-                  <StopIcon />
-                </button>
-              ) : null}
+            ) : null}
+            {showSendButton ? (
               <button
                 type="button"
                 onClick={() => {
@@ -1025,8 +1029,8 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
               >
                 <SendIcon />
               </button>
-            </div>
-          ) : null}
+            ) : null}
+          </div>
         </div>
         {attachments.length > 0 ? (
           <AttachmentStrip
@@ -1057,52 +1061,11 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
             {cancelNotice.text}
           </div>
         ) : null}
-        {dense ? null : (
-          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[rgb(var(--claw-muted))]">
-            <span>
-            {helperText ?? "Enter to send, Shift+Enter for newline."}
-            </span>
-            <div className="flex items-center gap-3">
-              <span>{wordCount > 0 ? `${wordCount} word${wordCount === 1 ? "" : "s"}` : null}</span>
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={hardDisabled}
-                aria-label="Attach files"
-                title="Attach files"
-              >
-                <PaperclipIcon />
-              </Button>
-              {isInFlight ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => { void stopSending(); }}
-                  aria-label="Stop"
-                  title="Stop generation"
-                  className="border-red-500/60 text-red-400 hover:border-red-500 hover:text-red-300"
-                >
-                  <StopIcon className="mr-1" />
-                  Stop
-                </Button>
-              ) : null}
-              <Button
-                type="button"
-                size="sm"
-                variant="primary"
-                onClick={() => {
-                  void sendMessage();
-                }}
-                disabled={sendDisabled}
-              >
-                Send
-              </Button>
-            </div>
+        {dense ? null : wordCount > 0 ? (
+          <div className="mt-2 flex justify-end text-xs text-[rgb(var(--claw-muted))]">
+            <span>{`${wordCount} word${wordCount === 1 ? "" : "s"}`}</span>
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );

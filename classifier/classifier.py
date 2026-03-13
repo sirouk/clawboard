@@ -2309,10 +2309,7 @@ def list_logs_by_task(task_id: str, limit: int = 50, offset: int = 0):
 
 
 def list_notes_by_related_ids(related_ids: list[str], limit: int = 200):
-    if not related_ids:
-        return []
-    joined = ",".join(related_ids)
-    return list_logs({"type": "note", "relatedLogId": joined, "limit": limit, "offset": 0})
+    return []
 
 
 def list_topics():
@@ -2553,7 +2550,6 @@ def _topic_digest_input(topic: dict, tasks: list[dict], logs: list[dict]) -> dic
         active_tasks = tasks
 
     convo = [e for e in logs if str(e.get("type") or "").strip().lower() == "conversation"]
-    notes = [e for e in logs if str(e.get("type") or "").strip().lower() == "note" and e.get("relatedLogId")]
 
     payload = {
         "topic": {
@@ -2564,15 +2560,6 @@ def _topic_digest_input(topic: dict, tasks: list[dict], logs: list[dict]) -> dic
         },
         "activeTasks": [compact_task(t) for t in active_tasks[:10]],
         "recentConversation": [compact_log(e) for e in convo[:18]],
-        "recentNotes": [
-            {
-                "id": n.get("id"),
-                "relatedLogId": n.get("relatedLogId"),
-                "text": _strip_transport_noise(n.get("content") or n.get("summary") or "")[:260],
-                "createdAt": n.get("createdAt"),
-            }
-            for n in notes[:18]
-        ],
         "outputSpec": {
             "format": "plain_text",
             "maxLines": 12,
@@ -2585,7 +2572,6 @@ def _topic_digest_input(topic: dict, tasks: list[dict], logs: list[dict]) -> dic
 
 def _task_digest_input(task: dict, logs: list[dict]) -> dict:
     convo = [e for e in logs if str(e.get("type") or "").strip().lower() == "conversation"]
-    notes = [e for e in logs if str(e.get("type") or "").strip().lower() == "note" and e.get("relatedLogId")]
 
     payload = {
         "task": {
@@ -2604,15 +2590,6 @@ def _task_digest_input(task: dict, logs: list[dict]) -> dict:
                 "createdAt": e.get("createdAt"),
             }
             for e in convo[:16]
-        ],
-        "recentNotes": [
-            {
-                "id": n.get("id"),
-                "relatedLogId": n.get("relatedLogId"),
-                "text": _strip_transport_noise(n.get("content") or n.get("summary") or "")[:260],
-                "createdAt": n.get("createdAt"),
-            }
-            for n in notes[:16]
         ],
         "outputSpec": {
             "format": "plain_text",
@@ -3042,18 +3019,7 @@ def task_candidates(topic_id: str, query_text: str, k: int = 8):
 
 
 def build_notes_index(logs: list[dict]):
-    log_ids = [e.get("id") for e in logs if e.get("id")]
-    notes = list_notes_by_related_ids(log_ids, limit=300)
-    index: dict[str, list[str]] = {}
-    for n in notes:
-        rid = n.get("relatedLogId")
-        if not rid:
-            continue
-        text = (n.get("content") or n.get("summary") or "").strip()
-        if not text:
-            continue
-        index.setdefault(rid, []).append(text[:600])
-    return index
+    return {}
 
 
 def summarize_logs(logs: list[dict], notes_index: dict[str, list[str]] | None = None, limit: int = 6):

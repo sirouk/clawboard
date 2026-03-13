@@ -1,6 +1,7 @@
 import type { OpenClawWorkspace } from "@/lib/types";
 
 export const WORKSPACE_NAV_SYNC_EVENT = "clawboard:navigation-sync";
+const PRIMARY_WORKSPACE_ROOT = "/Users/chris";
 
 function normalizeWorkspacePath(value: string | null | undefined) {
   return String(value || "")
@@ -44,6 +45,16 @@ export function workspaceDirLabel(workspaceDir: string, sharedPrefix: string) {
     return normalized.slice(sharedPrefix.length + 1) || ".";
   }
   return normalized.split("/").filter(Boolean).pop() ?? normalized;
+}
+
+export function workspaceDirDisplay(workspaceDir: string) {
+  const normalized = normalizeWorkspacePath(workspaceDir);
+  if (!normalized) return "";
+  if (normalized === PRIMARY_WORKSPACE_ROOT) return "~";
+  if (normalized.startsWith(`${PRIMARY_WORKSPACE_ROOT}/`)) {
+    return normalized.slice(PRIMARY_WORKSPACE_ROOT.length) || "/";
+  }
+  return normalized;
 }
 
 export function orderOpenClawWorkspaces(workspaces: OpenClawWorkspace[]) {

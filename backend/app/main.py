@@ -3240,6 +3240,9 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     content_text = _coerce_safe_text(payload.content)
     summary_text = _coerce_safe_text(payload.summary) or None
     raw_text = _coerce_safe_text(payload.raw) or None
+    log_type = _coerce_safe_text(payload.type).strip().lower()
+    if log_type == "note":
+        raise HTTPException(status_code=400, detail="type=note is no longer supported for new log writes")
     agent_id = _coerce_safe_text(payload.agentId).strip() or None
     agent_label = _coerce_safe_text(payload.agentLabel).strip() or None
 
@@ -10942,7 +10945,6 @@ def _resolve_board_send_target(
             status="active",
             snoozedUntil=None,
             tags=[],
-            parentId=None,
             createdAt=stamp,
             updatedAt=stamp,
         )
@@ -12742,10 +12744,6 @@ def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
             reindex_needed = True
             touched = True
 
-        if "parentId" in fields:
-            topic.parentId = payload.parentId
-            touched = True
-
         # Digest updates are system touches and should keep the topic fresh in the board order.
         if "digest" in fields:
             topic.digest = payload.digest
@@ -12879,7 +12877,6 @@ def upsert_topic(
                     "status": "active",
                     "dueDate": "2026-02-05T00:00:00.000Z",
                     "tags": ["product", "platform"],
-                    "parentId": "topic-1",
                 },
             }
         },
@@ -12934,9 +12931,6 @@ def upsert_topic(
                         topic.tags or [],
                         fallback_space_id=DEFAULT_SPACE_ID,
                     )
-            if "parentId" in fields:
-                topic.parentId = payload.parentId
-
             normalized_status = normalize_topic_status(topic.status) or "active"
             if "snoozedUntil" in fields and payload.snoozedUntil is None and "status" not in fields:
                 if normalized_status in {"snoozed", "paused"}:
@@ -13092,7 +13086,6 @@ def upsert_topic(
                 dueDate=resolved_due_date,
                 snoozedUntil=resolved_snoozed_until,
                 tags=_normalize_tags(payload.tags or []),
-                parentId=payload.parentId,
                 createdAt=timestamp,
                 updatedAt=timestamp,
             )
@@ -13777,6 +13770,8 @@ def enqueue_log(
     """Queue a log entry for async ingestion (high-scale mode)."""
     if os.getenv("CLAWBOARD_INGEST_MODE", "").lower() != "queue":
         raise HTTPException(status_code=400, detail="Queue ingestion not enabled")
+    if str(payload.type or "").strip().lower() == "note":
+        raise HTTPException(status_code=400, detail="type=note is no longer supported for new log writes")
     with get_session() as session:
         job = IngestQueue(
             payload=payload.model_dump(),
@@ -15248,24 +15243,9 @@ def _search_impl(
     topic_map: dict[str, Topic] = {item.id: item for item in topics}
     log_map: dict[str, LogEntry] = {item.id: item for item in logs}
 
-    notes = [entry for entry in logs if entry.type == "note" and entry.relatedLogId]
     note_count_by_log: dict[str, int] = {}
     note_items_by_log: dict[str, list[LogEntry]] = {}
-    for note in notes:
-        related_id = str(note.relatedLogId or "")
-        if not related_id:
-            continue
-        note_count_by_log[related_id] = (note_count_by_log.get(related_id) or 0) + 1
-        note_items_by_log.setdefault(related_id, []).append(note)
-
     note_weight_by_topic: dict[str, float] = {}
-    for related_id, count in note_count_by_log.items():
-        related = log_map.get(related_id)
-        if not related:
-            continue
-        weight = min(0.24, 0.07 * count)
-        if related.topicId:
-            note_weight_by_topic[related.topicId] = (note_weight_by_topic.get(related.topicId) or 0.0) + weight
 
     session_topic_ids: set[str] = set()
     session_log_ids: set[str] = set()
@@ -15624,7 +15604,6 @@ def _search_impl(
         score = base_score
         direct_match_boost = topic_direct_match_boost.get(topic_id2, 0.0)
         score += direct_match_boost
-        score += min(0.26, note_weight_by_topic.get(topic_id2, 0.0))
         if topic_id2 in session_topic_ids:
             score += 0.12
         topic_rows.append(
@@ -15641,7 +15620,6 @@ def _search_impl(
                 "bestChunk": (topic_search_rows.get(topic_id2) or {}).get("bestChunk"),
                 "logPropagationWeight": round(topic_log_boost.get(topic_id2, 0.0), 6),
                 "directMatchBoost": round(direct_match_boost, 6),
-                "noteWeight": round(min(0.26, note_weight_by_topic.get(topic_id2, 0.0)), 6),
                 "sessionBoosted": topic_id2 in session_topic_ids,
             }
         )
@@ -15661,9 +15639,6 @@ def _search_impl(
         content_preview = _sanitize_log_text(content_preview_by_log_id.get(log_id2, ""))
         response_content = content_preview or best_chunk_text or _sanitize_log_text(entry.summary or "")
         score = base_score
-        note_count = int(note_count_by_log.get(log_id2) or 0)
-        note_weight = min(0.24, 0.06 * note_count)
-        score += note_weight
         lexical_rescue_hit = log_id2 in lexical_rescue_log_ids
         if lexical_rescue_hit:
             score += SEARCH_GLOBAL_LEXICAL_RESCUE_SCORE_BOOST
@@ -15686,8 +15661,6 @@ def _search_impl(
                 "rrfScore": float(search_row.get("rrfScore") or 0.0),
                 "rerankScore": float(search_row.get("rerankScore") or 0.0),
                 "bestChunk": best_chunk if isinstance(best_chunk, dict) else None,
-                "noteCount": note_count,
-                "noteWeight": round(note_weight, 6),
                 "lexicalRescueHit": lexical_rescue_hit,
                 "sessionBoosted": log_id2 in session_log_ids,
             }
@@ -15702,27 +15675,6 @@ def _search_impl(
     log_rows = log_rows[:effective_limit_logs]
 
     note_rows: list[dict[str, Any]] = []
-    emitted_note_ids: set[str] = set()
-    for item in log_rows:
-        log_id3 = str(item.get("id") or "")
-        for note in note_items_by_log.get(log_id3, [])[:3]:
-            if note.id in emitted_note_ids:
-                continue
-            emitted_note_ids.add(note.id)
-            note_content_preview = _sanitize_log_text(content_preview_by_log_id.get(str(note.id), ""))
-            note_content = note_content_preview or _sanitize_log_text(note.summary or "")
-            note_rows.append(
-                {
-                    "id": note.id,
-                    "relatedLogId": note.relatedLogId,
-                    "topicId": note.topicId,
-                    "summary": _clip(_sanitize_log_text(note.summary or ""), 140),
-                    "content": _clip(note_content, 280),
-                    "createdAt": note.createdAt,
-                }
-            )
-        if len(note_rows) >= 160:
-            break
 
     return {
         "query": query,
@@ -16332,15 +16284,12 @@ def context(
         if semantic:
             topics_hit_limit = 3
             logs_hit_limit = 6
-            notes_hit_limit = 6
             if effective_mode == "patient":
                 topics_hit_limit = 5
                 logs_hit_limit = 12
-                notes_hit_limit = 10
 
             topics_hit = list(semantic.get("topics") or [])[:topics_hit_limit]
             logs_hit = list(semantic.get("logs") or [])[:logs_hit_limit]
-            notes_hit = list(semantic.get("notes") or [])[:notes_hit_limit]
 
             if topics_hit:
                 lines.append("Semantic recall topics:")
@@ -16358,11 +16307,6 @@ def context(
                     )
                     text2 = _sanitize_log_text(str(item.get("summary") or item.get("content") or ""))
                     lines.append(f"- {who}: {_clip(text2, 140)}")
-            if notes_hit:
-                lines.append("Curated notes:")
-                for item in notes_hit:
-                    note_text = _sanitize_log_text(str(item.get("summary") or item.get("content") or ""))
-                    lines.append(f"- {_clip(note_text, 160)}")
 
     block = _clip("\n".join(lines).strip(), maxChars)
     return {

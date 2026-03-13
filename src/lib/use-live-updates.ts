@@ -12,6 +12,26 @@ export type ConnectionInfo = {
   reconnectAttempt: number;
 };
 
+const STREAM_EVENT_TS_KEY = "clawboard.stream.eventTs";
+const STREAM_EVENT_ID_KEY = "clawboard.stream.lastEventId";
+
+function readStoredCursor(key: string) {
+  if (typeof window === "undefined") return undefined;
+  const value = window.localStorage.getItem(key);
+  const normalized = String(value ?? "").trim();
+  return normalized || undefined;
+}
+
+function writeStoredCursor(key: string, value: string | undefined) {
+  if (typeof window === "undefined") return;
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    window.localStorage.removeItem(key);
+    return;
+  }
+  window.localStorage.setItem(key, normalized);
+}
+
 // Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s (max), with ±25% jitter.
 function backoffDelayMs(retryCount: number): number {
   const base = Math.min(30_000, 1_000 * Math.pow(2, retryCount));
@@ -34,8 +54,8 @@ export function useLiveUpdates(options: {
   const handlerRef = useRef(options.onEvent);
   const reconcileRef = useRef<ReconcileFn | undefined>(options.reconcile);
   const onConnectionChangeRef = useRef(options.onConnectionChange);
-  const lastEventTs = useRef<string | undefined>(undefined);
-  const lastSseId = useRef<string | undefined>(undefined);
+  const lastEventTs = useRef<string | undefined>(readStoredCursor(STREAM_EVENT_TS_KEY));
+  const lastSseId = useRef<string | undefined>(readStoredCursor(STREAM_EVENT_ID_KEY));
   const lastMessageAt = useRef<number>(0);
   const lastReconcileAt = useRef<number>(0);
   const lastBase = useRef<string>("");
@@ -65,6 +85,8 @@ export function useLiveUpdates(options: {
       // Switching instances (or fixing API base) requires a full resync.
       lastEventTs.current = undefined;
       lastSseId.current = undefined;
+      writeStoredCursor(STREAM_EVENT_TS_KEY, undefined);
+      writeStoredCursor(STREAM_EVENT_ID_KEY, undefined);
     }
     lastBase.current = base;
     const streamUrl = apiRequestUrl("/api/stream");
@@ -103,6 +125,7 @@ export function useLiveUpdates(options: {
         const next = await reconcileRef.current(lastEventTs.current);
         if (typeof next === "string") {
           lastEventTs.current = next;
+          writeStoredCursor(STREAM_EVENT_TS_KEY, next);
         }
       } catch {
         // Reconcile is best-effort. Network errors or transient API failures are silently
@@ -159,7 +182,10 @@ export function useLiveUpdates(options: {
           dataLines.push(value);
         }
       }
-      if (eventId) lastSseId.current = eventId;
+      if (eventId) {
+        lastSseId.current = eventId;
+        writeStoredCursor(STREAM_EVENT_ID_KEY, eventId);
+      }
       if (eventName !== "message") return;
       if (!dataLines.length) return;
       const payloadRaw = dataLines.join("\n");
@@ -168,17 +194,22 @@ export function useLiveUpdates(options: {
         if (payload.type === "stream.reset") {
           lastEventTs.current = undefined;
           lastSseId.current = undefined;
+          writeStoredCursor(STREAM_EVENT_TS_KEY, undefined);
+          writeStoredCursor(STREAM_EVENT_ID_KEY, undefined);
           void runReconcile();
           return;
         }
         if (payload.eventTs) {
           lastEventTs.current = payload.eventTs;
+          writeStoredCursor(STREAM_EVENT_TS_KEY, payload.eventTs);
         } else if ("data" in payload && payload.data && typeof payload.data === "object") {
           const maybe = payload.data as { updatedAt?: string; createdAt?: string };
           if (typeof maybe.updatedAt === "string") {
             lastEventTs.current = maybe.updatedAt;
+            writeStoredCursor(STREAM_EVENT_TS_KEY, maybe.updatedAt);
           } else if (typeof maybe.createdAt === "string") {
             lastEventTs.current = maybe.createdAt;
+            writeStoredCursor(STREAM_EVENT_TS_KEY, maybe.createdAt);
           }
         }
         handlerRef.current(payload);

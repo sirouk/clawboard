@@ -73,7 +73,6 @@ export function NowPanel({
         </div>
       )}
       {openTasks.map((task) => {
-        const parentLabel = task.parentId ? topics.find((t) => t.id === task.parentId)?.name : undefined;
         const taskHref = buildTopicUrl(task, topics);
         const titleNode = linkEntireCard && !allowStatusUpdate ? (
           <span className="text-sm font-semibold">{task.name}</span>
@@ -88,7 +87,6 @@ export function NowPanel({
             <div className="flex items-center justify-between gap-3">
               <div>
                 {titleNode}
-                {parentLabel && <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{parentLabel}</div>}
               </div>
               <StatusPill tone={STATUS_TONE[statusKey] ?? "muted"} label={statusKey} />
             </div>

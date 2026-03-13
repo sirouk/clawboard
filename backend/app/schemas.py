@@ -216,7 +216,6 @@ class TopicOut(ModelBase):
     )
     dueDate: Optional[str] = Field(description="Optional due date (ISO).", examples=["2026-02-05T00:00:00.000Z"])
     tags: List[str] = Field(description="Freeform tags.", examples=[["product", "platform"]])
-    parentId: Optional[str] = Field(description="Parent topic ID (for subtopics).", examples=["topic-1"])
     digest: Optional[str] = Field(
         default=None,
         description="Durable topic digest (system-managed summary; optional).",
@@ -309,7 +308,6 @@ class TopicUpsert(BaseModel):
                 "status": "active",
                 "dueDate": "2026-02-05T00:00:00.000Z",
                 "tags": ["product", "platform"],
-                "parentId": "topic-1",
             }
         }
     )
@@ -327,9 +325,8 @@ class TopicUpsert(BaseModel):
     )
     dueDate: Optional[str] = Field(default=None, description="Optional due date (ISO).", examples=["2026-02-05T00:00:00.000Z"])
     tags: Optional[List[str]] = Field(default=None, description="Tags list.", examples=[["product", "platform"]])
-    parentId: Optional[str] = Field(default=None, description="Parent topic ID.", examples=["topic-1"])
 
-    @field_validator("name", "description", "priority", "status", "parentId", mode="before")
+    @field_validator("name", "description", "priority", "status", mode="before")
     @classmethod
     def _normalize_text_fields(cls, value: Any) -> Any:
         return _normalize_utf8_text(value)
@@ -388,7 +385,7 @@ class LogAppend(BaseModel):
     )
 
     type: str = Field(
-        description="Log type (conversation | action | note | system | import).",
+        description="Log type (conversation | action | system | import). Historical note rows remain readable but note creation is disabled.",
         examples=["conversation"],
     )
     content: str = Field(description="Full log content.", examples=["Defined onboarding wizard steps and token flow."])
@@ -459,11 +456,10 @@ class TopicPatch(BaseModel):
     snoozedUntil: Optional[str] = Field(default=None, description="ISO timestamp when snoozed topic re-activates.")
     dueDate: Optional[str] = Field(default=None, description="Optional due date (ISO).")
     tags: Optional[List[str]] = Field(default=None, description="Freeform tags.")
-    parentId: Optional[str] = Field(default=None, description="Parent topic id.")
     digest: Optional[str] = Field(default=None, description="Durable digest text (system-managed).")
     digestUpdatedAt: Optional[str] = Field(default=None, description="Digest updated timestamp (ISO).")
 
-    @field_validator("name", "description", "priority", "status", "parentId", "digest", mode="before")
+    @field_validator("name", "description", "priority", "status", "digest", mode="before")
     @classmethod
     def _normalize_text_fields(cls, value: Any) -> Any:
         return _normalize_utf8_text(value)

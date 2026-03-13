@@ -45,16 +45,15 @@ type ToolEventKind = "call" | "result" | "error";
 type ToolEvent = { kind: ToolEventKind; toolName: string };
 type SourceMetaItem = { key: string; label: string; value: string; abbreviate?: boolean };
 
-function effectiveLogTopicId(entry: Pick<LogEntry, "topicId" | "taskId">) {
-  return String(entry.taskId ?? entry.topicId ?? "").trim();
+function effectiveLogTopicId(entry: Pick<LogEntry, "topicId">) {
+  return String(entry.topicId ?? "").trim();
 }
 
 function effectiveLogParentTopicId(
-  entry: Pick<LogEntry, "topicId" | "taskId">,
+  entry: Pick<LogEntry, "topicId">,
   topicById: ReadonlyMap<string, Topic>
 ) {
-  const topic = topicById.get(effectiveLogTopicId(entry));
-  return String(topic?.parentId ?? entry.topicId ?? "").trim();
+  return String(topicById.get(effectiveLogTopicId(entry))?.id ?? entry.topicId ?? "").trim();
 }
 
 const TOOL_EVENT_RE = /^(Tool call|Tool result|Tool error)\s*:\s*(.+)\s*$/i;
@@ -306,7 +305,6 @@ function areLogsEquivalent(a: LogEntry[], b: LogEntry[]) {
     if ((left.updatedAt ?? "") !== (right.updatedAt ?? "")) return false;
     if ((left.createdAt ?? "") !== (right.createdAt ?? "")) return false;
     if ((left.topicId ?? "") !== (right.topicId ?? "")) return false;
-    if ((left.taskId ?? "") !== (right.taskId ?? "")) return false;
     if ((left.type ?? "") !== (right.type ?? "")) return false;
     if ((left.classificationStatus ?? "") !== (right.classificationStatus ?? "")) return false;
     if (String(left.summary ?? "").length !== String(right.summary ?? "").length) return false;
@@ -1110,7 +1108,6 @@ const LogRow = memo(function LogRow({
   scopeTopicId,
   scopeTaskId,
   showRawAll,
-  allowNotes,
   allowDelete,
   messageDensity,
   onAddNote,
@@ -1211,6 +1208,7 @@ const LogRow = memo(function LogRow({
     return typeLabel;
   }, [entry.type, toolEvent, typeLabel]);
   const allowEdit = allowDelete;
+  const allowNotesEnabled = false;
   const agentLabel = entry.agentLabel || entry.agentId;
   const showAgentBadge = Boolean(agentLabel && agentLabel.trim().toLowerCase() !== typeLabel.trim().toLowerCase());
   const messageSource = stripTransportNoise((entry.content ?? entry.raw ?? entry.summary ?? "").trim());
@@ -1250,6 +1248,18 @@ const LogRow = memo(function LogRow({
   const sourceMetaParts = sourceMetaItems.map((item) => `${item.label}: ${item.value}`);
   const sourceMeta = sourceMetaParts.length > 0 ? sourceMetaParts.join(" · ") : null;
   const editTopicValue = editTopicId || "";
+  const chatDetailsDefaultExpanded = useMemo(() => {
+    if (metaExpandEpoch > metaCollapseEpoch) return true;
+    if (metaCollapseEpoch > metaExpandEpoch) return false;
+    return false;
+  }, [metaCollapseEpoch, metaExpandEpoch]);
+  const [chatDetailsExpanded, setChatDetailsExpanded] = useState(() => chatDetailsDefaultExpanded);
+  const [chatHoverActive, setChatHoverActive] = useState(false);
+  const [chatFocusWithin, setChatFocusWithin] = useState(false);
+
+  useEffect(() => {
+    setChatDetailsExpanded(chatDetailsDefaultExpanded);
+  }, [chatDetailsDefaultExpanded]);
 
   const [toolRawLoaded, setToolRawLoaded] = useState(() => {
     if (typeof entry.raw === "string" && entry.raw.trim()) return true;
@@ -1269,7 +1279,16 @@ const LogRow = memo(function LogRow({
     if (summary) return summary;
     return "";
   }, [entry.content, entry.raw, entry.summary]);
-  const copyValue = toolEvent && toolRaw ? toolRaw : baseCopyValue;
+  const markdownCopyValue = useMemo(() => {
+    if (!isMarkdownMessage) return "";
+    const content = typeof entry.content === "string" ? entry.content : "";
+    if (content.trim()) return content;
+    const raw = typeof entry.raw === "string" ? entry.raw : "";
+    if (raw.trim()) return raw;
+    const summary = typeof entry.summary === "string" ? entry.summary : "";
+    return summary.trim();
+  }, [entry.content, entry.raw, entry.summary, isMarkdownMessage]);
+  const copyValue = toolEvent && toolRaw ? toolRaw : markdownCopyValue || baseCopyValue;
 
   const [replayStatus, setReplayStatus] = useState<"idle" | "running" | "queued" | "failed">("idle");
   const [replayError, setReplayError] = useState<string | null>(null);
@@ -1307,6 +1326,10 @@ const LogRow = memo(function LogRow({
       hiddenToolCallsBefore === 1 ? "1 tool call" : `${hiddenToolCallsBefore} tool calls`;
     const chatFooterButtonClass = "!h-7 !px-2.5 !text-[12px]";
     const chatFooterCopyClass = "!h-7 !px-2.5 !py-1 !text-[9px] !tracking-[0.14em]";
+    const showChatDetailsToggle = Boolean(sourceMetaItems.length > 0 || showReplay || allowEdit);
+    const showChatFooterTools = Boolean((copyValue || messageSource || chatBubbleText).trim() || showChatDetailsToggle);
+    const chatDetailsVisible = chatDetailsExpanded || chatHoverActive || chatFocusWithin || editOpen || noteOpen;
+    const chatDetailToggleLabel = chatDetailsExpanded ? "Unpin message tools" : "Pin message tools";
     const chatSourceMetaInline = !editOpen && sourceMetaItems.length > 0 ? (
       <div className="min-w-0 flex-1 overflow-x-auto overscroll-x-contain text-[10px] leading-4 text-[rgb(var(--claw-muted))]">
         <div className={`flex w-max min-w-full ${isUser ? "justify-end" : "justify-start"}`}>
@@ -1333,7 +1356,17 @@ const LogRow = memo(function LogRow({
       >
         {isMarkdownMessage ? (
           <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-            <div className="w-full max-w-[78%]">
+            <div
+              className="w-full max-w-[78%]"
+              onMouseEnter={() => setChatHoverActive(true)}
+              onMouseLeave={() => setChatHoverActive(false)}
+              onFocusCapture={() => setChatFocusWithin(true)}
+              onBlurCapture={(event) => {
+                const nextTarget = event.relatedTarget as Node | null;
+                if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+                setChatFocusWithin(false);
+              }}
+            >
 	              <div className={`mb-1 flex items-center ${isUser ? "justify-end" : "justify-start"}`}>
 	                {flowLabel ? (
 	                  <span className="mr-2 text-[10px] uppercase tracking-[0.12em] text-[rgb(var(--claw-muted))]">{flowLabel}</span>
@@ -1401,91 +1434,130 @@ const LogRow = memo(function LogRow({
 	                )}
 	              </div>
 
-              <div className={`mt-2 flex w-full min-w-0 items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
-                {isUser ? chatSourceMetaInline : null}
-                <div className={`flex shrink-0 items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
-                  <CopyPill value={copyValue || messageSource || chatBubbleText} className={chatFooterCopyClass} />
-                  {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen ? (
-                    <>
-                      {showReplay && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className={chatFooterButtonClass}
-                          disabled={readOnly || replayStatus === "running"}
-                          title={
-                            readOnly
-                              ? "Read-only mode. Add token in Setup to replay classification."
-                              : replayStatus === "running"
-                                ? "Rechecking..."
-                                : "Re-run the classifier for this message bundle"
-                          }
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            if (readOnly) return;
-                            if (replayStatus === "running") return;
-                            setReplayStatus("running");
-                            setReplayError(null);
-                            void (async () => {
-                              try {
-                                const result = await onReplayClassifier(entry.id);
-                                if (!result.ok) {
-                                  setReplayStatus("failed");
-                                  setReplayError(result.error ?? "Failed to replay classifier.");
-                                  return;
-                                }
-                                setReplayStatus("queued");
-                                window.setTimeout(() => setReplayStatus("idle"), 1400);
-                              } catch {
-                                setReplayStatus("failed");
-                                setReplayError("Failed to replay classifier.");
+              <div className={`mt-2 flex min-h-[28px] w-full min-w-0 items-start gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
+                {!isUser && showChatFooterTools ? (
+                  <button
+                    type="button"
+                    aria-label={chatDetailToggleLabel}
+                    title={chatDetailToggleLabel}
+                    aria-pressed={chatDetailsExpanded}
+                    className="mt-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] text-[rgba(148,163,184,0.72)] transition hover:text-[rgb(var(--claw-text))]"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setChatDetailsExpanded((prev) => !prev);
+                    }}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`h-1.5 w-1.5 rounded-full transition ${
+                        chatDetailsExpanded
+                          ? "bg-[rgba(255,90,45,0.95)] shadow-[0_0_0_3px_rgba(255,90,45,0.14)]"
+                          : "bg-[rgba(148,163,184,0.72)]"
+                      }`}
+                    />
+                  </button>
+                ) : null}
+                <div
+                  className={`flex min-w-0 flex-1 items-start gap-2 transition-all duration-150 ${
+                    chatDetailsVisible ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-1 opacity-0"
+                  } ${isUser ? "justify-end" : "justify-start"}`}
+                >
+                  <>
+                    {isUser ? chatSourceMetaInline : null}
+                    <div className={`flex shrink-0 items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
+                      <CopyPill value={copyValue || messageSource || chatBubbleText} className={chatFooterCopyClass} />
+                      {allowEdit && !editOpen ? (
+                        <>
+                          {showReplay && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className={chatFooterButtonClass}
+                              disabled={readOnly || replayStatus === "running"}
+                              title={
+                                readOnly
+                                  ? "Read-only mode. Add token in Setup to replay classification."
+                                  : replayStatus === "running"
+                                    ? "Rechecking..."
+                                    : "Re-run the classifier for this message bundle"
                               }
-                            })();
-                          }}
-                        >
-                          {replayStatus === "running" ? "Rechecking..." : replayStatus === "queued" ? "Queued" : "Recheck tasks"}
-                        </Button>
-                      )}
-                      {allowEdit && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className={chatFooterButtonClass}
-                          disabled={readOnly}
-                          title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
-                          onClick={() => {
-                            setEditOpen(true);
-                            setDeleteArmed(false);
-                            setDeleteStatus(null);
-                            setPurgeArmed(false);
-                            setPurgeStatus(null);
-                            setEditTopicId(effectiveLogTopicId(entry));
-                            setEditContent(entry.content ?? "");
-                            setEditSummary(entry.summary ?? "");
-                            setEditStatus(null);
-                          }}
-                        >
-                          Edit
-                        </Button>
-                      )}
-                      {allowNotes && entry.type !== "note" && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className={chatFooterButtonClass}
-                          onClick={() => {
-                            setNoteDraftKey(entry.id);
-                            setNoteOpen(true);
-                          }}
-                        >
-                          Add note
-                        </Button>
-                      )}
-                    </>
-                  ) : null}
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                if (readOnly) return;
+                                if (replayStatus === "running") return;
+                                setReplayStatus("running");
+                                setReplayError(null);
+                                void (async () => {
+                                  try {
+                                    const result = await onReplayClassifier(entry.id);
+                                    if (!result.ok) {
+                                      setReplayStatus("failed");
+                                      setReplayError(result.error ?? "Failed to replay classifier.");
+                                      return;
+                                    }
+                                    setReplayStatus("queued");
+                                    window.setTimeout(() => setReplayStatus("idle"), 1400);
+                                  } catch {
+                                    setReplayStatus("failed");
+                                    setReplayError("Failed to replay classifier.");
+                                  }
+                                })();
+                              }}
+                            >
+                              {replayStatus === "running" ? "Rechecking..." : replayStatus === "queued" ? "Queued" : "Recheck topics"}
+                            </Button>
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className={chatFooterButtonClass}
+                            disabled={readOnly}
+                            title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
+                            onClick={() => {
+                              setEditOpen(true);
+                              setDeleteArmed(false);
+                              setDeleteStatus(null);
+                              setPurgeArmed(false);
+                              setPurgeStatus(null);
+                              setEditTopicId(effectiveLogTopicId(entry));
+                              setEditContent(entry.content ?? "");
+                              setEditSummary(entry.summary ?? "");
+                              setEditStatus(null);
+                            }}
+                          >
+                            Edit
+                          </Button>
+                        </>
+                      ) : null}
+                    </div>
+                    {!isUser ? chatSourceMetaInline : null}
+                  </>
                 </div>
-                {!isUser ? chatSourceMetaInline : null}
+                {isUser && showChatFooterTools ? (
+                  <button
+                    type="button"
+                    aria-label={chatDetailToggleLabel}
+                    title={chatDetailToggleLabel}
+                    aria-pressed={chatDetailsExpanded}
+                    className="mt-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] text-[rgba(148,163,184,0.72)] transition hover:text-[rgb(var(--claw-text))]"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setChatDetailsExpanded((prev) => !prev);
+                    }}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`h-1.5 w-1.5 rounded-full transition ${
+                        chatDetailsExpanded
+                          ? "bg-[rgba(255,90,45,0.95)] shadow-[0_0_0_3px_rgba(255,90,45,0.14)]"
+                          : "bg-[rgba(148,163,184,0.72)]"
+                      }`}
+                    />
+                  </button>
+                ) : null}
               </div>
               {showReplay && replayStatus === "failed" && replayError ? (
                 <p className={`mt-1 text-xs ${isUser ? "text-right" : "text-left"} text-[rgb(var(--claw-warning))]`}>
@@ -1493,7 +1565,7 @@ const LogRow = memo(function LogRow({
                 </p>
               ) : null}
 
-              {allowNotes && entry.type !== "note" && noteOpen && (
+              {allowNotesEnabled && entry.type !== "note" && noteOpen && (
                 <div className="mt-2">
                   <div
 	                    ref={notePanelRef}
@@ -1759,7 +1831,17 @@ const LogRow = memo(function LogRow({
             </div>
           </div>
 	        ) : (
-	          <div className="flex w-full flex-col items-start">
+	          <div
+              className="flex w-full flex-col items-start"
+              onMouseEnter={() => setChatHoverActive(true)}
+              onMouseLeave={() => setChatHoverActive(false)}
+              onFocusCapture={() => setChatFocusWithin(true)}
+              onBlurCapture={(event) => {
+                const nextTarget = event.relatedTarget as Node | null;
+                if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+                setChatFocusWithin(false);
+              }}
+            >
 	            <div className="mb-1 flex w-full max-w-[78%] items-center justify-start">
 	              <span className="text-xs text-[rgb(var(--claw-muted))]">{formatDateTime(entry.createdAt)}</span>
 	              {isPending && (
@@ -1849,51 +1931,80 @@ const LogRow = memo(function LogRow({
 	              ) : null}
 	            </div>
 
-            <div className="mt-2 flex w-full max-w-[78%] min-w-0 items-center gap-2 justify-start">
-              <div className="flex shrink-0 items-center gap-2">
-                <CopyPill value={copyValue || messageSource || chatBubbleText} className={chatFooterCopyClass} />
-                {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen ? (
-                  <>
-                    {allowEdit && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className={chatFooterButtonClass}
-                        disabled={readOnly}
-                        title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
-                        onClick={() => {
-                          setEditOpen(true);
-                          setDeleteArmed(false);
-                          setDeleteStatus(null);
-                          setEditTopicId(effectiveLogTopicId(entry));
-                          setEditContent(entry.content ?? "");
-                          setEditSummary(entry.summary ?? "");
-                          setEditStatus(null);
-                        }}
-                      >
-                        Edit
-                      </Button>
-                    )}
-                    {allowNotes && entry.type !== "note" && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className={chatFooterButtonClass}
-                        onClick={() => {
-                          setNoteDraftKey(entry.id);
-                          setNoteOpen(true);
-                        }}
-                      >
-                        Add note
-                      </Button>
-                    )}
-                  </>
-                ) : null}
+            <div className="mt-2 flex min-h-[28px] w-full max-w-[78%] min-w-0 items-center gap-2 justify-start">
+              {showChatFooterTools ? (
+                <button
+                  type="button"
+                  aria-label={chatDetailToggleLabel}
+                  title={chatDetailToggleLabel}
+                  aria-pressed={chatDetailsExpanded}
+                  className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] text-[rgba(148,163,184,0.72)] transition hover:text-[rgb(var(--claw-text))]"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setChatDetailsExpanded((prev) => !prev);
+                  }}
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`h-1.5 w-1.5 rounded-full transition ${
+                      chatDetailsExpanded
+                        ? "bg-[rgba(255,90,45,0.95)] shadow-[0_0_0_3px_rgba(255,90,45,0.14)]"
+                        : "bg-[rgba(148,163,184,0.72)]"
+                    }`}
+                  />
+                </button>
+              ) : null}
+              <div
+                className={`flex min-w-0 flex-1 items-center gap-2 transition-all duration-150 ${
+                  chatDetailsVisible ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-1 opacity-0"
+                }`}
+              >
+                <div className="flex shrink-0 items-center gap-2">
+                  <CopyPill value={copyValue || messageSource || chatBubbleText} className={chatFooterCopyClass} />
+                  {(allowEdit || (allowNotesEnabled && entry.type !== "note")) && !noteOpen && !editOpen ? (
+                    <>
+                      {allowEdit && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className={chatFooterButtonClass}
+                          disabled={readOnly}
+                          title={readOnly ? "Read-only mode. Add token in Setup to edit/delete." : "Edit message actions"}
+                          onClick={() => {
+                            setEditOpen(true);
+                            setDeleteArmed(false);
+                            setDeleteStatus(null);
+                            setEditTopicId(effectiveLogTopicId(entry));
+                            setEditContent(entry.content ?? "");
+                            setEditSummary(entry.summary ?? "");
+                            setEditStatus(null);
+                          }}
+                        >
+                          Edit
+                        </Button>
+                      )}
+                      {allowNotesEnabled && entry.type !== "note" && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className={chatFooterButtonClass}
+                          onClick={() => {
+                            setNoteDraftKey(entry.id);
+                            setNoteOpen(true);
+                          }}
+                        >
+                          Add note
+                        </Button>
+                      )}
+                    </>
+                  ) : null}
+                </div>
+                {chatSourceMetaInline}
               </div>
-              {chatSourceMetaInline}
             </div>
 
-            {allowNotes && entry.type !== "note" && noteOpen && (
+            {allowNotesEnabled && entry.type !== "note" && noteOpen && (
               <div className="mt-2 w-full max-w-[90%]">
                 <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
                   <TextArea
@@ -2309,7 +2420,7 @@ const LogRow = memo(function LogRow({
           )}
         </>
       )}
-      {(allowEdit || (allowNotes && entry.type !== "note")) && !noteOpen && !editOpen && (
+      {(allowEdit || (allowNotesEnabled && entry.type !== "note")) && !noteOpen && !editOpen && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {allowEdit && (
             <Button
@@ -2330,7 +2441,7 @@ const LogRow = memo(function LogRow({
               Edit
             </Button>
           )}
-          {allowNotes && entry.type !== "note" && (
+          {allowNotesEnabled && entry.type !== "note" && (
             <Button
               variant="secondary"
               size="sm"
@@ -2344,7 +2455,7 @@ const LogRow = memo(function LogRow({
           )}
         </div>
       )}
-	      {allowNotes && entry.type !== "note" && noteOpen && (
+	      {allowNotesEnabled && entry.type !== "note" && noteOpen && (
 	        <div className="mt-3">
 	          <div
 	            ref={notePanelRef}

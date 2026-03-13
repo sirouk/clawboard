@@ -22,10 +22,11 @@ import {
 } from "@/lib/openclaw-workspaces";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
-import { buildTopicUrl, withRevealParam, withSpaceParam } from "@/lib/url";
+import { buildTopicUrl, withFocusParam, withRevealParam, withSpaceParam } from "@/lib/url";
 import { apiFetch, getApiBase } from "@/lib/api";
 import type { OpenClawWorkspace, Space, Topic } from "@/lib/types";
 import { compareByBoardOrder } from "@/lib/topic-order";
+import { chatKeyForTopic } from "@/lib/attention-state";
 
 const ICONS: Record<string, React.ReactElement> = {
   home: (
@@ -201,6 +202,15 @@ function topicSpaceIds(topic: Pick<Topic, "spaceId" | "tags"> | null | undefined
   return Array.from(out);
 }
 
+function topicMatchesSelectedSpace(
+  topic: Pick<Topic, "spaceId" | "tags"> | null | undefined,
+  selectedSpaceId: string
+) {
+  const normalized = String(selectedSpaceId ?? "").trim();
+  if (!normalized) return true;
+  return topicSpaceIds(topic).includes(normalized);
+}
+
 const NAV_ITEMS = [
   { href: "/u", label: "Board", id: "home" },
   { href: "/workspaces", label: "Workspaces", id: "workspaces" },
@@ -336,6 +346,7 @@ function WorkspaceNavRow({
 function TopicNavRow({
   topic,
   selected,
+  unread,
   onGo,
   onDoubleClick,
   reorderEnabled,
@@ -344,6 +355,7 @@ function TopicNavRow({
 }: {
   topic: Topic;
   selected: boolean;
+  unread: boolean;
   onGo: () => void;
   onDoubleClick?: () => void;
   reorderEnabled: boolean;
@@ -393,7 +405,10 @@ function TopicNavRow({
         ) : null}
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
-            <div className="truncate font-semibold">{topic.name}</div>
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="truncate font-semibold">{topic.name}</div>
+              {unread ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[rgba(77,171,158,0.92)]" /> : null}
+            </div>
           </div>
           <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-[rgba(148,163,184,0.9)]">
             <div className="truncate">{formatRelativeTime(topic.updatedAt)}</div>
@@ -416,7 +431,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 function AppShellLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { spaces: storeSpaces, topics: storeTopics, tasks: storeTasks, setTopics, hydrated, sseConnected } = useDataStore();
+  const {
+    spaces: storeSpaces,
+    topics: storeTopics,
+    logs,
+    chatSeenByKey,
+    setTopics,
+    hydrated,
+    sseConnected,
+  } = useDataStore();
   const { instanceTitle, token, tokenRequired, tokenConfigured, remoteReadLocked } = useAppConfig();
   const { configured: workspaceConfigured, workspaces: resolvedWorkspaces } = useOpenClawWorkspaces();
   const collapsed = useLocalStorageItem("clawboard.navCollapsed") === "true";
@@ -504,26 +527,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   }, [mergedSpaces, selectedSpaceId]);
   const spaceVisibilityRevision = useMemo(() => buildSpaceVisibilityRevision(mergedSpaces), [mergedSpaces]);
 
-  const allowedSpaceSet = useMemo(() => new Set(allowedSpaceIds), [allowedSpaceIds]);
-  const storeTopicById = useMemo(() => new Map(storeTopics.map((topic) => [topic.id, topic])), [storeTopics]);
   const topics = useMemo(() => {
-    if (!selectedSpaceId || allowedSpaceSet.size === 0) return storeTopics;
-    return storeTopics.filter((topic) => topicSpaceIds(topic).some((spaceId) => allowedSpaceSet.has(spaceId)));
-  }, [allowedSpaceSet, selectedSpaceId, storeTopics]);
-
-  const tasks = useMemo(() => {
-    if (!selectedSpaceId || allowedSpaceSet.size === 0) return storeTasks;
-    return storeTasks.filter((task) => {
-      const taskSpace = String(task.spaceId ?? "").trim();
-      if (taskSpace) return allowedSpaceSet.has(taskSpace);
-      if (task.topicId) {
-        const parent = storeTopicById.get(task.topicId);
-        if (!parent) return false;
-        return topicSpaceIds(parent).some((spaceId) => allowedSpaceSet.has(spaceId));
-      }
-      return false;
-    });
-  }, [allowedSpaceSet, selectedSpaceId, storeTasks, storeTopicById]);
+    if (!selectedSpaceId) return storeTopics;
+    return storeTopics.filter((topic) => topicMatchesSelectedSpace(topic, selectedSpaceId));
+  }, [selectedSpaceId, storeTopics]);
 
   const apiBase = getApiBase();
   const showBoardTopics = boardTopicsExpanded && !collapsed;
@@ -739,8 +746,8 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const topicSemanticRefreshKey = useMemo(() => {
     if (!showBoardTopics || normalizedTopicSearch.length < 1) return "";
     const latestTopic = topics.reduce((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), "");
-    return `${topics.length}:${latestTopic}:${tasks.length}:${spaceVisibilityRevision}`;
-  }, [normalizedTopicSearch.length, showBoardTopics, spaceVisibilityRevision, tasks.length, topics]);
+    return `${topics.length}:${latestTopic}:${spaceVisibilityRevision}`;
+  }, [normalizedTopicSearch.length, showBoardTopics, spaceVisibilityRevision, topics]);
 
   const topicSemanticSearch = useSemanticSearch({
     query: normalizedTopicSearch,
@@ -765,7 +772,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 
 	    const base = [...topics].filter((topic) => {
 	      if (query || !selectedSpaceId) return true;
-	      return topicSpaceIds(topic).includes(selectedSpaceId);
+	      return topicMatchesSelectedSpace(topic, selectedSpaceId);
 	    });
 	    base.sort((a, b) => {
 	      const as = (a.status ?? "active") === "archived" ? 1 : 0;
@@ -800,6 +807,21 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	  }, [normalizedTopicSearch, selectedSpaceId, topicSemanticForQuery, topics, topicsById]);
 
   const boardTopicReorderEnabled = showBoardTopics && !readOnly && normalizedTopicSearch.length === 0;
+  const unreadTopicIds = useMemo(() => {
+    const out = new Set<string>();
+    for (const topic of topics) {
+      const key = chatKeyForTopic(topic.id);
+      if (!key) continue;
+      const seenAtMs = Date.parse(chatSeenByKey[key] ?? "");
+      const updatedAtMs = Date.parse(String(topic.updatedAt ?? topic.createdAt ?? ""));
+      if (!Number.isFinite(updatedAtMs)) continue;
+      if (!Number.isFinite(seenAtMs) || updatedAtMs > seenAtMs) {
+        const hasVisibleActivity = logs.some((entry) => String(entry.topicId ?? "").trim() === topic.id);
+        if (hasVisibleActivity || !Number.isFinite(seenAtMs)) out.add(topic.id);
+      }
+    }
+    return out;
+  }, [chatSeenByKey, logs, topics]);
 
   const boardTopicsForNav = useMemo(() => {
     if (boardTopicReorderEnabled) return filteredTopics;
@@ -1307,7 +1329,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                                const selected = topic.id === activeBoardIds.topicId;
 			                                const href = buildTopicUrl(topic, topics);
 			                                const go = () => {
-			                                  router.push(withSpaceParam(withRevealParam(href, true), topic.spaceId));
+			                                  router.push(withSpaceParam(withFocusParam(withRevealParam(href, true), true), topic.spaceId));
 			                                };
 
 			                                const dropActive = Boolean(draggingBoardTopicId) && boardTopicDropTargetId === topic.id;
@@ -1316,6 +1338,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                                    key={topic.id}
 			                                    topic={topic}
 			                                    selected={selected}
+			                                    unread={unreadTopicIds.has(topic.id)}
 			                                    onGo={go}
 			                                    reorderEnabled={boardTopicReorderEnabled}
 			                                    dropActive={dropActive}

@@ -96,7 +96,6 @@ export function TaskList({
           ...current,
           ...updates,
           name: nextTitle || current.name,
-          parentId: updates.topicId !== undefined ? updates.topicId : (current.topicId ?? current.parentId ?? null),
         }),
       },
       token
@@ -209,7 +208,7 @@ function TaskRow({
   const router = useRouter();
   const [title, setTitle] = useState(task.title ?? task.name);
   const [saving, setSaving] = useState(false);
-  const topicName = topics.find((topic) => topic.id === (task.topicId ?? task.parentId))?.name ?? "Unassigned";
+  const topicName = topics.find((topic) => topic.id === task.topicId)?.name ?? "Unassigned";
   const compact = density === "compact";
   const rowPadding = compact ? "p-3" : "p-4";
   const titleClass = compact ? "text-sm" : "text-base";
@@ -285,7 +284,7 @@ function TaskRow({
           )}
           {showTopicSelect && allowTopicChange && (
             <Select
-              value={task.topicId ?? task.parentId ?? ""}
+              value={task.topicId ?? ""}
               onChange={(event) => onUpdate(task.id, { topicId: event.target.value || null })}
               className={topicSelectClass}
               disabled={readOnly}

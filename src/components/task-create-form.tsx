@@ -6,10 +6,12 @@ import type { Topic } from "@/lib/types";
 import { Button, Input, Select } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { apiFetch } from "@/lib/api";
+import { useLocalStorageItem } from "@/lib/local-storage";
 
 export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; defaultTopicId?: string | null }) {
   const router = useRouter();
   const { token, tokenRequired } = useAppConfig();
+  const activeSpaceId = (useLocalStorageItem("clawboard.space.active") ?? "").trim();
   const [title, setTitle] = useState("");
   const [topicId, setTopicId] = useState(defaultTopicId ?? "");
   const [saving, setSaving] = useState(false);
@@ -26,6 +28,9 @@ export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; de
       return;
     }
 
+    const parentTopic = topics.find((topic) => topic.id === topicId) ?? null;
+    const resolvedSpaceId = String(parentTopic?.spaceId ?? "").trim() || activeSpaceId;
+
     setSaving(true);
     try {
       const res = await apiFetch(
@@ -37,8 +42,9 @@ export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; de
           },
           body: JSON.stringify({
             name: title.trim(),
-            parentId: topicId || null,
             status: "todo",
+            spaceId: resolvedSpaceId || undefined,
+            tags: parentTopic?.tags ?? undefined,
           }),
         },
         token

@@ -92,7 +92,6 @@ export function LogsPage() {
           showRawToggle
           showRawAll={showRawAll}
           onShowRawAllChange={setShowRawAll}
-          allowNotes
           initialVisibleCount={50}
           loadMoreStep={50}
           initialSearch={urlFilters.q}

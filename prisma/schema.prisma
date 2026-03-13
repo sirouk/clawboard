@@ -18,7 +18,6 @@ model Topic {
   id           String    @id
   name         String
   description  String?
-  parentId     String?
   tags         String?
   color        String?
   status       String?

@@ -89,10 +89,6 @@ class Topic(SQLModel, table=True):
         sa_column=Column(JSON),
         description="Freeform tags.",
     )
-    parentId: Optional[str] = Field(
-        default=None,
-        description="Parent topic ID (for subtopics).",
-    )
     digest: Optional[str] = Field(
         default=None,
         description="Durable topic digest (system-managed summary; optional).",

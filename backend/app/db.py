@@ -416,6 +416,8 @@ def init_db() -> None:
                 'ON topic("createdAt");'
             )
             conn.exec_driver_sql("UPDATE topic SET tags = '[]' WHERE tags IS NULL;")
+            if "parentId" in topic_existing:
+                conn.exec_driver_sql('UPDATE topic SET "parentId" = NULL WHERE "parentId" IS NOT NULL;')
             conn.exec_driver_sql(
                 f"UPDATE topic SET spaceId = '{DEFAULT_SPACE_ID}' WHERE spaceId IS NULL OR trim(spaceId) = '';"
             )
@@ -435,11 +437,11 @@ def init_db() -> None:
                     conn.exec_driver_sql(
                         "INSERT OR IGNORE INTO topic "
                         "(id, spaceId, name, createdBy, sortIndex, color, description, priority, status, "
-                        " snoozedUntil, dueDate, tags, parentId, digest, digestUpdatedAt, createdAt, updatedAt) "
+                        " snoozedUntil, dueDate, tags, digest, digestUpdatedAt, createdAt, updatedAt) "
                         "SELECT id, COALESCE(spaceId, 'space-default'), title, 'import', "
                         "  COALESCE(sortIndex, 0), color, NULL, COALESCE(priority, 'medium'), "
                         "  COALESCE(status, 'todo'), snoozedUntil, dueDate, COALESCE(tags, '[]'), "
-                        "  NULL, digest, digestUpdatedAt, createdAt, updatedAt "
+                        "  digest, digestUpdatedAt, createdAt, updatedAt "
                         "FROM task;"
                     )
                     # Re-point logs that referenced a task to the migrated topic.
@@ -627,11 +629,11 @@ def init_db() -> None:
                         conn.exec_driver_sql(
                             'INSERT INTO topic '
                             '(id, "spaceId", name, "createdBy", "sortIndex", color, description, priority, status, '
-                            ' "snoozedUntil", "dueDate", tags, "parentId", digest, "digestUpdatedAt", "createdAt", "updatedAt") '
+                            ' "snoozedUntil", "dueDate", tags, digest, "digestUpdatedAt", "createdAt", "updatedAt") '
                             "SELECT id, COALESCE(\"spaceId\", 'space-default'), title, 'import', "
                             '  COALESCE("sortIndex", 0), color, NULL, COALESCE(priority, \'medium\'), '
                             "  COALESCE(status, 'todo'), \"snoozedUntil\", \"dueDate\", COALESCE(tags, '[]'::json), "
-                            '  NULL, digest, "digestUpdatedAt", "createdAt", "updatedAt" '
+                            '  digest, "digestUpdatedAt", "createdAt", "updatedAt" '
                             "FROM task "
                             "ON CONFLICT (id) DO NOTHING;"
                         )

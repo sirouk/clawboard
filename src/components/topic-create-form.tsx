@@ -5,10 +5,12 @@ import { useRouter } from "next/navigation";
 import { Button, Input, Select, TextArea } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { apiFetch } from "@/lib/api";
+import { useLocalStorageItem } from "@/lib/local-storage";
 
 export function TopicCreateForm() {
   const router = useRouter();
   const { token, tokenRequired } = useAppConfig();
+  const activeSpaceId = (useLocalStorageItem("clawboard.space.active") ?? "").trim();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState("medium");
@@ -37,6 +39,7 @@ export function TopicCreateForm() {
           name: name.trim(),
           description: description.trim(),
           priority,
+          spaceId: activeSpaceId || undefined,
         }),
         },
         token

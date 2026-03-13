@@ -104,25 +104,26 @@ export function Markdown({ children, className, highlightCommands = true }: { ch
   if (!text.trim()) return null;
 
   return (
-    <div className={cn("claw-markdown", className)}>
+    <div className={cn("claw-markdown min-w-0", className)}>
       <ReactMarkdown
+        skipHtml
         remarkPlugins={[remarkGfm, remarkBreaks]}
         components={{
           p: ({ children }) => {
-            const content = children;
+            const content = nodeText(children);
             // Check if the paragraph starts with a forwardslash command
-            if (highlightCommands && typeof content === "string" && content.startsWith("/") && !content.includes("\n")) {
+            if (highlightCommands && content.startsWith("/") && !content.includes("\n")) {
               const parts = content.split(/\s+/, 2);
               const cmd = parts[0];
               const rest = parts[1] || "";
               return (
-                <p className="break-words">
+                <p className="min-w-0 break-words [overflow-wrap:anywhere]">
                   <span className="font-bold text-[rgb(var(--claw-accent))]">{cmd}</span> {rest}
                 </p>
               );
             }
             return (
-              <p className="break-words">
+              <p className="min-w-0 break-words [overflow-wrap:anywhere]">
                 {children}
               </p>
             );
@@ -132,17 +133,17 @@ export function Markdown({ children, className, highlightCommands = true }: { ch
               href={href}
               target="_blank"
               rel="noreferrer"
-              className="underline underline-offset-2 decoration-[rgba(var(--claw-muted),0.72)] hover:decoration-[rgba(var(--claw-text),0.85)]"
+              className="break-all underline underline-offset-2 decoration-[rgba(var(--claw-muted),0.72)] hover:decoration-[rgba(var(--claw-text),0.85)]"
             >
               {children}
             </a>
           ),
-          ul: ({ children }) => <ul className="ml-5 list-disc space-y-1">{children}</ul>,
-          ol: ({ children }) => <ol className="ml-5 list-decimal space-y-1">{children}</ol>,
-          li: ({ children }) => <li className="break-words">{children}</li>,
+          ul: ({ children }) => <ul className="min-w-0 ml-5 list-disc space-y-1 [overflow-wrap:anywhere]">{children}</ul>,
+          ol: ({ children }) => <ol className="min-w-0 ml-5 list-decimal space-y-1 [overflow-wrap:anywhere]">{children}</ol>,
+          li: ({ children }) => <li className="min-w-0 break-words [overflow-wrap:anywhere]">{children}</li>,
           table: ({ children }) => (
-            <div className="max-w-full overflow-x-auto rounded-[var(--radius-md)] border border-[rgba(255,255,255,0.12)] bg-black/25">
-              <table className="min-w-max border-collapse text-left text-xs leading-relaxed text-[rgb(var(--claw-text))]">
+            <div className="max-w-full overflow-x-auto overscroll-x-contain rounded-[var(--radius-md)] border border-[rgba(255,255,255,0.12)] bg-black/25 [scrollbar-width:thin]">
+              <table className="w-max min-w-full border-collapse text-left text-xs leading-relaxed text-[rgb(var(--claw-text))]">
                 {children}
               </table>
             </div>
@@ -151,7 +152,7 @@ export function Markdown({ children, className, highlightCommands = true }: { ch
           tbody: ({ children }) => <tbody>{children}</tbody>,
           tr: ({ children }) => <tr className="border-b border-[rgba(255,255,255,0.08)] last:border-b-0">{children}</tr>,
           th: ({ children }) => (
-            <th className="whitespace-nowrap border-b border-[rgba(255,255,255,0.12)] px-3 py-2 align-top font-semibold text-[rgba(var(--claw-text),0.96)]">
+            <th className="whitespace-nowrap px-3 py-2 align-top font-semibold text-[rgba(var(--claw-text),0.96)]">
               {children}
             </th>
           ),
@@ -161,7 +162,7 @@ export function Markdown({ children, className, highlightCommands = true }: { ch
             </td>
           ),
           blockquote: ({ children }) => (
-            <blockquote className="border-l-2 border-[rgba(255,255,255,0.18)] pl-3 text-[rgba(var(--claw-text),0.92)]">
+            <blockquote className="min-w-0 overflow-x-auto border-l-2 border-[rgba(255,255,255,0.18)] pl-3 text-[rgba(var(--claw-text),0.92)]">
               {children}
             </blockquote>
           ),
@@ -176,7 +177,7 @@ export function Markdown({ children, className, highlightCommands = true }: { ch
             return (
               <code
                 className={cn(
-                  "inline-block max-w-full overflow-x-auto whitespace-nowrap align-bottom rounded-[8px] bg-black/35 px-1 py-0.5 font-mono text-[0.92em] text-[rgba(var(--claw-text),0.92)]",
+                  "inline-flex max-w-full overflow-x-auto overscroll-x-contain whitespace-pre align-bottom rounded-[8px] bg-black/35 px-1 py-0.5 font-mono text-[0.92em] text-[rgba(var(--claw-text),0.92)] [scrollbar-width:none]",
                   className
                 )}
                 {...props}
@@ -185,16 +186,20 @@ export function Markdown({ children, className, highlightCommands = true }: { ch
               </code>
             );
           },
+          img: ({ src, alt }) => (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={src ?? ""} alt={alt ?? ""} loading="lazy" className="h-auto max-w-full rounded-[var(--radius-md)]" />
+          ),
           pre: ({ children }) => {
             const raw = nodeText(children).replace(/\n$/, "");
             const isSingleLine = raw && !raw.includes("\n");
             const buttonPos = isSingleLine ? "top-1/2 -translate-y-1/2" : "bottom-2";
             const prePadding = isSingleLine ? "p-3 pr-14" : "p-3 pr-14 pb-9";
             return (
-              <div className="relative">
+              <div className="relative max-w-full">
                 <pre
                   className={cn(
-                    "overflow-x-auto rounded-[var(--radius-md)] bg-black/40 text-xs leading-relaxed text-[rgb(var(--claw-text))]",
+                    "max-w-full overflow-x-auto overscroll-x-contain rounded-[var(--radius-md)] bg-black/40 text-xs leading-relaxed text-[rgb(var(--claw-text))] [scrollbar-width:thin]",
                     prePadding
                   )}
                 >
