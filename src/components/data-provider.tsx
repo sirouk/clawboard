@@ -9,7 +9,6 @@ import { normalizeBoardSessionKey } from "@/lib/board-session";
 import { CLAWBOARD_CONFIG_UPDATED_EVENT } from "@/lib/config-events";
 import {
   CHAT_SEEN_AT_KEY,
-  UNSNOOZED_TASKS_KEY,
   UNSNOOZED_TOPICS_KEY,
   chatKeyFromLogEntry,
   parseNumberMap,
@@ -21,7 +20,6 @@ import {
   CLAWBOARD_NOTIFICATION_CLICK_EVENT,
   CLAWBOARD_NOTIFICATION_CLICK_MESSAGE_TYPE,
   CLAWBOARD_NOTIFY_CHAT_PARAM,
-  CLAWBOARD_NOTIFY_TASK_PARAM,
   CLAWBOARD_NOTIFY_TOPIC_PARAM,
   PUSH_ENABLED_KEY,
   closePwaNotificationsByTag,
@@ -30,7 +28,7 @@ import {
   showPwaNotification,
   type PwaNotificationClickData,
 } from "@/lib/pwa-utils";
-import { buildTaskUrl, buildTopicUrl } from "@/lib/url";
+import { buildTopicUrl } from "@/lib/url";
 
 type DataContextValue = {
   spaces: Space[];
@@ -318,19 +316,43 @@ function chatTag(chatKey: string) {
 
 function readNotificationClickDataFromSearchParams(searchParams: URLSearchParams): PwaNotificationClickData {
   const topicId = String(searchParams.get(CLAWBOARD_NOTIFY_TOPIC_PARAM) ?? "").trim();
-  const taskId = String(searchParams.get(CLAWBOARD_NOTIFY_TASK_PARAM) ?? "").trim();
   const chatKey = String(searchParams.get(CLAWBOARD_NOTIFY_CHAT_PARAM) ?? "").trim();
   const out: PwaNotificationClickData = {};
   if (topicId) out.topicId = topicId;
-  if (taskId) out.taskId = taskId;
   if (chatKey) out.chatKey = chatKey;
   return out;
+}
+
+function topicToTask(topic: Topic): Task {
+  return {
+    ...topic,
+    title: topic.name,
+    topicId: topic.id,
+  };
+}
+
+function taskToTopic(task: Task, fallback?: Topic): Topic {
+  const name = String(task.title ?? task.name ?? fallback?.name ?? "").trim();
+  return {
+    ...(fallback ?? {}),
+    ...task,
+    name: name || fallback?.name || "",
+    parentId: task.topicId && task.topicId !== task.id ? task.topicId : (task.parentId ?? fallback?.parentId ?? null),
+  };
 }
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [topics, setTopics] = useState<Topic[]>([]);
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const tasks: Task[] = useMemo(() => topics.map(topicToTask), [topics]);
+  const setTasks: React.Dispatch<React.SetStateAction<Task[]>> = useCallback((next) => {
+    setTopics((previousTopics) => {
+      const previousTasks = previousTopics.map(topicToTask);
+      const resolvedTasks = typeof next === "function" ? next(previousTasks) : next;
+      const previousById = new Map(previousTopics.map((topic) => [topic.id, topic]));
+      return resolvedTasks.map((task) => taskToTopic(task, previousById.get(task.id)));
+    });
+  }, []);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [openclawTyping, setOpenclawTyping] = useState<
@@ -342,12 +364,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [hydrated, setHydrated] = useState(false);
   const [sseConnected, setSseConnected] = useState(false);
   const unsnoozedTopicsRaw = useLocalStorageItem(UNSNOOZED_TOPICS_KEY) ?? "{}";
-  const unsnoozedTasksRaw = useLocalStorageItem(UNSNOOZED_TASKS_KEY) ?? "{}";
   const chatSeenRaw = useLocalStorageItem(CHAT_SEEN_AT_KEY) ?? "{}";
   const notificationsEnabledRaw = useLocalStorageItem(PUSH_ENABLED_KEY);
 
   const unsnoozedTopicBadges = useMemo(() => parseNumberMap(unsnoozedTopicsRaw), [unsnoozedTopicsRaw]);
-  const unsnoozedTaskBadges = useMemo(() => parseNumberMap(unsnoozedTasksRaw), [unsnoozedTasksRaw]);
+  const unsnoozedTaskBadges = useMemo(() => ({}), []);
   const chatSeenByKey = useMemo(() => parseStringMap(chatSeenRaw), [chatSeenRaw]);
   const notificationsEnabled = useMemo(() => notificationsEnabledRaw !== "false", [notificationsEnabledRaw]);
   const activeUnsnoozedTopicCount = useMemo(() => {
@@ -358,14 +379,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
     return count;
   }, [topics, unsnoozedTopicBadges]);
-  const activeUnsnoozedTaskCount = useMemo(() => {
-    const validTaskIds = new Set(tasks.map((task) => task.id));
-    let count = 0;
-    for (const taskId of Object.keys(unsnoozedTaskBadges)) {
-      if (validTaskIds.has(taskId)) count += 1;
-    }
-    return count;
-  }, [tasks, unsnoozedTaskBadges]);
+  const activeUnsnoozedTaskCount = 0;
 
   const unreadMessageCount = useMemo(() => {
     const seenAtMs = new Map<string, number>();
@@ -388,15 +402,15 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     return count;
   }, [chatSeenByKey, logs]);
 
-  // Keep PWA badge scope strict: unread Topic/Task chat replies and unsnoozed items only.
+  // Keep PWA badge scope strict: unread topic chat replies and unsnoozed topics only.
   const pwaAttentionCount = useMemo(
-    () => activeUnsnoozedTopicCount + activeUnsnoozedTaskCount + unreadMessageCount,
-    [activeUnsnoozedTaskCount, activeUnsnoozedTopicCount, unreadMessageCount]
+    () => activeUnsnoozedTopicCount + unreadMessageCount,
+    [activeUnsnoozedTopicCount, unreadMessageCount]
   );
 
   const upsertSpace = (space: Space) => setSpaces((prev) => upsertById(prev, space));
   const upsertTopic = (topic: Topic) => setTopics((prev) => upsertById(prev, topic));
-  const upsertTask = (task: Task) => setTasks((prev) => upsertById(prev, task));
+  const upsertTask = (task: Task) => upsertTopic({ ...task, name: task.title ?? task.name });
   const appendLog = (log: LogEntry) => setLogs((prev) => mergeLogs(prev, [log]));
   const upsertDraft = (draft: Draft) =>
     setDrafts((prev) => {
@@ -450,26 +464,18 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     (taskId: string) => {
       const id = String(taskId || "").trim();
       if (!id) return;
-      const updated: Record<string, number> = { ...unsnoozedTaskBadges };
-      if (!Object.prototype.hasOwnProperty.call(updated, id)) return;
-      delete updated[id];
-      setLocalStorageItem(UNSNOOZED_TASKS_KEY, JSON.stringify(updated));
-
-      const tags = [unsnoozedTaskTag(id)];
-      if (Object.keys(updated).length === 0) tags.push(UNSNOOZE_TASKS_SUMMARY_TAG);
-      void closePwaNotificationsByTag(tags);
+      dismissUnsnoozedTopicBadge(id);
     },
-    [unsnoozedTaskBadges]
+    [dismissUnsnoozedTopicBadge]
   );
 
   const handleNotificationClickData = useCallback(
     (rawData: unknown) => {
       const data = parsePwaNotificationClickData(rawData);
       if (data.topicId) dismissUnsnoozedTopicBadge(data.topicId);
-      if (data.taskId) dismissUnsnoozedTaskBadge(data.taskId);
       if (data.chatKey) markChatSeen(data.chatKey);
     },
-    [dismissUnsnoozedTaskBadge, dismissUnsnoozedTopicBadge, markChatSeen]
+    [dismissUnsnoozedTopicBadge, markChatSeen]
   );
 
   useEffect(() => {
@@ -494,10 +500,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     const currentUrl = new URL(window.location.href);
     const fromUrl = readNotificationClickDataFromSearchParams(currentUrl.searchParams);
-    if (fromUrl.topicId || fromUrl.taskId || fromUrl.chatKey) {
+    if (fromUrl.topicId || fromUrl.chatKey) {
       handleNotificationClickData(fromUrl);
       currentUrl.searchParams.delete(CLAWBOARD_NOTIFY_TOPIC_PARAM);
-      currentUrl.searchParams.delete(CLAWBOARD_NOTIFY_TASK_PARAM);
       currentUrl.searchParams.delete(CLAWBOARD_NOTIFY_CHAT_PARAM);
       window.history.replaceState(window.history.state, "", `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
     }
@@ -550,15 +555,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       } else if (deletedTopics.length > 0) {
         setTopics((prev) => applyDeletedEntityTombstones(prev, deletedTopics));
       }
-      if (Array.isArray(payload.tasks)) {
-        setTasks((prev) =>
-          applyDeletedEntityTombstones(
-            overlayFresherById(payload.tasks as Task[], prev, cursor, mergeById),
-            deletedTasks
-          )
-        );
-      } else if (deletedTasks.length > 0) {
-        setTasks((prev) => applyDeletedEntityTombstones(prev, deletedTasks));
+      if (deletedTasks.length > 0) {
+        setTopics((prev) => applyDeletedEntityTombstones(prev, deletedTasks));
       }
       if (Array.isArray(payload.logs)) {
         setLogs((prev) => {
@@ -595,10 +593,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       } else if (deletedTopics.length > 0) {
         setTopics((prev) => applyDeletedEntityTombstones(prev, deletedTopics));
       }
-      if (Array.isArray(payload.tasks)) {
-        setTasks((prev) => applyDeletedEntityTombstones(mergeById(prev, payload.tasks as Task[]), deletedTasks));
-      } else if (deletedTasks.length > 0) {
-        setTasks((prev) => applyDeletedEntityTombstones(prev, deletedTasks));
+      if (deletedTasks.length > 0) {
+        setTopics((prev) => applyDeletedEntityTombstones(prev, deletedTasks));
       }
       if (Array.isArray(payload.logs)) setLogs((prev) => mergeLogs(prev, payload.logs as LogEntry[]));
       if (Array.isArray(payload.deletedLogIds) && payload.deletedLogIds.length > 0) {
@@ -653,20 +649,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         const id = (event.data as { id?: string }).id;
         if (id) {
           setTopics((prev) => removeById(prev, id));
-          setTasks((prev) => prev.map((item) => (item.topicId === id ? { ...item, topicId: null } : item)));
           setLogs((prev) => prev.map((item) => (item.topicId === id ? { ...item, topicId: null } : item)));
-        }
-        return;
-      }
-      if (event.type === "task.upserted" && event.data && typeof event.data === "object") {
-        upsertTask(event.data as Task);
-        return;
-      }
-      if (event.type === "task.deleted" && event.data && typeof event.data === "object") {
-        const id = (event.data as { id?: string }).id;
-        if (id) {
-          setTasks((prev) => removeById(prev, id));
-          setLogs((prev) => prev.map((item) => (item.taskId === id ? { ...item, taskId: null } : item)));
         }
         return;
       }
@@ -746,7 +729,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
   const knownLogIdsRef = useRef<Set<string> | null>(null);
   const prevTopicStatusRef = useRef<Map<string, { status: string; snoozedUntil: string | null }> | null>(null);
-  const prevTaskSnoozeRef = useRef<Map<string, string | null> | null>(null);
   const seededSeenMapRef = useRef(false);
 
   useEffect(() => {
@@ -788,29 +770,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   }, [hydrated, topics, unsnoozedTopicBadges]);
 
   useEffect(() => {
-    if (!hydrated) return;
-    const validTaskIds = new Set(tasks.map((task) => task.id));
-    const staleTaskIds = Object.keys(unsnoozedTaskBadges).filter((taskId) => !validTaskIds.has(taskId));
-    if (staleTaskIds.length === 0) return;
-    const updated: Record<string, number> = { ...unsnoozedTaskBadges };
-    for (const taskId of staleTaskIds) {
-      delete updated[taskId];
-    }
-    setLocalStorageItem(UNSNOOZED_TASKS_KEY, JSON.stringify(updated));
-    const tags = staleTaskIds.map((taskId) => unsnoozedTaskTag(taskId));
-    if (Object.keys(updated).length === 0) tags.push(UNSNOOZE_TASKS_SUMMARY_TAG);
-    void closePwaNotificationsByTag(tags);
-  }, [hydrated, tasks, unsnoozedTaskBadges]);
-
-  useEffect(() => {
     if (Object.keys(unsnoozedTopicBadges).length > 0) return;
     void closePwaNotificationsByTag([UNSNOOZE_TOPICS_SUMMARY_TAG]);
   }, [unsnoozedTopicBadges]);
-
-  useEffect(() => {
-    if (Object.keys(unsnoozedTaskBadges).length > 0) return;
-    void closePwaNotificationsByTag([UNSNOOZE_TASKS_SUMMARY_TAG]);
-  }, [unsnoozedTaskBadges]);
 
   useEffect(() => {
     if (unreadMessageCount > 0) return;
@@ -881,65 +843,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   }, [notificationsEnabled, topics, unsnoozedTopicBadges]);
 
   useEffect(() => {
-    const previous = prevTaskSnoozeRef.current;
-    const next = new Map<string, string | null>();
-    const additions: Task[] = [];
-
-    for (const task of tasks) {
-      const snoozedUntil = task.snoozedUntil ? String(task.snoozedUntil) : null;
-      next.set(task.id, snoozedUntil);
-      if (!previous) continue;
-      const before = previous.get(task.id);
-      if (!before) continue;
-      if (before && !snoozedUntil) additions.push(task);
-    }
-    prevTaskSnoozeRef.current = next;
-
-    if (!previous || additions.length === 0) return;
-
-    const stamp = Date.now();
-    let changed = false;
-    const updated: Record<string, number> = { ...unsnoozedTaskBadges };
-    for (const task of additions) {
-      if (!Object.prototype.hasOwnProperty.call(updated, task.id)) changed = true;
-      updated[task.id] = stamp;
-    }
-    if (changed) {
-      setLocalStorageItem(UNSNOOZED_TASKS_KEY, JSON.stringify(updated));
-    }
-
-    if (typeof document === "undefined") return;
-    if (document.visibilityState === "visible") return;
-    if (!notificationsEnabled) return;
-
-    if (additions.length === 1) {
-      const task = additions[0];
-      const url = `${buildTaskUrl(task, topics)}?focus=1`;
-      void showPwaNotification(
-        {
-          title: `Task unsnoozed: ${task.title}`,
-          body: "Activity resumed.",
-          tag: unsnoozedTaskTag(task.id),
-          url,
-          data: { taskId: task.id },
-        },
-        notificationsEnabled
-      );
-      return;
-    }
-
-    void showPwaNotification(
-      {
-        title: "Clawboard",
-        body: `${additions.length} tasks unsnoozed.`,
-        tag: UNSNOOZE_TASKS_SUMMARY_TAG,
-        url: "/u",
-      },
-      notificationsEnabled
-    );
-  }, [notificationsEnabled, tasks, topics, unsnoozedTaskBadges]);
-
-  useEffect(() => {
     if (!hydrated) return;
 
     const known = knownLogIdsRef.current;
@@ -974,18 +877,18 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       const entry = unseenAdditions[0];
       const chatKey = chatKeyFromLogEntry(entry);
       const body = clipNotificationText(entry.content ?? entry.summary ?? "");
-      if (chatKey.startsWith("task:")) {
-        const taskId = chatKey.slice("task:".length).trim();
-        const task = taskById.get(taskId);
-        if (task) {
-          const url = `${buildTaskUrl(task, topics)}?focus=1`;
+      if (chatKey.startsWith("topic:")) {
+        const topicId = chatKey.slice("topic:".length).trim();
+        const topic = topicById.get(topicId);
+        if (topic) {
+          const url = `${buildTopicUrl(topic, topics)}?focus=1`;
           void showPwaNotification(
             {
-              title: `Task Chat: ${task.title}`,
+              title: `Topic Chat: ${topic.name}`,
               body,
               tag: chatTag(chatKey),
               url,
-              data: { chatKey },
+              data: { chatKey, topicId: topic.id },
             },
             notificationsEnabled
           );
@@ -1008,7 +911,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       },
       notificationsEnabled
     );
-  }, [chatSeenByKey, hydrated, logs, notificationsEnabled, taskById, topicById, topics]);
+  }, [chatSeenByKey, hydrated, logs, notificationsEnabled, topicById, topics]);
 
   const topicTags = useMemo(() => {
     const labels = new Map<string, string>();

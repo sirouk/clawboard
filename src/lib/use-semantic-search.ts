@@ -13,7 +13,6 @@ type SemanticSearchParams = {
   allowedSpaceIds?: string[] | null;
   includePending?: boolean;
   limitTopics?: number;
-  limitTasks?: number;
   limitLogs?: number;
   enabled?: boolean;
   debounceMs?: number;
@@ -38,7 +37,6 @@ export function useSemanticSearch({
   allowedSpaceIds,
   includePending = true,
   limitTopics = 80,
-  limitTasks = 160,
   limitLogs = 240,
   enabled = true,
   debounceMs = 380,
@@ -58,7 +56,6 @@ export function useSemanticSearch({
   const requestUrl = useMemo(() => {
     if (!enabled || trimmedQuery.length < Math.max(1, minQueryLength)) return "";
     const topicsValue = Math.min(Math.max(1, limitTopics), 120);
-    const tasksValue = Math.min(Math.max(1, limitTasks), 240);
     const logsValue = Math.min(Math.max(10, limitLogs), 320);
     const params = new URLSearchParams();
     params.set("q", trimmedQuery);
@@ -67,7 +64,6 @@ export function useSemanticSearch({
     }
     params.set("includePending", includePending ? "true" : "false");
     params.set("limitTopics", String(topicsValue));
-    params.set("limitTasks", String(tasksValue));
     params.set("limitLogs", String(logsValue));
     if (topicId) params.set("topicId", topicId);
     if (sessionKey) params.set("sessionKey", sessionKey);
@@ -81,7 +77,6 @@ export function useSemanticSearch({
     enabled,
     includePending,
     limitLogs,
-    limitTasks,
     limitTopics,
     minQueryLength,
     sessionKey,

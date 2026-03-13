@@ -6,12 +6,10 @@ import {
   Event,
   ImportJob,
   PortalData,
-  Status,
-  Task,
   Topic
 } from "./types";
 import { prisma } from "./prisma";
-import { deriveTaskColor, normalizeHexColor, pickTopicColor } from "./color";
+import { normalizeHexColor, pickTopicColor } from "./color";
 
 const DATA_PATH =
   process.env.PORTAL_DATA_PATH ?? path.join(process.cwd(), "data", "portal.json");
@@ -81,17 +79,6 @@ const seedData = (): PortalData => {
     }
   ];
 
-  const tasks: Task[] = [
-    {
-      id: "task-seed-mvp",
-      topicId: "topic-ops-admin-finance",
-      title: "Seed portal baseline tasks (business + personal)",
-      status: "todo",
-      createdAt,
-      updatedAt: createdAt
-    }
-  ];
-
   const log: ActivityLog[] = [
     {
       id: "log-seed",
@@ -104,7 +91,7 @@ const seedData = (): PortalData => {
   const events: Event[] = [];
   const importJobs: ImportJob[] = [];
 
-  return { seedVersion: SEED_VERSION, topics, tasks, log, events, importJobs };
+  return { seedVersion: SEED_VERSION, topics, log, events, importJobs };
 };
 
 const parseDate = (value?: string | Date | null) =>
@@ -169,6 +156,11 @@ const serializeTopic = (topic: {
   parentId: string | null;
   tags: unknown;
   color: string | null;
+  status: string | null;
+  priority: string | null;
+  dueDate: Date | null;
+  snoozedUntil: Date | null;
+  pinned: boolean;
   createdAt: Date;
   updatedAt: Date;
 }): Topic => ({
@@ -178,26 +170,13 @@ const serializeTopic = (topic: {
   description: topic.description ?? undefined,
   parentId: topic.parentId ?? null,
   tags: normalizeTags(topic.tags),
+  status: topic.status ?? undefined,
+  priority: topic.priority ?? undefined,
+  dueDate: toIso(topic.dueDate) ?? null,
+  snoozedUntil: toIso(topic.snoozedUntil) ?? null,
+  pinned: topic.pinned ?? false,
   createdAt: topic.createdAt.toISOString(),
   updatedAt: topic.updatedAt.toISOString()
-});
-
-const serializeTask = (task: {
-  id: string;
-  topicId: string;
-  title: string;
-  status: string;
-  color: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}): Task => ({
-  id: task.id,
-  topicId: task.topicId,
-  title: task.title,
-  color: task.color ?? undefined,
-  status: task.status as Status,
-  createdAt: task.createdAt.toISOString(),
-  updatedAt: task.updatedAt.toISOString()
 });
 
 const serializeLog = (entry: {
@@ -273,16 +252,15 @@ const serializeImportJob = (job: {
 let seedPromise: Promise<void> | null = null;
 
 const migrateFromJsonIfNeeded = async () => {
-  const [topicCount, taskCount, logCount, eventCount, importCount] =
+  const [topicCount, logCount, eventCount, importCount] =
     await prisma.$transaction([
       prisma.topic.count(),
-      prisma.task.count(),
       prisma.activityLog.count(),
       prisma.event.count(),
       prisma.importJob.count()
     ]);
 
-  if (topicCount + taskCount + logCount + eventCount + importCount > 0) return;
+  if (topicCount + logCount + eventCount + importCount > 0) return;
 
   const legacy = await readJson();
   if (!legacy) return;
@@ -306,17 +284,6 @@ const migrateFromJsonIfNeeded = async () => {
       tags: JSON.stringify(topic.tags ?? []),
       createdAt: parseDate(topic.createdAt) ?? new Date(),
       updatedAt: parseDate(topic.updatedAt) ?? new Date()
-    }))
-  });
-
-  await prisma.task.createMany({
-    data: legacy.tasks.map((task) => ({
-      id: task.id,
-      topicId: task.topicId,
-      title: task.title,
-      status: task.status,
-      createdAt: parseDate(task.createdAt) ?? new Date(),
-      updatedAt: parseDate(task.updatedAt) ?? new Date()
     }))
   });
 
@@ -404,21 +371,6 @@ const ensureSeeded = async () => {
         });
       }
 
-      for (const task of seeded.tasks) {
-        await prisma.task.upsert({
-          where: { id: task.id },
-          update: {},
-          create: {
-            id: task.id,
-            topicId: task.topicId,
-            title: task.title,
-            status: task.status,
-            createdAt: parseDate(task.createdAt) ?? new Date(),
-            updatedAt: parseDate(task.updatedAt) ?? new Date()
-          }
-        });
-      }
-
       for (const entry of seeded.log) {
         await prisma.activityLog.upsert({
           where: { id: entry.id },
@@ -439,11 +391,10 @@ const ensureSeeded = async () => {
 
 export const getData = async (): Promise<PortalData> => {
   await ensureSeeded();
-  const [config, topics, tasks, log, events, importJobs] =
+  const [config, topics, log, events, importJobs] =
     await prisma.$transaction([
       prisma.workspaceConfig.findUnique({ where: { id: "default" } }),
       prisma.topic.findMany(),
-      prisma.task.findMany(),
       prisma.activityLog.findMany(),
       prisma.event.findMany(),
       prisma.importJob.findMany()
@@ -452,7 +403,6 @@ export const getData = async (): Promise<PortalData> => {
   return {
     seedVersion: config?.seedVersion ?? SEED_VERSION,
     topics: topics.map(serializeTopic),
-    tasks: tasks.map(serializeTask),
     log: log.map(serializeLog),
     events: events.map(serializeEvent),
     importJobs: importJobs.map(serializeImportJob)
@@ -465,6 +415,11 @@ export const createTopic = async (input: {
   parentId?: string | null;
   tags?: string[];
   color?: string;
+  status?: string;
+  priority?: string;
+  dueDate?: string | null;
+  snoozedUntil?: string | null;
+  pinned?: boolean;
   id?: string;
 }) => {
   await ensureSeeded();
@@ -483,6 +438,11 @@ export const createTopic = async (input: {
       parentId: input.parentId ?? null,
       tags: JSON.stringify(input.tags ?? []),
       color: pickedColor,
+      status: input.status ?? null,
+      priority: input.priority ?? null,
+      dueDate: parseDate(input.dueDate) ?? null,
+      snoozedUntil: parseDate(input.snoozedUntil) ?? null,
+      pinned: input.pinned ?? false,
       createdAt,
       updatedAt: createdAt
     }
@@ -497,6 +457,11 @@ export const ensureTopic = async (input: {
   parentId?: string | null;
   tags?: string[];
   color?: string;
+  status?: string;
+  priority?: string;
+  dueDate?: string | null;
+  snoozedUntil?: string | null;
+  pinned?: boolean;
 }) => {
   await ensureSeeded();
   const match = input.id
@@ -536,7 +501,7 @@ export const ensureTopic = async (input: {
 
 export const patchTopic = async (
   id: string,
-  input: Partial<Pick<Topic, "name" | "description" | "parentId" | "tags" | "color">>
+  input: Partial<Pick<Topic, "name" | "description" | "parentId" | "tags" | "color" | "status" | "priority" | "dueDate" | "snoozedUntil" | "pinned">>
 ) => {
   await ensureSeeded();
   const existing = await prisma.topic.findUnique({ where: { id } });
@@ -550,6 +515,11 @@ export const patchTopic = async (
       parentId: input.parentId ?? existing.parentId,
       tags: JSON.stringify(input.tags ?? normalizeTags(existing.tags)),
       color: normalizeHexColor(input.color) ?? existing.color,
+      status: input.status !== undefined ? input.status : existing.status,
+      priority: input.priority !== undefined ? input.priority : existing.priority,
+      dueDate: input.dueDate !== undefined ? parseDate(input.dueDate) ?? null : existing.dueDate,
+      snoozedUntil: input.snoozedUntil !== undefined ? parseDate(input.snoozedUntil) ?? null : existing.snoozedUntil,
+      pinned: input.pinned !== undefined ? input.pinned : existing.pinned,
       updatedAt: new Date()
     }
   });
@@ -560,102 +530,10 @@ export const patchTopic = async (
 export const deleteTopic = async (id: string) => {
   await ensureSeeded();
   await prisma.$transaction([
-    prisma.task.deleteMany({ where: { topicId: id } }),
     prisma.activityLog.deleteMany({ where: { topicId: id } }),
     prisma.event.deleteMany({ where: { topicId: id } }),
     prisma.topic.delete({ where: { id } })
   ]);
-};
-
-export const createTask = async (input: {
-  topicId: string;
-  title: string;
-  status?: Status;
-  color?: string;
-  id?: string;
-}) => {
-  await ensureSeeded();
-  const id = input.id ?? `task-${crypto.randomUUID()}`;
-  const createdAt = new Date();
-  const topic = await prisma.topic.findUnique({ where: { id: input.topicId }, select: { color: true, name: true } });
-  const topicColor = normalizeHexColor(topic?.color) ?? pickTopicColor(`topic:${input.topicId}:${topic?.name ?? ""}`, []);
-  const pickedColor =
-    normalizeHexColor(input.color) ??
-    deriveTaskColor(topicColor, `task:${id}:${input.title}`);
-
-  const task = await prisma.task.create({
-    data: {
-      id,
-      topicId: input.topicId,
-      title: input.title,
-      status: input.status ?? "todo",
-      color: pickedColor,
-      createdAt,
-      updatedAt: createdAt
-    }
-  });
-  return serializeTask(task);
-};
-
-export const upsertTask = async (input: {
-  id?: string;
-  topicId: string;
-  title: string;
-  status?: Status;
-  color?: string;
-}) => {
-  await ensureSeeded();
-  if (input.id) {
-    const existing = await prisma.task.findUnique({ where: { id: input.id } });
-    if (existing) {
-      const updated = await prisma.task.update({
-        where: { id: input.id },
-        data: {
-          topicId: input.topicId ?? existing.topicId,
-          title: input.title ?? existing.title,
-          status: input.status ?? (existing.status as Status),
-          color: normalizeHexColor(input.color) ?? existing.color,
-          updatedAt: new Date()
-        }
-      });
-      return { task: serializeTask(updated), created: false };
-    }
-  }
-
-  const task = await createTask({
-    id: input.id,
-    topicId: input.topicId,
-    title: input.title,
-    status: input.status,
-    color: input.color
-  });
-  return { task, created: true };
-};
-
-export const patchTask = async (
-  id: string,
-  input: Partial<Pick<Task, "title" | "status" | "topicId" | "color">>
-) => {
-  await ensureSeeded();
-  const existing = await prisma.task.findUnique({ where: { id } });
-  if (!existing) return null;
-
-  const updated = await prisma.task.update({
-    where: { id },
-    data: {
-      title: input.title ?? existing.title,
-      status: input.status ?? (existing.status as Status),
-      topicId: input.topicId ?? existing.topicId,
-      color: normalizeHexColor(input.color) ?? existing.color,
-      updatedAt: new Date()
-    }
-  });
-  return serializeTask(updated);
-};
-
-export const deleteTask = async (id: string) => {
-  await ensureSeeded();
-  await prisma.task.delete({ where: { id } });
 };
 
 export const appendLog = async (input: {

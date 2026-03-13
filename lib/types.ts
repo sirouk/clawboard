@@ -7,16 +7,11 @@ export type Topic = {
   parentId?: string | null;
   tags?: string[];
   color?: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type Task = {
-  id: string;
-  topicId: string;
-  title: string;
-  status: Status;
-  color?: string;
+  status?: string;
+  priority?: string;
+  dueDate?: string | null;
+  snoozedUntil?: string | null;
+  pinned?: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -38,8 +33,7 @@ export type ActivityLog = {
 export type EventType =
   | "conversation.user"
   | "conversation.assistant"
-  | "action"
-  | "task";
+  | "action";
 
 export type EventSourceMeta = {
   source: "memory" | "api" | "manual" | string;
@@ -86,7 +80,6 @@ export type ImportJob = {
 export type PortalData = {
   seedVersion?: string;
   topics: Topic[];
-  tasks: Task[];
   log: ActivityLog[];
   events: Event[];
   importJobs: ImportJob[];

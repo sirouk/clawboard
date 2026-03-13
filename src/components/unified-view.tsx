@@ -4,7 +4,9 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import {
   useCallback,
+  useDeferredValue,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -13,12 +15,11 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import type { LogEntry, OpenClawWorkspace, Space, Task, Topic } from "@/lib/types";
+import type { LogEntry, OpenClawWorkspace, Space, Task, Topic, TopicStatus } from "@/lib/types";
 import { Button, Input, Select, StatusPill, TextArea } from "@/components/ui";
 import { LogList } from "@/components/log-list";
 import { formatRelativeTime } from "@/lib/format";
 import { useAppConfig, useOpenClawWorkspaces } from "@/components/providers";
-import { PinToggleGeneric } from "@/components/pin-toggle-generic";
 
 import { decodeSlugId, encodeTaskSlug, encodeTopicSlug, slugify } from "@/lib/slug";
 import { cn } from "@/lib/cn";
@@ -38,7 +39,7 @@ import {
   type BoardChatComposerSendEvent,
 } from "@/components/board-chat-composer";
 import {
-  BOARD_TASK_SESSION_PREFIX,
+  BOARD_TOPIC_SESSION_PREFIX,
   normalizeBoardSessionKey,
   taskSessionKey,
 } from "@/lib/board-session";
@@ -70,7 +71,7 @@ const STATUS_LABELS: Record<string, string> = {
   done: "Done",
 };
 
-const TASK_STATUS_OPTIONS: Task["status"][] = ["todo", "doing", "blocked", "done"];
+const TASK_STATUS_OPTIONS: TopicStatus[] = ["todo", "doing", "blocked", "done"];
 const TASK_STATUS_FILTERS = ["all", "todo", "doing", "blocked", "done"] as const;
 type TaskStatusFilter = (typeof TASK_STATUS_FILTERS)[number];
 
@@ -448,7 +449,7 @@ type ScoredSemanticMatch = {
 };
 
 type LogChatCountsPayload = {
-  taskChatCounts?: Record<string, number>;
+  topicChatCounts?: Record<string, number>;
 };
 
 function tokenizeSearchQuery(query: string, maxTerms: number) {
@@ -1567,6 +1568,12 @@ function mixRgb(hex: string, ratio: number, base: { r: number; g: number; b: num
   return `rgb(${mr}, ${mg}, ${mb})`;
 }
 
+function compatTaskLogKey(entry: Pick<LogEntry, "taskId" | "topicId">) {
+  const taskId = String(entry.taskId ?? "").trim();
+  if (taskId) return taskId;
+  return String(entry.topicId ?? "").trim();
+}
+
 function hashString(seed: string) {
   let hash = 0;
   for (let i = 0; i < seed.length; i += 1) {
@@ -1682,11 +1689,11 @@ function pickVibrantDistinctColor({
     const usagePenalty = usageCount ? usageCount.get(candidate) ?? 0 : 0;
     const jitter = (Math.abs(hashString(`jitter:${seed}:${candidate}`)) % 1000) / 10000;
     const score =
-      minPrimary * 4.6 +
-      avgPrimary * 1.2 +
-      minSecondary * 0.9 +
+      minPrimary * 5.5 +
+      avgPrimary * 1.4 +
+      minSecondary * 1.6 +
       vibrancy * 0.8 -
-      usagePenalty * 1.7 +
+      usagePenalty * 2.2 +
       jitter;
     if (score > bestScore) {
       best = candidate;
@@ -1766,14 +1773,13 @@ function parseTopicPayload(value: unknown): Topic | null {
 }
 
 function parseTaskPayload(value: unknown): Task | null {
-  if (!value || typeof value !== "object") return null;
-  const direct = value as Partial<Task>;
-  if (typeof direct.id === "string" && direct.id.trim()) return direct as Task;
-  const nested = (value as { task?: unknown }).task;
-  if (!nested || typeof nested !== "object") return null;
-  const task = nested as Partial<Task>;
-  if (typeof task.id !== "string" || !task.id.trim()) return null;
-  return task as Task;
+  const topic = parseTopicPayload(value);
+  if (!topic) return null;
+  return {
+    ...topic,
+    title: topic.name,
+    topicId: topic.id,
+  };
 }
 
 function normalizeCountMap(value: unknown): Record<string, number> {
@@ -1847,8 +1853,8 @@ export function ColorShuffleTrigger({
       const runSeed = randomId();
       const topicColorById = new Map<string, string>();
       const topicUsage = new Map<string, number>();
-      const topicRecent: string[] = [];
       const topicColorsBySpace = new Map<string, string[]>();
+      const allAssigned: string[] = [];
 
       const registerTopicColor = (topic: Topic, rawColor: string) => {
         const color = normalizeHexColor(rawColor) ?? "#4EA1FF";
@@ -1859,8 +1865,7 @@ export function ColorShuffleTrigger({
           existing.push(color);
           topicColorsBySpace.set(scopeKey, existing);
         }
-        topicRecent.push(color);
-        if (topicRecent.length > 20) topicRecent.shift();
+        allAssigned.push(color);
       };
 
       const topicOrder = sortBySeed(topics, `${runSeed}:topics`, (topic) => topic.id);
@@ -1873,7 +1878,7 @@ export function ColorShuffleTrigger({
           palette: TOPIC_FALLBACK_COLORS,
           seed: `${runSeed}:topic:${topic.id}:${topic.name}`,
           primaryAvoid: sameSpaceColors,
-          secondaryAvoid: topicRecent,
+          secondaryAvoid: allAssigned,
           usageCount: topicUsage,
         });
         registerTopicColor(topic, color);
@@ -1897,48 +1902,15 @@ export function ColorShuffleTrigger({
       }
       onTopicsUpdate(nextTopics);
 
-      const taskUsage = new Map<string, number>();
-      const taskRecent: string[] = [];
-      const taskColorsByTopic = new Map<string, string[]>();
-      const taskColorById = new Map<string, string>();
-
-      const registerTaskColor = (task: Task, rawColor: string) => {
-        const color = normalizeHexColor(rawColor) ?? "#4EA1FF";
-        taskColorById.set(task.id, color);
-        taskUsage.set(color, (taskUsage.get(color) ?? 0) + 1);
-        const topicKey = (task.topicId ?? "").trim() || "__unassigned__";
-        const existing = taskColorsByTopic.get(topicKey) ?? [];
-        existing.push(color);
-        taskColorsByTopic.set(topicKey, existing);
-        taskRecent.push(color);
-        if (taskRecent.length > 24) taskRecent.shift();
-      };
-
-      const taskOrder = sortBySeed(tasks, `${runSeed}:tasks`, (task) => task.id);
-      for (const task of taskOrder) {
-        const topicKey = (task.topicId ?? "").trim() || "__unassigned__";
-        const topicColor = task.topicId ? topicColorById.get(task.topicId) ?? null : null;
-        const siblingColors = taskColorsByTopic.get(topicKey) ?? [];
-        const primaryAvoid = topicColor ? [topicColor, ...siblingColors] : [...siblingColors];
-        const secondaryAvoid = topicColor ? [topicColor, ...taskRecent] : taskRecent;
-        const color = pickVibrantDistinctColor({
-          palette: TASK_FALLBACK_COLORS,
-          seed: `${runSeed}:task:${task.id}:${task.title}:${topicKey}`,
-          primaryAvoid,
-          secondaryAvoid,
-          usageCount: taskUsage,
-        });
-        registerTaskColor(task, color);
-      }
-
+      // In flat topology task = topic — apply the same colors
       const nextTasks = tasks.map((task) => {
-        const color = taskColorById.get(task.id) ?? normalizeHexColor(task.color) ?? "#4EA1FF";
+        const color = topicColorById.get(task.id) ?? normalizeHexColor(task.color) ?? "#4EA1FF";
         return { ...task, color };
       });
 
       for (const task of nextTasks) {
         await apiFetch(
-          `/api/tasks/${encodeURIComponent(task.id)}`,
+          `/api/topics/${encodeURIComponent(task.id)}`,
           {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
@@ -2159,7 +2131,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (!response.ok) return;
       const payload = (await response.json().catch(() => null)) as LogChatCountsPayload | null;
       if (requestSeq !== chatCountsRequestSeqRef.current) return;
-      setTaskChatCountById(normalizeCountMap(payload?.taskChatCounts));
+      setTaskChatCountById(normalizeCountMap(payload?.topicChatCounts));
       setChatCountsHydrated(true);
     } catch {
       // Best-effort: keep existing counts when aggregate endpoint is unavailable.
@@ -2340,7 +2312,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [topicColorDraft, setTopicColorDraft] = useState("#FF8A4A");
   const [topicTagsDraft, setTopicTagsDraft] = useState("");
   const [topicTagsPendingEntry, setTopicTagsPendingEntry] = useState(false);
-  const [debouncedTopicTagsDraft, setDebouncedTopicTagsDraft] = useState("");
+  const deferredTopicTagsDraft = useDeferredValue(topicTagsDraft);
   const { value: unifiedComposerDraft, setValue: setUnifiedComposerDraft } = usePersistentDraft("draft:unified:composer", {
     fallback: "",
   });
@@ -2474,15 +2446,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (!exists) setComposerTarget(null);
   }, [composerTarget, tasks, topics]);
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setDebouncedTopicTagsDraft(topicTagsDraft);
-    }, 180);
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [topicTagsDraft]);
-
   const knownTopicTagOptions = useMemo(() => {
     return dedupeTagLabels(storeTopicTags ?? []).sort(
       (a, b) => normalizeTagKey(a).localeCompare(normalizeTagKey(b)) || a.localeCompare(b)
@@ -2492,11 +2455,21 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [taskColorDraft, setTaskColorDraft] = useState("#4EA1FF");
   const [taskTagsDraft, setTaskTagsDraft] = useState("");
   const [taskTagsPendingEntry, setTaskTagsPendingEntry] = useState(false);
+  const deferredTaskTagsDraft = useDeferredValue(taskTagsDraft);
   const topicRenameTagSuggestions = useMemo(
-    () => (topicTagsPendingEntry ? tagSuggestionsForDraft(debouncedTopicTagsDraft, knownTopicTagOptions) : []),
-    [debouncedTopicTagsDraft, knownTopicTagOptions, topicTagsPendingEntry]
+    () => (topicTagsPendingEntry ? tagSuggestionsForDraft(deferredTopicTagsDraft, knownTopicTagOptions) : []),
+    [deferredTopicTagsDraft, knownTopicTagOptions, topicTagsPendingEntry]
   );
-  const [activeTopicTagField, setActiveTopicTagField] = useState<"new-topic" | "rename-topic" | null>(null);
+  const topicRenameTagListboxId = useId();
+  const [topicRenameActiveSuggestionIndex, setTopicRenameActiveSuggestionIndex] = useState(0);
+  const [activeTopicTagField, setActiveTopicTagField] = useState<"rename-topic" | null>(null);
+  const taskRenameTagSuggestions = useMemo(
+    () => (taskTagsPendingEntry ? tagSuggestionsForDraft(deferredTaskTagsDraft, knownTopicTagOptions) : []),
+    [deferredTaskTagsDraft, knownTopicTagOptions, taskTagsPendingEntry]
+  );
+  const taskRenameTagListboxId = useId();
+  const [taskRenameActiveSuggestionIndex, setTaskRenameActiveSuggestionIndex] = useState(0);
+  const [activeTaskTagField, setActiveTaskTagField] = useState<"rename-task" | null>(null);
   const [renameSavingKey, setRenameSavingKey] = useState<string | null>(null);
   const [deleteArmedKey, setDeleteArmedKey] = useState<string | null>(null);
   const [deleteInFlightKey, setDeleteInFlightKey] = useState<string | null>(null);
@@ -2508,6 +2481,48 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const mobileDoneCollapseTaskIdRef = useRef<string | null>(null);
   const [mobileForcedCollapsedTaskIds, setMobileForcedCollapsedTaskIds] = useState<Set<string>>(() => new Set());
   const patchedTopicColorsRef = useRef<Set<string>>(new Set());
+  const topicRenameTagMenuOpen = activeTopicTagField === "rename-topic" && topicRenameTagSuggestions.length > 0;
+  const taskRenameTagMenuOpen = activeTaskTagField === "rename-task" && taskRenameTagSuggestions.length > 0;
+  useEffect(() => {
+    if (!topicRenameTagMenuOpen) {
+      setTopicRenameActiveSuggestionIndex(0);
+      return;
+    }
+    setTopicRenameActiveSuggestionIndex((prev) => {
+      if (prev < topicRenameTagSuggestions.length) return prev;
+      return 0;
+    });
+  }, [topicRenameTagMenuOpen, topicRenameTagSuggestions.length]);
+  useEffect(() => {
+    if (!taskRenameTagMenuOpen) {
+      setTaskRenameActiveSuggestionIndex(0);
+      return;
+    }
+    setTaskRenameActiveSuggestionIndex((prev) => {
+      if (prev < taskRenameTagSuggestions.length) return prev;
+      return 0;
+    });
+  }, [taskRenameTagMenuOpen, taskRenameTagSuggestions.length]);
+  const applyTopicRenameTagSuggestion = useCallback((suggestion: string) => {
+    setTopicTagsDraft((prev) => applyTagSuggestionToDraft(prev, suggestion));
+    setTopicTagsPendingEntry(false);
+    setTopicRenameActiveSuggestionIndex(0);
+  }, []);
+  const commitPendingTopicTagDraft = useCallback(() => {
+    setTopicTagsDraft((prev) => commitTagDraftEntry(prev));
+    setTopicTagsPendingEntry(false);
+    setTopicRenameActiveSuggestionIndex(0);
+  }, []);
+  const applyTaskRenameTagSuggestion = useCallback((suggestion: string) => {
+    setTaskTagsDraft((prev) => applyTagSuggestionToDraft(prev, suggestion));
+    setTaskTagsPendingEntry(false);
+    setTaskRenameActiveSuggestionIndex(0);
+  }, []);
+  const commitPendingTaskTagDraft = useCallback(() => {
+    setTaskTagsDraft((prev) => commitTagDraftEntry(prev));
+    setTaskTagsPendingEntry(false);
+    setTaskRenameActiveSuggestionIndex(0);
+  }, []);
   const patchedTaskColorsRef = useRef<Set<string>>(new Set());
   const [activeComposer, setActiveComposer] = useState<{ kind: "task"; topicId: string; taskId: string } | null>(null);
   const [autoFocusTask, setAutoFocusTask] = useState<{ topicId: string; taskId: string } | null>(null);
@@ -2998,13 +3013,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const topicPointerReorder = useRef<{
     pointerId: number;
     draggedId: string;
-    pinned: boolean;
     orderedIds: string[];
   } | null>(null);
   const taskPointerReorder = useRef<{
     pointerId: number;
     draggedId: string;
-    pinned: boolean;
     scopeTopicId: string | null;
     orderedIds: string[];
   } | null>(null);
@@ -3303,13 +3316,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         if (aBoosted !== bBoosted) return aBoosted ? -1 : 1;
         if (aBoosted && bBoosted && aBump !== bBump) return bBump - aBump;
 
-        const ap = Boolean(a.pinned);
-        const bp = Boolean(b.pinned);
-        if (ap && !bp) return -1;
-        if (!ap && bp) return 1;
-        const as = typeof a.sortIndex === "number" ? a.sortIndex : 0;
-        const bs = typeof b.sortIndex === "number" ? b.sortIndex : 0;
-        if (as !== bs) return as - bs;
         return a.updatedAt < b.updatedAt ? 1 : -1;
       });
     }
@@ -3320,10 +3326,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const sorted = [...visibleLogs].sort(compareLogCreatedAtDesc);
     const map = new Map<string, LogEntry[]>();
     for (const entry of sorted) {
-      if (!entry.taskId) continue;
-      const list = map.get(entry.taskId) ?? [];
+      const compatTaskId = compatTaskLogKey(entry);
+      if (!compatTaskId) continue;
+      const list = map.get(compatTaskId) ?? [];
       list.push(entry);
-      map.set(entry.taskId, list);
+      map.set(compatTaskId, list);
     }
     return map;
   }, [visibleLogs]);
@@ -3347,10 +3354,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const sorted = [...eligible].sort(compareLogCreatedAtAsc);
     const map = new Map<string, LogEntry[]>();
     for (const entry of sorted) {
-      if (!entry.taskId) continue;
-      const list = map.get(entry.taskId) ?? [];
+      const compatTaskId = compatTaskLogKey(entry);
+      if (!compatTaskId) continue;
+      const list = map.get(compatTaskId) ?? [];
       list.push(entry);
-      map.set(entry.taskId, list);
+      map.set(compatTaskId, list);
     }
     return map;
   }, [logs]);
@@ -3404,7 +3412,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         let offset = 0;
         while (true) {
           const params = new URLSearchParams({
-            taskId: id,
+            topicId: id,
             limit: String(pageSize),
             offset: String(offset),
           });
@@ -3457,11 +3465,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const chatKeyFromSessionKey = useCallback((sessionKey: string) => {
     const key = normalizeBoardSessionKey(sessionKey);
     if (!key) return "";
-    if (key.startsWith(BOARD_TASK_SESSION_PREFIX)) {
-      const rest = key.slice(BOARD_TASK_SESSION_PREFIX.length).trim();
-      const parts = rest.split(":", 2);
-      const taskId = parts.length === 2 ? parts[1].trim() : "";
-      return taskId ? `task:${taskId}` : "";
+    if (key.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
+      const topicId = key.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim().split(":", 1)[0]?.trim() ?? "";
+      return topicId ? `topic:${topicId}` : "";
     }
     return "";
   }, []);
@@ -3833,10 +3839,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const semanticLimits = useMemo(
     () => ({
       topics: Math.min(Math.max(topics.length, 60), 120),
-      tasks: Math.min(Math.max(tasks.length, 120), 240),
       logs: Math.min(Math.max(visibleLogs.length, 180), 320),
     }),
-    [topics.length, tasks.length, visibleLogs.length]
+    [topics.length, visibleLogs.length]
   );
 
   const semanticRefreshKey = useMemo(() => {
@@ -3856,7 +3861,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     allowedSpaceIds,
     includePending: showRaw,
     limitTopics: semanticLimits.topics,
-    limitTasks: semanticLimits.tasks,
     limitLogs: semanticLimits.logs,
     refreshKey: semanticRefreshKey,
   });
@@ -3879,7 +3883,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   );
   const semanticTaskIds = useMemo(
     () =>
-      pickConfidentSemanticIds(semanticForQuery?.tasks, {
+      pickConfidentSemanticIds(semanticForQuery?.topics, {
         absoluteFloor: 0.16,
         relativeFloor: 0.34,
         maxCount: 10,
@@ -3900,7 +3904,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     [semanticForQuery]
   );
   const semanticTaskScores = useMemo(
-    () => new Map((semanticForQuery?.tasks ?? []).map((item) => [item.id, Number(item.score) || 0])),
+    () => new Map((semanticForQuery?.topics ?? []).map((item) => [item.id, Number(item.score) || 0])),
     [semanticForQuery]
   );
   const semanticLogScores = useMemo(
@@ -3980,7 +3984,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const matchesTaskSearch = useCallback((task: Task) => {
     if (revealSelection && revealedTaskIds.includes(task.id)) return true;
     if (!normalizedSearch) return true;
-    const titleMatch = matchesSearchText(task.title, searchPlan);
+    const titleMatch = matchesSearchText(task.title ?? task.name, searchPlan);
     const lexicalLogMatch = logsByTask.get(task.id)?.some(matchesLogText);
     if (semanticForQuery) {
       if (titleMatch || lexicalLogMatch) return true;
@@ -4009,7 +4013,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (!normalizedSearch) return map;
 
     for (const task of tasks) {
-      const titleScore = scoreSearchText(task.title, searchPlan);
+      const titleScore = scoreSearchText(task.title ?? task.name, searchPlan);
       const semanticScore = semanticTaskScores.get(task.id) ?? 0;
       const confidentSemanticBonus = semanticTaskIds.has(task.id) ? 0.45 : 0;
       const bestLogScore = Math.max(
@@ -4113,7 +4117,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         const aLastActivity = logsByTask.get(a.id)?.[0]?.createdAt ?? a.updatedAt;
         const bLastActivity = logsByTask.get(b.id)?.[0]?.createdAt ?? b.updatedAt;
         if (aLastActivity !== bLastActivity) return aLastActivity < bLastActivity ? 1 : -1;
-        return a.title.localeCompare(b.title);
+        return (a.title ?? a.name).localeCompare(b.title ?? b.name);
       });
       map.set(topicId, sorted);
     }
@@ -4146,11 +4150,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         if (aBoosted !== bBoosted) return aBoosted ? -1 : 1;
         if (aBoosted && bBoosted && aBump !== bBump) return bBump - aBump;
 
-        if (a.pinned && !b.pinned) return -1;
-        if (!a.pinned && b.pinned) return 1;
-        const as = typeof a.sortIndex === "number" ? a.sortIndex : 0;
-        const bs = typeof b.sortIndex === "number" ? b.sortIndex : 0;
-        if (as !== bs) return as - bs;
         return a.lastActivity < b.lastActivity ? 1 : -1;
       });
 
@@ -4200,8 +4199,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       filtered.push({
         id: "unassigned",
         name: "Unassigned",
-        description: "Recycle bin for tasks from deleted topics.",
-        pinned: false,
+        description: "Recycle bin for topics from deleted parents.",
         lastActivity: new Date().toISOString(),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -4260,7 +4258,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     // Assign in stable ID order so drag/reorder never changes colors.
     const map = new Map<string, string>();
     const usage = new Map<string, number>();
-    const recentGlobal: string[] = [];
+    const allAssigned: string[] = [];
     const scopeColors = new Map<string, string[]>();
 
     const register = (topic: Topic, rawColor: string) => {
@@ -4272,8 +4270,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         existing.push(color);
         scopeColors.set(scopeKey, existing);
       }
-      recentGlobal.push(color);
-      if (recentGlobal.length > 18) recentGlobal.shift();
+      allAssigned.push(color);
     };
 
     const stableTopics = topics.slice().sort((a, b) => a.id.localeCompare(b.id));
@@ -4289,7 +4286,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         palette: TOPIC_FALLBACK_COLORS,
         seed: `topic:auto:${topic.id}:${topic.name}:${scopeKeys.join("|")}`,
         primaryAvoid: sameScopeColors,
-        secondaryAvoid: recentGlobal,
+        secondaryAvoid: allAssigned,
         usageCount: usage,
       });
       register(topic, color);
@@ -4297,44 +4294,12 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return map;
   }, [topics]);
 
+  // In flat topology task = topic (same entity, same ID). Reuse topic colors directly.
   const taskDisplayColors = useMemo(() => {
     const map = new Map<string, string>();
-    const usage = new Map<string, number>();
-    const recentGlobal: string[] = [];
-    const siblingColorsByTopic = new Map<string, string[]>();
-
-    const register = (task: Task, rawColor: string) => {
-      const color = normalizeHexColor(rawColor) ?? "#4EA1FF";
-      map.set(task.id, color);
-      usage.set(color, (usage.get(color) ?? 0) + 1);
-      const topicKey = (task.topicId ?? "").trim() || "__unassigned__";
-      const existing = siblingColorsByTopic.get(topicKey) ?? [];
-      existing.push(color);
-      siblingColorsByTopic.set(topicKey, existing);
-      recentGlobal.push(color);
-      if (recentGlobal.length > 24) recentGlobal.shift();
-    };
-
-    const stableTasks = tasks.slice().sort((a, b) => a.id.localeCompare(b.id));
-    for (const task of stableTasks) {
-      const stored = normalizeHexColor(task.color);
-      if (stored) {
-        register(task, stored);
-        continue;
-      }
-      const topicColor = task.topicId ? topicDisplayColors.get(task.topicId) : null;
-      const topicKey = (task.topicId ?? "").trim() || "__unassigned__";
-      const siblingColors = siblingColorsByTopic.get(topicKey) ?? [];
-      const primaryAvoid = topicColor ? [topicColor, ...siblingColors] : [...siblingColors];
-      const secondaryAvoid = topicColor ? [topicColor, ...recentGlobal] : recentGlobal;
-      const color = pickVibrantDistinctColor({
-        palette: TASK_FALLBACK_COLORS,
-        seed: `task:auto:${task.id}:${task.title}:${topicKey}:${topicColor ?? ""}`,
-        primaryAvoid,
-        secondaryAvoid,
-        usageCount: usage,
-      });
-      register(task, color);
+    for (const task of tasks) {
+      const color = topicDisplayColors.get(task.id);
+      if (color) map.set(task.id, color);
     }
     return map;
   }, [tasks, topicDisplayColors]);
@@ -4353,7 +4318,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     });
   }, []);
 
-  const requestEmbeddingRefresh = useCallback(async (payload: { kind: "topic" | "task"; id: string; text: string; topicId?: string | null }) => {
+  const requestEmbeddingRefresh = useCallback(async (payload: { kind: "topic"; id: string; text: string; topicId?: string | null }) => {
     try {
       await apiFetch(
         "/api/reindex",
@@ -4373,12 +4338,22 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (readOnly) return;
     const current = tasks.find((task) => task.id === taskId);
     if (!current) return;
+    const body: Record<string, unknown> = { ...updates };
+    if (Object.prototype.hasOwnProperty.call(body, "title")) {
+      body.name = String(updates.title ?? current.title ?? current.name).trim() || current.name;
+      delete body.title;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "topicId")) {
+      const nextTopicId = String(updates.topicId ?? "").trim();
+      body.parentId = nextTopicId && nextTopicId !== taskId ? nextTopicId : null;
+      delete body.topicId;
+    }
     const res = await apiFetch(
-      `/api/tasks/${encodeURIComponent(taskId)}`,
+      `/api/topics/${encodeURIComponent(taskId)}`,
       {
         method: "PATCH",
         headers: writeHeaders,
-        body: JSON.stringify(updates),
+        body: JSON.stringify(body),
       },
       token
     );
@@ -4483,9 +4458,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       event.stopPropagation();
       setTopicSwipeOpenId(null);
 
-      const pinned = Boolean(topic.pinned);
       const initialVisibleIds = orderedTopics
-        .filter((t) => t.id !== "unassigned" && Boolean(t.pinned) === pinned)
+        .filter((t) => t.id !== "unassigned")
         .map((t) => t.id);
       if (initialVisibleIds.length < 2) return;
 
@@ -4494,7 +4468,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       topicPointerReorder.current = {
         pointerId: event.pointerId,
         draggedId: topic.id,
-        pinned,
         orderedIds: initialVisibleIds,
       };
       try {
@@ -4521,7 +4494,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
       const targetTopic = topics.find((t) => t.id === targetId);
       if (!targetTopic) return;
-      if (Boolean(targetTopic.pinned) !== state.pinned) return;
 
       const from = state.orderedIds.indexOf(state.draggedId);
       const to = state.orderedIds.indexOf(targetId);
@@ -4570,7 +4542,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       taskPointerReorder.current = {
         pointerId: event.pointerId,
         draggedId: task.id,
-        pinned: Boolean(task.pinned),
         scopeTopicId,
         orderedIds,
       };
@@ -4600,7 +4571,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (!targetTask) return;
       const targetScope = targetTask.topicId ?? null;
       if (targetScope !== state.scopeTopicId) return;
-      if (Boolean(targetTask.pinned) !== state.pinned) return;
 
       const from = state.orderedIds.indexOf(state.draggedId);
       const to = state.orderedIds.indexOf(targetId);
@@ -4641,11 +4611,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     );
     try {
       const res = await apiFetch(
-        "/api/tasks/reorder",
+        "/api/topics/reorder",
         {
           method: "POST",
           headers: writeHeaders,
-          body: JSON.stringify({ topicId: scopeTopicId, orderedIds }),
+          body: JSON.stringify({ orderedIds }),
         },
         token
       );
@@ -4797,7 +4767,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const tagsChanged = nextTags.join("|") !== currentTags.join("|");
     if (readOnly) return;
     if (!nextTitle) {
-      setRenameError(renameKey, "Task name cannot be empty.");
+      setRenameError(renameKey, "Name cannot be empty.");
       return;
     }
     if (!titleChanged && !colorChanged && !tagsChanged) {
@@ -4807,6 +4777,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         setTaskColorDraft(currentColor);
         setTaskTagsDraft(formatTags(currentTags));
         setTaskTagsPendingEntry(false);
+        setActiveTaskTagField(null);
         setMoveTaskId(null);
         setDeleteArmedKey(null);
       }
@@ -4817,22 +4788,22 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setRenameError(renameKey);
     try {
       const res = await apiFetch(
-        "/api/tasks",
+        "/api/topics",
         {
           method: "POST",
           headers: writeHeaders,
           body: JSON.stringify({
             id: task.id,
-            title: titleChanged ? nextTitle : task.title,
+            name: titleChanged ? nextTitle : task.title ?? task.name,
             color: nextColor,
-            topicId: task.topicId,
+            parentId: task.topicId && task.topicId !== task.id ? task.topicId : null,
             tags: tagsChanged ? nextTags : currentTags,
           }),
         },
         token
       );
       if (!res.ok) {
-        setRenameError(renameKey, "Failed to rename task.");
+        setRenameError(renameKey, "Failed to rename topic.");
         return;
       }
       const updated = parseTaskPayload(await res.json().catch(() => null));
@@ -4854,7 +4825,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         );
         if (titleChanged) {
           await requestEmbeddingRefresh({
-            kind: "task",
+            kind: "topic",
             id: updated.id,
             topicId: updated.topicId,
             text: updated.title || nextTitle,
@@ -4875,7 +4846,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         );
         if (titleChanged) {
           await requestEmbeddingRefresh({
-            kind: "task",
+            kind: "topic",
             id: task.id,
             topicId: task.topicId,
             text: nextTitle,
@@ -4888,6 +4859,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         setTaskColorDraft(currentColor);
         setTaskTagsDraft("");
         setTaskTagsPendingEntry(false);
+        setActiveTaskTagField(null);
         setMoveTaskId(null);
         setDeleteArmedKey(null);
       }
@@ -4925,6 +4897,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setTaskColorDraft(currentColor);
     setTaskTagsDraft("");
     setTaskTagsPendingEntry(false);
+    setActiveTaskTagField(null);
     setMoveTaskId(null);
     setDeleteArmedKey(null);
     setRenameError(`task:${task.id}`);
@@ -5007,13 +4980,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setNewTaskSavingKey(draftKey);
     try {
       const res = await apiFetch(
-        "/api/tasks",
+        "/api/topics",
         {
           method: "POST",
           headers: writeHeaders,
           body: JSON.stringify({
-            title: trimmed,
-            topicId: scopeTopicId,
+            name: trimmed,
+            parentId: scopeTopicId,
             status: "todo",
             spaceId: scopeTopicId ? undefined : selectedSpaceId || undefined,
           }),
@@ -5127,20 +5100,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setRenameError(deleteKey);
     try {
       const removed = new Set<string>();
-      const bulkRes = await apiFetch("/api/tasks/unassigned/empty", { method: "DELETE" }, token);
-      if (bulkRes.status === 404) {
-        // Backward compatibility with older backends: fall back to per-task deletes.
-        for (const task of unassignedTasks) {
-          const res = await apiFetch(`/api/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" }, token);
-          if (!res.ok) continue;
-          const payload = (await res.json().catch(() => null)) as { deleted?: boolean } | null;
-          if (payload?.deleted) removed.add(task.id);
-        }
-      } else if (bulkRes.ok) {
-        for (const task of unassignedTasks) removed.add(task.id);
+      for (const task of unassignedTasks) {
+        const res = await apiFetch(`/api/topics/${encodeURIComponent(task.id)}`, { method: "DELETE" }, token);
+        if (!res.ok) continue;
+        const payload = (await res.json().catch(() => null)) as { deleted?: boolean } | null;
+        if (payload?.deleted) removed.add(task.id);
       }
       if (removed.size === 0) {
-        setRenameError(deleteKey, "Failed to clear unassigned tasks.");
+        setRenameError(deleteKey, "Failed to clear unassigned topics.");
         return;
       }
       const updatedAt = new Date().toISOString();
@@ -5206,14 +5173,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setDeleteInFlightKey(deleteKey);
     setRenameError(deleteKey);
     try {
-      const res = await apiFetch(`/api/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" }, token);
+      const res = await apiFetch(`/api/topics/${encodeURIComponent(task.id)}`, { method: "DELETE" }, token);
       if (!res.ok) {
-        setRenameError(deleteKey, "Failed to delete task.");
+        setRenameError(deleteKey, "Failed to delete topic.");
         return;
       }
       const payload = (await res.json().catch(() => null)) as { deleted?: boolean } | null;
       if (!payload?.deleted) {
-        setRenameError(deleteKey, "Task not found.");
+        setRenameError(deleteKey, "Topic not found.");
         return;
       }
       const updatedAt = new Date().toISOString();
@@ -5441,7 +5408,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const raw = decodeSlugId(value);
       if (tasks.some((task) => task.id === raw)) return raw;
       const slug = value.includes("--") ? value.slice(0, value.lastIndexOf("--")) : value;
-      const match = tasks.find((task) => slugify(task.title) === slug);
+      const match = tasks.find((task) => slugify(task.title ?? task.name) === slug);
       return match?.id ?? raw;
     },
     [tasks]
@@ -5458,7 +5425,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const encodeTaskParam = useCallback(
     (taskId: string) => {
       const task = tasks.find((item) => item.id === taskId);
-      return task ? encodeTaskSlug(task) : taskId;
+      return task ? encodeTaskSlug({ ...task, title: task.title ?? task.name }) : taskId;
     },
     [tasks]
   );
@@ -5600,6 +5567,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const nextPage = overrides.page ?? String(safePage);
       const nextTopics = overrides.topics ?? Array.from(expandedTopicsSafe);
       const nextTasks = overrides.tasks ?? Array.from(expandedTasksSafe);
+      const nextTopicIds = Array.from(new Set([...nextTopics, ...nextTasks]));
       const nextReveal = overrides.reveal ?? (revealSelection ? "1" : "0");
 
       if (selectedSpaceId) params.set("space", selectedSpaceId);
@@ -5612,11 +5580,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (nextPage && nextPage !== "1") params.set("page", nextPage);
       if (nextReveal === "1") params.set("reveal", "1");
       const segments: string[] = [];
-      for (const topicId of nextTopics) {
+      for (const topicId of nextTopicIds) {
         segments.push("topic", encodeTopicParam(topicId));
-      }
-      for (const taskId of nextTasks) {
-        segments.push("task", encodeTaskParam(taskId));
       }
 
       const trimmedBase =
@@ -5682,23 +5647,23 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (selectedComposerTarget?.kind === "task") {
       return {
         kind: "task" as const,
-        badge: "Task",
-        chipLabel: `${selectedComposerTarget.topic.name} -> ${selectedComposerTarget.task.title}`,
-        submitLabel: unifiedComposerBusy ? "Sending..." : "Continue task",
+        badge: "Topic",
+        chipLabel: `${selectedComposerTarget.topic.name}`,
+        submitLabel: unifiedComposerBusy ? "Sending..." : "Continue",
       };
     }
     if (selectedComposerTarget?.kind === "topic") {
       return {
         kind: "topic" as const,
         badge: "Topic",
-        chipLabel: `${selectedComposerTarget.topic.name} -> new task`,
-        submitLabel: unifiedComposerBusy ? "Creating task..." : "New task in topic",
+        chipLabel: `${selectedComposerTarget.topic.name}`,
+        submitLabel: unifiedComposerBusy ? "Creating..." : "New in topic",
       };
     }
     return {
       kind: "new" as const,
       badge: "New",
-      chipLabel: "New topic -> new task",
+      chipLabel: "New topic",
       submitLabel: unifiedComposerBusy ? "Creating topic..." : "Start new topic",
     };
   }, [selectedComposerTarget, unifiedComposerBusy]);
@@ -5788,7 +5753,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     async ({ clearComposer }: { clearComposer: boolean }) => {
       const target = resolveUnifiedCancelTargetSession();
       if (!target) {
-        setUnifiedCancelNotice("Select a topic/task target to stop.");
+        setUnifiedCancelNotice("Select a topic to stop.");
         return false;
       }
 
@@ -5832,7 +5797,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           target.reason === "selected"
             ? "Cancelled selected target run."
             : target.reason === "revealed"
-              ? "Cancelled revealed task run."
+              ? "Cancelled revealed run."
             : target.reason === "active"
               ? "Cancelled active chat run."
               : "Cancelled active chat run."
@@ -6022,7 +5987,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     twoColumn ? "2-column board" : "1-column board",
   ].join(" · ");
   const unifiedComposerPlaceholder = mdUp
-    ? "Type a message. Pick a topic or task if you want to reuse one.\nEnter sends. Shift+Enter adds a newline."
+    ? "Type a message. Pick a topic if you want to continue a conversation.\nEnter sends. Shift+Enter adds a newline."
     : "Type a message or pick a target.\nEnter sends. Shift+Enter adds a newline.";
   const renderTopicViewSelect = (className = "w-full") => (
     <Select
@@ -6330,7 +6295,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         unifiedCancelTarget?.reason === "selected"
                           ? "Stop selected run"
                           : unifiedCancelTarget?.reason === "revealed"
-                            ? "Stop revealed task run"
+                            ? "Stop revealed run"
                           : unifiedCancelTarget?.reason === "active"
                             ? "Stop active chat run"
                             : "Stop active chat run"
@@ -6339,7 +6304,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         unifiedCancelTarget?.reason === "selected"
                           ? "Stop selected run"
                           : unifiedCancelTarget?.reason === "revealed"
-                            ? "Stop revealed task run"
+                            ? "Stop revealed run"
                           : unifiedCancelTarget?.reason === "active"
                             ? "Stop active chat run"
                             : "Stop active chat run"
@@ -6395,13 +6360,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 <div className="text-xs text-[rgb(var(--claw-muted))]">{unifiedCancelNotice}</div>
               ) : null}
               {readOnly && (
-                <span className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add token to move tasks.</span>
+                <span className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add token to manage topics.</span>
               )}
               {normalizedSearch ? (
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[rgb(var(--claw-muted))]">
                   <span>
                     {semanticSearch.loading
-                      ? "Finding related topics, tasks, and messages…"
+                      ? "Finding related topics and messages…"
                       : semanticForQuery
                         ? `Potential matches (${describeSemanticSearchMode(semanticForQuery.mode)})`
                         : semanticSearch.error === "search_timeout"
@@ -6449,7 +6414,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	            normalizedSearch.length > 0 &&
 	            matchesSearchText(`${topic.name} ${topic.description ?? ""}`, searchPlan);
 	          const showTasks = true;
-	          const isExpanded = normalizedSearch.length > 0 || expandedTopicsSafe.has(topicId);
+	          const isExpanded = true;
 	          const mobileChatTopicId = mobileLayer === "chat" ? mobileChatTarget?.topicId ?? null : null;
 	          if (!mdUp && mobileLayer === "chat" && mobileChatTopicId && mobileChatTopicId !== topicId) {
 	            return null;
@@ -6478,7 +6443,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                setTopicSwipeOpenId(null);
 	                const count = taskList.length;
 	                if (count === 0) return;
-	                const ok = window.confirm(`Permanently delete all ${count} unassigned task${count === 1 ? "" : "s"}? This cannot be undone.`);
+	                const ok = window.confirm(`Permanently delete all ${count} unassigned topic${count === 1 ? "" : "s"}? This cannot be undone.`);
 	                if (!ok) return;
 	                void deleteUnassignedTasks();
 	              }}
@@ -6566,31 +6531,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
               key={topicId}
               data-topic-card-id={topicId}
 	              className={cn(
-	                "border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300 md:p-5",
-	                "relative rounded-[var(--radius-lg)]",
-	                // Sticky section-header behavior is handled by the inner header row — not the outer card.
-	                // The outer card must remain non-sticky so the browser can use it as the sticky boundary
-	                // (header sticks until the card's bottom edge passes the top threshold).
-	                draggingTopicId && topicDropTargetId === topicId ? "border-[rgba(255,90,45,0.55)]" : "",
+	                "relative transition-colors duration-300",
+	                draggingTopicId && topicDropTargetId === topicId ? "ring-2 ring-[rgba(255,90,45,0.55)]" : "",
 	                topicSelectedForSend ? "ring-2 ring-[rgba(77,171,158,0.55)]" : ""
 	              )}
-	              style={topicGlowStyle(topicColor, topicIndex, isExpanded)}
 	            >
 	              <div
                 role="button"
-                tabIndex={0}
-	                className={cn(
-	                  "flex items-start justify-between gap-3 text-left",
-	                  editingTopicId === topic.id ? "flex-wrap" : "flex-nowrap",
-	                  isExpanded
-	                    ? "sticky z-10 -mx-4 -mt-4 min-h-[76px] rounded-t-[calc(var(--radius-lg)-1px)] px-4 py-2 md:-mx-5 md:-mt-5 md:px-5"
-	                    : ""
-	                )}
-	                style={
-	                  isExpanded
-	                    ? { top: 0, ...stickyTopicHeaderStyle(topicColor, topicIndex) }
-	                    : undefined
-	                }
+                tabIndex={-1}
+	                className="hidden"
                 onClick={(event) => {
                   if (!allowToggle(event.target as HTMLElement)) return;
                   toggleTopicExpanded(topicId);
@@ -6600,9 +6549,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                  if (isUnassigned) return;
 			                  const dragged = draggingTopicId;
 		                  if (!dragged || dragged === topicId) return;
-		                  const draggedTopic = topics.find((item) => item.id === dragged);
-		                  if (!draggedTopic) return;
-		                  if (Boolean(draggedTopic.pinned) !== Boolean(topic.pinned)) return;
+		                  if (!dragged || dragged === topicId) return;
 		                  event.preventDefault();
 		                  setTopicDropTargetId(topicId);
 		                }}
@@ -6611,9 +6558,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                  if (isUnassigned) return;
 		                  const dragged = draggingTopicId;
 		                  if (!dragged || dragged === topicId) return;
-		                  const draggedTopic = topics.find((item) => item.id === dragged);
-		                  if (!draggedTopic) return;
-		                  if (Boolean(draggedTopic.pinned) !== Boolean(topic.pinned)) return;
 		                  event.preventDefault();
 		                  event.dataTransfer.dropEffect = "move";
 		                }}
@@ -6623,9 +6567,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                  event.preventDefault();
 		                  const dragged = (draggingTopicId ?? event.dataTransfer.getData("text/plain") ?? "").trim();
 		                  if (!dragged || dragged === topicId) return;
-		                  const draggedTopic = topics.find((item) => item.id === dragged);
-		                  if (!draggedTopic) return;
-		                  if (Boolean(draggedTopic.pinned) !== Boolean(topic.pinned)) return;
 		                  const order = orderedTopics.filter((item) => item.id !== "unassigned").map((item) => item.id);
 		                  const from = order.indexOf(dragged);
 		                  const to = order.indexOf(topicId);
@@ -6716,40 +6657,99 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                   const nextValue = event.target.value;
                                   setTopicTagsDraft(nextValue);
                                   setTopicTagsPendingEntry(isTagDraftPending(nextValue));
+                                  setTopicRenameActiveSuggestionIndex(0);
                                 }}
 		                            onFocus={() => setActiveTopicTagField("rename-topic")}
 		                            onBlur={() =>
 		                              setActiveTopicTagField((current) => (current === "rename-topic" ? null : current))
 		                            }
 		                            onKeyDown={(event) => {
+                                  if (event.key === "ArrowDown" && topicRenameTagSuggestions.length > 0) {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    setTopicRenameActiveSuggestionIndex((prev) => (prev + 1) % topicRenameTagSuggestions.length);
+                                    return;
+                                  }
+                                  if (event.key === "ArrowUp" && topicRenameTagSuggestions.length > 0) {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    setTopicRenameActiveSuggestionIndex((prev) =>
+                                      prev <= 0 ? topicRenameTagSuggestions.length - 1 : prev - 1
+                                    );
+                                    return;
+                                  }
+                                  if ((event.key === "Enter" || event.key === "Tab") && topicRenameTagMenuOpen) {
+                                    const suggestion =
+                                      topicRenameTagSuggestions[topicRenameActiveSuggestionIndex] ?? topicRenameTagSuggestions[0];
+                                    if (suggestion) {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      applyTopicRenameTagSuggestion(suggestion);
+                                      return;
+                                    }
+                                  }
+                                  if (event.key === "Escape") {
+                                    setActiveTopicTagField(null);
+                                    setTopicRenameActiveSuggestionIndex(0);
+                                    return;
+                                  }
 		                              if (event.key !== "Enter") return;
 		                              event.preventDefault();
 		                              event.stopPropagation();
                                   if (topicTagsPendingEntry) {
-                                    setTopicTagsDraft(commitTagDraftEntry(topicTagsDraft));
-                                    setTopicTagsPendingEntry(false);
+                                    commitPendingTopicTagDraft();
                                     return;
                                   }
                                   void saveTopicRename(topic);
 		                            }}
+                                    role="combobox"
+                                    aria-haspopup="listbox"
+                                    aria-autocomplete="list"
+                                    aria-expanded={topicRenameTagMenuOpen}
+                                    aria-controls={topicRenameTagMenuOpen ? topicRenameTagListboxId : undefined}
+                                    aria-activedescendant={
+                                      topicRenameTagMenuOpen
+                                        ? `${topicRenameTagListboxId}-option-${topicRenameActiveSuggestionIndex}`
+                                        : undefined
+                                    }
+                                    autoCapitalize="none"
+                                    autoCorrect="off"
+                                    spellCheck={false}
+                                    enterKeyHint="done"
 		                            placeholder="Tags (comma separated)"
-		                            className="h-9 w-[240px] max-w-[70vw]"
+		                            className="h-11 w-[min(28rem,calc(100vw-4rem))] max-w-full md:h-9 md:w-[240px]"
 		                          />
-		                          {activeTopicTagField === "rename-topic" && topicRenameTagSuggestions.length > 0 ? (
-		                            <div className="absolute left-0 top-full z-40 mt-1.5 max-h-44 w-[240px] max-w-[70vw] overflow-auto rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.35)]">
-		                              {topicRenameTagSuggestions.map((suggestion) => (
+		                          {topicRenameTagMenuOpen ? (
+		                            <div
+                                      id={topicRenameTagListboxId}
+                                      role="listbox"
+                                      aria-label="Topic tag suggestions"
+                                      className="absolute left-0 top-full z-40 mt-1.5 max-h-56 w-full overflow-auto rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.35)]"
+                                    >
+		                              {topicRenameTagSuggestions.map((suggestion, index) => (
 		                                <button
+                                          id={`${topicRenameTagListboxId}-option-${index}`}
 		                                  key={`rename-topic-tag-${suggestion}`}
 		                                  type="button"
-		                                  className="flex w-full items-center rounded-[var(--radius-xs)] px-2 py-1.5 text-left text-xs text-[rgb(var(--claw-text))] transition hover:bg-[rgb(var(--claw-panel-2))]"
-		                                  onMouseDown={(event) => {
+                                          role="option"
+                                          aria-selected={index === topicRenameActiveSuggestionIndex}
+		                                  className={cn(
+                                            "flex min-h-11 w-full items-center rounded-[var(--radius-xs)] px-3 py-2 text-left text-sm text-[rgb(var(--claw-text))] transition md:min-h-9 md:px-2 md:py-1.5 md:text-xs",
+                                            index === topicRenameActiveSuggestionIndex
+                                              ? "bg-[rgb(var(--claw-panel-2))] text-[rgb(var(--claw-text))]"
+                                              : "hover:bg-[rgb(var(--claw-panel-2))]"
+                                          )}
+                                          onMouseEnter={() => setTopicRenameActiveSuggestionIndex(index)}
+		                                  onPointerDown={(event) => {
 		                                    event.preventDefault();
 		                                    event.stopPropagation();
-		                                    setTopicTagsDraft(applyTagSuggestionToDraft(topicTagsDraft, suggestion));
-                                    setTopicTagsPendingEntry(false);
+		                                    applyTopicRenameTagSuggestion(suggestion);
 		                                  }}
 		                                >
-                                  <span>{suggestion}</span>
+                                          <span className="truncate">{suggestion}</span>
+                                          <span className="ml-auto pl-3 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))] md:text-[9px]">
+                                            Match
+                                          </span>
 		                                </button>
 		                              ))}
 		                            </div>
@@ -6862,7 +6862,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                               setComposerTarget({ kind: "topic", topicId: topic.id });
                             }}
                           >
-                            {topicSelectedForSend ? "Topic selected" : "New task here"}
+                            {topicSelectedForSend ? "Topic selected" : "Continue here"}
                           </Button>
                         ) : null}
                         <button
@@ -6906,17 +6906,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         </button>
                       </>
                     )}
-                    <PinToggleGeneric
-                      item={topic} itemType="topic"
-                      size="sm"
-                      onToggled={(nextPinned) =>
-                        setTopics((prev) =>
-                          prev.map((item) =>
-                            item.id === topic.id ? { ...item, pinned: nextPinned, updatedAt: new Date().toISOString() } : item
-                          )
-                        )
-                      }
-                    />
                   </div>
                   {renameErrors[`topic:${topic.id}`] && (
                     <p className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`topic:${topic.id}`]}</p>
@@ -6935,10 +6924,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         {topicSpaceExtraCount > 0 ? ` +${topicSpaceExtraCount}` : ""}
                       </span>
                     ) : null}
-	                    <span>{taskList.length} tasks</span>
-	                    <span>{openCount} open</span>
-	                    {isExpanded && <span>{doingCount} doing</span>}
-	                    {isExpanded && <span>{blockedCount} blocked</span>}
+                      <span>{(topic.status ?? "active").toUpperCase()}</span>
                       <span>{topicChatMetricsLabel}</span>
 	                    {hasUnsnoozedBadge ? (
 	                      <button
@@ -6957,77 +6943,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                    )}
 	                  </div>
 	                </div>
-		                <button
-	                  type="button"
-	                  aria-label={isExpanded ? `Collapse topic ${topic.name}` : `Expand topic ${topic.name}`}
-	                  title={isExpanded ? "Collapse" : "Expand"}
-	                  onClick={(event) => {
-	                    event.stopPropagation();
-	                    toggleTopicExpanded(topicId);
-	                  }}
-		                  className={cn(
-		                    "flex h-8 w-8 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-base text-[rgb(var(--claw-muted))] transition",
-		                    "hover:border-[rgba(255,90,45,0.3)] hover:text-[rgb(var(--claw-text))]"
-		                  )}
-	                >
-		                  {isExpanded ? "▾" : "▸"}
-		                </button>
+		                {/* expand/collapse removed — flat topology */}
 		              </div>
 	
 		              {isExpanded && showTasks && (
 		                <div
                       data-testid={`topic-expanded-body-${topicId}`}
-	                      className="mt-3 space-y-3 max-md:pb-2"
+	                      className="space-y-3 max-md:pb-2"
 	                    >
-                      {topic.description ? (
-                        <p className="text-xs text-[rgb(var(--claw-muted))]">{topic.description}</p>
-                      ) : null}
-                      {!isUnassigned ? (
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Input
-                            value={newTaskDraftByTopicId[topicId === "unassigned" ? "unassigned" : topicId] ?? ""}
-                            onChange={(event) => {
-                              const key = topicId === "unassigned" ? "unassigned" : topicId;
-                              const next = event.target.value;
-                              newTaskDraftEditedAtRef.current.set(key, Date.now());
-                              setNewTaskDraftByTopicId((prev) => ({ ...prev, [key]: next }));
-                              queueDraftUpsert(`draft:new-task:${key}`, next);
-                            }}
-                            onKeyDown={(event) => {
-                              if (event.key !== "Enter") return;
-                              event.preventDefault();
-                              const key = topicId === "unassigned" ? "unassigned" : topicId;
-                              const scopeTopicId = topicId === "unassigned" ? null : topicId;
-                              const draft = newTaskDraftByTopicId[key] ?? "";
-                              void createTask(scopeTopicId, draft);
-                            }}
-                            placeholder="Add a task…"
-                            disabled={readOnly || newTaskSavingKey === (topicId === "unassigned" ? "unassigned" : topicId)}
-                            className="h-9 min-w-[220px] flex-1 text-sm"
-                          />
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            disabled={readOnly || newTaskSavingKey === (topicId === "unassigned" ? "unassigned" : topicId)}
-                            onClick={() => {
-                              const key = topicId === "unassigned" ? "unassigned" : topicId;
-                              const scopeTopicId = topicId === "unassigned" ? null : topicId;
-                              const draft = newTaskDraftByTopicId[key] ?? "";
-                              void createTask(scopeTopicId, draft);
-                            }}
-                          >
-                            {newTaskSavingKey === (topicId === "unassigned" ? "unassigned" : topicId) ? "Adding..." : "+ Task"}
-                          </Button>
-                          {readOnly ? (
-                            <span className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add token in Setup to add tasks.</span>
-                          ) : null}
-                        </div>
-                      ) : (
-                        <p className="text-xs text-[rgb(var(--claw-muted))]">
-                          Recycle bin: tasks appear here after their topic is deleted. Swipe left and tap EMPTY to clear all.
-                        </p>
-                      )}
-	                  {taskList.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No tasks yet.</p>}
+                      {/* Topic description and "Add a task" removed — flat topology, the task card IS the topic */}
 	                  {taskList
 	                    .filter((task) => {
 	                      if (!matchesStatusFilter(task)) return false;
@@ -7072,7 +6996,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 	                                void updateTask(task.id, { snoozedUntil: null });
 	                                return;
 	                              }
-	                              setSnoozeTarget({ kind: "task", topicId, taskId: task.id, label: task.title });
+	                              setSnoozeTarget({ kind: "task", topicId, taskId: task.id, label: task.title ?? task.name });
 	                            }}
 	                            disabled={readOnly}
 	                            className={cn(
@@ -7107,7 +7031,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                               event.stopPropagation();
                               if (readOnly) return;
                               setTaskSwipeOpenId(null);
-                              const ok = window.confirm(`Delete task \"${task.title}\"? This cannot be undone.`);
+                              const ok = window.confirm(`Delete \"${task.title}\"? This cannot be undone.`);
                               if (!ok) return;
                               setDeleteArmedKey(null);
                               void deleteTask(task);
@@ -7164,15 +7088,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                        <div
                               data-task-card-id={task.id}
 		                          className={cn(
-		                            "border border-[rgb(var(--claw-border))] p-3.5 transition-colors duration-300 sm:p-4",
+		                            "border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300 md:p-5",
                                 taskChatFullscreen
                                   ? "fixed inset-0 z-[1400] m-0 flex h-[var(--claw-mobile-vh)] flex-col overflow-hidden rounded-none border-0 bg-[rgb(10,12,16)] p-0"
-                                  : "relative rounded-[var(--radius-md)]",
-		                            draggingTaskId && taskDropTargetId === task.id ? "border-[rgba(77,171,158,0.55)]" : "",
+                                  : "relative rounded-[var(--radius-lg)]",
+		                            draggingTopicId && topicDropTargetId === topicId ? "border-[rgba(77,171,158,0.55)]" : "",
                                 statusMenuTaskId === task.id ? "z-40" : "",
                                 taskSelectedForSend ? "ring-2 ring-[rgba(77,171,158,0.55)]" : ""
 		                          )}
-		                          style={taskChatFullscreen ? mobileOverlaySurfaceStyle(taskColor) : taskGlowStyle(taskColor, taskIndex, taskExpanded)}
+		                          style={taskChatFullscreen ? mobileOverlaySurfaceStyle(taskColor) : topicGlowStyle(topicColor, topicIndex, taskExpanded)}
 		                        >
                           <div
                             role="button"
@@ -7195,44 +7119,34 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                               toggleTaskExpanded(topicId, task.id);
                             }}
 		                            onDragEnter={(event) => {
-		                              if (!taskReorderEnabled) return;
-		                              const dragged = draggingTaskId;
-		                              if (!dragged || dragged === task.id) return;
-	                              if (draggingTaskTopicId !== topicId) return;
-	                              const draggedTask = taskList.find((item) => item.id === dragged);
-	                              if (!draggedTask) return;
-	                              if (Boolean(draggedTask.pinned) !== Boolean(task.pinned)) return;
+		                              if (!topicReorderEnabled) return;
+		                              if (isUnassigned) return;
+		                              const dragged = draggingTopicId;
+		                              if (!dragged || dragged === topicId) return;
 	                              event.preventDefault();
-	                              setTaskDropTargetId(task.id);
+	                              setTopicDropTargetId(topicId);
 	                            }}
 	                            onDragOver={(event) => {
-	                              if (!taskReorderEnabled) return;
-	                              const dragged = draggingTaskId;
-	                              if (!dragged || dragged === task.id) return;
-	                              if (draggingTaskTopicId !== topicId) return;
-	                              const draggedTask = taskList.find((item) => item.id === dragged);
-	                              if (!draggedTask) return;
-	                              if (Boolean(draggedTask.pinned) !== Boolean(task.pinned)) return;
+	                              if (!topicReorderEnabled) return;
+	                              if (isUnassigned) return;
+	                              const dragged = draggingTopicId;
+	                              if (!dragged || dragged === topicId) return;
 	                              event.preventDefault();
 	                              event.dataTransfer.dropEffect = "move";
 	                            }}
 	                            onDrop={(event) => {
-	                              if (!taskReorderEnabled) return;
+	                              if (!topicReorderEnabled) return;
+	                              if (isUnassigned) return;
 	                              event.preventDefault();
-	                              const dragged = (draggingTaskId ?? event.dataTransfer.getData("text/plain") ?? "").trim();
-	                              if (!dragged || dragged === task.id) return;
-	                              if (draggingTaskTopicId !== topicId) return;
-	                              const draggedTask = taskList.find((item) => item.id === dragged);
-	                              if (!draggedTask) return;
-	                              if (Boolean(draggedTask.pinned) !== Boolean(task.pinned)) return;
-	                              const order = taskList.map((item) => item.id);
+	                              const dragged = (draggingTopicId ?? event.dataTransfer.getData("text/plain") ?? "").trim();
+	                              if (!dragged || dragged === topicId) return;
+	                              const order = orderedTopics.filter((item) => item.id !== "unassigned").map((item) => item.id);
 	                              const from = order.indexOf(dragged);
-	                              const to = order.indexOf(task.id);
+	                              const to = order.indexOf(topicId);
 	                              const next = moveInArray(order, from, to);
-	                              setDraggingTaskId(null);
-	                              setDraggingTaskTopicId(null);
-	                              setTaskDropTargetId(null);
-	                              void persistTaskOrder(topicId === "unassigned" ? null : topicId, next);
+	                              setDraggingTopicId(null);
+	                              setTopicDropTargetId(null);
+	                              void persistTopicOrder(next);
 	                            }}
 	                            aria-expanded={taskExpanded}
 	                          >
@@ -7240,44 +7154,43 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 			                            <div className="flex min-w-0 items-center gap-1.5 text-sm font-semibold">
 		                              <button
 		                                type="button"
-		                                data-testid={`reorder-task-${task.id}`}
-		                                aria-label="Reorder task"
+		                                data-testid={`reorder-topic-${topicId}`}
+		                                aria-label="Reorder topic"
+                                    data-no-swipe="true"
 		                                title={
-		                                  readOnly
-		                                    ? "Read-only mode. Add token in Setup to reorder."
-		                                    : taskReorderEnabled
-		                                      ? "Drag to reorder tasks"
-		                                      : "Clear the composer draft and set Status=All to reorder"
+		                                  isUnassigned
+		                                    ? "Unassigned is a virtual bucket."
+		                                    : readOnly
+		                                      ? "Read-only mode. Add token in Setup to reorder."
+		                                      : topicReorderEnabled
+		                                        ? "Drag to reorder"
+		                                        : "Clear the composer draft and set Status=All to reorder"
 		                                }
-		                                disabled={readOnly || !taskReorderEnabled}
-		                                draggable={!readOnly && taskReorderEnabled}
+		                                disabled={readOnly || isUnassigned || !topicReorderEnabled}
+		                                draggable={!readOnly && !isUnassigned && topicReorderEnabled}
 		                                onClick={(event) => event.stopPropagation()}
-                                    onPointerDown={(event) =>
-                                      beginPointerTaskReorder(event, task, topicId === "unassigned" ? null : topicId, taskList)
-                                    }
-                                    onPointerMove={(event) => updatePointerTaskReorder(event)}
-                                    onPointerUp={() => endPointerTaskReorder()}
-                                    onPointerCancel={() => endPointerTaskReorder()}
+                                    onPointerDown={(event) => beginPointerTopicReorder(event, topic)}
+                                    onPointerMove={(event) => updatePointerTopicReorder(event)}
+                                    onPointerUp={() => endPointerTopicReorder()}
+                                    onPointerCancel={() => endPointerTopicReorder()}
 		                                onDragStart={(event) => {
-		                                  if (readOnly || !taskReorderEnabled) {
+		                                  if (readOnly || isUnassigned || !topicReorderEnabled) {
 		                                    event.preventDefault();
 		                                    return;
 		                                  }
 	                                  event.dataTransfer.effectAllowed = "move";
-	                                  event.dataTransfer.setData("text/plain", task.id);
-	                                  setDraggingTaskId(task.id);
-	                                  setDraggingTaskTopicId(topicId);
-	                                  setTaskDropTargetId(null);
+	                                  event.dataTransfer.setData("text/plain", topicId);
+	                                  setDraggingTopicId(topicId);
+	                                  setTopicDropTargetId(null);
 	                                }}
 	                                onDragEnd={() => {
-	                                  setDraggingTaskId(null);
-	                                  setDraggingTaskTopicId(null);
-	                                  setTaskDropTargetId(null);
+	                                  setDraggingTopicId(null);
+	                                  setTopicDropTargetId(null);
 	                                }}
 		                                style={{ touchAction: "none" }}
 		                                className={cn(
 		                                  "flex h-7 w-7 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] transition",
-		                                  readOnly || !taskReorderEnabled
+		                                  readOnly || isUnassigned || !topicReorderEnabled
 		                                    ? "cursor-not-allowed opacity-50"
 		                                    : "cursor-grab hover:border-[rgba(77,171,158,0.4)] hover:text-[rgb(var(--claw-text))] active:cursor-grabbing"
 		                                )}
@@ -7305,32 +7218,116 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                         void saveTaskRename(task);
                                       }
                                     }}
-		                                    placeholder="Rename task"
+		                                    placeholder="Rename topic"
 		                                    className="h-9 w-[280px] max-w-[68vw]"
 		                                  />
-		                                  <Input
-                                    data-testid={`rename-task-tags-${task.id}`}
-		                                    value={taskTagsDraft}
-		                                    onClick={(event) => event.stopPropagation()}
-		                                    onChange={(event) => {
-                                      const nextValue = event.target.value;
-                                      setTaskTagsDraft(nextValue);
-                                      setTaskTagsPendingEntry(isTagDraftPending(nextValue));
-                                    }}
-                                    onKeyDown={(event) => {
-                                      if (event.key !== "Enter") return;
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      if (taskTagsPendingEntry) {
-                                        setTaskTagsDraft(commitTagDraftEntry(taskTagsDraft));
-                                        setTaskTagsPendingEntry(false);
-                                        return;
+                                  <div className="relative">
+		                                    <Input
+                                      data-testid={`rename-task-tags-${task.id}`}
+		                                      value={taskTagsDraft}
+		                                      onClick={(event) => event.stopPropagation()}
+		                                      onChange={(event) => {
+                                        const nextValue = event.target.value;
+                                        setTaskTagsDraft(nextValue);
+                                        setTaskTagsPendingEntry(isTagDraftPending(nextValue));
+                                        setTaskRenameActiveSuggestionIndex(0);
+                                      }}
+                                      onFocus={() => setActiveTaskTagField("rename-task")}
+                                      onBlur={() =>
+                                        setActiveTaskTagField((current) => (current === "rename-task" ? null : current))
                                       }
-                                      void saveTaskRename(task);
-                                    }}
-		                                    placeholder="Tags (comma separated)"
-		                                    className="h-9 w-[240px] max-w-[68vw]"
-		                                  />
+                                      onKeyDown={(event) => {
+                                        if (event.key === "ArrowDown" && taskRenameTagSuggestions.length > 0) {
+                                          event.preventDefault();
+                                          event.stopPropagation();
+                                          setTaskRenameActiveSuggestionIndex((prev) => (prev + 1) % taskRenameTagSuggestions.length);
+                                          return;
+                                        }
+                                        if (event.key === "ArrowUp" && taskRenameTagSuggestions.length > 0) {
+                                          event.preventDefault();
+                                          event.stopPropagation();
+                                          setTaskRenameActiveSuggestionIndex((prev) =>
+                                            prev <= 0 ? taskRenameTagSuggestions.length - 1 : prev - 1
+                                          );
+                                          return;
+                                        }
+                                        if ((event.key === "Enter" || event.key === "Tab") && taskRenameTagMenuOpen) {
+                                          const suggestion =
+                                            taskRenameTagSuggestions[taskRenameActiveSuggestionIndex] ?? taskRenameTagSuggestions[0];
+                                          if (suggestion) {
+                                            event.preventDefault();
+                                            event.stopPropagation();
+                                            applyTaskRenameTagSuggestion(suggestion);
+                                            return;
+                                          }
+                                        }
+                                        if (event.key === "Escape") {
+                                          setActiveTaskTagField(null);
+                                          setTaskRenameActiveSuggestionIndex(0);
+                                          return;
+                                        }
+                                        if (event.key !== "Enter") return;
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        if (taskTagsPendingEntry) {
+                                          commitPendingTaskTagDraft();
+                                          return;
+                                        }
+                                        void saveTaskRename(task);
+                                      }}
+                                      role="combobox"
+                                      aria-haspopup="listbox"
+                                      aria-autocomplete="list"
+                                      aria-expanded={taskRenameTagMenuOpen}
+                                      aria-controls={taskRenameTagMenuOpen ? taskRenameTagListboxId : undefined}
+                                      aria-activedescendant={
+                                        taskRenameTagMenuOpen
+                                          ? `${taskRenameTagListboxId}-option-${taskRenameActiveSuggestionIndex}`
+                                          : undefined
+                                      }
+                                      autoCapitalize="none"
+                                      autoCorrect="off"
+                                      spellCheck={false}
+                                      enterKeyHint="done"
+		                                      placeholder="Tags (comma separated)"
+		                                      className="h-11 w-[min(28rem,calc(100vw-4rem))] max-w-full md:h-9 md:w-[240px]"
+		                                    />
+                                    {taskRenameTagMenuOpen ? (
+                                      <div
+                                        id={taskRenameTagListboxId}
+                                        role="listbox"
+                                        aria-label="Topic tag suggestions"
+                                        className="absolute left-0 top-full z-40 mt-1.5 max-h-56 w-full overflow-auto rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.35)]"
+                                      >
+                                        {taskRenameTagSuggestions.map((suggestion, index) => (
+                                          <button
+                                            id={`${taskRenameTagListboxId}-option-${index}`}
+                                            key={`rename-task-tag-${suggestion}`}
+                                            type="button"
+                                            role="option"
+                                            aria-selected={index === taskRenameActiveSuggestionIndex}
+                                            className={cn(
+                                              "flex min-h-11 w-full items-center rounded-[var(--radius-xs)] px-3 py-2 text-left text-sm text-[rgb(var(--claw-text))] transition md:min-h-9 md:px-2 md:py-1.5 md:text-xs",
+                                              index === taskRenameActiveSuggestionIndex
+                                                ? "bg-[rgb(var(--claw-panel-2))] text-[rgb(var(--claw-text))]"
+                                                : "hover:bg-[rgb(var(--claw-panel-2))]"
+                                            )}
+                                            onMouseEnter={() => setTaskRenameActiveSuggestionIndex(index)}
+                                            onPointerDown={(event) => {
+                                              event.preventDefault();
+                                              event.stopPropagation();
+                                              applyTaskRenameTagSuggestion(suggestion);
+                                            }}
+                                          >
+                                            <span className="truncate">{suggestion}</span>
+                                            <span className="ml-auto pl-3 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))] md:text-[9px]">
+                                              Match
+                                            </span>
+                                          </button>
+                                        ))}
+                                      </div>
+                                    ) : null}
+                                  </div>
 		                                  <Select
 		                                    data-testid={`task-status-${task.id}`}
 		                                    value={task.status}
@@ -7497,14 +7494,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                         setComposerTarget({ kind: "task", topicId, taskId: task.id });
                                       }}
                                     >
-                                      {taskSelectedForSend ? "Task selected" : "Continue here"}
+                                      {taskSelectedForSend ? "Selected" : "Continue here"}
                                     </Button>
                                   ) : null}
                                   <button
                                     type="button"
                                     data-testid={`rename-task-${task.id}`}
-                                    aria-label={`Rename task ${task.title}`}
-                                    title={readOnly ? "Read-only mode. Add token in Setup to rename." : "Rename task"}
+                                    aria-label={`Rename topic ${task.title}`}
+                                    title={readOnly ? "Read-only mode. Add token in Setup to rename." : "Rename topic"}
                                     disabled={readOnly}
                                     onClick={(event) => {
                                       event.stopPropagation();
@@ -7513,7 +7510,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                       setTopicNameDraft("");
                                       setTopicColorDraft(TOPIC_FALLBACK_COLORS[0]);
                                       setEditingTaskId(task.id);
-                                      setTaskNameDraft(task.title);
+                                      setTaskNameDraft(task.title ?? task.name);
                                       setTaskColorDraft(taskColor);
                                       setTaskTagsDraft(formatTags(task.tags));
                                       setTaskTagsPendingEntry(false);
@@ -7535,22 +7532,18 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                   </button>
                                 </>
                               )}
-                              <PinToggleGeneric
-                                item={task} itemType="task"
-                                size="sm"
-                                onToggled={(nextPinned) =>
-                                  setTasks((prev) =>
-                                    prev.map((item) =>
-                                      item.id === task.id ? { ...item, pinned: nextPinned, updatedAt: new Date().toISOString() } : item
-                                    )
-                                  )
-                                }
-                              />
                             </div>
 	                            {renameErrors[`task:${task.id}`] && (
 	                              <div className="mt-1 text-xs text-[rgb(var(--claw-warning))]">{renameErrors[`task:${task.id}`]}</div>
 	                            )}
                             <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-[rgb(var(--claw-muted))] sm:text-xs">
+                              {topicSpaceName ? (
+                                <span
+                                  className="inline-flex items-center rounded-full border border-[rgba(148,163,184,0.22)] bg-[rgba(148,163,184,0.07)] px-2 py-0.5 text-[10px] font-medium tracking-[0.08em] text-[rgb(var(--claw-muted))]"
+                                >
+                                  {topicSpaceName}
+                                </span>
+                              ) : null}
                               <span>{taskChatMetricsLabel}</span>
 	                              {hasUnsnoozedTaskBadge ? (
 	                                <button
@@ -7616,8 +7609,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                   )}
                                 >
                                   <StatusPill
-                                    tone={STATUS_TONE[taskVisualStatus(task)]}
-                                    label={STATUS_LABELS[taskVisualStatus(task)] ?? taskVisualStatus(task)}
+                                    tone={STATUS_TONE[taskVisualStatus(task) ?? "active"]}
+                                    label={STATUS_LABELS[taskVisualStatus(task) ?? "active"] ?? taskVisualStatus(task) ?? "active"}
                                   />
                                 </button>
                                 {statusMenuTaskId === task.id && !readOnly && statusMenuPosition && typeof document !== "undefined"
@@ -7749,7 +7742,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                         setTopicNameDraft("");
                                         setTopicColorDraft(TOPIC_FALLBACK_COLORS[0]);
                                         setEditingTaskId(task.id);
-                                        setTaskNameDraft(task.title);
+                                        setTaskNameDraft(task.title ?? task.name);
                                         setTaskColorDraft(taskColor);
                                         setTaskTagsDraft(formatTags(task.tags));
                                         setTaskTagsPendingEntry(false);
@@ -7780,23 +7773,18 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                             <div data-testid={`task-chat-context-${task.id}`} className="min-w-0 flex-1 pr-2">
                                               <div className="flex min-w-0 items-center gap-1.5">
                                                 <div className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
-                                                  TASK CHAT
+                                                  CHAT
                                                 </div>
                                                 {isTaskResponding(task) ? <TypingDots /> : null}
                                               </div>
                                               <nav
-                                                aria-label="Task chat context"
+                                                aria-label="Topic chat context"
                                                 data-testid={`task-chat-breadcrumb-${task.id}`}
                                                 className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 text-[11px] text-[rgb(var(--claw-muted))]"
                                               >
                                                 <span className="shrink-0 uppercase tracking-[0.14em]">Topic</span>
                                                 <span className="inline-flex max-w-full overflow-x-auto whitespace-nowrap font-medium text-[rgb(var(--claw-text))]">
                                                   {topic.name}
-                                                </span>
-                                                <span className="shrink-0 text-[rgba(var(--claw-muted),0.65)]">/</span>
-                                                <span className="shrink-0 uppercase tracking-[0.14em]">Task</span>
-                                                <span className="inline-flex max-w-full overflow-x-auto whitespace-nowrap font-medium text-[rgb(var(--claw-text))]">
-                                                  {task.title}
                                                 </span>
                                               </nav>
                                             </div>
@@ -8220,7 +8208,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
       <SnoozeModal
         open={Boolean(snoozeTarget)}
-        title={snoozeTarget?.kind === "task" ? "Snooze task" : "Snooze topic"}
+        title="Snooze topic"
         subtitle="Hide it until the chosen time. Any new activity will bring it back early."
         entityLabel={snoozeTarget?.label ?? null}
         onClose={() => setSnoozeTarget(null)}

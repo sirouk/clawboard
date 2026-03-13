@@ -7,9 +7,9 @@ import { formatRelativeTime } from "@/lib/format";
 import { buildTopicUrl } from "@/lib/url";
 import { useDataStore } from "@/components/data-provider";
 import { apiFetch } from "@/lib/api";
-import type { Task } from "@/lib/types";
+import type { TaskStatus } from "@/lib/types";
 
-type StatusKey = Task["status"];
+type StatusKey = TaskStatus;
 
 type CreationGateBucket = {
   allowedTotal: number;
@@ -78,7 +78,7 @@ function MetricCard({
 }
 
 export function StatsLive() {
-  const { tasks, logs, topics } = useDataStore();
+  const { topics, logs } = useDataStore();
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
 
   useEffect(() => {
@@ -101,14 +101,15 @@ export function StatsLive() {
     };
   }, []);
 
-  const taskCounts = tasks.reduce<Record<string, number>>(
-    (acc, task) => {
-      acc[task.status] = (acc[task.status] ?? 0) + 1;
+  const taskCounts = topics.reduce<Record<string, number>>(
+    (acc, topic) => {
+      const s = topic.status ?? "active";
+      acc[s] = (acc[s] ?? 0) + 1;
       return acc;
     },
     { todo: 0, doing: 0, blocked: 0, done: 0 }
   );
-  const openCount = tasks.filter((task) => task.status !== "done").length;
+  const openCount = topics.filter((topic) => topic.status !== "done").length;
 
   const topicActivity = useMemo(() => {
     const logCountByTopic = new Map<string, number>();
@@ -118,22 +119,14 @@ export function StatsLive() {
       logCountByTopic.set(topicId, (logCountByTopic.get(topicId) ?? 0) + 1);
     }
 
-    const taskCountByTopic = new Map<string, number>();
-    for (const task of tasks) {
-      const topicId = String(task.topicId ?? "").trim();
-      if (!topicId) continue;
-      taskCountByTopic.set(topicId, (taskCountByTopic.get(topicId) ?? 0) + 1);
-    }
-
     return topics
       .map((topic) => ({
         ...topic,
         logCount: logCountByTopic.get(topic.id) ?? 0,
-        taskCount: taskCountByTopic.get(topic.id) ?? 0,
       }))
       .sort((a, b) => b.logCount - a.logCount)
       .slice(0, 6);
-  }, [logs, tasks, topics]);
+  }, [logs, topics]);
 
   const agentStats = useMemo(() => {
     const latestEventTime = logs.reduce((max, entry) => {
@@ -176,8 +169,7 @@ export function StatsLive() {
 		<div className="space-y-6">
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <MetricCard title="Topics" count={topics.length} tone="accent" description="Active areas of focus." href="/u" cta="Open board" />
-        <MetricCard title="Tasks" count={tasks.length} tone="accent2" description="Total tracked actions." href="/u" cta="Review tasks" />
-        <MetricCard title="Open" count={openCount} tone="warning" description="Needs attention." href="/u?status=blocked" cta="View blocked tasks" />
+        <MetricCard title="Open" count={openCount} tone="warning" description="Needs attention." href="/u?status=blocked" cta="View blocked" />
         <MetricCard title="Logs" count={logs.length} tone="accent" description="Conversation + action events." href="/log" cta="Open logs" />
       </div>
 
@@ -207,7 +199,7 @@ export function StatsLive() {
               </div>
             </div>
             <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4 text-sm">
-              <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Tasks</div>
+              <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Items</div>
               <div className="mt-2 text-[rgb(var(--claw-muted))]">
                 Created last 24h: <span className="text-[rgb(var(--claw-text))]">{creation.tasks?.created24h ?? 0}</span>
               </div>
@@ -243,7 +235,7 @@ export function StatsLive() {
                 <div className="text-xs text-[rgb(var(--claw-muted))]">{topic.description}</div>
               </div>
               <div className="text-xs text-[rgb(var(--claw-muted))]">
-                {topic.logCount} logs · {topic.taskCount} tasks · updated {formatRelativeTime(topic.updatedAt)}
+                {topic.logCount} logs · updated {formatRelativeTime(topic.updatedAt)}
               </div>
             </Link>
           ))}
@@ -254,7 +246,7 @@ export function StatsLive() {
       <div className="grid gap-6 lg:grid-cols-[1.2fr_1fr]">
         <Card>
           <CardHeader>
-            <h2 className="text-lg font-semibold">Task Status</h2>
+            <h2 className="text-lg font-semibold">Topic Status</h2>
             <Badge tone="muted">Filters</Badge>
           </CardHeader>
           <div className="grid gap-3 sm:grid-cols-2">

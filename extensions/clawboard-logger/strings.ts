@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { isBoardSessionKey, parseBoardSessionKey } from "./session-key.js";
+import { isBoardSessionKey } from "./session-key.js";
 import type { ContextMode } from "./types.js";
 
 export function envInt(name: string, fallback: number, min: number, max: number) {
@@ -283,31 +283,6 @@ export function lexicalSimilarity(a: string, b: string) {
   return inter / union;
 }
 
-export function normalizeTaskIdentity(value: string | undefined | null) {
-  const normalized = typeof value === "string" ? value.trim() : "";
-  if (!normalized) return "";
-  return normalized.replace(/^task[-_:]?/i, "");
-}
-
-export function resolveBoardTaskPatchId(
-  requestedId: string | undefined | null,
-  sessionKey: string | undefined | null,
-  fallbackTaskId?: string | undefined | null
-) {
-  const requested = typeof requestedId === "string" ? requestedId.trim() : "";
-  const route = parseBoardSessionKey(sessionKey);
-  const sessionTaskId =
-    route?.kind === "task"
-      ? route.taskId
-      : (typeof fallbackTaskId === "string" ? fallbackTaskId.trim() : "");
-  if (!requested) return sessionTaskId || undefined;
-  if (!sessionTaskId) return requested;
-  if (requested === sessionTaskId) return requested;
-  if (normalizeTaskIdentity(requested) === normalizeTaskIdentity(sessionTaskId)) return sessionTaskId;
-  if (!/^task[-_:]/i.test(requested)) return sessionTaskId;
-  return requested;
-}
-
 export function extractTextLoose(value: unknown, depth = 0): string | undefined {
   if (!value || depth > 4) return undefined;
   if (typeof value === "string") return value;
@@ -348,12 +323,12 @@ export function isClassifierPayloadText(content: string) {
   const text = content.trim();
   if (!text) return false;
   if (!text.startsWith("{") && !text.startsWith("```")) return false;
-  const markers = ["\"window\"", "\"candidateTopics\"", "\"candidateTasks\"", "\"instructions\"", "\"summaries\""];
+  const markers = ["\"window\"", "\"candidateTopics\"", "\"instructions\"", "\"summaries\""];
   if (markers.some((marker) => text.includes(marker))) return true;
 
   // Some classifier/control payloads are smaller and don't include the "window" schema,
   // but still shouldn't be logged as chat content.
-  const controlMarkers = ["\"createTopic\"", "\"createTask\"", "\"topicId\"", "\"taskId\""];
+  const controlMarkers = ["\"createTopic\"", "\"topicId\""];
   let hits = 0;
   for (const marker of controlMarkers) {
     if (text.includes(marker)) hits += 1;

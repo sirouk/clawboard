@@ -9,8 +9,8 @@ from typing import Any
 
 from sqlmodel import select
 
-from .models import SessionRoutingMemory, Task, Topic
-from .spaces import _normalize_space_id, _space_id_for_task, _space_id_for_topic
+from .models import SessionRoutingMemory, Topic
+from .spaces import _normalize_space_id, _space_id_for_topic
 from .text_processing import _clip, _normalize_label, _sanitize_log_text
 
 __all__ = [
@@ -18,24 +18,18 @@ __all__ = [
     "_auto_pick_color",
     "_label_similarity",
     "_find_similar_topic",
-    "_find_similar_task",
     "_RESOLVER_NAME_STOPWORDS",
     "_resolver_float_env",
     "_resolver_topic_similarity_threshold",
-    "_resolver_task_similarity_threshold",
     "_resolver_semantic_topic_score_threshold",
-    "_resolver_semantic_task_score_threshold",
     "_resolver_fallback_mode",
     "_resolver_clean_name",
     "_resolver_title_case_token",
     "_resolver_terms_from_message",
     "_resolver_derive_topic_name",
-    "_resolver_derive_task_title",
     "_resolver_pick_semantic_topic_id",
-    "_resolver_pick_semantic_task",
     "_resolver_recent_routing_hints",
     "_next_sort_index_for_new_topic",
-    "_next_sort_index_for_new_task",
 ]
 
 
@@ -93,35 +87,6 @@ def _find_similar_topic(session, name: str, threshold: float = 0.80, space_id: s
     return None
 
 
-def _find_similar_task(
-    session,
-    topic_id: str | None,
-    title: str,
-    threshold: float = 0.88,
-    space_id: str | None = None,
-):
-    if not title.strip():
-        return None
-    tasks = session.exec(select(Task)).all()
-    normalized_space_id = _normalize_space_id(space_id)
-    if topic_id is not None:
-        tasks = [task for task in tasks if task.topicId == topic_id]
-    else:
-        tasks = [task for task in tasks if task.topicId is None]
-        if normalized_space_id:
-            tasks = [task for task in tasks if _space_id_for_task(task) == normalized_space_id]
-    best = None
-    best_score = 0.0
-    for task in tasks:
-        score = _label_similarity(task.title, title)
-        if score > best_score:
-            best_score = score
-            best = task
-    if best and best_score >= threshold:
-        return best
-    return None
-
-
 _RESOLVER_NAME_STOPWORDS = {
     "a",
     "an",
@@ -166,16 +131,8 @@ def _resolver_topic_similarity_threshold() -> float:
     return _resolver_float_env("CLAWBOARD_RESOLVER_TOPIC_SIM_THRESHOLD", 0.80, 0.40, 0.98)
 
 
-def _resolver_task_similarity_threshold() -> float:
-    return _resolver_float_env("CLAWBOARD_RESOLVER_TASK_SIM_THRESHOLD", 0.88, 0.45, 0.99)
-
-
 def _resolver_semantic_topic_score_threshold() -> float:
     return _resolver_float_env("CLAWBOARD_RESOLVER_SEMANTIC_TOPIC_THRESHOLD", 0.78, 0.35, 0.98)
-
-
-def _resolver_semantic_task_score_threshold() -> float:
-    return _resolver_float_env("CLAWBOARD_RESOLVER_SEMANTIC_TASK_THRESHOLD", 0.80, 0.35, 0.99)
 
 
 def _resolver_fallback_mode() -> str:
@@ -261,30 +218,6 @@ def _resolver_derive_topic_name(message: str, *, context_payload: dict[str, Any]
     return _resolver_clean_name(titled, fallback="Untitled Topic", max_chars=72)
 
 
-def _resolver_derive_task_title(message: str, *, context_payload: dict[str, Any] | None = None) -> str:
-    semantic = ((context_payload or {}).get("data") or {}).get("semantic") if isinstance((context_payload or {}).get("data"), dict) else None
-    if isinstance(semantic, dict):
-        tasks = semantic.get("tasks")
-        if isinstance(tasks, list):
-            top = tasks[0] if tasks else None
-            if isinstance(top, dict):
-                top_title = _resolver_clean_name(str(top.get("title") or "").strip(), fallback="", max_chars=84)
-                top_score = float(top.get("score") or 0.0) if top.get("score") is not None else 0.0
-                if top_title and top_score >= _resolver_semantic_task_score_threshold():
-                    return top_title
-
-    terms = _resolver_terms_from_message(message, limit=12)
-    if not terms:
-        return "New Task"
-    keyword_terms = [term for term in terms if term.lower() not in _RESOLVER_NAME_STOPWORDS]
-    chosen = (keyword_terms or terms)[:8]
-    titled = " ".join(
-        _resolver_title_case_token(token, idx == 0 or idx == len(chosen) - 1)
-        for idx, token in enumerate(chosen)
-    ).strip()
-    return _resolver_clean_name(titled, fallback="New Task", max_chars=84)
-
-
 def _resolver_pick_semantic_topic_id(
     session: Any,
     *,
@@ -319,45 +252,10 @@ def _resolver_pick_semantic_topic_id(
     return None
 
 
-def _resolver_pick_semantic_task(
-    session: Any,
-    *,
-    topic_id: str,
-    context_payload: dict[str, Any] | None,
-) -> Task | None:
-    data = (context_payload or {}).get("data")
-    if not isinstance(data, dict):
-        return None
-    semantic = data.get("semantic")
-    if not isinstance(semantic, dict):
-        return None
-    tasks = semantic.get("tasks")
-    if not isinstance(tasks, list):
-        return None
-    threshold = _resolver_semantic_task_score_threshold()
-    for row in tasks:
-        if not isinstance(row, dict):
-            continue
-        candidate_id = str(row.get("id") or "").strip()
-        if not candidate_id:
-            continue
-        score = float(row.get("score") or 0.0) if row.get("score") is not None else 0.0
-        if score < threshold:
-            continue
-        task = session.get(Task, candidate_id)
-        if not task:
-            continue
-        if str(getattr(task, "topicId", "") or "").strip() != topic_id:
-            continue
-        return task
-    return None
-
-
 def _resolver_recent_routing_hints(
     session: Any,
     *,
     selected_topic_id: str | None,
-    selected_task_id: str | None,
     limit: int = 16,
 ) -> list[dict[str, Any]]:
     rows = session.exec(
@@ -370,18 +268,13 @@ def _resolver_recent_routing_hints(
             if not isinstance(item, dict):
                 continue
             topic_id = str(item.get("topicId") or "").strip()
-            task_id = str(item.get("taskId") or "").strip()
             if selected_topic_id and topic_id and topic_id != selected_topic_id:
-                continue
-            if selected_task_id and task_id and task_id != selected_task_id:
                 continue
             out.append(
                 {
                     "ts": str(item.get("ts") or "").strip(),
                     "topicId": topic_id or None,
                     "topicName": str(item.get("topicName") or "").strip() or None,
-                    "taskId": task_id or None,
-                    "taskTitle": str(item.get("taskTitle") or "").strip() or None,
                     "anchor": _clip(_sanitize_log_text(str(item.get("anchor") or "")), 220) or None,
                 }
             )
@@ -399,11 +292,3 @@ def _next_sort_index_for_new_topic(session, pinned: bool) -> int:
     return min(indices) - 1
 
 
-def _next_sort_index_for_new_task(session, topic_id: str | None, pinned: bool) -> int:
-    """Return a sortIndex that places new tasks at the top of their pinned group within the topic."""
-    tasks = session.exec(select(Task)).all()
-    scoped = [task for task in tasks if task.topicId == topic_id]
-    indices = [int(getattr(task, "sortIndex", 0)) for task in scoped if bool(getattr(task, "pinned", False)) == pinned]
-    if not indices:
-        return 0
-    return min(indices) - 1

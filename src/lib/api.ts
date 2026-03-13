@@ -94,6 +94,9 @@ function shouldUseSameOriginApiProxy(path: string) {
   if (envBase.startsWith("/")) return true;
   try {
     const url = new URL(envBase);
+    // Remote/Tailscale/browser-cross-origin API bases should still flow through the Next proxy.
+    // That keeps browser traffic same-origin and avoids CORS failures during local dev.
+    if (!isLoopbackHost(url.hostname)) return true;
     // Product default: real Clawboard browser traffic should use the Next same-origin proxy
     // whenever the configured backend is the normal API service port. Nonstandard ports
     // (for example mock Playwright servers on 3051) stay direct.

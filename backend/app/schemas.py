@@ -90,9 +90,9 @@ class StartFreshReplayRequest(BaseModel):
     replayMode: Literal["reclassify", "fresh"] = Field(
         default="reclassify",
         description=(
-            "Replay strategy: 'reclassify' keeps existing topic/task links and only re-queues unassigned/failed "
+            "Replay strategy: 'reclassify' keeps existing topic links and only re-queues unassigned/failed "
             "conversation logs for classification; "
-            "'fresh' clears derived topics/tasks first."
+            "'fresh' clears derived topics first."
         ),
         examples=["reclassify"],
     )
@@ -209,11 +209,12 @@ class TopicOut(ModelBase):
     color: Optional[str] = Field(description="Topic color #RRGGBB.", examples=["#FF8A4A"])
     description: Optional[str] = Field(description="Topic description.", examples=["Product and platform work."])
     priority: Optional[str] = Field(description="Priority (low | medium | high).", examples=["high"])
-    status: Optional[str] = Field(description="Status (active | snoozed | archived).", examples=["active"])
+    status: Optional[str] = Field(description="Status (active | todo | doing | blocked | done | snoozed | archived).", examples=["active"])
     snoozedUntil: Optional[str] = Field(
         description="ISO timestamp when a snoozed topic should re-activate (nullable).",
         examples=["2026-02-09T18:00:00.000Z"],
     )
+    dueDate: Optional[str] = Field(description="Optional due date (ISO).", examples=["2026-02-05T00:00:00.000Z"])
     tags: List[str] = Field(description="Freeform tags.", examples=[["product", "platform"]])
     parentId: Optional[str] = Field(description="Parent topic ID (for subtopics).", examples=["topic-1"])
     pinned: Optional[bool] = Field(description="Pinned topics sort to the top.", examples=[True])
@@ -231,41 +232,10 @@ class TopicOut(ModelBase):
     updatedAt: str = Field(description="ISO timestamp of last activity/update.", examples=["2026-02-03T20:05:00.000Z"])
 
 
-class TaskOut(ModelBase):
-    id: str = Field(description="Task ID.", examples=["task-1"])
-    spaceId: str = Field(description="Owning space ID.", examples=["space-default"])
-    topicId: Optional[str] = Field(description="Parent topic ID (nullable).", examples=["topic-1"])
-    title: str = Field(description="Task title.", examples=["Ship onboarding wizard"])
-    sortIndex: int = Field(description="Manual ordering index within the topic (lower comes first).", examples=[0])
-    color: Optional[str] = Field(description="Task color #RRGGBB.", examples=["#4EA1FF"])
-    status: str = Field(description="Task status (todo | doing | blocked | done).", examples=["doing"])
-    pinned: Optional[bool] = Field(description="Pinned tasks sort to the top.", examples=[True])
-    priority: Optional[str] = Field(description="Priority (low | medium | high).", examples=["high"])
-    dueDate: Optional[str] = Field(description="Optional due date (ISO).", examples=["2026-02-05T00:00:00.000Z"])
-    digest: Optional[str] = Field(
-        default=None,
-        description="Durable task digest (system-managed summary; optional).",
-        examples=["Goal: make /api/context single-call; Progress: endpoint + plugin update merged."],
-    )
-    digestUpdatedAt: Optional[str] = Field(
-        default=None,
-        description="ISO timestamp when digest was last updated (nullable).",
-        examples=["2026-02-10T18:00:00.000Z"],
-    )
-    snoozedUntil: Optional[str] = Field(
-        description="ISO timestamp when a snoozed task should re-activate (nullable).",
-        examples=["2026-02-09T18:00:00.000Z"],
-    )
-    tags: List[str] = Field(description="Freeform tags.", examples=[["ops", "follow-up"]])
-    createdAt: str = Field(description="ISO timestamp when the task was created.", examples=["2026-02-02T10:00:00.000Z"])
-    updatedAt: str = Field(description="ISO timestamp of last update.", examples=["2026-02-03T19:55:00.000Z"])
-
-
 class LogOut(ModelBase):
     id: str = Field(description="Log entry ID.", examples=["log-1"])
     spaceId: str = Field(description="Owning space ID.", examples=["space-default"])
     topicId: Optional[str] = Field(description="Associated topic ID (nullable).", examples=["topic-1"])
-    taskId: Optional[str] = Field(description="Associated task ID (nullable).", examples=["task-1"])
     relatedLogId: Optional[str] = Field(description="Link to original log (for notes).", examples=["log-12"])
     idempotencyKey: Optional[str] = Field(description="Idempotency key if provided.", examples=["discord:msg:assistant"])
     type: str = Field(description="Log type (conversation | action | note | system | import).", examples=["conversation"])
@@ -297,7 +267,6 @@ class LogOutLite(ModelBase):
     id: str = Field(description="Log entry ID.", examples=["log-1"])
     spaceId: str = Field(description="Owning space ID.", examples=["space-default"])
     topicId: Optional[str] = Field(description="Associated topic ID (nullable).", examples=["topic-1"])
-    taskId: Optional[str] = Field(description="Associated task ID (nullable).", examples=["task-1"])
     relatedLogId: Optional[str] = Field(description="Link to original log (for notes).", examples=["log-12"])
     idempotencyKey: Optional[str] = Field(description="Idempotency key if provided.", examples=["discord:msg:assistant"])
     type: str = Field(description="Log type (conversation | action | note | system | import).", examples=["conversation"])
@@ -323,10 +292,10 @@ class LogOutLite(ModelBase):
 
 
 class LogChatCountsResponse(BaseModel):
-    taskChatCounts: Dict[str, int] = Field(
+    topicChatCounts: Dict[str, int] = Field(
         default_factory=dict,
-        description="Aggregate task-chat entry counts keyed by task id.",
-        examples=[{"task-1": 28, "task-2": 4}],
+        description="Aggregate topic-chat entry counts keyed by topic id.",
+        examples=[{"topic-1": 28, "topic-2": 4}],
     )
 
 
@@ -339,6 +308,7 @@ class TopicUpsert(BaseModel):
                 "description": "Product work.",
                 "priority": "high",
                 "status": "active",
+                "dueDate": "2026-02-05T00:00:00.000Z",
                 "tags": ["product", "platform"],
                 "parentId": "topic-1",
                 "pinned": True,
@@ -351,60 +321,18 @@ class TopicUpsert(BaseModel):
     color: Optional[str] = Field(default=None, description="Optional topic color #RRGGBB.", examples=["#FF8A4A"])
     description: Optional[str] = Field(default=None, description="Topic description.", examples=["Product work."])
     priority: Optional[str] = Field(default=None, description="Priority (low | medium | high).", examples=["high"])
-    status: Optional[str] = Field(default=None, description="Status (active | snoozed | archived).", examples=["active"])
+    status: Optional[str] = Field(default=None, description="Status (active | todo | doing | blocked | done | snoozed | archived).", examples=["active"])
     snoozedUntil: Optional[str] = Field(
         default=None,
         description="ISO timestamp when a snoozed topic should re-activate (nullable).",
         examples=["2026-02-09T18:00:00.000Z"],
     )
+    dueDate: Optional[str] = Field(default=None, description="Optional due date (ISO).", examples=["2026-02-05T00:00:00.000Z"])
     tags: Optional[List[str]] = Field(default=None, description="Tags list.", examples=[["product", "platform"]])
     parentId: Optional[str] = Field(default=None, description="Parent topic ID.", examples=["topic-1"])
     pinned: Optional[bool] = Field(default=None, description="Pin topic to top.", examples=[True])
 
     @field_validator("name", "description", "priority", "status", "parentId", mode="before")
-    @classmethod
-    def _normalize_text_fields(cls, value: Any) -> Any:
-        return _normalize_utf8_text(value)
-
-    @field_validator("tags", mode="before")
-    @classmethod
-    def _normalize_tag_fields(cls, value: Any) -> Any:
-        return _normalize_utf8_list(value)
-
-
-class TaskUpsert(BaseModel):
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "id": "task-1",
-                "topicId": "topic-1",
-                "title": "Ship onboarding wizard",
-                "status": "doing",
-                "pinned": True,
-                "priority": "high",
-                "dueDate": "2026-02-05T00:00:00.000Z",
-            }
-        }
-    )
-    id: Optional[str] = Field(default=None, description="Task ID (omit to create).", examples=["task-1"])
-    spaceId: Optional[str] = Field(default=None, description="Owning space ID.", examples=["space-default"])
-    topicId: Optional[str] = Field(default=None, description="Parent topic ID.", examples=["topic-1"])
-    title: str = Field(description="Task title.", examples=["Ship onboarding wizard"])
-    color: Optional[str] = Field(default=None, description="Optional task color #RRGGBB.", examples=["#4EA1FF"])
-    status: Optional[str] = Field(
-        default=None, description="Task status (todo | doing | blocked | done).", examples=["doing"]
-    )
-    pinned: Optional[bool] = Field(default=None, description="Pin task to top.", examples=[True])
-    priority: Optional[str] = Field(default=None, description="Priority (low | medium | high).", examples=["high"])
-    dueDate: Optional[str] = Field(default=None, description="Optional due date (ISO).", examples=["2026-02-05T00:00:00.000Z"])
-    snoozedUntil: Optional[str] = Field(
-        default=None,
-        description="ISO timestamp when a snoozed task should re-activate (nullable).",
-        examples=["2026-02-09T18:00:00.000Z"],
-    )
-    tags: Optional[List[str]] = Field(default=None, description="Tags list.", examples=[["ops", "follow-up"]])
-
-    @field_validator("title", "status", "priority", mode="before")
     @classmethod
     def _normalize_text_fields(cls, value: Any) -> Any:
         return _normalize_utf8_text(value)
@@ -430,32 +358,11 @@ class TopicReorderRequest(BaseModel):
         return self
 
 
-class TaskReorderRequest(BaseModel):
-    topicId: Optional[str] = Field(
-        default=None,
-        description="Scope reorder to tasks belonging to this topic ID. Omit/null to reorder unassigned tasks.",
-        examples=["topic-1"],
-    )
-    orderedIds: List[str] = Field(
-        description="Task IDs in the desired order (use the full list for stable ordering).",
-        examples=[["task-1", "task-2", "task-3"]],
-    )
-
-    @model_validator(mode="after")
-    def _validate_unique(self):
-        if not self.orderedIds:
-            raise ValueError("orderedIds cannot be empty")
-        if len(set(self.orderedIds)) != len(self.orderedIds):
-            raise ValueError("orderedIds must be unique")
-        return self
-
-
 class LogAppend(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "topicId": "topic-1",
-                "taskId": "task-1",
                 "type": "conversation",
                 "content": "Defined onboarding wizard steps and token flow.",
                 "summary": "Defined onboarding wizard steps.",
@@ -469,7 +376,6 @@ class LogAppend(BaseModel):
     )
     spaceId: Optional[str] = Field(default=None, description="Owning space ID override.", examples=["space-default"])
     topicId: Optional[str] = Field(default=None, description="Topic ID (nullable).", examples=["topic-1"])
-    taskId: Optional[str] = Field(default=None, description="Task ID (nullable).", examples=["task-1"])
     relatedLogId: Optional[str] = Field(default=None, description="Link to original log (for notes).", examples=["log-12"])
     idempotencyKey: Optional[str] = Field(
         default=None,
@@ -530,7 +436,6 @@ class LogPatch(BaseModel):
 
     spaceId: Optional[str] = Field(default=None, description="Owning space ID.")
     topicId: Optional[str] = Field(default=None, description="Topic ID.")
-    taskId: Optional[str] = Field(default=None, description="Task ID.")
     relatedLogId: Optional[str] = Field(default=None, description="Related log ID.")
     content: Optional[str] = Field(default=None, description="Content override.")
     summary: Optional[str] = Field(default=None, description="Summary override.")
@@ -553,8 +458,9 @@ class TopicPatch(BaseModel):
     color: Optional[str] = Field(default=None, description="Optional topic color #RRGGBB.")
     description: Optional[str] = Field(default=None, description="Topic description.")
     priority: Optional[str] = Field(default=None, description="Priority (low | medium | high).")
-    status: Optional[str] = Field(default=None, description="Status (active | snoozed | archived).")
+    status: Optional[str] = Field(default=None, description="Status (active | todo | doing | blocked | done | snoozed | archived).")
     snoozedUntil: Optional[str] = Field(default=None, description="ISO timestamp when snoozed topic re-activates.")
+    dueDate: Optional[str] = Field(default=None, description="Optional due date (ISO).")
     tags: Optional[List[str]] = Field(default=None, description="Freeform tags.")
     parentId: Optional[str] = Field(default=None, description="Parent topic id.")
     pinned: Optional[bool] = Field(default=None, description="Pinned topic.")
@@ -562,33 +468,6 @@ class TopicPatch(BaseModel):
     digestUpdatedAt: Optional[str] = Field(default=None, description="Digest updated timestamp (ISO).")
 
     @field_validator("name", "description", "priority", "status", "parentId", "digest", mode="before")
-    @classmethod
-    def _normalize_text_fields(cls, value: Any) -> Any:
-        return _normalize_utf8_text(value)
-
-    @field_validator("tags", mode="before")
-    @classmethod
-    def _normalize_tag_fields(cls, value: Any) -> Any:
-        return _normalize_utf8_list(value)
-
-
-class TaskPatch(BaseModel):
-    """Patch fields on an existing task (partial update)."""
-
-    spaceId: Optional[str] = Field(default=None, description="Owning space ID.")
-    title: Optional[str] = Field(default=None, description="Task title.")
-    color: Optional[str] = Field(default=None, description="Optional task color #RRGGBB.")
-    status: Optional[str] = Field(default=None, description="Task status (todo | doing | blocked | done).")
-    priority: Optional[str] = Field(default=None, description="Priority (low | medium | high).")
-    dueDate: Optional[str] = Field(default=None, description="Optional due date (ISO).")
-    snoozedUntil: Optional[str] = Field(default=None, description="ISO timestamp when snoozed task re-activates.")
-    pinned: Optional[bool] = Field(default=None, description="Pinned task.")
-    tags: Optional[List[str]] = Field(default=None, description="Freeform tags.")
-    topicId: Optional[str] = Field(default=None, description="Parent topic id (nullable).")
-    digest: Optional[str] = Field(default=None, description="Durable digest text (system-managed).")
-    digestUpdatedAt: Optional[str] = Field(default=None, description="Digest updated timestamp (ISO).")
-
-    @field_validator("title", "status", "priority", "digest", mode="before")
     @classmethod
     def _normalize_text_fields(cls, value: Any) -> Any:
         return _normalize_utf8_text(value)
@@ -618,8 +497,8 @@ class DraftUpsert(BaseModel):
         ...,
         min_length=1,
         max_length=240,
-        description="Stable draft key (e.g. draft:chat:clawboard:task:topic-123:task-456).",
-        examples=["draft:chat:clawboard:task:topic-123:task-456"],
+        description="Stable draft key (e.g. draft:chat:clawboard:topic:topic-123).",
+        examples=["draft:chat:clawboard:topic:topic-123"],
     )
     value: str = Field(
         default="",
@@ -635,7 +514,7 @@ class DraftUpsert(BaseModel):
 
 
 class DraftOut(ModelBase):
-    key: str = Field(description="Draft key.", examples=["draft:chat:clawboard:task:topic-123:task-456"])
+    key: str = Field(description="Draft key.", examples=["draft:chat:clawboard:topic:topic-123"])
     value: str = Field(description="Draft value.", examples=["Working on the onboarding flow..."])
     createdAt: str = Field(description="ISO timestamp when created.", examples=["2026-02-09T18:00:00.000Z"])
     updatedAt: str = Field(description="ISO timestamp when updated.", examples=["2026-02-09T18:05:00.000Z"])
@@ -652,7 +531,7 @@ class DeletedEntityOut(BaseModel):
 class OpenClawTypingSignalOut(BaseModel):
     sessionKey: str = Field(
         description="Session key whose typing state is currently active.",
-        examples=["clawboard:task:topic-123:task-456"],
+        examples=["clawboard:topic:topic-123"],
     )
     typing: bool = Field(default=True, description="Whether the session is actively typing/responding.")
     requestId: Optional[str] = Field(
@@ -666,7 +545,7 @@ class OpenClawTypingSignalOut(BaseModel):
 class OpenClawThreadWorkSignalOut(BaseModel):
     sessionKey: str = Field(
         description="Session key whose background work is currently active.",
-        examples=["clawboard:task:topic-123:task-456"],
+        examples=["clawboard:topic:topic-123"],
     )
     active: bool = Field(default=True, description="Whether the session still has active OpenClaw work.")
     requestId: Optional[str] = Field(
@@ -690,7 +569,6 @@ class ChangesResponse(BaseModel):
     )
     spaces: List[SpaceOut] = Field(description="Spaces updated since timestamp.")
     topics: List[TopicOut] = Field(description="Topics updated since timestamp.")
-    tasks: List[TaskOut] = Field(description="Tasks updated since timestamp.")
     logs: List[LogOutLite] = Field(description="Logs created since timestamp (lightweight, excludes raw).")
     drafts: List[DraftOut] = Field(description="Drafts updated since timestamp.")
     deletedLogIds: List[str] = Field(
@@ -701,10 +579,6 @@ class ChangesResponse(BaseModel):
     deletedTopics: List[DeletedEntityOut] = Field(
         default_factory=list,
         description="Topics deleted since timestamp (durable tombstones for replay/reconcile).",
-    )
-    deletedTasks: List[DeletedEntityOut] = Field(
-        default_factory=list,
-        description="Tasks deleted since timestamp (durable tombstones for replay/reconcile).",
     )
     openclawTyping: List[OpenClawTypingSignalOut] = Field(
         default_factory=list,
@@ -720,7 +594,7 @@ class OpenClawChatRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "sessionKey": "clawboard:task:topic-123:task-456",
+                "sessionKey": "clawboard:topic:topic-123",
                 "message": "Summarize what we did today and propose next steps.",
                 "agentId": "main",
             }
@@ -728,8 +602,8 @@ class OpenClawChatRequest(BaseModel):
     )
     sessionKey: str = Field(
         ...,
-        description="OpenClaw session key for thread continuity. Board sends must use clawboard:task:<topicId>:<taskId>.",
-        examples=["clawboard:task:topic-123:task-456"],
+        description="OpenClaw session key for thread continuity. Board sends must use clawboard:topic:<topicId>.",
+        examples=["clawboard:topic:topic-123"],
         min_length=1,
         max_length=240,
     )
@@ -768,16 +642,14 @@ class OpenClawResolveBoardSendRequest(BaseModel):
                 "message": "Please prep migration for Postgres indexes this week.",
                 "spaceId": "space-default",
                 "selectedTopicId": None,
-                "selectedTaskId": None,
                 "forceNewTopic": True,
-                "forceNewTask": True,
             }
         }
     )
 
     message: str = Field(
         ...,
-        description="User message content used for resolver topic/task decisioning.",
+        description="User message content used for resolver topic decisioning.",
         min_length=1,
         max_length=20_000,
     )
@@ -791,18 +663,9 @@ class OpenClawResolveBoardSendRequest(BaseModel):
         description="Optional selected topic id from Unified view.",
         examples=["topic-123"],
     )
-    selectedTaskId: Optional[str] = Field(
-        default=None,
-        description="Optional selected task id from Unified view.",
-        examples=["task-456"],
-    )
     forceNewTopic: bool = Field(
         default=False,
         description="Force creation of a new topic instead of reusing semantic/similar matches.",
-    )
-    forceNewTask: bool = Field(
-        default=False,
-        description="Force creation of a new task instead of reusing semantic/similar matches.",
     )
 
 
@@ -810,14 +673,11 @@ class OpenClawResolveBoardSendResponse(BaseModel):
     topicId: str = Field(description="Resolved topic id.")
     topicName: str = Field(description="Resolved topic name.")
     topicCreated: bool = Field(description="Whether resolver created topic.")
-    taskId: str = Field(description="Resolved task id.")
-    taskTitle: str = Field(description="Resolved task title.")
-    taskCreated: bool = Field(description="Whether resolver created task.")
-    sessionKey: str = Field(description="Resolved task session key (clawboard:task:<topicId>:<taskId>).")
+    sessionKey: str = Field(description="Resolved topic session key (clawboard:topic:<topicId>).")
     decisionSource: str = Field(
         description=(
             "Resolver decision mode source "
-            "(heuristic|direct_new_topic|direct_selected_topic_new_task|direct_selected_task)."
+            "(heuristic|direct_new_topic|direct_selected_topic)."
         ),
     )
 
@@ -831,7 +691,7 @@ class OpenClawChatCancelRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "sessionKey": "clawboard:task:topic-abc:task-def",
+                "sessionKey": "clawboard:topic:topic-abc",
                 "requestId": "occhat-abc123",
             }
         }
@@ -966,11 +826,10 @@ class OpenClawChatDispatchQuarantineResponse(BaseModel):
 
 
 class ReindexRequest(BaseModel):
-    kind: Literal["topic", "task", "log"] = Field(description="Embedding namespace kind.")
-    id: str = Field(description="Topic/task/log ID.")
+    kind: Literal["topic", "log"] = Field(description="Embedding namespace kind.")
+    id: str = Field(description="Topic/log ID.")
     op: Literal["upsert", "delete"] = Field(default="upsert", description="Queue operation.")
     text: Optional[str] = Field(default=None, description="Canonical label text to embed.")
-    topicId: Optional[str] = Field(default=None, description="Task parent topic ID when kind=task.")
 
     @model_validator(mode="after")
     def validate_for_operation(self):
@@ -985,7 +844,7 @@ class ReindexRequest(BaseModel):
 class ClawgraphNode(BaseModel):
     id: str = Field(description="Stable graph node ID.", examples=["topic:topic-1"])
     label: str = Field(description="Human label.", examples=["Clawboard"])
-    type: str = Field(description="Node type (topic|task|entity|agent).", examples=["topic"])
+    type: str = Field(description="Node type (topic|entity|agent).", examples=["topic"])
     score: float = Field(description="Node score (importance/centrality).", examples=[3.42])
     size: float = Field(description="Visual node size hint.", examples=[18.4])
     color: str = Field(description="Node color hint.", examples=["#ff8a4a"])
@@ -995,10 +854,10 @@ class ClawgraphNode(BaseModel):
 class ClawgraphEdge(BaseModel):
     id: str = Field(description="Stable edge ID.", examples=["edge-1"])
     source: str = Field(description="Source node ID.", examples=["topic:topic-1"])
-    target: str = Field(description="Target node ID.", examples=["task:task-2"])
+    target: str = Field(description="Target node ID.", examples=["topic:topic-2"])
     type: str = Field(
-        description="Edge type (has_task|mentions|co_occurs|related_topic|related_task|agent_focus).",
-        examples=["has_task"],
+        description="Edge type (mentions|co_occurs|related_topic|agent_focus).",
+        examples=["related_topic"],
     )
     weight: float = Field(description="Relationship strength.", examples=[1.23])
     evidence: int = Field(description="Evidence count.", examples=[4])
@@ -1008,7 +867,6 @@ class ClawgraphStats(BaseModel):
     nodeCount: int = Field(description="Total nodes in graph.")
     edgeCount: int = Field(description="Total edges in graph.")
     topicCount: int = Field(description="Topic nodes.")
-    taskCount: int = Field(description="Task nodes.")
     entityCount: int = Field(description="Entity nodes.")
     agentCount: int = Field(description="Agent nodes.")
     density: float = Field(description="Approximate graph density.", examples=[0.12])
@@ -1022,13 +880,11 @@ class ClawgraphResponse(BaseModel):
 
 
 class SessionRoutingItem(BaseModel):
-    """One routing decision for a session (topic mandatory, task optional)."""
+    """One routing decision for a session."""
 
     ts: str = Field(description="Decision timestamp (ISO).", examples=["2026-02-10T18:00:00.000Z"])
     topicId: str = Field(description="Chosen topic id.", examples=["topic-1"])
     topicName: Optional[str] = Field(default=None, description="Chosen topic name (best-effort).", examples=["Clawboard"])
-    taskId: Optional[str] = Field(default=None, description="Chosen task id (optional).", examples=["task-1"])
-    taskTitle: Optional[str] = Field(default=None, description="Chosen task title (best-effort).", examples=["Ship onboarding wizard"])
     anchor: Optional[str] = Field(
         default=None,
         description="Compact intent anchor text used to resolve future follow-ups.",
@@ -1050,8 +906,6 @@ class SessionRoutingAppend(BaseModel):
                 "sessionKey": "channel:discord|thread:123",
                 "topicId": "topic-1",
                 "topicName": "Clawboard",
-                "taskId": "task-1",
-                "taskTitle": "Ship onboarding wizard",
                 "anchor": "Fix the login redirect bug in NIMBUS.",
                 "ts": "2026-02-10T18:00:00.000Z",
             }
@@ -1061,8 +915,6 @@ class SessionRoutingAppend(BaseModel):
     sessionKey: str = Field(description="Session key to update.", min_length=1, max_length=512)
     topicId: str = Field(description="Chosen topic id.", min_length=1, max_length=128)
     topicName: Optional[str] = Field(default=None, description="Chosen topic name (best-effort).", max_length=200)
-    taskId: Optional[str] = Field(default=None, description="Chosen task id (optional).", max_length=128)
-    taskTitle: Optional[str] = Field(default=None, description="Chosen task title (best-effort).", max_length=200)
     anchor: Optional[str] = Field(default=None, description="Compact anchor text.", max_length=800)
     ts: Optional[str] = Field(default=None, description="Optional explicit timestamp (ISO).")
 
@@ -1087,8 +939,8 @@ class ClassifierReplayResponse(BaseModel):
     ok: bool = Field(default=True, description="Whether the replay request was accepted.", examples=[True])
     anchorLogId: str = Field(description="Anchor log id that started the replay.", examples=["log-123"])
     sessionKey: str = Field(
-        description="Session key being replayed (source.sessionKey). Task Chat only.",
-        examples=["clawboard:task:topic-1:task-1"],
+        description="Session key being replayed (source.sessionKey). Topic Chat only.",
+        examples=["clawboard:topic:topic-1"],
     )
     topicId: Optional[str] = Field(description="Resolved topic id for the session (if board-scoped).", examples=["topic-1"])
     logCount: int = Field(description="Number of logs marked pending for replay.", examples=[6])

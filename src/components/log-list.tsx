@@ -499,17 +499,22 @@ export function LogList({
       if (tasksLoading[key]) return;
       setTasksLoading((prev) => ({ ...prev, [key]: true }));
       try {
-        const url = topicId ? `/api/tasks?topicId=${encodeURIComponent(topicId)}` : "/api/tasks";
+        const url = "/api/topics";
         const res = await apiFetch(url, { cache: "no-store" });
         if (!res.ok) return;
         const raw = await res.json().catch(() => null);
         const payload = Array.isArray(raw)
-          ? (raw as Task[])
-          : raw && typeof raw === "object" && Array.isArray((raw as { tasks?: unknown }).tasks)
-            ? ((raw as { tasks: Task[] }).tasks ?? [])
+          ? (raw as Topic[])
+          : raw && typeof raw === "object" && Array.isArray((raw as { topics?: unknown }).topics)
+            ? ((raw as { topics: Topic[] }).topics ?? [])
             : null;
         if (!payload || !Array.isArray(payload)) return;
-        const next = topicId ? payload : payload.filter((task) => task.topicId == null);
+        const mapped = payload.map((topic) => ({
+          ...topic,
+          title: topic.name,
+          topicId: topic.parentId ?? topic.id,
+        }));
+        const next = topicId ? mapped.filter((task) => task.topicId === topicId) : [];
         setTasksCache((prev) => ({ ...prev, [key]: next }));
       } finally {
         setTasksLoading((prev) => ({ ...prev, [key]: false }));
@@ -638,7 +643,6 @@ export function LogList({
     topicId: topicFilter !== "all" ? topicFilter : undefined,
     includePending: true,
     limitTopics: Math.min(Math.max(topics.length, 60), 120),
-    limitTasks: Math.min(Math.max(Math.ceil(logs.length / 3), 120), 240),
     limitLogs: Math.min(Math.max(logs.length, 160), 320),
     refreshKey: semanticRefreshKey,
   });
@@ -1180,15 +1184,9 @@ const LogRow = memo(function LogRow({
   const showFullMessage = showRawAll || expanded;
   const summary = entry.summary ?? entry.content;
   const resolvedTopic = entry.topicId ? topics.find((topic) => topic.id === entry.topicId) : null;
-  const destinationBase = entry.taskId
-    ? buildTaskUrl(
-        { id: entry.taskId, title: entry.summary ?? entry.content ?? "task", topicId: entry.topicId ?? null },
-        topics,
-        resolvedTopic ?? null
-      )
-    : resolvedTopic
-      ? buildTopicUrl(resolvedTopic, topics)
-      : UNIFIED_BASE;
+  const destinationBase = resolvedTopic
+    ? buildTopicUrl(resolvedTopic, topics)
+    : UNIFIED_BASE;
   const destinationSpaceId = String(entry.spaceId ?? "").trim() || String(resolvedTopic?.spaceId ?? "").trim();
 
   // Navigating from Logs should always "reveal" the selection in Unified View.

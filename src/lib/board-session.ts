@@ -1,4 +1,4 @@
-export const BOARD_TASK_SESSION_PREFIX = "clawboard:task:" as const;
+export const BOARD_TOPIC_SESSION_PREFIX = "clawboard:topic:" as const;
 
 function normalizeRawSessionKey(value: string | undefined | null) {
   return String(value ?? "").trim();
@@ -14,18 +14,23 @@ export function normalizeBoardSessionKey(value: string | undefined | null) {
   if (!raw) return "";
 
   const withoutThread = stripBoardThreadSuffix(raw);
-  const taskIdx = withoutThread.indexOf(BOARD_TASK_SESSION_PREFIX);
-  if (taskIdx >= 0) {
-    return withoutThread.slice(taskIdx);
+  const topicIdx = withoutThread.indexOf(BOARD_TOPIC_SESSION_PREFIX);
+  if (topicIdx >= 0) {
+    return withoutThread.slice(topicIdx);
   }
 
   return "";
 }
 
-export function taskSessionKey(topicId: string, taskId: string) {
-  return `${BOARD_TASK_SESSION_PREFIX}${topicId}:${taskId}`;
+export function topicSessionKey(topicId: string) {
+  return `${BOARD_TOPIC_SESSION_PREFIX}${topicId}`;
 }
 
 export function isBoardSessionKey(value: string | undefined | null) {
   return Boolean(normalizeBoardSessionKey(value));
+}
+
+/** @deprecated Use topicSessionKey. In the flat topology, only topicId is needed. */
+export function taskSessionKey(topicId: string, _taskId?: string) {
+  return topicSessionKey(topicId);
 }

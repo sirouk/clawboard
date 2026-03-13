@@ -6,7 +6,7 @@ from pathlib import Path
 from sqlmodel import select, delete
 
 from .db import init_db, get_session
-from .models import InstanceConfig, Topic, Task, LogEntry
+from .models import InstanceConfig, Topic, LogEntry
 
 
 def load_fixture(path: Path) -> dict:
@@ -17,7 +17,6 @@ def load_fixture(path: Path) -> dict:
 
 def reset_db(session):
     session.exec(delete(LogEntry))
-    session.exec(delete(Task))
     session.exec(delete(Topic))
     session.exec(delete(InstanceConfig))
     session.commit()
@@ -34,13 +33,9 @@ def seed_from_fixture(session, fixture: dict):
     session.add(inst)
 
     topics = [Topic(**topic) for topic in fixture.get("topics", [])]
-    tasks = [Task(**task) for task in fixture.get("tasks", [])]
     logs = [LogEntry(**log) for log in fixture.get("logs", [])]
 
     session.add_all(topics)
-    session.commit()
-
-    session.add_all(tasks)
     session.commit()
 
     session.add_all(logs)

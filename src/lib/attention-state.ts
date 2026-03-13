@@ -1,35 +1,33 @@
 import {
-  BOARD_TASK_SESSION_PREFIX,
+  BOARD_TOPIC_SESSION_PREFIX,
   normalizeBoardSessionKey,
 } from "@/lib/board-session";
 import type { LogEntry } from "@/lib/types";
 
 export const UNSNOOZED_TOPICS_KEY = "clawboard.unified.unsnoozedTopics";
-export const UNSNOOZED_TASKS_KEY = "clawboard.unified.unsnoozedTasks";
 export const CHAT_SEEN_AT_KEY = "clawboard.unified.chatSeenAt";
 
-export function chatKeyForTask(taskId: string) {
-  const id = String(taskId ?? "").trim();
-  return id ? `task:${id}` : "";
+export function chatKeyForTopic(topicId: string) {
+  const id = String(topicId ?? "").trim();
+  return id ? `topic:${id}` : "";
 }
 
 export function chatKeyFromSessionKey(sessionKey: string) {
   const key = normalizeBoardSessionKey(sessionKey);
   if (!key) return "";
-  if (key.startsWith(BOARD_TASK_SESSION_PREFIX)) {
-    const rest = key.slice(BOARD_TASK_SESSION_PREFIX.length).trim();
-    const parts = rest.split(":", 2);
-    const taskId = parts.length === 2 ? parts[1].trim() : "";
-    return chatKeyForTask(taskId);
+  if (key.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
+    const rest = key.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim();
+    const topicId = rest.split(":", 1)[0]?.trim() ?? "";
+    return chatKeyForTopic(topicId);
   }
   return "";
 }
 
-export function chatKeyFromLogEntry(entry: Pick<LogEntry, "taskId" | "topicId" | "source">) {
+export function chatKeyFromLogEntry(entry: Pick<LogEntry, "topicId" | "source">) {
   const fromSession = chatKeyFromSessionKey(String(entry.source?.sessionKey ?? ""));
   if (fromSession) return fromSession;
-  const taskId = String(entry.taskId ?? "").trim();
-  if (taskId) return chatKeyForTask(taskId);
+  const topicId = String(entry.topicId ?? "").trim();
+  if (topicId) return chatKeyForTopic(topicId);
   return "";
 }
 
@@ -70,6 +68,12 @@ export function parseStringMap(rawValue: string | null | undefined): Record<stri
     return {};
   }
 }
+
+/** @deprecated Use UNSNOOZED_TOPICS_KEY */
+export const UNSNOOZED_TASKS_KEY = UNSNOOZED_TOPICS_KEY;
+
+/** @deprecated Use chatKeyForTopic */
+export const chatKeyForTask = chatKeyForTopic;
 
 export function isUnreadConversationCandidate(entry: LogEntry) {
   if (entry.type !== "conversation") return false;

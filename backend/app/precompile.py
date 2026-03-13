@@ -54,8 +54,6 @@ _PRECOMPILE_WARM_TRIGGER_EVENTS = {
     "space.upserted",
     "topic.upserted",
     "topic.deleted",
-    "task.upserted",
-    "task.deleted",
     "log.appended",
     "log.patched",
     "log.deleted",

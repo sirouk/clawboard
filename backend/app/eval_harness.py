@@ -14,7 +14,6 @@ from urllib import request as url_request
 class QueryCase:
     query: str
     relevant_topics: tuple[str, ...]
-    relevant_tasks: tuple[str, ...]
     relevant_logs: tuple[str, ...]
     results: dict[str, list[str]]
 
@@ -105,11 +104,9 @@ def _coerce_case(raw: dict[str, Any]) -> QueryCase:
     return QueryCase(
         query=str(raw.get("query") or ""),
         relevant_topics=tuple(str(item) for item in (relevant.get("topics") or []) if str(item)),
-        relevant_tasks=tuple(str(item) for item in (relevant.get("tasks") or []) if str(item)),
         relevant_logs=tuple(str(item) for item in (relevant.get("logs") or []) if str(item)),
         results={
             "topics": _extract_ranked_ids(results, "topics"),
-            "tasks": _extract_ranked_ids(results, "tasks"),
             "logs": _extract_ranked_ids(results, "logs"),
         },
     )
@@ -124,7 +121,6 @@ def _search_api(api_base: str, token: str | None, query: dict[str, Any]) -> dict
     if query.get("includePending") is not None:
         params["includePending"] = "true" if bool(query["includePending"]) else "false"
     params["limitTopics"] = str(int(query.get("limitTopics") or 120))
-    params["limitTasks"] = str(int(query.get("limitTasks") or 320))
     params["limitLogs"] = str(int(query.get("limitLogs") or 1200))
 
     url = f"{api_base.rstrip('/')}/api/search?{url_parse.urlencode(params)}"
@@ -144,22 +140,17 @@ def evaluate(cases: list[QueryCase], ks: tuple[int, ...] = (1, 3, 5, 10)) -> dic
     metrics: dict[str, list[float]] = defaultdict(list)
     for case in cases:
         ranked_topics = list(case.results.get("topics") or [])
-        ranked_tasks = list(case.results.get("tasks") or [])
         ranked_logs = list(case.results.get("logs") or [])
         rel_topics = set(case.relevant_topics)
-        rel_tasks = set(case.relevant_tasks)
         rel_logs = set(case.relevant_logs)
 
         metrics["topic_mrr"].append(reciprocal_rank(ranked_topics, rel_topics))
-        metrics["task_mrr"].append(reciprocal_rank(ranked_tasks, rel_tasks))
         metrics["log_mrr"].append(reciprocal_rank(ranked_logs, rel_logs))
 
         for k in ks:
             metrics[f"topic_recall@{k}"].append(recall_at_k(ranked_topics, rel_topics, k))
-            metrics[f"task_recall@{k}"].append(recall_at_k(ranked_tasks, rel_tasks, k))
             metrics[f"log_recall@{k}"].append(recall_at_k(ranked_logs, rel_logs, k))
             metrics[f"topic_ndcg@{k}"].append(ndcg_at_k(ranked_topics, rel_topics, k))
-            metrics[f"task_ndcg@{k}"].append(ndcg_at_k(ranked_tasks, rel_tasks, k))
             metrics[f"log_ndcg@{k}"].append(ndcg_at_k(ranked_logs, rel_logs, k))
 
     return {name: _safe_float(sum(values) / max(1, len(values))) for name, values in metrics.items()}
@@ -186,19 +177,13 @@ def run_eval(payload: dict[str, Any], api_base: str | None = None, token: str | 
 
     dedupe_block = payload.get("dedupe") if isinstance(payload.get("dedupe"), dict) else {}
     topic_pairs = dedupe_block.get("topics") if isinstance(dedupe_block.get("topics"), list) else []
-    task_pairs = dedupe_block.get("tasks") if isinstance(dedupe_block.get("tasks"), list) else []
 
     topic_precision = dedupe_precision(topic_pairs)
     topic_recall_value = dedupe_recall(topic_pairs)
-    task_precision = dedupe_precision(task_pairs)
-    task_recall_value = dedupe_recall(task_pairs)
 
     metric_values["topic_dedupe_precision"] = topic_precision
     metric_values["topic_dedupe_recall"] = topic_recall_value
     metric_values["topic_dedupe_f1"] = dedupe_f1(topic_precision, topic_recall_value)
-    metric_values["task_dedupe_precision"] = task_precision
-    metric_values["task_dedupe_recall"] = task_recall_value
-    metric_values["task_dedupe_f1"] = dedupe_f1(task_precision, task_recall_value)
 
     return {
         "queryCount": len(cases),

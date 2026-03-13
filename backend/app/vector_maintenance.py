@@ -160,23 +160,6 @@ def _load_desired_embeddings(clawboard_db_path: str) -> dict[tuple[str, str], di
                     "text": text,
                 }
 
-        if _table_exists(conn, "task"):
-            rows = conn.execute("SELECT id, topicId, title FROM task").fetchall()
-            for row in rows:
-                item_id = str(row["id"] or "").strip()
-                topic_id = str(row["topicId"] or "").strip()
-                title = str(row["title"] or "").strip()
-                if not item_id or not title:
-                    continue
-                namespace = f"task:{topic_id or 'unassigned'}"
-                desired[(namespace, item_id)] = {
-                    "op": "upsert",
-                    "kind": "task",
-                    "id": item_id,
-                    "topicId": topic_id or None,
-                    "text": title,
-                }
-
         if _table_exists(conn, "logentry"):
             rows = conn.execute("SELECT id, topicId, type, summary, content, raw FROM logentry").fetchall()
             for row in rows:
@@ -221,6 +204,7 @@ def _load_existing_embedding_keys(embeddings_db_path: str) -> set[tuple[str, str
 
 
 def _is_managed_kind(kind: str) -> bool:
+    # Also clean up legacy task: namespaces during vector maintenance.
     return kind == "topic" or kind == "log" or kind.startswith("task:")
 
 

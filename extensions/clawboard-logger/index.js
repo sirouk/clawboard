@@ -10,7 +10,6 @@ const SUMMARY_MAX = 72;
 const RAW_MAX = 5000;
 const DEFAULT_CONTEXT_MAX_CHARS = 2200;
 const DEFAULT_CONTEXT_TOPIC_LIMIT = 3;
-const DEFAULT_CONTEXT_TASK_LIMIT = 3;
 const DEFAULT_CONTEXT_LOG_LIMIT = 6;
 const DEFAULT_CONTEXT_FETCH_TIMEOUT_MS = 3000;
 const DEFAULT_CONTEXT_FETCH_RETRIES = 1;
@@ -299,30 +298,6 @@ function lexicalSimilarity(a, b) {
         return 0;
     return inter / union;
 }
-function normalizeTaskIdentity(value) {
-    const normalized = typeof value === "string" ? value.trim() : "";
-    if (!normalized)
-        return "";
-    return normalized.replace(/^task[-_:]?/i, "");
-}
-function resolveBoardTaskPatchId(requestedId, sessionKey, fallbackTaskId) {
-    const requested = typeof requestedId === "string" ? requestedId.trim() : "";
-    const route = parseBoardSessionKey(sessionKey);
-    const sessionTaskId = route?.kind === "task"
-        ? route.taskId
-        : (typeof fallbackTaskId === "string" ? fallbackTaskId.trim() : "");
-    if (!requested)
-        return sessionTaskId || undefined;
-    if (!sessionTaskId)
-        return requested;
-    if (requested === sessionTaskId)
-        return requested;
-    if (normalizeTaskIdentity(requested) === normalizeTaskIdentity(sessionTaskId))
-        return sessionTaskId;
-    if (!/^task[-_:]/i.test(requested))
-        return sessionTaskId;
-    return requested;
-}
 function extractTextLoose(value, depth = 0) {
     if (!value || depth > 4)
         return undefined;
@@ -473,7 +448,6 @@ export default function register(api) {
     const useQueue = rawConfig.queue === true;
     const ingestPath = rawConfig.ingestPath ?? (useQueue ? "/api/ingest" : "/api/log");
     const defaultTopicId = rawConfig.defaultTopicId;
-    const defaultTaskId = rawConfig.defaultTaskId;
     // Default OFF: session buckets are not meaningful topics.
     // Stage-2 classifier will attach real topics asynchronously.
     const autoTopicBySession = rawConfig.autoTopicBySession === true;
@@ -492,9 +466,6 @@ export default function register(api) {
     const contextTopicLimit = typeof rawConfig.contextTopicLimit === "number" && Number.isFinite(rawConfig.contextTopicLimit)
         ? Math.max(1, Math.min(8, Math.floor(rawConfig.contextTopicLimit)))
         : DEFAULT_CONTEXT_TOPIC_LIMIT;
-    const contextTaskLimit = typeof rawConfig.contextTaskLimit === "number" && Number.isFinite(rawConfig.contextTaskLimit)
-        ? Math.max(1, Math.min(12, Math.floor(rawConfig.contextTaskLimit)))
-        : DEFAULT_CONTEXT_TASK_LIMIT;
     const contextLogLimit = typeof rawConfig.contextLogLimit === "number" && Number.isFinite(rawConfig.contextLogLimit)
         ? Math.max(2, Math.min(20, Math.floor(rawConfig.contextLogLimit)))
         : DEFAULT_CONTEXT_LOG_LIMIT;
@@ -651,8 +622,7 @@ export default function register(api) {
             this.failStmt.run(id, attempts, nextAttemptAtMs, error.slice(0, 1200));
         }
         saveBoardScope(agentId, scope) {
-            const taskId = scope.kind === "task" && scope.taskId ? scope.taskId : null;
-            this.scopeInsertStmt.run(agentId, scope.topicId, taskId, scope.kind, scope.sessionKey ?? null, scope.updatedAt);
+            this.scopeInsertStmt.run(agentId, scope.topicId, null, scope.kind, scope.sessionKey ?? null, scope.updatedAt);
         }
         saveBoardScopeForSession(sessionKey, scope) {
             const key = normalizeId(sessionKey);
@@ -670,13 +640,11 @@ export default function register(api) {
                 return undefined;
             const scope = {
                 topicId: row.topicId,
-                kind: "task",
+                kind: "topic",
                 sessionKey: row.sessionKey ?? "",
                 inherited: true,
                 updatedAt: row.updatedAt,
             };
-            if (row.taskId)
-                scope.taskId = row.taskId;
             return scope;
         }
         getFreshBoardScopeForSession(sessionKey, cutoffMs) {
@@ -793,12 +761,6 @@ export default function register(api) {
         topicCache.set(sessionKey, topicId);
         return topicId;
     }
-    function resolveTaskId(sessionKey) {
-        const route = parseBoardSessionKey(sessionKey);
-        if (route?.kind === "task")
-            return route.taskId;
-        return defaultTaskId;
-    }
     function resolveAgentLabel(agentId, sessionKey) {
         const fromCtx = agentId && agentId !== "agent" ? agentId : undefined;
         let fromSession;
@@ -874,7 +836,7 @@ export default function register(api) {
             keys.add(base);
         const boardRoute = parseBoardSessionKey(normalized);
         if (boardRoute) {
-            const canonical = `clawboard:task:${boardRoute.topicId}:${boardRoute.taskId}`;
+            const canonical = `clawboard:topic:${boardRoute.topicId}`;
             keys.add(canonical);
         }
         return Array.from(keys);
@@ -915,8 +877,7 @@ export default function register(api) {
             return undefined;
         return {
             topicId: route.topicId,
-            taskId: route.taskId,
-            kind: "task",
+            kind: "topic",
             sessionKey: key,
             inherited: false,
             updatedAt: nowMs(),
@@ -1181,9 +1142,6 @@ export default function register(api) {
             source.boardScopeSessionKey = boardScope.sessionKey;
             source.boardScopeInherited = Boolean(boardScope.inherited);
             source.boardScopeLock = true;
-            if (boardScope.taskId) {
-                source.boardScopeTaskId = boardScope.taskId;
-            }
         }
         const flow = params.flow;
         if (flow) {
@@ -1216,14 +1174,12 @@ export default function register(api) {
         return false;
     }
     function hasToolRoutingAnchor(routing) {
-        if (routing.topicId || routing.taskId)
+        if (routing.topicId)
             return true;
         const scope = routing.boardScope;
         if (!scope)
             return false;
-        if (scope.topicId)
-            return true;
-        return scope.kind === "task" && Boolean(scope.taskId);
+        return Boolean(scope.topicId);
     }
     function extractSpawnedSubagentSessionKeys(value) {
         const out = new Set();
@@ -1328,7 +1284,6 @@ export default function register(api) {
                 });
                 return {
                     topicId: cached.topicId,
-                    taskId: cached.taskId,
                     boardScope: cached,
                 };
             }
@@ -1344,7 +1299,6 @@ export default function register(api) {
             });
             return {
                 topicId: direct.topicId,
-                taskId: direct.taskId,
                 boardScope: direct,
             };
         }
@@ -1397,16 +1351,13 @@ export default function register(api) {
                 }
                 return {
                     topicId: nextScope.topicId,
-                    taskId: nextScope.taskId,
                     boardScope: nextScope,
                 };
             }
         }
         const resolvedTopicId = await resolveTopicId(normalizedSessionKey);
-        const resolvedTaskId = resolveTaskId(normalizedSessionKey);
         return {
             topicId: resolvedTopicId,
-            taskId: resolvedTaskId,
             boardScope: undefined,
         };
     }
@@ -1776,7 +1727,6 @@ export default function register(api) {
                         topicId: { type: "string", description: "Optional topic scope restriction." },
                         includePending: { type: "boolean", description: "Include pending (unclassified) logs." },
                         limitTopics: { type: "integer", description: "Max topic matches." },
-                        limitTasks: { type: "integer", description: "Max task matches." },
                         limitLogs: { type: "integer", description: "Max log matches." },
                     },
                     required: ["q"],
@@ -1791,7 +1741,6 @@ export default function register(api) {
                     const includePending = coerceBool(params.includePending, true);
                     const topicId = typeof params.topicId === "string" ? params.topicId.trim() : "";
                     const limitTopics = coerceInt(params.limitTopics, 24, 1, 2000);
-                    const limitTasks = coerceInt(params.limitTasks, 48, 1, 5000);
                     const limitLogs = coerceInt(params.limitLogs, 360, 10, 5000);
                     const lowerQuery = q.toLowerCase();
                     // Heartbeat watchdog primarily asks clawboard_search("delegating") to recover
@@ -1799,35 +1748,31 @@ export default function register(api) {
                     // semantic search so watchdog continuity remains reliable under load.
                     if (lowerQuery === "delegating") {
                         const startedFast = nowMs();
-                        const taskRes = await toolFetchJson({
-                            pathname: "/api/tasks",
+                        const topicRes = await toolFetchJson({
+                            pathname: "/api/topics",
                             query: {
                                 sessionKey: sk,
                                 topicId: topicId || undefined,
                             },
                             timeoutMs: 12000,
                         });
-                        if (taskRes.ok) {
-                            const tasks = toolDataArray(taskRes.data)
+                        if (topicRes.ok) {
+                            const topics = toolDataArray(topicRes.data)
                                 .filter((item) => item && typeof item === "object")
                                 .map((item) => item)
-                                .filter((task) => {
-                                const status = String(task.status ?? "").trim().toLowerCase();
+                                .filter((topic) => {
+                                const status = String(topic.status ?? "").trim().toLowerCase();
                                 if (status === "done")
                                     return false;
-                                const tags = Array.isArray(task.tags) ? task.tags : [];
+                                const tags = Array.isArray(topic.tags) ? topic.tags : [];
                                 return tags.some((tag) => String(tag ?? "").trim().toLowerCase() === "delegating");
                             })
-                                .slice(0, Math.max(1, limitTasks));
+                                .slice(0, Math.max(1, limitTopics));
                             const matchedTopicIds = new Set();
-                            const matchedTaskIds = [];
-                            for (const task of tasks) {
-                                const topicIdValue = String(task.topicId ?? "").trim();
+                            for (const topic of topics) {
+                                const topicIdValue = String(topic.id ?? "").trim();
                                 if (topicIdValue)
                                     matchedTopicIds.add(topicIdValue);
-                                const taskIdValue = String(task.id ?? "").trim();
-                                if (taskIdValue)
-                                    matchedTaskIds.push(taskIdValue);
                             }
                             return toolJsonResult({
                                 ok: true,
@@ -1835,28 +1780,25 @@ export default function register(api) {
                                 data: {
                                     query: q,
                                     mode: "delegating-fast-path",
-                                    topics: [],
-                                    tasks,
+                                    topics,
                                     logs: [],
                                     notes: [],
                                     matchedTopicIds: Array.from(matchedTopicIds),
-                                    matchedTaskIds,
                                     matchedLogIds: [],
                                     degraded: true,
                                     searchMeta: {
-                                        fastPath: "tasks-tag-filter",
+                                        fastPath: "topics-tag-filter",
                                         durationMs: Math.max(0, nowMs() - startedFast),
                                         effectiveLimits: {
-                                            topics: 0,
-                                            tasks: Math.max(1, limitTasks),
+                                            topics: Math.max(1, limitTopics),
                                             logs: 0,
                                         },
                                     },
                                 },
                             });
                         }
-                        if (!isToolTransientFailure(taskRes)) {
-                            return toolJsonResult(taskRes);
+                        if (!isToolTransientFailure(topicRes)) {
+                            return toolJsonResult(topicRes);
                         }
                     }
                     const baseQuery = {
@@ -1865,7 +1807,6 @@ export default function register(api) {
                         topicId: topicId || undefined,
                         includePending,
                         limitTopics,
-                        limitTasks,
                         limitLogs,
                     };
                     const res = await toolFetchJson({
@@ -1876,14 +1817,12 @@ export default function register(api) {
                     if (!isToolTransientFailure(res))
                         return toolJsonResult(res);
                     const retryLimitTopics = Math.max(1, Math.min(limitTopics, 12));
-                    const retryLimitTasks = Math.max(1, Math.min(limitTasks, 24));
                     const retryLimitLogs = Math.max(10, Math.min(limitLogs, 120));
                     const retry = await toolFetchJson({
                         pathname: "/api/search",
                         query: {
                             ...baseQuery,
                             limitTopics: retryLimitTopics,
-                            limitTasks: retryLimitTasks,
                             limitLogs: retryLimitLogs,
                         },
                         timeoutMs: 20000,
@@ -1898,7 +1837,6 @@ export default function register(api) {
                         meta.retryReason = toolErrorText(res) || `status:${res.status}`;
                         meta.retryLimits = {
                             topics: retryLimitTopics,
-                            tasks: retryLimitTasks,
                             logs: retryLimitLogs,
                         };
                         retryData.searchMeta = meta;
@@ -1936,7 +1874,7 @@ export default function register(api) {
                     const res = await toolFetchJson({
                         pathname: "/api/context",
                         query: {
-                            q: q || "current conversation continuity, active topics, active tasks, and curated notes",
+                            q: q || "current conversation continuity, active topics and curated notes",
                             sessionKey: sk,
                             mode,
                             maxChars,
@@ -1962,24 +1900,6 @@ export default function register(api) {
                     if (!id)
                         return toolJsonResult({ ok: false, error: "id required" });
                     const res = await toolFetchJson({ pathname: `/api/topics/${encodeURIComponent(id)}` });
-                    return toolJsonResult(res);
-                },
-            });
-            tools.push({
-                name: "clawboard_get_task",
-                label: "Get Clawboard Task",
-                description: "Fetch a Clawboard task by id.",
-                parameters: {
-                    type: "object",
-                    additionalProperties: false,
-                    properties: { id: { type: "string", description: "Task id." } },
-                    required: ["id"],
-                },
-                async execute(_toolCallId, params) {
-                    const id = typeof params.id === "string" ? params.id.trim() : "";
-                    if (!id)
-                        return toolJsonResult({ ok: false, error: "id required" });
-                    const res = await toolFetchJson({ pathname: `/api/tasks/${encodeURIComponent(id)}` });
                     return toolJsonResult(res);
                 },
             });
@@ -2019,7 +1939,6 @@ export default function register(api) {
                         relatedLogId: { type: "string", description: "Log id this note attaches to." },
                         text: { type: "string", description: "Note text (concise, durable, factual)." },
                         topicId: { type: "string", description: "Optional explicit topic id." },
-                        taskId: { type: "string", description: "Optional explicit task id." },
                     },
                     required: ["relatedLogId", "text"],
                 },
@@ -2032,12 +1951,10 @@ export default function register(api) {
                         return toolJsonResult({ ok: false, error: "text required" });
                     const clipped = clip(text, 1600);
                     const topicId = typeof params.topicId === "string" ? params.topicId.trim() : "";
-                    const taskId = typeof params.taskId === "string" ? params.taskId.trim() : "";
                     const payload = {
                         type: "note",
                         relatedLogId,
                         topicId: topicId || undefined,
-                        taskId: taskId || undefined,
                         content: clipped,
                         summary: summarize(clipped),
                         createdAt: new Date().toISOString(),
@@ -2056,18 +1973,18 @@ export default function register(api) {
                 },
             });
             tools.push({
-                name: "clawboard_update_task",
-                label: "Update Clawboard Task",
-                description: "Patch a task (status/priority/due/pin/snooze/tags) without needing the full task payload.",
+                name: "clawboard_update_topic",
+                label: "Update Clawboard Topic",
+                description: "Patch a topic (status/priority/due/pin/snooze/tags) without needing the full topic payload.",
                 parameters: {
                     type: "object",
                     additionalProperties: false,
                     properties: {
-                        id: { type: "string", description: "Task id." },
+                        id: { type: "string", description: "Topic id." },
                         status: { type: "string", description: "todo|doing|blocked|done" },
                         priority: { type: "string", description: "low|medium|high" },
                         dueDate: { type: "string", description: "ISO due date" },
-                        pinned: { type: "boolean", description: "Pin/unpin task" },
+                        pinned: { type: "boolean", description: "Pin/unpin topic" },
                         snoozedUntil: { type: "string", description: "ISO snooze-until timestamp (nullable string to clear)" },
                         tags: { type: "array", items: { type: "string" }, description: "Tags list" },
                     },
@@ -2092,11 +2009,11 @@ export default function register(api) {
                         patch.tags = params.tags.filter((t) => typeof t === "string").map((t) => t.trim()).filter(Boolean);
                     if (Object.keys(patch).length === 0)
                         return toolJsonResult({ ok: false, error: "no patch fields provided" });
-                    const id = resolveBoardTaskPatchId(requestedId, defaultSessionKey, defaultTaskId);
+                    const id = requestedId;
                     if (!id)
-                        return toolJsonResult({ ok: false, error: "task id unavailable for current board session" });
+                        return toolJsonResult({ ok: false, error: "topic id unavailable for current board session" });
                     const res = await toolFetchJson({
-                        pathname: `/api/tasks/${encodeURIComponent(id)}`,
+                        pathname: `/api/topics/${encodeURIComponent(id)}`,
                         method: "PATCH",
                         body: patch,
                     });
@@ -2109,10 +2026,9 @@ export default function register(api) {
                 "clawboard_search",
                 "clawboard_context",
                 "clawboard_get_topic",
-                "clawboard_get_task",
                 "clawboard_get_log",
                 "clawboard_create_note",
-                "clawboard_update_task",
+                "clawboard_update_topic",
             ],
         });
     }
@@ -2205,7 +2121,7 @@ export default function register(api) {
                     includePending: "1",
                     maxChars: String(contextMaxChars),
                     // Working set should be a bit larger than semantic shortlist.
-                    workingSetLimit: String(Math.max(6, contextTaskLimit)),
+                    workingSetLimit: String(Math.max(6, contextTopicLimit)),
                     timelineLimit: String(contextLogLimit),
                 },
                 initFactory: () => ({ headers: apiHeaders, signal: controller.signal }),
@@ -2342,7 +2258,7 @@ export default function register(api) {
         }
         const retrievalQuery = cleanInput && cleanInput.trim().length > 0 && !isSubagentScaffoldPrompt
             ? clip(cleanInput, 320)
-            : "current conversation continuity, active topics, active tasks, and curated notes";
+            : "current conversation continuity, active topics and curated notes";
         const primaryMode = effectiveContextMode;
         const context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, primaryMode);
         if (!context)
@@ -2437,9 +2353,9 @@ export default function register(api) {
         return recentOpenclawRequestId(params.sessionKey);
     };
     const canonicalBoardScopeSessionKey = (scope) => {
-        if (!scope?.topicId || !scope.taskId)
+        if (!scope?.topicId)
             return undefined;
-        return `clawboard:task:${scope.topicId}:${scope.taskId}`;
+        return `clawboard:topic:${scope.topicId}`;
     };
     const resolveOpenclawRequestIdForBoardScope = async (params) => {
         const explicitRequestId = normalizeRequestId(params.requestId);
@@ -2476,7 +2392,7 @@ export default function register(api) {
             const route = parseBoardSessionKey(candidate);
             if (!route)
                 continue;
-            lookupSessionKeys.add(`clawboard:task:${route.topicId}:${route.taskId}`);
+            lookupSessionKeys.add(`clawboard:topic:${route.topicId}`);
         }
         if (lookupSessionKeys.size === 0)
             return explicitRequestId ?? params.requestId;
@@ -2781,8 +2697,10 @@ export default function register(api) {
         if (!value)
             return undefined;
         const normalized = value.trim().toLowerCase();
-        if (normalized === "task")
+        if (normalized === "topic")
             return normalized;
+        if (normalized === "task")
+            return "topic";
         return undefined;
     };
     const normalizeEventMeta = (meta, topLevelSessionKey) => {
@@ -2881,7 +2799,6 @@ export default function register(api) {
             boardScope: routing.boardScope,
         });
         const topicId = routing.topicId;
-        const taskId = routing.taskId;
         const metaSummary = meta?.summary;
         const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? summarize(metaSummary) : summarize(cleanRaw);
         const incomingKey = messageId
@@ -2904,7 +2821,6 @@ export default function register(api) {
             : "User";
         sendAsync({
             topicId,
-            taskId,
             type: "conversation",
             content: cleanRaw,
             summary,
@@ -3083,7 +2999,6 @@ export default function register(api) {
             boardScope: routing.boardScope,
         });
         const topicId = routing.topicId;
-        const taskId = routing.taskId;
         // Outbound message content is always assistant-side.
         const agentId = "assistant";
         const agentLabel = resolveAgentLabel(ctx.agentId, meta?.sessionKey ?? ctx?.sessionKey);
@@ -3101,7 +3016,6 @@ export default function register(api) {
         rememberOutgoingSession(effectiveSessionKey ?? ctx.sessionKey, cleanRaw);
         sendAsync({
             topicId,
-            taskId,
             type: "conversation",
             content: cleanRaw,
             summary,
@@ -3194,7 +3108,6 @@ export default function register(api) {
         const raw = truncateRaw(contentText || JSON.stringify(redact(messageRecord), null, 2));
         sendAsync({
             topicId: routing.topicId,
-            taskId: routing.taskId,
             type: "action",
             content,
             summary: content,
@@ -3274,7 +3187,6 @@ export default function register(api) {
         };
         sendAsync({
             topicId: routing.topicId,
-            taskId: routing.taskId,
             type: "action",
             content,
             summary: content,
@@ -3332,10 +3244,8 @@ export default function register(api) {
             routing,
         });
         const topicId = routing.topicId;
-        const taskId = routing.taskId;
         sendAsync({
             topicId,
-            taskId,
             type: "action",
             content: `Tool call: ${event.toolName}`,
             summary: `Tool call: ${event.toolName}`,
@@ -3401,10 +3311,8 @@ export default function register(api) {
             }
         }
         const topicId = routing.topicId;
-        const taskId = routing.taskId;
         sendAsync({
             topicId,
-            taskId,
             type: "action",
             content: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
             summary: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
@@ -3497,7 +3405,6 @@ export default function register(api) {
             boardScope: routing.boardScope,
         });
         const topicId = routing.topicId;
-        const taskId = routing.taskId;
         // agent_end is always this agent's run: treat assistant-role messages as assistant output.
         const agentId = "assistant";
         const agentLabel = resolveAgentLabel(ctx.agentId, inferredSessionKey);
@@ -3511,7 +3418,6 @@ export default function register(api) {
                 }));
                 sendAsync({
                     topicId,
-                    taskId,
                     type: "action",
                     content: "clawboard-logger: agent_end message shape",
                     summary: "clawboard-logger: agent_end message shape",
@@ -3624,7 +3530,6 @@ export default function register(api) {
                     agentEndSeq += 1;
                     sendAsync({
                         topicId,
-                        taskId,
                         type: "conversation",
                         content: cleanedContent,
                         summary,
@@ -3661,7 +3566,6 @@ export default function register(api) {
                     agentEndSeq += 1;
                     sendAsync({
                         topicId,
-                        taskId,
                         type: "conversation",
                         content: cleanedContent,
                         summary,
@@ -3692,7 +3596,6 @@ export default function register(api) {
         if (!event.success || debug) {
             sendAsync({
                 topicId,
-                taskId,
                 type: "action",
                 content: event.success ? "Agent run complete" : "Agent run failed",
                 summary: event.success ? "Agent run complete" : "Agent run failed",
@@ -3768,7 +3671,6 @@ export default function register(api) {
                 const content = `Hook event: ${hookName}`;
                 sendAsync({
                     topicId: routing.topicId,
-                    taskId: routing.taskId,
                     type: "action",
                     content,
                     summary: content,
@@ -3790,4 +3692,4 @@ export default function register(api) {
     }
 }
 // Export utility functions for testing
-export { normalizeBaseUrl, sanitizeRetrievedContextBlock, sanitizeMessageContent, summarize, dedupeFingerprint, truncateRaw, clip, normalizeWhitespace, tokenSet, lexicalSimilarity, normalizeTaskIdentity, resolveBoardTaskPatchId, };
+export { normalizeBaseUrl, sanitizeRetrievedContextBlock, sanitizeMessageContent, summarize, dedupeFingerprint, truncateRaw, clip, normalizeWhitespace, tokenSet, lexicalSimilarity, };

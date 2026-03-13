@@ -21,9 +21,9 @@ import {
 } from "@/lib/openclaw-workspaces";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
-import { buildTaskUrl, buildTopicUrl, withRevealParam, withSpaceParam } from "@/lib/url";
+import { buildTopicUrl, withRevealParam, withSpaceParam } from "@/lib/url";
 import { apiFetch, getApiBase } from "@/lib/api";
-import type { OpenClawWorkspace, Space, Task, Topic } from "@/lib/types";
+import type { OpenClawWorkspace, Space, Topic } from "@/lib/types";
 
 const ICONS: Record<string, React.ReactElement> = {
   home: (
@@ -213,7 +213,6 @@ const BOARD_TOPICS_EXPANDED_KEY = "clawboard.board.topics.navExpanded";
 const BOARD_SPACES_EXPANDED_KEY = "clawboard.board.spaces.navExpanded";
 const WORKSPACES_EXPANDED_KEY = "clawboard.workspaces.navExpanded";
 const BOARD_TOPICS_SEARCH_KEY = "clawboard.board.topics.search";
-const BOARD_TOPICS_TASKS_EXPANDED_KEY = "clawboard.board.topics.tasksExpanded";
 const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
 const HEADER_COMPACT_KEY = "clawboard.header.compact";
 const ACTIVE_SPACE_KEY = "clawboard.space.active";
@@ -295,35 +294,6 @@ function StatusGlyph({ status, className }: { status: string; className?: string
       <path d="M15 12h5" />
       <circle cx="12" cy="12" r="3" />
     </svg>
-  );
-}
-
-function TaskNavRow({
-  task,
-  selected,
-  onGo,
-}: {
-  task: Task;
-  selected: boolean;
-  onGo: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onGo}
-      className={cn(
-        // Indent via padding (not margin) so we don't overflow the nav panel width.
-        "w-full rounded-[var(--radius-sm)] border px-3 py-2 pl-7 text-left text-xs transition",
-        selected
-          ? "border-[rgba(77,171,158,0.5)] bg-[rgba(77,171,158,0.16)] text-[rgb(var(--claw-text))]"
-          : "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
-      )}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <div className="truncate">{task.title}</div>
-        <div className="shrink-0 text-[10px]">{(task.status ?? "todo").toUpperCase()}</div>
-      </div>
-    </button>
   );
 }
 
@@ -431,7 +401,7 @@ function TopicNavRow({
           </div>
           <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-[rgba(148,163,184,0.9)]">
             <div className="truncate">{formatRelativeTime(topic.updatedAt)}</div>
-            <div className="shrink-0">{topic.pinned ? "PINNED" : (topic.status ?? "active").toUpperCase()}</div>
+            <div className="shrink-0">{(topic.status ?? "active").toUpperCase()}</div>
           </div>
         </div>
       </button>
@@ -458,7 +428,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const boardTopicsExpanded = useLocalStorageItem(BOARD_TOPICS_EXPANDED_KEY) === "true";
   const workspacesExpanded = useLocalStorageItem(WORKSPACES_EXPANDED_KEY) !== "false";
   const topicPanelSearch = useLocalStorageItem(BOARD_TOPICS_SEARCH_KEY) ?? "";
-  const topicTasksExpandedRaw = useLocalStorageItem(BOARD_TOPICS_TASKS_EXPANDED_KEY) ?? "";
   const lastBoardUrlStored = useLocalStorageItem(BOARD_LAST_URL_KEY) ?? "";
   const compactHeader = useLocalStorageItem(HEADER_COMPACT_KEY) === "true";
   const activeSpaceIdStored = (useLocalStorageItem(ACTIVE_SPACE_KEY) ?? "").trim();
@@ -728,7 +697,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     if (cleanPath.startsWith("/u")) {
       return {
         title: "Unified View",
-        subtitle: "Topics → tasks → messages in a single, expandable view.",
+        subtitle: "Topics and messages in a single, expandable view.",
       };
     }
     if (cleanPath === "/" || cleanPath === "/dashboard") {
@@ -740,7 +709,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     if (cleanPath === "/graph") {
       return {
         title: "Clawgraph",
-        subtitle: "Topic, task, entity, and agent relationships mapped as an interactive memory graph.",
+        subtitle: "Topic, entity, and agent relationships mapped as an interactive memory graph.",
       };
     }
     if (cleanPath === "/workspaces" || cleanPath.startsWith("/workspaces/")) {
@@ -752,7 +721,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     if (cleanPath === "/stats") {
       return {
         title: "Stats",
-        subtitle: "Coverage and momentum across topics, tasks, and conversations.",
+        subtitle: "Coverage and momentum across topics, agents, and conversations.",
       };
     }
     if (cleanPath === "/providers") {
@@ -770,7 +739,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     if (cleanPath === "/log") {
       return {
         title: "Logs",
-        subtitle: "Conversation, notes, and actions across topics and tasks.",
+        subtitle: "Conversation, notes, and actions across the board.",
       };
     }
     if (cleanPath === "/chat" || cleanPath.startsWith("/chat/")) {
@@ -781,8 +750,8 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     }
     if (cleanPath === "/tasks") {
       return {
-        title: "Tasks",
-        subtitle: "All tasks across topics.",
+        title: "Topics",
+        subtitle: "All topics.",
       };
     }
     if (cleanPath === "/topics") {
@@ -797,7 +766,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
       const task = taskId ? tasks.find((row) => row.id === taskId) ?? null : null;
       const topic = task?.topicId ? topics.find((row) => row.id === task.topicId) ?? null : null;
       return {
-        title: task?.title?.trim() || "Task",
+        title: task?.title?.trim() || "Topic",
         subtitle: topic?.name?.trim() || "Unassigned",
       };
     }
@@ -815,35 +784,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 
   const normalizedTopicSearch = topicPanelSearch.trim().toLowerCase();
 
-  const expandedTopicIds = useMemo((): string[] => {
-    const raw = topicTasksExpandedRaw.trim();
-    if (!raw) return [];
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed.map((id) => String(id)).filter(Boolean);
-      return [];
-    } catch {
-      return [];
-    }
-  }, [topicTasksExpandedRaw]);
-
-  const setExpandedTopicIds = useCallback((next: string[]) => {
-    setLocalStorageItem(BOARD_TOPICS_TASKS_EXPANDED_KEY, JSON.stringify(next));
-  }, []);
-
-  const toggleTopicExpanded = useCallback(
-    (topicId: string) => {
-      if (!topicId) return;
-      const set = new Set(expandedTopicIds);
-      if (set.has(topicId)) set.delete(topicId);
-      else set.add(topicId);
-      setExpandedTopicIds(Array.from(set));
-    },
-    [expandedTopicIds, setExpandedTopicIds]
-  );
-
   const topicsById = useMemo(() => new Map(topics.map((t) => [t.id, t])), [topics]);
-  const tasksById = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
   const topicSemanticRefreshKey = useMemo(() => {
     if (!showBoardTopics || normalizedTopicSearch.length < 1) return "";
@@ -857,7 +798,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     allowedSpaceIds,
     includePending: true,
     limitTopics: 120,
-    limitTasks: 80,
     limitLogs: 180,
     enabled: showBoardTopics && normalizedTopicSearch.length > 0,
     refreshKey: topicSemanticRefreshKey,
@@ -878,16 +818,9 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	      return topicSpaceIds(topic).includes(selectedSpaceId);
 	    });
 	    base.sort((a, b) => {
-	      const ap = Boolean(a.pinned);
-	      const bp = Boolean(b.pinned);
-	      if (ap && !bp) return -1;
-	      if (!ap && bp) return 1;
 	      const as = (a.status ?? "active") === "archived" ? 1 : 0;
 	      const bs = (b.status ?? "active") === "archived" ? 1 : 0;
 	      if (as !== bs) return as - bs;
-	      const ai = typeof a.sortIndex === "number" ? a.sortIndex : 0;
-	      const bi = typeof b.sortIndex === "number" ? b.sortIndex : 0;
-	      if (ai !== bi) return ai - bi;
 	      return b.updatedAt.localeCompare(a.updatedAt);
 	    });
       if (!query) {
@@ -916,56 +849,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
       });
 	  }, [normalizedTopicSearch, selectedSpaceId, topicSemanticForQuery, topics, topicsById]);
 
-  const filteredTasksForSearch = useMemo((): Task[] => {
-    if (!topicSemanticForQuery) return [];
-    return (topicSemanticForQuery.tasks ?? [])
-      .map((match) => tasksById.get(match.id))
-      .filter((t): t is Task => Boolean(t))
-      .slice(0, NAV_SEARCH_TASKS_LIMIT);
-  }, [tasksById, topicSemanticForQuery]);
-
   const boardTopicReorderEnabled = showBoardTopics && !readOnly && normalizedTopicSearch.length === 0;
-
-  const visibleTasksByTopicId = useMemo(() => {
-    const byTopic = new Map<string, Task[]>();
-    if (normalizedTopicSearch.length > 0) return byTopic;
-
-    for (const task of tasks) {
-      const topicId = task.topicId;
-      if (!topicId) continue;
-      if (task.status === "done") continue;
-      if (task.snoozedUntil) continue;
-      const existing = byTopic.get(topicId);
-      if (existing) existing.push(task);
-      else byTopic.set(topicId, [task]);
-    }
-
-    const rank = (status: Task["status"]) => {
-      switch (status) {
-        case "doing":
-          return 0;
-        case "blocked":
-          return 1;
-        case "todo":
-          return 2;
-        case "done":
-          return 3;
-        default:
-          return 9;
-      }
-    };
-
-    for (const [topicId, list] of byTopic.entries()) {
-      list.sort((a, b) => {
-        const rs = rank(a.status) - rank(b.status);
-        if (rs !== 0) return rs;
-        return (b.updatedAt || "").localeCompare(a.updatedAt || "");
-      });
-      byTopic.set(topicId, list.slice(0, 8));
-    }
-
-    return byTopic;
-  }, [normalizedTopicSearch.length, tasks]);
 
   const boardTopicsForNav = useMemo(() => {
     if (boardTopicReorderEnabled) return filteredTopics;
@@ -977,8 +861,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const [boardTopicDropTargetId, setBoardTopicDropTargetId] = useState<string | null>(null);
   const draggingBoardTopicIdRef = useRef<string | null>(null);
   const boardTopicDropTargetIdRef = useRef<string | null>(null);
-  const topicClickTimersRef = useRef<Map<string, number>>(new Map());
-
   const moveInArray = useCallback(<T,>(items: T[], from: number, to: number) => {
     if (from === to) return items;
     if (from < 0 || to < 0) return items;
@@ -992,16 +874,9 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const orderedTopicIds = useMemo(() => {
     const base = [...topics];
     base.sort((a, b) => {
-      const ap = Boolean(a.pinned);
-      const bp = Boolean(b.pinned);
-      if (ap && !bp) return -1;
-      if (!ap && bp) return 1;
       const as = (a.status ?? "active") === "archived" ? 1 : 0;
       const bs = (b.status ?? "active") === "archived" ? 1 : 0;
       if (as !== bs) return as - bs;
-      const ai = typeof a.sortIndex === "number" ? a.sortIndex : 0;
-      const bi = typeof b.sortIndex === "number" ? b.sortIndex : 0;
-      if (ai !== bi) return ai - bi;
       return b.updatedAt.localeCompare(a.updatedAt);
     });
     return base.map((topic) => topic.id);
@@ -1046,8 +921,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
       const draggedTopic = topicsById.get(draggedId);
       const targetTopic = topicsById.get(targetId);
       if (!draggedTopic || !targetTopic) return;
-      if (Boolean(draggedTopic.pinned) !== Boolean(targetTopic.pinned)) return;
-
       const visibleIds = filteredTopics.map((item) => item.id);
       const from = visibleIds.indexOf(draggedId);
       const to = visibleIds.indexOf(targetId);
@@ -1100,7 +973,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
         const draggedTopic = topicsById.get(dragged);
         const targetTopic = topicsById.get(targetId);
         if (!draggedTopic || !targetTopic) return;
-        if (Boolean(draggedTopic.pinned) !== Boolean(targetTopic.pinned)) return;
         boardTopicDropTargetIdRef.current = targetId;
         setBoardTopicDropTargetId(targetId);
       };
@@ -1128,34 +1000,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   );
 
   const activeBoardIds = useMemo(() => parseBoardPathIds(activeBoardPath), [activeBoardPath]);
-
-  const mostRecentTaskByTopicId = useMemo(() => {
-    const activityByTaskId = new Map<string, string>();
-    for (const task of tasks) {
-      activityByTaskId.set(task.id, task.updatedAt || "");
-    }
-    for (const entry of logs) {
-      const taskId = entry.taskId;
-      if (!taskId) continue;
-      const ts = entry.createdAt || entry.updatedAt || "";
-      if (!ts) continue;
-      const prev = activityByTaskId.get(taskId) ?? "";
-      if (ts > prev) activityByTaskId.set(taskId, ts);
-    }
-
-    const bestByTopic = new Map<string, { task: Task; activity: string }>();
-    for (const task of tasks) {
-      const topicId = task.topicId;
-      if (!topicId) continue;
-      const activity = activityByTaskId.get(task.id) ?? (task.updatedAt || "");
-      const existing = bestByTopic.get(topicId);
-      if (!existing || activity > existing.activity) bestByTopic.set(topicId, { task, activity });
-    }
-
-    const out = new Map<string, Task>();
-    for (const [topicId, record] of bestByTopic.entries()) out.set(topicId, record.task);
-    return out;
-  }, [logs, tasks]);
 
   return (
     <div className="claw-ambient min-h-screen">
@@ -1487,7 +1331,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 		                                setLocalStorageItem(BOARD_TOPICS_SEARCH_KEY, next);
 		                              }}
                                   onClear={() => setLocalStorageItem(BOARD_TOPICS_SEARCH_KEY, "")}
-	                              placeholder="Search tasks, topics…"
+	                              placeholder="Search topics…"
                                   className="flex-1"
 	                              inputClassName="h-9 text-xs"
 	                            />
@@ -1497,51 +1341,12 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                              {normalizedTopicSearch.length > 0
 	                                ? topicSemanticSearch.loading
 	                                  ? "Searching…"
-	                                  : `${topicSemanticForQuery?.tasks?.length ?? 0} tasks · ${filteredTopics.length} topics`
+	                                  : `${filteredTopics.length} topics`
 	                                : `${filteredTopics.length} topics`}
 	                            </span>
 	                            {normalizedTopicSearch.length > 0 && topicSemanticSearch.error ? <span>Search failed</span> : null}
 	                          </div>
 
-	                          {normalizedTopicSearch.length > 0 && filteredTasksForSearch.length > 0 && (
-	                            <div className="mt-3 border-t border-[rgb(var(--claw-border))] pt-3">
-	                              <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))]">
-	                                Tasks
-	                              </div>
-	                              <div className="space-y-1">
-	                                {filteredTasksForSearch.map((task) => {
-	                                  const selected = task.id === activeBoardIds.taskId;
-	                                  const href = buildTaskUrl(task, topics);
-	                                  const taskSpaceId =
-	                                    String(task.spaceId ?? "").trim() ||
-	                                    String(topicsById.get(String(task.topicId ?? ""))?.spaceId ?? "").trim();
-	                                  const destination = withSpaceParam(withRevealParam(href, true), taskSpaceId);
-	                                  return (
-	                                    <button
-	                                      key={task.id}
-	                                      type="button"
-	                                      onClick={() => {
-	                                        // Keep the nav search query intact so users can click multiple results.
-	                                        router.push(destination);
-	                                      }}
-	                                      className={cn(
-	                                        "w-full rounded-[var(--radius-sm)] border px-3 py-2 text-left text-xs transition",
-	                                        selected
-	                                          ? "border-[rgba(77,171,158,0.5)] bg-[rgba(77,171,158,0.16)] text-[rgb(var(--claw-text))]"
-	                                          : "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
-	                                      )}
-	                                    >
-	                                      <div className="flex items-center justify-between gap-2">
-	                                        <div className="truncate font-semibold">{task.title}</div>
-	                                        <div className="shrink-0 text-[10px]">{(task.status ?? "todo").toUpperCase()}</div>
-	                                      </div>
-	                                      <div className="mt-1 truncate font-mono text-[10px] text-[rgba(148,163,184,0.9)]">{task.id}</div>
-	                                    </button>
-	                                  );
-	                                })}
-	                              </div>
-	                            </div>
-	                          )}
 			                          <div className="mt-3 max-h-[52vh] space-y-1 overflow-y-auto overscroll-contain pr-1">
 		                            {filteredTopics.length === 0 ? (
 		                              <div className="rounded-[var(--radius-sm)] border border-[rgb(var(--claw-border))] px-3 py-2 text-xs text-[rgb(var(--claw-muted))]">
@@ -1552,66 +1357,21 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                                const selected = topic.id === activeBoardIds.topicId;
 			                                const href = buildTopicUrl(topic, topics);
 			                                const topicDestination = withSpaceParam(withRevealParam(href, true), topic.spaceId);
-			                                const recentTask = mostRecentTaskByTopicId.get(topic.id) ?? null;
-			                                const expanded = normalizedTopicSearch.length === 0 && expandedTopicIds.includes(topic.id);
-			                                const visibleTasks = expanded ? (visibleTasksByTopicId.get(topic.id) ?? []) : [];
-
 			                                const go = () => {
-			                                  // Search mode: unchanged (single click navigates + reveals).
-			                                  if (normalizedTopicSearch.length > 0) {
-			                                    router.push(withSpaceParam(withRevealParam(href, true), topic.spaceId));
-			                                    return;
-			                                  }
-
-			                                  // Non-search mode: single click navigates, double click expands.
-			                                  const timers = topicClickTimersRef.current;
-			                                  const existing = timers.get(topic.id);
-			                                  if (existing) window.clearTimeout(existing);
-			                                  const handle = window.setTimeout(() => {
-			                                    timers.delete(topic.id);
-			                                    void recentTask; // keep computed value available for future UX tweaks
-			                                    router.push(topicDestination);
-			                                  }, 250);
-			                                  timers.set(topic.id, handle);
+			                                  router.push(withSpaceParam(withRevealParam(href, true), topic.spaceId));
 			                                };
 
-			                                const onDoubleClick = () => {
-			                                  if (normalizedTopicSearch.length > 0) return;
-			                                  const timers = topicClickTimersRef.current;
-			                                  const existing = timers.get(topic.id);
-			                                  if (existing) window.clearTimeout(existing);
-			                                  timers.delete(topic.id);
-			                                  toggleTopicExpanded(topic.id);
-			                                };
 			                                const dropActive = Boolean(draggingBoardTopicId) && boardTopicDropTargetId === topic.id;
 			                                return (
-			                                  <div key={topic.id} className="space-y-1">
-			                                    <TopicNavRow
-			                                      topic={topic}
-			                                      selected={selected}
-			                                      onGo={go}
-			                                      onDoubleClick={onDoubleClick}
-			                                      reorderEnabled={boardTopicReorderEnabled}
-			                                      dropActive={dropActive}
-			                                      onReorderPointerDown={beginPointerTopicReorder}
-			                                    />
-			                                    {expanded && visibleTasks.length > 0 ? (
-			                                      <div className="space-y-1">
-			                                        {visibleTasks.map((task) => {
-			                                          const taskSelected = task.id === activeBoardIds.taskId;
-			                                          const taskHref = withRevealParam(buildTaskUrl(task, topics), true);
-			                                          return (
-			                                            <TaskNavRow
-			                                              key={task.id}
-			                                              task={task}
-			                                              selected={taskSelected}
-			                                              onGo={() => router.push(taskHref)}
-			                                            />
-			                                          );
-			                                        })}
-			                                      </div>
-			                                    ) : null}
-			                                  </div>
+			                                  <TopicNavRow
+			                                    key={topic.id}
+			                                    topic={topic}
+			                                    selected={selected}
+			                                    onGo={go}
+			                                    reorderEnabled={boardTopicReorderEnabled}
+			                                    dropActive={dropActive}
+			                                    onReorderPointerDown={beginPointerTopicReorder}
+			                                  />
 			                                );
 			                              })
 			                            )}

@@ -1,11 +1,11 @@
 /**
- * Returns true if the session key is an explicit Clawboard Task Chat session.
- * Handles wrapped keys (e.g. agent:main:clawboard:task:...).
+ * Returns true if the session key is an explicit Clawboard Topic Chat session.
+ * Handles wrapped keys (e.g. agent:main:clawboard:topic:...).
  */
 export function isBoardSessionKey(sessionKey) {
     if (typeof sessionKey !== "string")
         return false;
-    return /clawboard:task:topic-[a-zA-Z0-9-]+:task-[a-zA-Z0-9-]+/.test(sessionKey);
+    return /clawboard:topic:topic-[a-zA-Z0-9-]+/.test(sessionKey);
 }
 export function parseBoardSessionKey(sessionKey) {
     if (typeof sessionKey !== "string")
@@ -15,10 +15,9 @@ export function parseBoardSessionKey(sessionKey) {
         return null;
     // Strip OpenClaw's optional thread suffix (`|thread:...`) if present.
     const base = trimmed.split("|", 1)[0] ?? trimmed;
-    // Task-only parsing (Topic Chat removed).
-    const taskMatch = base.match(/clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)/);
-    if (taskMatch && taskMatch[1] && taskMatch[2]) {
-        return { kind: "task", topicId: taskMatch[1], taskId: taskMatch[2] };
+    const topicMatch = base.match(/clawboard:topic:(topic-[a-zA-Z0-9-]+)/);
+    if (topicMatch && topicMatch[1]) {
+        return { kind: "topic", topicId: topicMatch[1] };
     }
     return null;
 }
@@ -33,7 +32,7 @@ export function computeEffectiveSessionKey(meta, ctx) {
         ? String(meta.threadId).trim()
         : "";
     const isBoard = (value) => isBoardSessionKey(value);
-    // Board sessions are explicitly chosen by Clawboard Task Chat. When present, they must
+    // Board sessions are explicitly chosen by Clawboard Topic Chat. When present, they must
     // win even if OpenClaw supplies an unrelated conversationId, otherwise logs get mis-attributed
     // (and Clawboard can double-log user input).
     let base = (metaSession && isBoard(metaSession) ? metaSession : "") ||

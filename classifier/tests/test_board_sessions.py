@@ -5,23 +5,16 @@ from classifier import classifier as c
 
 
 class BoardSessionKeyTests(unittest.TestCase):
-    def test_parse_board_session_key_rejects_topic_sessions(self):
-        self.assertEqual(c._parse_board_session_key("clawboard:topic:topic-123"), (None, None))
-
-    def test_parse_board_session_key_parses_task(self):
+    def test_parse_board_session_key_parses_topic(self):
         self.assertEqual(
-            c._parse_board_session_key("clawboard:task:topic-123:task-456"),
-            ("topic-123", "task-456"),
+            c._parse_board_session_key("clawboard:topic:topic-123"),
+            ("topic-123", "topic-123"),
         )
 
     def test_parse_board_session_key_strips_thread_suffix(self):
         self.assertEqual(
             c._parse_board_session_key("clawboard:topic:topic-123|thread:999"),
-            (None, None),
-        )
-        self.assertEqual(
-            c._parse_board_session_key("clawboard:task:topic-123:task-456|thread:999"),
-            ("topic-123", "task-456"),
+            ("topic-123", "topic-123"),
         )
 
     def test_parse_board_session_key_rejects_non_board_values(self):
@@ -33,7 +26,7 @@ class BoardSessionKeyTests(unittest.TestCase):
 
 class BoardSessionClassificationTests(unittest.TestCase):
     def test_classify_session_task_scope_keeps_task_fixed(self):
-        session_key = "clawboard:task:topic-abc:task-xyz"
+        session_key = "clawboard:topic:topic-abc"
         logs = [
             {
                 "id": "log-1",
@@ -84,7 +77,7 @@ class BoardSessionClassificationTests(unittest.TestCase):
                 "classificationAttempts": 1,
                 "classificationError": "filtered_tool_activity",
                 "topicId": "topic-abc",
-                "taskId": "task-old",
+                "taskId": "topic-old",
                 "createdAt": "2026-02-09T09:10:04.000Z",
                 "source": {"sessionKey": session_key},
             },
@@ -108,24 +101,24 @@ class BoardSessionClassificationTests(unittest.TestCase):
 
         by_id = {lid: payload for lid, payload in patched}
         self.assertEqual(by_id["log-1"].get("topicId"), "topic-abc")
-        self.assertEqual(by_id["log-1"].get("taskId"), "task-xyz")
+        self.assertEqual(by_id["log-1"].get("taskId"), "topic-abc")
 
         self.assertEqual(by_id["log-2"].get("classificationError"), "filtered_command")
         self.assertEqual(by_id["log-2"].get("topicId"), "topic-abc")
-        self.assertEqual(by_id["log-2"].get("taskId"), "task-xyz")
+        self.assertEqual(by_id["log-2"].get("taskId"), "topic-abc")
 
         self.assertEqual(by_id["log-3"].get("classificationError"), "filtered_memory_action")
         self.assertEqual(by_id["log-3"].get("topicId"), "topic-abc")
-        self.assertEqual(by_id["log-3"].get("taskId"), "task-xyz")
+        self.assertEqual(by_id["log-3"].get("taskId"), "topic-abc")
 
         self.assertEqual(by_id["log-4"].get("classificationError"), "filtered_non_semantic")
         self.assertEqual(by_id["log-4"].get("topicId"), "topic-abc")
-        self.assertEqual(by_id["log-4"].get("taskId"), "task-xyz")
+        self.assertEqual(by_id["log-4"].get("taskId"), "topic-abc")
 
         # Backfill previously-classified action traces that drifted to the wrong task.
         self.assertEqual(by_id["log-5"].get("classificationError"), "filtered_memory_action")
         self.assertEqual(by_id["log-5"].get("topicId"), "topic-abc")
-        self.assertEqual(by_id["log-5"].get("taskId"), "task-xyz")
+        self.assertEqual(by_id["log-5"].get("taskId"), "topic-abc")
 
     def test_subagent_session_with_existing_task_scope_stays_pinned(self):
         session_key = "agent:main:subagent:abc-123"

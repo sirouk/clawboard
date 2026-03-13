@@ -18,10 +18,10 @@ class SpaceScopedSessionTests(unittest.TestCase):
             patch.object(c, "_resolve_allowed_space_ids_for_session", return_value=("space-alpha", "space-beta")),
             patch.object(c, "classify_session", side_effect=_capture_scope),
         ):
-            c._classify_session_scoped("clawboard:task:topic-123:task-123")
+            c._classify_session_scoped("clawboard:topic:topic-123")
 
         self.assertEqual(len(observed_scopes), 1)
-        self.assertEqual(observed_scopes[0][0], "clawboard:task:topic-123:task-123")
+        self.assertEqual(observed_scopes[0][0], "clawboard:topic:topic-123")
         self.assertEqual(observed_scopes[0][1], ("space-alpha", "space-beta"))
         self.assertIsNone(c._SPACE_SCOPE_ALLOWED_IDS.get())
 
@@ -70,8 +70,6 @@ class SpaceScopedSessionTests(unittest.TestCase):
             calls.append(text)
             if text.endswith("/api/log"):
                 return _FakeResponse(ok=True, status_code=200, body=[])
-            if "/api/tasks/" in text:
-                return _FakeResponse(ok=False, status_code=404, body={"detail": "missing"})
             if "/api/topics/" in text:
                 return _FakeResponse(ok=False, status_code=404, body={"detail": "missing"})
             if text.endswith("/api/spaces/allowed"):
@@ -85,10 +83,10 @@ class SpaceScopedSessionTests(unittest.TestCase):
         try:
             with patch.object(c, "requests", fake_requests):
                 scoped_a = c._resolve_allowed_space_ids_for_session(
-                    "clawboard:task:topic-404-loop:task-404-loop|thread:one"
+                    "clawboard:topic:topic-404-loop|thread:one"
                 )
                 scoped_b = c._resolve_allowed_space_ids_for_session(
-                    "clawboard:task:topic-404-loop:task-404-loop|thread:two"
+                    "clawboard:topic:topic-404-loop|thread:two"
                 )
         finally:
             c._MISSING_TASK_SCOPE_CACHE.clear()
@@ -97,7 +95,7 @@ class SpaceScopedSessionTests(unittest.TestCase):
 
         self.assertIsNone(scoped_a)
         self.assertIsNone(scoped_b)
-        self.assertEqual(len([call for call in calls if "/api/tasks/" in call]), 1)
+        self.assertEqual(len([call for call in calls if "/api/topics/" in call]), 1)
         self.assertEqual(len([call for call in calls if "/api/log" in call]), 1)
 
 

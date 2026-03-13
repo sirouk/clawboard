@@ -1,5 +1,7 @@
 export type IntegrationLevel = "manual" | "write" | "full";
 
+export type TopicStatus = "active" | "todo" | "doing" | "blocked" | "done" | "snoozed" | "archived" | "paused";
+
 export type Topic = {
   id: string;
   spaceId?: string;
@@ -9,8 +11,8 @@ export type Topic = {
   color?: string;
   description?: string;
   priority?: "low" | "medium" | "high";
-  // "paused" is a legacy alias retained for backward compatibility.
-  status?: "active" | "snoozed" | "archived" | "paused";
+  status?: TopicStatus;
+  dueDate?: string | null;
   snoozedUntil?: string | null;
   tags?: string[];
   parentId?: string | null;
@@ -19,23 +21,15 @@ export type Topic = {
   updatedAt: string;
 };
 
+/** @deprecated Use TopicStatus instead. Kept for backward compatibility. */
 export type TaskStatus = "todo" | "doing" | "blocked" | "done";
 
-export type Task = {
-  id: string;
-  spaceId?: string;
-  topicId: string | null;
-  title: string;
-  sortIndex?: number;
-  color?: string;
-  status: TaskStatus;
-  pinned?: boolean;
-  priority?: "low" | "medium" | "high";
-  dueDate?: string | null;
-  snoozedUntil?: string | null;
-  tags?: string[];
-  createdAt: string;
-  updatedAt: string;
+/** @deprecated Tasks have been merged into Topics. Use Topic instead. */
+export type Task = Topic & {
+  /** @deprecated Use `name` instead. */
+  title?: string;
+  /** @deprecated Topics no longer have a topicId; they ARE topics. */
+  topicId?: string | null;
 };
 
 export type Attachment = {
@@ -56,6 +50,7 @@ export type LogEntry = {
   id: string;
   spaceId?: string;
   topicId: string | null;
+  /** @deprecated Tasks merged into Topics. Kept for backward compat with old data. */
   taskId?: string | null;
   relatedLogId?: string | null;
   idempotencyKey?: string | null;
@@ -81,8 +76,7 @@ export type LogEntry = {
     channel?: string;
     boardScopeSpaceId?: string;
     boardScopeTopicId?: string;
-    boardScopeTaskId?: string;
-    boardScopeKind?: "task";
+    boardScopeKind?: "topic";
     boardScopeSessionKey?: string;
     boardScopeInherited?: boolean;
     boardScopeLock?: boolean;
@@ -120,13 +114,11 @@ export type Space = {
 export type DataStore = {
   instance: InstanceConfig;
   topics: Topic[];
-  tasks: Task[];
   logs: LogEntry[];
 };
 
 export type TopicStats = {
-  taskCount: number;
-  openCount: number;
+  logCount?: number;
   lastActivity?: string | null;
 };
 
@@ -141,20 +133,9 @@ export type SemanticTopicMatch = {
   sessionBoosted?: boolean;
 };
 
-export type SemanticTaskMatch = {
-  id: string;
-  topicId?: string | null;
-  title: string;
-  status?: TaskStatus;
-  score: number;
-  noteWeight?: number;
-  sessionBoosted?: boolean;
-};
-
 export type SemanticLogMatch = {
   id: string;
   topicId?: string | null;
-  taskId?: string | null;
   type: LogEntry["type"];
   agentId?: string | null;
   agentLabel?: string | null;
@@ -171,7 +152,6 @@ export type SemanticNoteMatch = {
   id: string;
   relatedLogId?: string | null;
   topicId?: string | null;
-  taskId?: string | null;
   summary?: string;
   content?: string;
   createdAt?: string;
@@ -181,11 +161,9 @@ export type SemanticSearchResponse = {
   query: string;
   mode: string;
   topics: SemanticTopicMatch[];
-  tasks: SemanticTaskMatch[];
   logs: SemanticLogMatch[];
   notes: SemanticNoteMatch[];
   matchedTopicIds: string[];
-  matchedTaskIds: string[];
   matchedLogIds: string[];
 };
 

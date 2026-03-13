@@ -81,8 +81,7 @@ export type PluginHookAgentContext = PluginHookContextBase;
 
 export type BoardScope = {
   topicId: string;
-  taskId?: string;
-  kind: "task";
+  kind: "topic";
   sessionKey: string;
   inherited: boolean;
   updatedAt: number;
@@ -90,7 +89,6 @@ export type BoardScope = {
 
 export type RoutingScope = {
   topicId?: string;
-  taskId?: string;
   boardScope?: BoardScope;
 };
 
@@ -120,8 +118,6 @@ export type ClawboardLoggerConfig = {
   ingestPath?: string;
   /** Optional: force all logs into a single topic. */
   defaultTopicId?: string;
-  /** Optional: force all logs into a single task. */
-  defaultTaskId?: string;
   /** Optional: additional hook names to register with generic capture handlers. */
   extraHooks?: string[];
   /** When true (default), auto-create a topic per OpenClaw sessionKey and attach logs to it. */
@@ -142,8 +138,6 @@ export type ClawboardLoggerConfig = {
   contextMaxChars?: number;
   /** Max topics to include in context block. */
   contextTopicLimit?: number;
-  /** Max tasks to include in context block. */
-  contextTaskLimit?: number;
   /** Max recent conversation entries to include in context block. */
   contextLogLimit?: number;
   /** Retries per mode when context fetch fails (default 1). */

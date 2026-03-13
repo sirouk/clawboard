@@ -1,7 +1,7 @@
-import type { LogEntry, Task, Topic } from "@/lib/types";
+import type { LogEntry, Topic } from "@/lib/types";
 
-export type ClawgraphNodeType = "topic" | "task" | "entity" | "agent";
-export type ClawgraphEdgeType = "has_task" | "mentions" | "co_occurs" | "related_topic" | "related_task" | "agent_focus";
+export type ClawgraphNodeType = "topic" | "entity" | "agent";
+export type ClawgraphEdgeType = "mentions" | "co_occurs" | "related_topic" | "agent_focus";
 
 export type ClawgraphNode = {
   id: string;
@@ -26,7 +26,6 @@ export type ClawgraphStats = {
   nodeCount: number;
   edgeCount: number;
   topicCount: number;
-  taskCount: number;
   entityCount: number;
   agentCount: number;
   density: number;
@@ -117,7 +116,6 @@ const ENTITY_NOISE_TOKENS = new Set(["ok", "okay", "yeah", "yes", "hey", "so", "
 
 const NODE_COLORS: Record<ClawgraphNodeType, string> = {
   topic: "#ff8a4a",
-  task: "#4ea1ff",
   entity: "#45c4a0",
   agent: "#f2c84b",
 };
@@ -220,7 +218,7 @@ function extractEntities(text: string) {
 }
 
 function nodeSize(type: ClawgraphNodeType, score: number) {
-  const base = type === "topic" ? 20 : type === "task" ? 15 : type === "agent" ? 11.5 : 10.5;
+  const base = type === "topic" ? 20 : type === "agent" ? 11.5 : 10.5;
   const boost = Math.max(0, Math.min(22, Math.sqrt(Math.max(score, 0)) * 2.4));
   return Math.round((base + boost) * 100) / 100;
 }
@@ -232,7 +230,6 @@ function edgeKey(source: string, target: string, type: ClawgraphEdgeType, undire
 
 export function buildClawgraphFromData(
   topics: Topic[],
-  tasks: Task[],
   logs: LogEntry[],
   options: BuildOptions = {}
 ): ClawgraphData {
@@ -275,30 +272,9 @@ export function buildClawgraphFromData(
     });
   }
 
-  for (const task of tasks) {
-    const nodeId = `task:${task.id}`;
-    const statusBoost = task.status === "doing" ? 0.9 : task.status === "blocked" ? 0.7 : task.status === "todo" ? 0.45 : 0.1;
-    nodeMap.set(nodeId, {
-      id: nodeId,
-      label: task.title || task.id,
-      type: "task",
-      score: 1.1 + statusBoost + (task.pinned ? 0.45 : 0),
-      meta: {
-        taskId: task.id,
-        topicId: task.topicId ?? null,
-        status: task.status,
-        pinned: Boolean(task.pinned),
-      },
-    });
-    if (task.topicId && nodeMap.has(`topic:${task.topicId}`)) {
-      addEdge(`topic:${task.topicId}`, nodeId, "has_task", 1 + statusBoost * 0.25);
-    }
-  }
-
   const entityScore = new Map<string, number>();
   const entityLabel = new Map<string, string>();
   const topicEntity = new Map<string, Map<string, number>>();
-  const taskEntity = new Map<string, Map<string, number>>();
   const agentEntity = new Map<string, Map<string, number>>();
 
   const bumpInMap = (container: Map<string, Map<string, number>>, bucket: string, key: string, weight: number) => {
@@ -347,7 +323,6 @@ export function buildClawgraphFromData(
       const entityId = `entity:${slug(key)}`;
       entityIds.push(entityId);
       if (log.topicId) bumpInMap(topicEntity, log.topicId, entityId, weight);
-      if (log.taskId) bumpInMap(taskEntity, log.taskId, entityId, weight);
       if (agentLabel && !excludeAgentFocus) bumpInMap(agentEntity, agentLabel, entityId, weight * 0.85);
     });
 
@@ -389,17 +364,6 @@ export function buildClawgraphFromData(
     });
   });
 
-  taskEntity.forEach((entityMap, taskId) => {
-    const source = `task:${taskId}`;
-    if (!nodeMap.has(source)) return;
-    entityMap.forEach((weight, entityId) => {
-      if (!selectedEntityIds.has(entityId)) return;
-      addEdge(source, entityId, "mentions", weight);
-      const node = nodeMap.get(source);
-      if (node) node.score += weight * 0.035;
-    });
-  });
-
   agentEntity.forEach((entityMap, agentLabel) => {
     const source = `agent:${slug(agentLabel)}`;
     if (!nodeMap.has(source)) return;
@@ -429,32 +393,6 @@ export function buildClawgraphFromData(
     }
   }
 
-  const tasksByTopic = new Map<string, Task[]>();
-  for (const task of tasks) {
-    if (!task.topicId) continue;
-    const list = tasksByTopic.get(task.topicId) ?? [];
-    list.push(task);
-    tasksByTopic.set(task.topicId, list);
-  }
-  tasksByTopic.forEach((bucket) => {
-    for (let i = 0; i < bucket.length; i += 1) {
-      for (let j = i + 1; j < bucket.length; j += 1) {
-        const left = bucket[i];
-        const right = bucket[j];
-        const leftMap = taskEntity.get(left.id) ?? new Map<string, number>();
-        const rightMap = taskEntity.get(right.id) ?? new Map<string, number>();
-        let shared = 0;
-        leftMap.forEach((weight, entityId) => {
-          if (selectedEntityIds.has(entityId) && rightMap.has(entityId)) {
-            shared += Math.min(weight, rightMap.get(entityId) ?? 0);
-          }
-        });
-        if (shared < 0.95) continue;
-        addEdge(`task:${left.id}`, `task:${right.id}`, "related_task", shared * 0.11, true);
-      }
-    }
-  });
-
   const structural = new Set<string>();
   nodeMap.forEach((node, nodeId) => {
     if (node.type !== "entity") structural.add(nodeId);
@@ -480,7 +418,7 @@ export function buildClawgraphFromData(
       };
     })
     .filter((edge) => keepNodes.has(edge.source) && keepNodes.has(edge.target))
-    .filter((edge) => edge.type === "has_task" || edge.weight >= minEdgeWeight)
+    .filter((edge) => edge.weight >= minEdgeWeight)
     .sort((a, b) => b.weight - a.weight)
     .slice(0, 1200)
     .map((edge, index) => ({ ...edge, id: `edge-${index + 1}` }));
@@ -491,7 +429,7 @@ export function buildClawgraphFromData(
     usedNodes.add(edge.target);
   });
   keepNodes.forEach((nodeId) => {
-    if (nodeId.startsWith("topic:") || nodeId.startsWith("task:")) usedNodes.add(nodeId);
+    if (nodeId.startsWith("topic:")) usedNodes.add(nodeId);
   });
 
   const graphNodes: ClawgraphNode[] = Array.from(nodeMap.values())
@@ -511,7 +449,6 @@ export function buildClawgraphFromData(
     }));
 
   const topicCount = graphNodes.filter((node) => node.type === "topic").length;
-  const taskCount = graphNodes.filter((node) => node.type === "task").length;
   const entityCount = graphNodes.filter((node) => node.type === "entity").length;
   const agentCount = graphNodes.filter((node) => node.type === "agent").length;
   const densityBase = Math.max(1, (graphNodes.length * (graphNodes.length - 1)) / 2);
@@ -523,7 +460,6 @@ export function buildClawgraphFromData(
       nodeCount: graphNodes.length,
       edgeCount: edges.length,
       topicCount,
-      taskCount,
       entityCount,
       agentCount,
       density: Number(density.toFixed(4)),
@@ -540,16 +476,12 @@ export type GraphLayoutPosition = {
 
 function desiredEdgeDistance(type: ClawgraphEdgeType) {
   switch (type) {
-    case "has_task":
-      return 150;
     case "mentions":
       return 205;
     case "agent_focus":
       return 225;
     case "co_occurs":
       return 280;
-    case "related_task":
-      return 255;
     case "related_topic":
       return 300;
     default:
@@ -570,10 +502,9 @@ export function layoutClawgraph(
   const centerX = safeWidth / 2;
   const centerY = safeHeight / 2;
 
-  const typeOrder: ClawgraphNodeType[] = ["topic", "task", "entity", "agent"];
+  const typeOrder: ClawgraphNodeType[] = ["topic", "entity", "agent"];
   const groupedByType: Record<ClawgraphNodeType, ClawgraphNode[]> = {
     topic: [],
-    task: [],
     entity: [],
     agent: [],
   };
@@ -672,7 +603,6 @@ export function layoutClawgraph(
   const vy = new Float64Array(orderedNodes.length);
   const nodesByComponentType: Array<Record<ClawgraphNodeType, number[]>> = components.map(() => ({
     topic: [],
-    task: [],
     entity: [],
     agent: [],
   }));
@@ -689,7 +619,7 @@ export function layoutClawgraph(
     typeOrder.forEach((type) => {
       const bucket = nodesByComponentType[componentId]?.[type] ?? [];
       if (bucket.length === 0) return;
-      const scale = type === "topic" ? 0.46 : type === "task" ? 0.74 : type === "entity" ? 1.02 : 1.28;
+      const scale = type === "topic" ? 0.48 : type === "entity" ? 0.98 : 1.24;
       const radius = baseRadius * scale;
       bucket.forEach((nodeIndex, position) => {
         const angle = (position / Math.max(1, bucket.length)) * Math.PI * 2 + componentId * 0.29;

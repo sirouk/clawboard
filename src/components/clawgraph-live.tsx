@@ -14,18 +14,16 @@ import {
   type ClawgraphNodeType,
 } from "@/lib/clawgraph";
 import { cn } from "@/lib/cn";
-import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam, withSpaceParam } from "@/lib/url";
-import type { Space, Task, Topic } from "@/lib/types";
+import { buildTopicUrl, UNIFIED_BASE, withRevealParam, withSpaceParam } from "@/lib/url";
+import type { Space, Topic } from "@/lib/types";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 
 const EDGE_COLORS: Record<string, string> = {
-  has_task: "rgba(78,161,255,0.72)",
   mentions: "rgba(86,214,178,0.66)",
   co_occurs: "rgba(140,151,170,0.46)",
   related_topic: "rgba(255,168,96,0.62)",
-  related_task: "rgba(252,195,110,0.58)",
   agent_focus: "rgba(231,211,111,0.62)",
 };
 
@@ -47,7 +45,6 @@ const EMPTY_GRAPH: ClawgraphData = {
     nodeCount: 0,
     edgeCount: 0,
     topicCount: 0,
-    taskCount: 0,
     entityCount: 0,
     agentCount: 0,
     density: 0,
@@ -58,7 +55,6 @@ const EMPTY_GRAPH: ClawgraphData = {
 
 const NODE_THEME: Record<ClawgraphNodeType, { color: string; glow: string }> = {
   topic: { color: "#FF8A4A", glow: "#FF8A4A" },
-  task: { color: "#4EA1FF", glow: "#4EA1FF" },
   entity: { color: "#59C3A6", glow: "#59C3A6" },
   agent: { color: "#F4B55F", glow: "#F4B55F" },
 };
@@ -115,14 +111,6 @@ function topicFromNode(node: ClawgraphNode | null, topics: Topic[]) {
   const topicId = topicIdFromMeta || node.id.replace(/^topic:/, "");
   if (!topicId) return null;
   return topics.find((topic) => topic.id === topicId) ?? null;
-}
-
-function taskFromNode(node: ClawgraphNode | null, tasks: Task[]) {
-  if (!node || node.type !== "task") return null;
-  const taskIdFromMeta = String(node.meta?.taskId ?? "").trim();
-  const taskId = taskIdFromMeta || node.id.replace(/^task:/, "");
-  if (!taskId) return null;
-  return tasks.find((task) => task.id === taskId) ?? null;
 }
 
 function slug(value: string) {
@@ -222,7 +210,6 @@ function edgeThresholdAtPercent(edges: ClawgraphEdge[], percent: number) {
 
 function buildGraphStats(nodes: ClawgraphNode[], edges: ClawgraphEdge[]): ClawgraphData["stats"] {
   const topicCount = nodes.filter((node) => node.type === "topic").length;
-  const taskCount = nodes.filter((node) => node.type === "task").length;
   const entityCount = nodes.filter((node) => node.type === "entity").length;
   const agentCount = nodes.filter((node) => node.type === "agent").length;
   const densityBase = Math.max(1, (nodes.length * (nodes.length - 1)) / 2);
@@ -231,7 +218,6 @@ function buildGraphStats(nodes: ClawgraphNode[], edges: ClawgraphEdge[]): Clawgr
     nodeCount: nodes.length,
     edgeCount: edges.length,
     topicCount,
-    taskCount,
     entityCount,
     agentCount,
     density: Number(density.toFixed(4)),
@@ -369,7 +355,7 @@ export function ClawgraphLive() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const { spaces: storeSpaces, topics: storeTopics, tasks: storeTasks, logs: storeLogs, hydrated } = useDataStore();
+  const { spaces: storeSpaces, topics: storeTopics, logs: storeLogs, hydrated } = useDataStore();
   const activeSpaceId = (useLocalStorageItem("clawboard.space.active") ?? "").trim();
   const spaceFromUrl = (searchParams.get("space") ?? "").trim();
   const spaceQueryInitializedRef = useRef(false);
@@ -486,40 +472,11 @@ export function ClawgraphLive() {
 
   const topicById = useMemo(() => new Map(topics.map((topic) => [topic.id, topic])), [topics]);
 
-  const tasks = useMemo(() => {
-    if (!selectedSpaceId || allowedSpaceSet.size === 0) return storeTasks;
-    return storeTasks.filter((task) => {
-      const directSpace = String(task.spaceId ?? "").trim();
-      if (directSpace) return allowedSpaceSet.has(directSpace);
-      if (task.topicId) {
-        const topic = topicById.get(task.topicId);
-        if (!topic) return false;
-        return topicSpaceIds(topic).some((spaceId) => allowedSpaceSet.has(spaceId));
-      }
-      return false;
-    });
-  }, [allowedSpaceSet, selectedSpaceId, storeTasks, topicById]);
-
-  const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
-
   const logs = useMemo(() => {
     if (!selectedSpaceId || allowedSpaceSet.size === 0) return storeLogs;
     return storeLogs.filter((entry) => {
       const directSpace = String(entry.spaceId ?? "").trim();
       if (directSpace) return allowedSpaceSet.has(directSpace);
-      if (entry.taskId) {
-        const task = taskById.get(entry.taskId);
-        if (task) {
-          const taskSpace = String(task.spaceId ?? "").trim();
-          if (taskSpace) return allowedSpaceSet.has(taskSpace);
-          if (task.topicId) {
-            const parent = topicById.get(task.topicId);
-            if (parent) {
-              return topicSpaceIds(parent).some((spaceId) => allowedSpaceSet.has(spaceId));
-            }
-          }
-        }
-      }
       if (entry.topicId) {
         const topic = topicById.get(entry.topicId);
         if (topic) {
@@ -528,17 +485,17 @@ export function ClawgraphLive() {
       }
       return false;
     });
-  }, [allowedSpaceSet, selectedSpaceId, storeLogs, taskById, topicById]);
+  }, [allowedSpaceSet, selectedSpaceId, storeLogs, topicById]);
 
   const localGraph = useMemo(() => {
     // Building the local graph is expensive; only do it when we are actively rendering local mode.
     if (graphMode !== "local") return EMPTY_GRAPH;
-    return buildClawgraphFromData(topics, tasks, logs, {
+    return buildClawgraphFromData(topics, logs, {
       maxEntities: 120,
       maxNodes: 260,
       minEdgeWeight: 0.08,
     });
-  }, [graphMode, logs, tasks, topics]);
+  }, [graphMode, logs, topics]);
 
   const fetchRemoteGraph = useCallback(async () => {
     const params = new URLSearchParams({
@@ -609,7 +566,7 @@ export function ClawgraphLive() {
       alive = false;
       clearTimeout(timer);
     };
-  }, [fetchRemoteGraph, graphMode, logs.length, spaceVisibilityRevision, tasks.length, topics.length]);
+  }, [fetchRemoteGraph, graphMode, logs.length, spaceVisibilityRevision, topics.length]);
 
   useEffect(() => {
     const node = containerRef.current;
@@ -637,20 +594,18 @@ export function ClawgraphLive() {
 
   const semanticRefreshKey = useMemo(() => {
     const latestTopic = topics.reduce((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), "");
-    const latestTask = tasks.reduce((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), "");
     const latestLog = logs.reduce((acc, item) => {
       const stamp = item.updatedAt || item.createdAt || "";
       return stamp > acc ? stamp : acc;
     }, "");
-    return `${topics.length}:${tasks.length}:${logs.length}:${latestTopic}:${latestTask}:${latestLog}:${spaceVisibilityRevision}`;
-  }, [logs, spaceVisibilityRevision, tasks, topics]);
+    return `${topics.length}:${logs.length}:${latestTopic}:${latestLog}:${spaceVisibilityRevision}`;
+  }, [logs, spaceVisibilityRevision, topics]);
   const semanticSearch = useSemanticSearch({
     query: normalizedQuery,
     spaceId: selectedSpaceId || undefined,
     allowedSpaceIds,
     includePending: true,
     limitTopics: Math.min(Math.max(topics.length, 120), 500),
-    limitTasks: Math.min(Math.max(tasks.length, 240), 1200),
     limitLogs: Math.min(Math.max(logs.length, 800), 4000),
     refreshKey: semanticRefreshKey,
   });
@@ -670,16 +625,11 @@ export function ClawgraphLive() {
       if (!topicId) continue;
       ids.add(`topic:${topicId}`);
     }
-    for (const taskId of semanticForQuery?.matchedTaskIds ?? []) {
-      if (!taskId) continue;
-      ids.add(`task:${taskId}`);
-    }
     const matchedLogIds = new Set(semanticForQuery?.matchedLogIds ?? []);
     if (matchedLogIds.size > 0) {
       for (const entry of logs) {
         if (!matchedLogIds.has(entry.id)) continue;
         if (entry.topicId) ids.add(`topic:${entry.topicId}`);
-        if (entry.taskId) ids.add(`task:${entry.taskId}`);
         const agentLabel = String(entry.agentLabel || entry.agentId || "").trim();
         if (agentLabel) ids.add(`agent:${slug(agentLabel)}`);
       }
@@ -806,15 +756,10 @@ export function ClawgraphLive() {
       if (!topicId) continue;
       ids.add(`topic:${topicId}`);
     }
-    for (const taskId of semanticForQuery.matchedTaskIds ?? []) {
-      if (!taskId) continue;
-      ids.add(`task:${taskId}`);
-    }
     const matchedLogIds = new Set(semanticForQuery.matchedLogIds ?? []);
     for (const entry of logs) {
       if (!matchedLogIds.has(entry.id)) continue;
       if (entry.topicId) ids.add(`topic:${entry.topicId}`);
-      if (entry.taskId) ids.add(`task:${entry.taskId}`);
       const agentLabel = String(entry.agentLabel || entry.agentId || "").trim();
       if (agentLabel) ids.add(`agent:${slug(agentLabel)}`);
     }
@@ -861,17 +806,8 @@ export function ClawgraphLive() {
 
   const selectedTopic = useMemo(() => topicFromNode(selectedNode, topics), [selectedNode, topics]);
 
-  const selectedTask = useMemo(() => taskFromNode(selectedNode, tasks), [selectedNode, tasks]);
-
   const selectedTopicUrl = selectedTopic
     ? withSpaceParam(withRevealParam(buildTopicUrl(selectedTopic, topics)), selectedTopic.spaceId)
-    : null;
-  const selectedTaskUrl = selectedTask
-    ? withSpaceParam(
-        withRevealParam(buildTaskUrl(selectedTask, topics)),
-        String(selectedTask.spaceId ?? "").trim() ||
-          String(topics.find((topic) => topic.id === selectedTask.topicId)?.spaceId ?? "").trim()
-      )
     : null;
 
   const connectedEdgeRows = useMemo(() => {
@@ -886,28 +822,14 @@ export function ClawgraphLive() {
       const oppositeNodeId = edge.source === selectedNodeId ? edge.target : edge.source;
       const oppositeNode = displayNodeById.get(oppositeNodeId) ?? nodeById.get(oppositeNodeId) ?? null;
       const oppositeTopic = topicFromNode(oppositeNode, topics);
-      const oppositeTask = taskFromNode(oppositeNode, tasks);
-      const oppositeTaskSpaceId =
-        String(oppositeTask?.spaceId ?? "").trim() ||
-        String(topics.find((topic) => topic.id === oppositeTask?.topicId)?.spaceId ?? "").trim();
-      const selectedTaskSpaceId =
-        String(selectedTask?.spaceId ?? "").trim() ||
-        String(topics.find((topic) => topic.id === selectedTask?.topicId)?.spaceId ?? "").trim();
       let href = withRevealParam(UNIFIED_BASE);
-      if (oppositeTask) {
-        href = withSpaceParam(withRevealParam(buildTaskUrl(oppositeTask, topics)), oppositeTaskSpaceId);
-      } else if (oppositeTopic) {
+      if (oppositeTopic) {
         href = withSpaceParam(withRevealParam(buildTopicUrl(oppositeTopic, topics)), oppositeTopic.spaceId);
       } else {
         const queryHint = oppositeNode?.label ?? selectedNode.label;
-        const base = selectedTask
-          ? buildTaskUrl(selectedTask, topics)
-          : selectedTopic
-            ? buildTopicUrl(selectedTopic, topics)
-            : UNIFIED_BASE;
+        const base = selectedTopic ? buildTopicUrl(selectedTopic, topics) : UNIFIED_BASE;
         const baseWithQuery = queryHint ? `${base}?q=${encodeURIComponent(queryHint)}` : base;
-        const fallbackSpaceId = selectedTask ? selectedTaskSpaceId : selectedTopic?.spaceId;
-        href = withSpaceParam(withRevealParam(baseWithQuery), fallbackSpaceId);
+        href = withSpaceParam(withRevealParam(baseWithQuery), selectedTopic?.spaceId);
       }
 
       return {
@@ -926,9 +848,7 @@ export function ClawgraphLive() {
     nodeById,
     selectedNode,
     selectedNodeId,
-    selectedTask,
     selectedTopic,
-    tasks,
     topics,
   ]);
 
@@ -1108,7 +1028,7 @@ export function ClawgraphLive() {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onClear={() => setQuery("")}
-            placeholder="Search entity, topic, task, or agent"
+            placeholder="Search entity, topic, or agent"
           />
           <div className="flex items-center gap-2 justify-self-start">
             <Button size="sm" variant="secondary" onClick={fitToGraph}>
@@ -1189,7 +1109,6 @@ export function ClawgraphLive() {
                   {(
                     [
                       { type: "topic", label: "Topics" },
-                      { type: "task", label: "Tasks" },
                       { type: "entity", label: "Entities" },
                       { type: "agent", label: "Agents" },
                     ] as Array<{ type: ClawgraphNodeType; label: string }>
@@ -1279,7 +1198,7 @@ export function ClawgraphLive() {
                   const nodeTheme = NODE_THEME[node.type];
                   const nodeColor = node.color || nodeTheme.color;
                   const allowScaleLabel = view.scale >= 1.02;
-                  const allowPriorityLabel = node.type === "topic" || node.type === "task" || node.score >= 2.1;
+                  const allowPriorityLabel = node.type === "topic" || node.score >= 2.1;
                   const showNodeLabel = selected || matched || hovered || (showLabels && (allowScaleLabel || allowPriorityLabel));
                   const primaryGlow = toRgba(nodeColor, selected ? 0.44 : hovered ? 0.34 : 0.26);
                   const secondaryGlow = toRgba(nodeTheme.glow, selected ? 0.28 : hovered ? 0.2 : 0.14);
@@ -1367,11 +1286,6 @@ export function ClawgraphLive() {
                         Open topic
                       </Button>
                     )}
-                    {selectedTaskUrl && (
-                      <Button size="sm" variant="secondary" onClick={() => router.push(selectedTaskUrl)}>
-                        Open task
-                      </Button>
-                    )}
                   </div>
                   <div className="space-y-2">
                     <div className="text-xs uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">Strongest links</div>
@@ -1398,14 +1312,10 @@ export function ClawgraphLive() {
                 <h2 className="text-lg font-semibold">Graph Health</h2>
                 <Badge tone="muted">Realtime</Badge>
               </CardHeader>
-              <div className="grid grid-cols-2 gap-2 text-sm">
+              <div className="grid grid-cols-2 gap-2 text-sm md:grid-cols-3">
                 <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
                   <div className="text-xs text-[rgb(var(--claw-muted))]">Topics</div>
                   <div className="font-semibold">{stats.topicCount}</div>
-                </div>
-                <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
-                  <div className="text-xs text-[rgb(var(--claw-muted))]">Tasks</div>
-                  <div className="font-semibold">{stats.taskCount}</div>
                 </div>
                 <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
                   <div className="text-xs text-[rgb(var(--claw-muted))]">Entities</div>
@@ -1414,6 +1324,14 @@ export function ClawgraphLive() {
                 <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
                   <div className="text-xs text-[rgb(var(--claw-muted))]">Agents</div>
                   <div className="font-semibold">{stats.agentCount}</div>
+                </div>
+                <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
+                  <div className="text-xs text-[rgb(var(--claw-muted))]">Nodes</div>
+                  <div className="font-semibold">{stats.nodeCount}</div>
+                </div>
+                <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-2">
+                  <div className="text-xs text-[rgb(var(--claw-muted))]">Edges</div>
+                  <div className="font-semibold">{stats.edgeCount}</div>
                 </div>
               </div>
               <div className="mt-3 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-3 text-xs text-[rgb(var(--claw-muted))]">

@@ -29,21 +29,15 @@ export function PinToggleGeneric({
     event.stopPropagation();
     if (readOnly || saving) return;
     setSaving(true);
-    
-    const endpoint = itemType === "topic" ? "/api/topics" : "/api/tasks";
-    
-    // Prepare the payload - for topics we need to include the name
+
     const payload = {
       ...item,
+      name: "title" in item ? item.title ?? item.name : item.name,
+      parentId: "topicId" in item ? item.topicId ?? item.parentId ?? null : item.parentId,
       pinned: !item.pinned,
     } as Topic | Task;
-    
-    // For topics, ensure name is included
-    if (itemType === "topic" && 'name' in item && item.name) {
-      (payload as Topic).name = item.name;
-    }
 
-    const res = await apiFetch(endpoint, {
+    const res = await apiFetch("/api/topics", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

@@ -39,11 +39,9 @@ from .models import (
     Space,
     InstanceConfig,
     Topic,
-    Task,
     LogEntry,
     DeletedLog,
     DeletedTopic,
-    DeletedTask,
     SessionRoutingMemory,
     OpenClawRequestRoute,
     IngestReceipt,
@@ -70,10 +68,6 @@ from .schemas import (
     TopicOut,
     TopicReorderRequest,
     TopicPatch,
-    TaskUpsert,
-    TaskOut,
-    TaskReorderRequest,
-    TaskPatch,
     LogAppend,
     LogOut,
     LogOutLite,
@@ -174,7 +168,6 @@ from .spaces import (  # noqa: F401
     _clean_tag_label,
     _normalize_tags,
     _space_id_for_topic,
-    _space_id_for_task,
     _space_id_from_log_scope,
     _infer_space_id_from_session_key,
     _resolve_source_space_id,
@@ -185,9 +178,7 @@ from .spaces import (  # noqa: F401
     _topic_space_candidates_from_tags,
     _topic_space_ids,
     _topic_matches_allowed_spaces,
-    _task_matches_allowed_spaces,
     _load_topics_by_ids,
-    _load_tasks_by_ids,
     _load_related_maps_for_logs,
     _log_matches_allowed_spaces,
     _propagate_topic_space,
@@ -199,23 +190,17 @@ from .resolver import (  # noqa: F401
     _auto_pick_color,
     _label_similarity,
     _find_similar_topic,
-    _find_similar_task,
     _resolver_float_env,
     _resolver_topic_similarity_threshold,
-    _resolver_task_similarity_threshold,
     _resolver_semantic_topic_score_threshold,
-    _resolver_semantic_task_score_threshold,
     _resolver_fallback_mode,
     _resolver_clean_name,
     _resolver_title_case_token,
     _resolver_terms_from_message,
     _resolver_derive_topic_name,
-    _resolver_derive_task_title,
     _resolver_pick_semantic_topic_id,
-    _resolver_pick_semantic_task,
     _resolver_recent_routing_hints,
     _next_sort_index_for_new_topic,
-    _next_sort_index_for_new_task,
 )
 from .precompile import (  # noqa: F401
     PRECOMPILE_ENABLED,
@@ -500,19 +485,6 @@ TOPIC_LOG_PROPAGATION_FACTOR = 0.22
 TOPIC_LOG_PROPAGATION_PER_LOG_CAP = 0.18
 TOPIC_LOG_PROPAGATION_TOP_K = 6
 TOPIC_LOG_PROPAGATION_CAP = 0.42
-TOPIC_TASK_PROPAGATION_FACTOR = 0.32
-TOPIC_TASK_PROPAGATION_PER_TASK_CAP = 0.24
-TOPIC_TASK_PROPAGATION_LEXICAL_FACTOR = 2.8
-TOPIC_TASK_PROPAGATION_LEXICAL_CAP = 0.34
-TOPIC_TASK_PROPAGATION_EXACT_BONUS = 0.22
-TOPIC_TASK_PROPAGATION_PER_TASK_TOTAL_CAP = 0.62
-TOPIC_TASK_PROPAGATION_TOP_K = 3
-TOPIC_TASK_PROPAGATION_CAP = 0.72
-TOPIC_TASK_PROPAGATION_TOPIC_EXACT_BONUS = 0.12
-TASK_LOG_PROPAGATION_FACTOR = 0.25
-TASK_LOG_PROPAGATION_PER_LOG_CAP = 0.2
-TASK_LOG_PROPAGATION_TOP_K = 6
-TASK_LOG_PROPAGATION_CAP = 0.48
 SEARCH_LOG_CONTENT_SNIPPET_CHARS = int(os.getenv("CLAWBOARD_SEARCH_LOG_CONTENT_SNIPPET_CHARS", "640") or "640")
 SEARCH_LOG_TEXT_BUDGET_CHARS = int(os.getenv("CLAWBOARD_SEARCH_LOG_TEXT_BUDGET_CHARS", "960") or "960")
 SEARCH_LOG_SUMMARY_FETCH_CHARS = int(os.getenv("CLAWBOARD_SEARCH_LOG_SUMMARY_FETCH_CHARS", "520") or "520")
@@ -541,7 +513,6 @@ SEARCH_LONG_QUERY_DENSE_EXPANSION_MAX_LOGS = max(
     int(os.getenv("CLAWBOARD_SEARCH_LONG_QUERY_DENSE_EXPANSION_MAX_LOGS", "180") or "180"),
 )
 SEARCH_EFFECTIVE_LIMIT_TOPICS = max(1, min(120, _env_int_with_default("CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TOPICS", 120)))
-SEARCH_EFFECTIVE_LIMIT_TASKS = max(1, min(240, _env_int_with_default("CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_TASKS", 240)))
 SEARCH_EFFECTIVE_LIMIT_LOGS = max(10, min(320, _env_int_with_default("CLAWBOARD_SEARCH_EFFECTIVE_LIMIT_LOGS", 320)))
 SEARCH_WINDOW_MULTIPLIER = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MULTIPLIER", "2") or "2")
 SEARCH_WINDOW_MIN_LOGS = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MIN_LOGS", "320") or "320")
@@ -624,12 +595,10 @@ SEARCH_AUTO_HYBRID_MIN_QUERY_CHARS = max(1, int(os.getenv("CLAWBOARD_SEARCH_AUTO
 SEARCH_AUTO_HYBRID_MAX_LOG_DOCS = max(120, int(os.getenv("CLAWBOARD_SEARCH_AUTO_HYBRID_MAX_LOG_DOCS", "520") or "520"))
 SEARCH_HYBRID_PREFILTER_MULTIPLIER = max(1, int(os.getenv("CLAWBOARD_SEARCH_HYBRID_PREFILTER_MULTIPLIER", "4") or "4"))
 SEARCH_HYBRID_MAX_TOPIC_DOCS = max(40, int(os.getenv("CLAWBOARD_SEARCH_HYBRID_MAX_TOPIC_DOCS", "320") or "320"))
-SEARCH_HYBRID_MAX_TASK_DOCS = max(60, int(os.getenv("CLAWBOARD_SEARCH_HYBRID_MAX_TASK_DOCS", "460") or "460"))
 SEARCH_HYBRID_MAX_LOG_DOCS = max(120, int(os.getenv("CLAWBOARD_SEARCH_HYBRID_MAX_LOG_DOCS", "380") or "380"))
 SEARCH_CONCURRENCY_LIMIT = int(os.getenv("CLAWBOARD_SEARCH_CONCURRENCY_LIMIT", "3") or "3")
 SEARCH_CONCURRENCY_WAIT_SECONDS = float(os.getenv("CLAWBOARD_SEARCH_CONCURRENCY_WAIT_SECONDS", "0.25") or "0.25")
 SEARCH_BUSY_FALLBACK_LIMIT_TOPICS = int(os.getenv("CLAWBOARD_SEARCH_BUSY_FALLBACK_LIMIT_TOPICS", "64") or "64")
-SEARCH_BUSY_FALLBACK_LIMIT_TASKS = int(os.getenv("CLAWBOARD_SEARCH_BUSY_FALLBACK_LIMIT_TASKS", "160") or "160")
 SEARCH_BUSY_FALLBACK_LIMIT_LOGS = int(os.getenv("CLAWBOARD_SEARCH_BUSY_FALLBACK_LIMIT_LOGS", "180") or "180")
 SEARCH_DIRECT_LABEL_EXACT_BOOST = float(os.getenv("CLAWBOARD_SEARCH_DIRECT_LABEL_EXACT_BOOST", "0.38") or "0.38")
 SEARCH_DIRECT_LABEL_PREFIX_BOOST = float(os.getenv("CLAWBOARD_SEARCH_DIRECT_LABEL_PREFIX_BOOST", "0.2") or "0.2")
@@ -707,12 +676,10 @@ def _table_count_and_max_ts(session: Any, model: Any, ts_column: Any) -> tuple[i
 
 def _graph_revision_token(session: Any) -> str:
     topic_count, topic_max = _table_count_and_max_ts(session, Topic, Topic.updatedAt)
-    task_count, task_max = _table_count_and_max_ts(session, Task, Task.updatedAt)
     log_count, log_max = _table_count_and_max_ts(session, LogEntry, LogEntry.updatedAt)
     return "|".join(
         [
             f"topic:{topic_count}:{topic_max}",
-            f"task:{task_count}:{task_max}",
             f"log:{log_count}:{log_max}",
         ]
     )
@@ -721,24 +688,20 @@ def _graph_revision_token(session: Any) -> str:
 def _changes_revision_token(session: Any) -> str:
     space_count, space_max = _table_count_and_max_ts(session, Space, Space.updatedAt)
     topic_count, topic_max = _table_count_and_max_ts(session, Topic, Topic.updatedAt)
-    task_count, task_max = _table_count_and_max_ts(session, Task, Task.updatedAt)
     log_count, log_max = _table_count_and_max_ts(session, LogEntry, LogEntry.updatedAt)
     draft_count, draft_max = _table_count_and_max_ts(session, Draft, Draft.updatedAt)
     deleted_log_count, deleted_log_max = _table_count_and_max_ts(session, DeletedLog, DeletedLog.deletedAt)
     deleted_topic_count, deleted_topic_max = _table_count_and_max_ts(session, DeletedTopic, DeletedTopic.deletedAt)
-    deleted_task_count, deleted_task_max = _table_count_and_max_ts(session, DeletedTask, DeletedTask.deletedAt)
     dispatch_count, dispatch_max = _table_count_and_max_ts(session, OpenClawChatDispatchQueue, OpenClawChatDispatchQueue.updatedAt)
     run_count, run_max = _table_count_and_max_ts(session, OrchestrationRun, OrchestrationRun.updatedAt)
     return "|".join(
         [
             f"space:{space_count}:{space_max}",
             f"topic:{topic_count}:{topic_max}",
-            f"task:{task_count}:{task_max}",
             f"log:{log_count}:{log_max}",
             f"draft:{draft_count}:{draft_max}",
             f"deleted_log:{deleted_log_count}:{deleted_log_max}",
             f"deleted_topic:{deleted_topic_count}:{deleted_topic_max}",
-            f"deleted_task:{deleted_task_count}:{deleted_task_max}",
             f"dispatch:{dispatch_count}:{dispatch_max}",
             f"orchestration:{run_count}:{run_max}",
         ]
@@ -763,7 +726,6 @@ def _file_revision_token(path: str) -> str:
 
 def _metrics_revision_token(session: Any) -> str:
     topic_count, topic_max = _table_count_and_max_ts(session, Topic, Topic.updatedAt)
-    task_count, task_max = _table_count_and_max_ts(session, Task, Task.updatedAt)
     log_count, log_max = _table_count_and_max_ts(session, LogEntry, LogEntry.updatedAt)
     sync_state_count, sync_state_max = _table_count_and_max_ts(
         session,
@@ -774,7 +736,6 @@ def _metrics_revision_token(session: Any) -> str:
     return "|".join(
         [
             f"topic:{topic_count}:{topic_max}",
-            f"task:{task_count}:{task_max}",
             f"log:{log_count}:{log_max}",
             f"openclaw_history_sync:{sync_state_count}:{sync_state_max}",
             f"audit:{audit_token}",
@@ -1080,33 +1041,6 @@ def _find_similar_topic(session, name: str, threshold: float = 0.80, space_id: s
     return None
 
 
-def _find_similar_task(
-    session,
-    topic_id: str | None,
-    title: str,
-    threshold: float = 0.88,
-    space_id: str | None = None,
-):
-    if not title.strip():
-        return None
-    tasks = session.exec(select(Task)).all()
-    normalized_space_id = _normalize_space_id(space_id)
-    if topic_id is not None:
-        tasks = [task for task in tasks if task.topicId == topic_id]
-    else:
-        tasks = [task for task in tasks if task.topicId is None]
-        if normalized_space_id:
-            tasks = [task for task in tasks if _space_id_for_task(task) == normalized_space_id]
-    best = None
-    best_score = 0.0
-    for task in tasks:
-        score = _label_similarity(task.title, title)
-        if score > best_score:
-            best_score = score
-            best = task
-    if best and best_score >= threshold:
-        return best
-    return None
 
 
 
@@ -1320,10 +1254,7 @@ def _snooze_worker() -> None:
                 due_topics = (
                     session.exec(select(Topic).where(Topic.snoozedUntil.is_not(None)).where(Topic.snoozedUntil <= now)).all()
                 )
-                due_tasks = (
-                    session.exec(select(Task).where(Task.snoozedUntil.is_not(None)).where(Task.snoozedUntil <= now)).all()
-                )
-                if due_topics or due_tasks:
+                if due_topics:
                     for topic in due_topics:
                         topic.snoozedUntil = None
                         status = str(topic.status or "active").strip().lower()
@@ -1332,17 +1263,10 @@ def _snooze_worker() -> None:
                         topic.updatedAt = now
                         session.add(topic)
 
-                    for task in due_tasks:
-                        task.snoozedUntil = None
-                        task.updatedAt = now
-                        session.add(task)
-
                     session.commit()
 
                     for topic in due_topics:
                         event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
-                    for task in due_tasks:
-                        event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
         except Exception:
             _log_background_worker_exception("clawboard-snooze-worker")
         if _background_sleep(poll_interval):
@@ -1765,9 +1689,9 @@ def _openclaw_request_id_base_from_source(
     return request_base or message_base or ""
 
 
-def _openclaw_request_route_kind(topic_id: str | None, task_id: str | None) -> str:
-    if str(task_id or "").strip():
-        return "task"
+def _openclaw_request_route_kind(topic_id: str | None) -> str:
+    if str(topic_id or "").strip():
+        return "topic"
     return "detached"
 
 
@@ -1786,13 +1710,12 @@ def _openclaw_request_route_scope(
     session: Any,
     *,
     route: OpenClawRequestRoute | None,
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[str | None, str | None]:
     if route is None:
-        return (None, None, None)
+        return (None, None)
     return _validated_scope_candidate(
         session,
         topic_id=str(getattr(route, "topicId", "") or "").strip() or None,
-        task_id=str(getattr(route, "taskId", "") or "").strip() or None,
         space_id=_normalize_space_id(getattr(route, "spaceId", None)),
     )
 
@@ -1804,7 +1727,6 @@ def _upsert_openclaw_request_route(
     session_key: str | None,
     space_id: str | None,
     topic_id: str | None,
-    task_id: str | None,
     source_log_id: str | None = None,
 ) -> tuple[OpenClawRequestRoute | None, dict[str, Any] | None]:
     canonical_request_id = _canonical_openclaw_request_id(request_id)
@@ -1815,10 +1737,9 @@ def _upsert_openclaw_request_route(
     base_session_key = _base_session_key(normalized_session_key)
     normalized_space_id = _normalize_space_id(space_id)
 
-    resolved_space, resolved_topic, resolved_task = _validated_scope_candidate(
+    resolved_space, resolved_topic = _validated_scope_candidate(
         session,
         topic_id=topic_id,
-        task_id=task_id,
         space_id=normalized_space_id,
     )
 
@@ -1828,28 +1749,23 @@ def _upsert_openclaw_request_route(
     event_data: dict[str, Any] | None = None
     if existing is None:
         effective_session_key = normalized_session_key or base_session_key or ""
-        if resolved_task and resolved_topic:
-            effective_session_key = f"clawboard:task:{resolved_topic}:{resolved_task}"
+        if resolved_topic:
+            effective_session_key = f"clawboard:topic:{resolved_topic}"
         effective_base_session_key = _base_session_key(effective_session_key) or base_session_key or effective_session_key
-        route_kind = _openclaw_request_route_kind(resolved_topic, resolved_task)
-        promoted_at = now_value if resolved_task else None
+        route_kind = _openclaw_request_route_kind(resolved_topic)
         row = OpenClawRequestRoute(
             requestId=canonical_request_id,
             sessionKey=effective_session_key,
             baseSessionKey=effective_base_session_key,
             spaceId=resolved_space,
             topicId=resolved_topic,
-            taskId=resolved_task,
             routeKind=route_kind,
-            routeLocked=bool(resolved_task),
+            routeLocked=bool(resolved_topic),
             sourceLogId=str(source_log_id or "").strip() or None,
-            promotedAt=promoted_at,
             createdAt=now_value,
             updatedAt=now_value,
         )
         try:
-            # Savepoint avoids aborting the outer transaction if another writer inserts the same
-            # request route between our read and write.
             with session.begin_nested():
                 session.add(row)
                 session.flush()
@@ -1864,54 +1780,38 @@ def _upsert_openclaw_request_route(
             "baseSessionKey": row.baseSessionKey,
             "spaceId": row.spaceId,
             "topicId": row.topicId,
-            "taskId": row.taskId,
             "routeKind": row.routeKind,
             "routeLocked": row.routeLocked,
-            "promotedAt": row.promotedAt,
             "createdAt": row.createdAt,
             "updatedAt": row.updatedAt,
             "previousTopicId": None,
-            "previousTaskId": None,
-            "promotion": bool(resolved_task),
         }
         return (row, event_data)
 
     previous_topic_id = str(getattr(existing, "topicId", "") or "").strip() or None
-    previous_task_id = str(getattr(existing, "taskId", "") or "").strip() or None
 
     effective_space = _normalize_space_id(getattr(existing, "spaceId", None))
     effective_topic = previous_topic_id
-    effective_task = previous_task_id
 
     if resolved_topic:
         if not effective_topic:
             effective_topic = resolved_topic
-            effective_task = resolved_task
             effective_space = resolved_space or effective_space
         elif resolved_topic == effective_topic:
-            # Allow strict promotion within the same topic. Never downscope from task -> topic.
-            if resolved_task and not effective_task:
-                effective_task = resolved_task
-                effective_space = resolved_space or effective_space
-            elif resolved_task and effective_task and resolved_task != effective_task:
-                # Same-topic conflicting task id: prefer most recent explicit resolved task.
-                effective_task = resolved_task
-                effective_space = resolved_space or effective_space
-            elif not effective_task and resolved_space:
+            if resolved_space:
                 effective_space = resolved_space
 
     effective_session_key = str(getattr(existing, "sessionKey", "") or "").strip()
-    if effective_task and effective_topic:
-        effective_session_key = f"clawboard:task:{effective_topic}:{effective_task}"
+    if effective_topic:
+        effective_session_key = f"clawboard:topic:{effective_topic}"
     elif normalized_session_key:
         effective_session_key = normalized_session_key
     elif not effective_session_key:
         effective_session_key = base_session_key
     effective_base_session_key = _base_session_key(effective_session_key) or base_session_key or effective_session_key
 
-    promoted = bool(not previous_task_id and effective_task)
-    route_kind = _openclaw_request_route_kind(effective_topic, effective_task)
-    route_locked = bool(effective_task)
+    route_kind = _openclaw_request_route_kind(effective_topic)
+    route_locked = bool(effective_topic)
     source_log = str(source_log_id or "").strip() or None
 
     changed = False
@@ -1920,11 +1820,9 @@ def _upsert_openclaw_request_route(
         "baseSessionKey": effective_base_session_key,
         "spaceId": effective_space,
         "topicId": effective_topic,
-        "taskId": effective_task,
         "routeKind": route_kind,
         "routeLocked": route_locked,
         "sourceLogId": source_log or getattr(existing, "sourceLogId", None),
-        "promotedAt": (now_value if promoted else getattr(existing, "promotedAt", None)),
     }
     for key, value in updates.items():
         if getattr(existing, key, None) != value:
@@ -1939,15 +1837,11 @@ def _upsert_openclaw_request_route(
             "baseSessionKey": existing.baseSessionKey,
             "spaceId": existing.spaceId,
             "topicId": existing.topicId,
-            "taskId": existing.taskId,
             "routeKind": existing.routeKind,
             "routeLocked": existing.routeLocked,
-            "promotedAt": existing.promotedAt,
             "createdAt": existing.createdAt,
             "updatedAt": existing.updatedAt,
             "previousTopicId": previous_topic_id,
-            "previousTaskId": previous_task_id,
-            "promotion": promoted,
         }
     return (existing, event_data)
 
@@ -2093,17 +1987,14 @@ def _collect_openclaw_cancel_related_sessions(
             if row_request:
                 request_ids.add(row_request)
 
-    board_topic_id, board_task_id = _parse_board_session_key(primary_base or primary_key)
-    if board_topic_id or board_task_id:
+    board_topic_id = _parse_board_session_key(primary_base or primary_key)
+    if board_topic_id:
         scope_cutoff_iso = _iso_after_seconds(
             datetime.now(timezone.utc),
             -float(_openclaw_chat_cancel_scope_lookback_seconds()),
         )
         scope_query = select(LogEntry).where(LogEntry.createdAt >= scope_cutoff_iso)
-        if board_task_id:
-            scope_query = scope_query.where(LogEntry.taskId == board_task_id)
-        elif board_topic_id:
-            scope_query = scope_query.where(LogEntry.topicId == board_topic_id)
+        scope_query = scope_query.where(LogEntry.topicId == board_topic_id)
         scope_rows = session.exec(
             scope_query
             .order_by(
@@ -2166,57 +2057,37 @@ def _validated_scope_candidate(
     session: Any,
     *,
     topic_id: str | None,
-    task_id: str | None,
     space_id: str | None,
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[str | None, str | None]:
     topic_candidate = str(topic_id or "").strip()
-    task_candidate = str(task_id or "").strip()
     space_candidate = _normalize_space_id(space_id)
-
-    if task_candidate:
-        task_row = session.get(Task, task_candidate)
-        if not task_row:
-            # Stale task anchors can still carry a valid topic hint (for example session
-            # continuity memory after a task was deleted). Preserve the topic candidate when
-            # possible instead of discarding the scope entirely.
-            task_candidate = ""
-        else:
-            task_candidate = str(getattr(task_row, "id", "") or "").strip()
-            topic_candidate = str(getattr(task_row, "topicId", "") or "").strip()
-            if not topic_candidate:
-                return (None, None, None)
-            space_candidate = _space_id_for_task(task_row)
 
     if topic_candidate:
         topic_row = session.get(Topic, topic_candidate)
         if not topic_row:
-            return (None, None, None)
+            return (None, None)
         topic_candidate = str(getattr(topic_row, "id", "") or "").strip()
         if not space_candidate:
             space_candidate = _space_id_for_topic(topic_row)
 
-    if not topic_candidate and not task_candidate:
-        return (None, None, None)
+    if not topic_candidate:
+        return (None, None)
 
-    return (space_candidate, topic_candidate or None, task_candidate or None)
+    return (space_candidate, topic_candidate or None)
 
 
 def _scope_from_source_metadata(
     session: Any,
     source: dict[str, Any] | None,
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[str | None, str | None]:
     source_map = source if isinstance(source, dict) else {}
-    topic_candidate = str(source_map.get("boardScopeTopicId") or "").strip()
-    task_candidate = str(source_map.get("boardScopeTaskId") or "").strip()
+    topic_candidate = str(source_map.get("boardScopeTopicId") or source_map.get("boardScopeTaskId") or "").strip()
     space_candidate = _normalize_space_id(source_map.get("boardScopeSpaceId"))
-    if not topic_candidate and not task_candidate:
-        parsed_topic, parsed_task = _parse_board_session_key(str(source_map.get("sessionKey") or ""))
-        topic_candidate = parsed_topic or topic_candidate
-        task_candidate = parsed_task or task_candidate
+    if not topic_candidate:
+        topic_candidate = _parse_board_session_key(str(source_map.get("sessionKey") or "")) or ""
     return _validated_scope_candidate(
         session,
         topic_id=topic_candidate,
-        task_id=task_candidate,
         space_id=space_candidate,
     )
 
@@ -2224,15 +2095,13 @@ def _scope_from_source_metadata(
 def _scope_from_anchor_log_row(
     session: Any,
     row: LogEntry,
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[str | None, str | None]:
     source_map = row.source if isinstance(row.source, dict) else {}
-    topic_candidate = str(getattr(row, "topicId", "") or source_map.get("boardScopeTopicId") or "").strip()
-    task_candidate = str(getattr(row, "taskId", "") or source_map.get("boardScopeTaskId") or "").strip()
+    topic_candidate = str(getattr(row, "topicId", "") or source_map.get("boardScopeTopicId") or source_map.get("boardScopeTaskId") or "").strip()
     space_candidate = _normalize_space_id(source_map.get("boardScopeSpaceId") or getattr(row, "spaceId", None))
     return _validated_scope_candidate(
         session,
         topic_id=topic_candidate,
-        task_id=task_candidate,
         space_id=space_candidate,
     )
 
@@ -2258,15 +2127,12 @@ def _session_routing_memory_lookup_keys(session_key: str) -> tuple[list[str], st
     _add(key)
     _add(_base_session_key(key))
 
-    parsed_topic, parsed_task = _parse_board_session_key(key)
+    parsed_topic = _parse_board_session_key(key)
     canonical_board_key: str | None = None
     if parsed_topic:
-        canonical_board_key = (
-            f"clawboard:task:{parsed_topic}:{parsed_task}" if parsed_task else None
-        )
-        if canonical_board_key:
-            _add(canonical_board_key)
-        if canonical_board_key and "|" in key:
+        canonical_board_key = f"clawboard:topic:{parsed_topic}"
+        _add(canonical_board_key)
+        if "|" in key:
             suffix = key.split("|", 1)[1].strip()
             if suffix:
                 _add(f"{canonical_board_key}|{suffix}")
@@ -2279,12 +2145,12 @@ def _infer_scope_from_session_routing_memory(
     *,
     session_key: str,
     topic_id: str | None = None,
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[str | None, str | None]:
     base_key = _base_session_key(session_key)
     if not base_key:
-        return (None, None, None)
+        return (None, None)
     topic_filter = str(topic_id or "").strip()
-    best_scope: tuple[str | None, str | None, str | None] = (None, None, None)
+    best_scope: tuple[str | None, str | None] = (None, None)
 
     routing_candidates, canonical_board_key = _session_routing_memory_lookup_keys(session_key)
     seen_routing_keys: set[str] = set()
@@ -2304,22 +2170,18 @@ def _infer_scope_from_session_routing_memory(
             candidate_topic = str(item.get("topicId") or "").strip()
             if topic_filter and candidate_topic and candidate_topic != topic_filter:
                 continue
-            candidate_task = str(item.get("taskId") or "").strip()
             if topic_filter and not candidate_topic:
                 candidate_topic = topic_filter
-            scope_space, scope_topic, scope_task = _validated_scope_candidate(
+            scope_space, scope_topic = _validated_scope_candidate(
                 session,
                 topic_id=candidate_topic or topic_filter,
-                task_id=candidate_task or None,
                 space_id=None,
                 )
-            if scope_task:
-                return (scope_space, scope_topic, scope_task)
             if scope_topic and not best_scope[1]:
-                best_scope = (scope_space, scope_topic, scope_task)
+                best_scope = (scope_space, scope_topic)
 
     # Board session continuity can be written under wrapped forms
-    # (`agent:main:clawboard:task:*`) while current rows may carry canonical forms
+    # (`agent:main:clawboard:topic:*`) while current rows may carry canonical forms
     # (and vice versa). Fallback to a bounded LIKE scan over the canonical board key.
     if canonical_board_key:
         like_exprs = [
@@ -2343,19 +2205,15 @@ def _infer_scope_from_session_routing_memory(
                 candidate_topic = str(item.get("topicId") or "").strip()
                 if topic_filter and candidate_topic and candidate_topic != topic_filter:
                     continue
-                candidate_task = str(item.get("taskId") or "").strip()
                 if topic_filter and not candidate_topic:
                     candidate_topic = topic_filter
-                scope_space, scope_topic, scope_task = _validated_scope_candidate(
+                scope_space, scope_topic = _validated_scope_candidate(
                     session,
                     topic_id=candidate_topic or topic_filter,
-                    task_id=candidate_task or None,
                     space_id=None,
                 )
-                if scope_task:
-                    return (scope_space, scope_topic, scope_task)
                 if scope_topic and not best_scope[1]:
-                    best_scope = (scope_space, scope_topic, scope_task)
+                    best_scope = (scope_space, scope_topic)
     return best_scope
 
 
@@ -2364,11 +2222,11 @@ def _infer_subagent_scope_from_recent_anchors(
     *,
     session_key: str,
     created_at: str,
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[str | None, str | None]:
     base_key = _base_session_key(session_key)
     if not base_key or not _is_subagent_session_key(base_key):
-        return (None, None, None)
-    best_scope: tuple[str | None, str | None, str | None] = (None, None, None)
+        return (None, None)
+    best_scope: tuple[str | None, str | None] = (None, None)
 
     lookback_seconds = _subagent_scope_inference_lookback_seconds()
     created_ts = _iso_to_timestamp(created_at)
@@ -2390,7 +2248,7 @@ def _infer_subagent_scope_from_recent_anchors(
         _bounded_query()
         .where(LogEntry.type == "action")
         .where(or_(func.coalesce(LogEntry.raw, "").like(like_term), func.coalesce(LogEntry.content, "").like(like_term)))
-        .where(or_(LogEntry.topicId.is_not(None), LogEntry.taskId.is_not(None)))
+        .where(LogEntry.topicId.is_not(None))
         .order_by(
             LogEntry.createdAt.desc(),
             (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
@@ -2399,9 +2257,9 @@ def _infer_subagent_scope_from_recent_anchors(
     )
     anchor_rows = session.exec(anchor_query).all()
     for row in anchor_rows:
-        scope_space, scope_topic, scope_task = _scope_from_anchor_log_row(session, row)
-        if scope_topic and scope_task:
-            return (scope_space, scope_topic, scope_task)
+        scope_space, scope_topic = _scope_from_anchor_log_row(session, row)
+        if scope_topic:
+            return (scope_space, scope_topic)
 
     # Secondary fallback: session-level continuity memory for this subagent session key.
     routing_candidates = [base_key, _base_session_key(session_key), session_key]
@@ -2419,16 +2277,13 @@ def _infer_subagent_scope_from_recent_anchors(
         for item in reversed(list(routing_row.items or [])):
             if not isinstance(item, dict):
                 continue
-            scope_space, scope_topic, scope_task = _validated_scope_candidate(
+            scope_space, scope_topic = _validated_scope_candidate(
                 session,
                 topic_id=str(item.get("topicId") or "").strip(),
-                task_id=str(item.get("taskId") or "").strip(),
                 space_id=None,
             )
-            if scope_topic and scope_task:
-                return (scope_space, scope_topic, scope_task)
-            if scope_topic and not best_scope[1]:
-                best_scope = (scope_space, scope_topic, scope_task)
+            if scope_topic:
+                return (scope_space, scope_topic)
 
     # Final fallback: prior rows from this exact subagent session that already carry explicit
     # boardScope metadata (source-level, not classifier-derived assignments).
@@ -2444,12 +2299,12 @@ def _infer_subagent_scope_from_recent_anchors(
     for row in session.exec(recent_query).all():
         if not _log_matches_session(row, base_key):
             continue
-        scope_space, scope_topic, scope_task = _scope_from_source_metadata(
+        scope_space, scope_topic = _scope_from_source_metadata(
             session,
             row.source if isinstance(row.source, dict) else {},
         )
-        if scope_topic and scope_task:
-            return (scope_space, scope_topic, scope_task)
+        if scope_topic:
+            return (scope_space, scope_topic)
 
     return best_scope
 
@@ -2461,20 +2316,18 @@ def _retro_scope_subagent_unanchored_tool_activity(
     created_at: str,
     space_id: str | None,
     topic_id: str | None,
-    task_id: str | None,
 ) -> list[LogEntry]:
     """Backfill scope for early subagent tool logs that arrived before anchor metadata."""
     base_key = _base_session_key(session_key)
     if not base_key or not _is_subagent_session_key(base_key):
         return []
 
-    canonical_space, canonical_topic, canonical_task = _validated_scope_candidate(
+    canonical_space, canonical_topic = _validated_scope_candidate(
         session,
         topic_id=topic_id,
-        task_id=task_id,
         space_id=space_id,
     )
-    if not canonical_topic or not canonical_task:
+    if not canonical_topic:
         return []
 
     lookback_seconds = _subagent_scope_inference_lookback_seconds()
@@ -2490,7 +2343,6 @@ def _retro_scope_subagent_unanchored_tool_activity(
         .where(LogEntry.classificationStatus == "failed")
         .where(LogEntry.classificationError == "filtered_unanchored_tool_activity")
         .where(LogEntry.topicId.is_(None))
-        .where(LogEntry.taskId.is_(None))
         .where(LogEntry.createdAt <= created_at)
     )
     if lower_bound:
@@ -2522,7 +2374,6 @@ def _retro_scope_subagent_unanchored_tool_activity(
         if not _is_tool_call_log(row):
             continue
         row.topicId = canonical_topic
-        row.taskId = canonical_task
         if canonical_space:
             row.spaceId = canonical_space
         elif not _normalize_space_id(getattr(row, "spaceId", None)):
@@ -2537,9 +2388,8 @@ def _retro_scope_subagent_unanchored_tool_activity(
             source_map["boardScopeSpaceId"] = canonical_space
         if canonical_topic:
             source_map["boardScopeTopicId"] = canonical_topic
-            source_map["boardScopeKind"] = "task"
+            source_map["boardScopeKind"] = "topic"
             source_map["boardScopeLock"] = True
-            source_map["boardScopeTaskId"] = canonical_task
         row.source = source_map or None
         session.add(row)
         patched.append(row)
@@ -2589,23 +2439,21 @@ def _retro_scope_request_route_rows(
     session_key: str | None,
     space_id: str | None,
     topic_id: str | None,
-    task_id: str | None,
     source_log_id: str | None = None,
 ) -> list[LogEntry]:
     canonical_request_id = _canonical_openclaw_request_id(request_id)
-    canonical_space, canonical_topic, canonical_task = _validated_scope_candidate(
+    canonical_space, canonical_topic = _validated_scope_candidate(
         session,
         topic_id=topic_id,
-        task_id=task_id,
         space_id=space_id,
     )
-    if not canonical_request_id or not canonical_topic or not canonical_task:
+    if not canonical_request_id or not canonical_topic:
         return []
 
     candidate_session_keys = [
         str(session_key or "").strip(),
         _base_session_key(session_key),
-        f"clawboard:task:{canonical_topic}:{canonical_task}",
+        f"{BOARD_TOPIC_SESSION_PREFIX}{canonical_topic}",
     ]
     candidate_session_keys = list(dict.fromkeys([key for key in candidate_session_keys if key]))
 
@@ -2679,19 +2527,11 @@ def _retro_scope_request_route_rows(
     for row in rows:
         source_map = row.source.copy() if isinstance(row.source, dict) else {}
         current_topic = str(getattr(row, "topicId", "") or "").strip()
-        current_task = str(getattr(row, "taskId", "") or "").strip()
         current_source_topic = str(source_map.get("boardScopeTopicId") or "").strip()
-        current_source_task = str(source_map.get("boardScopeTaskId") or "").strip()
-        if (
-            current_topic == canonical_topic
-            and current_task == canonical_task
-            and current_source_topic == canonical_topic
-            and current_source_task == canonical_task
-        ):
+        if current_topic == canonical_topic and current_source_topic == canonical_topic:
             continue
 
         row.topicId = canonical_topic
-        row.taskId = canonical_task
         if canonical_space:
             row.spaceId = canonical_space
         elif not _normalize_space_id(getattr(row, "spaceId", None)):
@@ -2701,9 +2541,8 @@ def _retro_scope_request_route_rows(
         if canonical_space:
             source_map["boardScopeSpaceId"] = canonical_space
         source_map["boardScopeTopicId"] = canonical_topic
-        source_map["boardScopeKind"] = "task"
+        source_map["boardScopeKind"] = "topic"
         source_map["boardScopeLock"] = True
-        source_map["boardScopeTaskId"] = canonical_task
         row.source = source_map or None
         session.add(row)
         patched.append(row)
@@ -2974,8 +2813,8 @@ def _find_existing_openclaw_non_user_conversation_near_duplicate(
     candidate_session_keys = [key for key in [base_key, board_scope_key] if key]
     candidate_session_keys = list(dict.fromkeys(candidate_session_keys))
     incoming_scope = _scope_from_source_metadata(session, source_meta)
-    incoming_space_id, incoming_topic_id, incoming_task_id = incoming_scope
-    has_board_scope = bool(incoming_topic_id or incoming_task_id)
+    incoming_space_id, incoming_topic_id = incoming_scope
+    has_board_scope = bool(incoming_topic_id)
     if not candidate_session_keys and not has_board_scope:
         return None
 
@@ -3034,10 +2873,9 @@ def _find_existing_openclaw_non_user_conversation_near_duplicate(
 
         same_board_scope = False
         if has_board_scope:
-            candidate_space_id, candidate_topic_id, candidate_task_id = _scope_from_anchor_log_row(session, candidate)
+            candidate_space_id, candidate_topic_id = _scope_from_anchor_log_row(session, candidate)
             same_board_scope = (
                 candidate_topic_id == incoming_topic_id
-                and candidate_task_id == incoming_task_id
                 and (not incoming_space_id or not candidate_space_id or candidate_space_id == incoming_space_id)
             )
 
@@ -3068,14 +2906,13 @@ def _canonical_board_scope_session_key(
     session_key: str | None,
 ) -> str:
     if isinstance(source_meta, dict):
-        topic_id = str(source_meta.get("boardScopeTopicId") or "").strip()
-        task_id = str(source_meta.get("boardScopeTaskId") or "").strip()
-        if topic_id and task_id:
-            return f"clawboard:task:{topic_id}:{task_id}"
+        topic_id = str(source_meta.get("boardScopeTopicId") or source_meta.get("boardScopeTaskId") or "").strip()
+        if topic_id:
+            return f"clawboard:topic:{topic_id}"
 
-    parsed_topic, parsed_task = _parse_board_session_key(str(session_key or ""))
-    if parsed_topic and parsed_task:
-        return f"clawboard:task:{parsed_topic}:{parsed_task}"
+    parsed_topic = _parse_board_session_key(str(session_key or ""))
+    if parsed_topic:
+        return f"clawboard:topic:{parsed_topic}"
     return ""
 
 
@@ -3230,7 +3067,7 @@ def _find_existing_openclaw_user_near_duplicate(
     candidate_session_keys = list(dict.fromkeys(candidate_session_keys))
     if not candidate_session_keys:
         return None
-    if not any(bool(_parse_board_session_key(key)[0]) for key in candidate_session_keys):
+    if not any(bool(_parse_board_session_key(key)) for key in candidate_session_keys):
         return None
 
     created_ts = _iso_to_timestamp(created_at)
@@ -3649,14 +3486,11 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
 
     space_id = _normalize_space_id(payload.spaceId)
     topic_id = payload.topicId
-    task_id = payload.taskId
 
     source_scope_space_id: str | None = None
     source_scope_topic_id: str | None = None
-    source_scope_task_id: str | None = None
     request_route_seed_space_id = _normalize_space_id(payload.spaceId)
     request_route_seed_topic_id = str(payload.topicId or "").strip() or None
-    request_route_seed_task_id = str(payload.taskId or "").strip() or None
     scope_lock = False
     request_route_event: dict[str, Any] | None = None
     request_route_row: OpenClawRequestRoute | None = None
@@ -3672,59 +3506,29 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 request_route_seed_space_id = explicit_space
         session_key = str(source_meta.get("sessionKey") or "").strip()
         if session_key:
-            derived_topic_id, derived_task_id = _parse_board_session_key(session_key)
-            if derived_task_id:
-                source_scope_topic_id = derived_topic_id or source_scope_topic_id
-                source_scope_task_id = derived_task_id
-                scope_lock = True
-            elif derived_topic_id:
+            derived_topic_id = _parse_board_session_key(session_key)
+            if derived_topic_id:
                 source_scope_topic_id = derived_topic_id
                 scope_lock = True
 
-        explicit_topic = str(source_meta.get("boardScopeTopicId") or "").strip()
-        explicit_task = str(source_meta.get("boardScopeTaskId") or "").strip()
+        explicit_topic = str(source_meta.get("boardScopeTopicId") or source_meta.get("boardScopeTaskId") or "").strip()
         lock_raw = source_meta.get("boardScopeLock")
         if lock_raw is True:
             scope_lock = True
         elif isinstance(lock_raw, str) and lock_raw.strip().lower() in {"1", "true", "yes", "on"}:
             scope_lock = True
 
-        trust_explicit_topic_scope = not (_is_subagent_session_key(session_key) and explicit_topic and not explicit_task)
+        trust_explicit_topic_scope = not (_is_subagent_session_key(session_key) and explicit_topic)
         if explicit_topic and trust_explicit_topic_scope:
             source_scope_topic_id = explicit_topic
             if not request_route_seed_topic_id:
                 request_route_seed_topic_id = explicit_topic
-        if explicit_task:
-            source_scope_task_id = explicit_task
-            scope_lock = True
-            if not request_route_seed_task_id:
-                request_route_seed_task_id = explicit_task
 
         payload_type = str(payload.type or "").strip().lower()
         payload_agent_id = str(payload.agentId or "").strip().lower()
-        if (
-            session_key
-            and source_scope_topic_id
-            and not source_scope_task_id
-            and not explicit_task
-            and not _is_subagent_session_key(session_key)
-            and (payload_type != "conversation" or payload_agent_id != "user")
-        ):
-            memory_space, memory_topic, memory_task = _infer_scope_from_session_routing_memory(
-                session,
-                session_key=session_key,
-                topic_id=source_scope_topic_id,
-            )
-            if memory_task and memory_topic and memory_topic == source_scope_topic_id:
-                source_scope_task_id = memory_task
-                scope_lock = True
-                if memory_space and not source_scope_space_id:
-                    source_scope_space_id = memory_space
-                    if not space_id:
-                        space_id = memory_space
 
         if session_key and _is_subagent_session_key(session_key):
-            inferred_space, inferred_topic, inferred_task = _infer_subagent_scope_from_recent_anchors(
+            inferred_space, inferred_topic = _infer_subagent_scope_from_recent_anchors(
                 session,
                 session_key=session_key,
                 created_at=created_at,
@@ -3735,36 +3539,23 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                     space_id = inferred_space
             if inferred_topic and not source_scope_topic_id:
                 source_scope_topic_id = inferred_topic
-            if inferred_task and not source_scope_task_id:
-                source_scope_task_id = inferred_task
-                scope_lock = True
-
-        apply_derived_task_scope = not (
-            payload_type == "conversation"
-            and payload_agent_id == "user"
-            and not explicit_task
-        )
 
         # Clawboard routing: if a sender only provides source-scoped metadata (common for nested
-        # OpenClaw sessions), derive topic/task so thread affinity remains stable.
-        if source_scope_task_id and (scope_lock or not task_id) and apply_derived_task_scope:
-            task_id = source_scope_task_id
+        # OpenClaw sessions), derive topic so thread affinity remains stable.
         if source_scope_topic_id and (scope_lock or not topic_id):
             topic_id = source_scope_topic_id
 
     request_route_id = _canonical_openclaw_request_id_from_source(source_meta)
     if request_route_id:
         request_route_row = _get_openclaw_request_route(session, request_id=request_route_id)
-        route_space, route_topic, route_task = _openclaw_request_route_scope(session, route=request_route_row)
-        if route_task and route_topic:
+        route_space, route_topic = _openclaw_request_route_scope(session, route=request_route_row)
+        if route_topic:
             if route_space and not source_scope_space_id:
                 source_scope_space_id = route_space
                 if not space_id:
                     space_id = route_space
             source_scope_topic_id = route_topic
-            source_scope_task_id = route_task
             topic_id = route_topic
-            task_id = route_task
             scope_lock = True
 
     source_channel = ""
@@ -3797,9 +3588,7 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         if not space_id:
             space_id = source_scope_space_id or DEFAULT_SPACE_ID
         topic_id = None
-        task_id = None
         source_scope_topic_id = None
-        source_scope_task_id = None
         scope_lock = False
         if source_meta is not None:
             source_meta.pop("boardScopeTopicId", None)
@@ -3807,7 +3596,7 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             source_meta.pop("boardScopeKind", None)
             source_meta.pop("boardScopeLock", None)
 
-    # OpenClaw cron delivery/control messages should never be routed into user topics/tasks.
+    # OpenClaw cron delivery/control messages should never be routed into user topics.
     # Treat them as terminal noise at ingest time so they can't briefly appear in Unified View
     # before the classifier cycle runs.
     cron_event_filtered = source_channel == "cron-event"
@@ -3815,21 +3604,6 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         if not space_id:
             space_id = source_scope_space_id or DEFAULT_SPACE_ID
         topic_id = None
-        task_id = None
-
-    task_row = None
-    if task_id:
-        task_row = session.get(Task, task_id)
-        if not task_row:
-            task_id = None
-            task_row = None
-
-    # Enforce valid topic/task combinations at ingest time: a task implies its topic.
-    # This prevents "impossible" UI states where a log references a task from a different topic.
-    if task_row:
-        topic_id = task_row.topicId
-        space_id = _space_id_for_task(task_row)
-
     topic_row = None
     if topic_id:
         topic_row = session.get(Topic, topic_id)
@@ -3843,26 +3617,21 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         space_id = source_scope_space_id or DEFAULT_SPACE_ID
 
     # Normalize source-level board scope metadata so downstream classifier/UI can reliably
-    # keep nested/subagent logs in the originating board Topic/Task.
+    # keep nested/subagent logs in the originating board Topic.
     if source_meta is not None:
         canonical_space = str(source_scope_space_id or space_id or "").strip()
         canonical_topic = str(topic_id or "").strip()
-        canonical_task = str(task_id or "").strip()
         if not control_plane_filtered:
             if source_scope_topic_id and not canonical_topic:
                 canonical_topic = source_scope_topic_id
-            if source_scope_task_id and not canonical_task:
-                canonical_task = source_scope_task_id
-        if canonical_task and not canonical_topic and task_row and task_row.topicId:
-            canonical_topic = str(task_row.topicId).strip()
 
-        if canonical_topic and canonical_task:
+        if canonical_topic:
             source_meta["boardScopeTopicId"] = canonical_topic
-            source_meta["boardScopeKind"] = "task"
+            source_meta["boardScopeKind"] = "topic"
             source_meta["boardScopeLock"] = True
             if canonical_space:
                 source_meta["boardScopeSpaceId"] = canonical_space
-            source_meta["boardScopeTaskId"] = canonical_task
+            source_meta.pop("boardScopeTaskId", None)
         else:
             source_meta.pop("boardScopeTopicId", None)
             source_meta.pop("boardScopeTaskId", None)
@@ -3894,7 +3663,7 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         log_type == "action"
         and _is_memory_action_text(payload.content, payload.summary, payload.raw)
     )
-    has_scope_anchor = bool(topic_id or task_id or source_scope_topic_id or source_scope_task_id)
+    has_scope_anchor = bool(topic_id or source_scope_topic_id)
     defer_unanchored_tool_classification = (
         is_tool_trace_action
         and not has_scope_anchor
@@ -3902,7 +3671,6 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     )
     if is_tool_trace_action and not has_scope_anchor and not defer_unanchored_tool_classification:
         topic_id = None
-        task_id = None
 
     classification_status = payload.classificationStatus or "pending"
     classification_attempts = 0
@@ -3958,7 +3726,6 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         id=create_id("log"),
         spaceId=space_id or DEFAULT_SPACE_ID,
         topicId=topic_id,
-        taskId=task_id,
         relatedLogId=payload.relatedLogId,
         idempotencyKey=idempotency_key,
         sourceIdentityKey=source_identity_key,
@@ -3977,10 +3744,9 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         classificationError=_coerce_safe_text(classification_error) or None,
     )
     if request_route_id:
-        route_seed_space, route_seed_topic, route_seed_task = _validated_scope_candidate(
+        route_seed_space, route_seed_topic = _validated_scope_candidate(
             session,
             topic_id=request_route_seed_topic_id,
-            task_id=request_route_seed_task_id,
             space_id=request_route_seed_space_id or source_scope_space_id or space_id,
         )
         _route_row, request_route_event = _upsert_openclaw_request_route(
@@ -3989,7 +3755,6 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             session_key=str((source_meta or {}).get("sessionKey") or "").strip(),
             space_id=route_seed_space,
             topic_id=route_seed_topic,
-            task_id=route_seed_task,
             source_log_id=entry.id,
         )
         if _route_row is not None:
@@ -4120,12 +3885,10 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     if (
         request_route_id
         and topic_id
-        and task_id
         and request_route_event
         and (
             bool(request_route_event.get("promotion"))
             or str(request_route_event.get("previousTopicId") or "").strip() != str(topic_id or "").strip()
-            or str(request_route_event.get("previousTaskId") or "").strip() != str(task_id or "").strip()
         )
     ):
         try:
@@ -4135,7 +3898,6 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 session_key=source_session_key,
                 space_id=space_id,
                 topic_id=topic_id,
-                task_id=task_id,
                 source_log_id=str(entry.id or "").strip() or None,
             )
         except Exception:
@@ -4147,20 +3909,10 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         pass
 
     # Gmail-style behavior: new conversation activity should revive snoozed items.
-    # This ensures a topic/task doesn't stay hidden if new messages arrive while snoozed.
     revived_topic: Topic | None = None
-    revived_task: Task | None = None
     if str(payload.type or "").strip().lower() == "conversation":
         now = entry.updatedAt
         try:
-            if task_id:
-                row = task_row or session.get(Task, task_id)
-                if row and row.snoozedUntil:
-                    row.snoozedUntil = None
-                    row.updatedAt = now
-                    session.add(row)
-                    revived_task = row
-
             if topic_id:
                 row = topic_row or session.get(Topic, topic_id)
                 if row and (
@@ -4173,14 +3925,13 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                     session.add(row)
                     revived_topic = row
 
-            if revived_topic or revived_task:
+            if revived_topic:
                 try:
                     session.commit()
                 except OperationalError as exc:
                     if not DATABASE_URL.startswith("sqlite") or "database is locked" not in str(exc).lower():
                         session.rollback()
                         revived_topic = None
-                        revived_task = None
                     else:
                         session.rollback()
                         last_exc: OperationalError | None = exc
@@ -4197,7 +3948,6 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                                 last_exc = retry_exc
                         if last_exc is not None:
                             revived_topic = None
-                            revived_task = None
         except Exception:
             # Best-effort only: never break log ingestion for snooze revival.
             try:
@@ -4205,10 +3955,9 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             except Exception:
                 pass
             revived_topic = None
-            revived_task = None
 
     retro_scoped_rows: list[LogEntry] = []
-    if source_session_key and _is_subagent_session_key(source_session_key) and (topic_id or task_id):
+    if source_session_key and _is_subagent_session_key(source_session_key) and topic_id:
         try:
             retro_scoped_rows = _retro_scope_subagent_unanchored_tool_activity(
                 session,
@@ -4216,7 +3965,6 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 created_at=created_at,
                 space_id=space_id,
                 topic_id=topic_id,
-                task_id=task_id,
             )
         except Exception:
             # Best-effort only: never fail primary ingestion because retro-scope repair fails.
@@ -4226,8 +3974,6 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
 
     if revived_topic:
         event_hub.publish({"type": "topic.upserted", "data": revived_topic.model_dump(), "eventTs": revived_topic.updatedAt})
-    if revived_task:
-        event_hub.publish({"type": "task.upserted", "data": revived_task.model_dump(), "eventTs": revived_task.updatedAt})
 
     # raw payloads can be large; keep log events lightweight for SSE + in-memory buffer safety.
     event_hub.publish({"type": "log.appended", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
@@ -4402,13 +4148,14 @@ def _publish_openclaw_typing_state(
         )
 
 
-BOARD_TASK_SESSION_PREFIX = "clawboard:task:"
+BOARD_TOPIC_SESSION_PREFIX = "clawboard:topic:"
 
 
-def _parse_board_session_key(session_key: str) -> tuple[str | None, str | None]:
+def _parse_board_session_key(session_key: str) -> str | None:
+    """Parse a board session key and return the topic ID, or None."""
     key = str(session_key or "").strip()
     if not key:
-        return (None, None)
+        return None
 
     # OpenClaw may attach thread suffixes (`|thread:...`). Keep full and base
     # variants so wrapped keys can still be parsed.
@@ -4421,13 +4168,12 @@ def _parse_board_session_key(session_key: str) -> tuple[str | None, str | None]:
         if not candidate:
             continue
 
-        # Task-only board session parsing. Topic session keys are unsupported after
-        # Task-Chat-only cutover.
-        task_match = re.search(r"clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)", candidate)
-        if task_match:
-            return (task_match.group(1), task_match.group(2))
+        # New format: clawboard:topic:<topicId>
+        topic_match = re.search(r"clawboard:topic:(topic-[a-zA-Z0-9-]+)", candidate)
+        if topic_match:
+            return topic_match.group(1)
 
-    return (None, None)
+    return None
 
 
 @app.get("/api/attachments/policy", tags=["attachments"])
@@ -4950,13 +4696,15 @@ def _orchestration_append_in_band_log(
     if run is None:
         return
     board_topic_scope = str(getattr(run, "topicId", "") or "").strip()
-    board_task_scope = str(getattr(run, "taskId", "") or "").strip()
-    if not board_topic_scope and not board_task_scope:
-        parsed_topic, parsed_task = _parse_board_session_key(str(getattr(run, "baseSessionKey", "") or getattr(run, "sessionKey", "") or ""))
-        board_topic_scope = str(parsed_topic or "").strip()
-        board_task_scope = str(parsed_task or "").strip()
+    if not board_topic_scope:
+        board_topic_scope = _parse_board_session_key(str(getattr(run, "baseSessionKey", "") or getattr(run, "sessionKey", "") or "")) or ""
     # In-band orchestration logs are for board-origin runs only.
-    if not board_topic_scope and not board_task_scope:
+    if not board_topic_scope:
+        return
+    board_topic_row = session.get(Topic, board_topic_scope)
+    if board_topic_row is None:
+        # Stale orchestration runs can outlive their original board topic. Skip the in-band
+        # board log rather than writing a system log with a broken foreign key.
         return
 
     log_idem = _orchestration_event_log_idempotency_key(
@@ -4989,14 +4737,8 @@ def _orchestration_append_in_band_log(
     )
 
     run_space_id = _normalize_space_id(getattr(run, "spaceId", None))
-    if not run_space_id and str(getattr(run, "taskId", "") or "").strip():
-        task_row = session.get(Task, str(getattr(run, "taskId", "") or "").strip())
-        if task_row is not None:
-            run_space_id = _space_id_for_task(task_row)
-    if not run_space_id and str(getattr(run, "topicId", "") or "").strip():
-        topic_row = session.get(Topic, str(getattr(run, "topicId", "") or "").strip())
-        if topic_row is not None:
-            run_space_id = _space_id_for_topic(topic_row)
+    if not run_space_id:
+        run_space_id = _space_id_for_topic(board_topic_row)
     if not run_space_id:
         run_space_id = DEFAULT_SPACE_ID
 
@@ -5017,13 +4759,11 @@ def _orchestration_append_in_band_log(
     board_space = _normalize_space_id(getattr(run, "spaceId", None))
     if board_space:
         source["boardScopeSpaceId"] = board_space
-    if board_topic_scope and board_task_scope:
+    if board_topic_scope:
         source["boardScopeTopicId"] = board_topic_scope
-        source["boardScopeKind"] = "task"
-        source["boardScopeTaskId"] = board_task_scope
+        source["boardScopeKind"] = "topic"
     else:
         source.pop("boardScopeTopicId", None)
-        source.pop("boardScopeTaskId", None)
         source.pop("boardScopeKind", None)
         source.pop("boardScopeLock", None)
     if item_key_norm:
@@ -5041,25 +4781,11 @@ def _orchestration_append_in_band_log(
     if compact_payload:
         source["eventPayload"] = compact_payload
 
-    board_topic_row: Topic | None = None
-    board_task_row: Task | None = None
-    board_topic = board_topic_scope
-    board_task = board_task_scope
-    if board_task:
-        board_task_row = session.get(Task, board_task)
-        if board_task_row is not None:
-            task_topic = str(getattr(board_task_row, "topicId", "") or "").strip()
-            if task_topic:
-                board_topic = task_topic
-    if board_topic:
-        board_topic_row = session.get(Topic, board_topic)
-
     session.add(
         LogEntry(
             id=create_id("log"),
             spaceId=run_space_id,
-            topicId=board_topic or None,
-            taskId=board_task or None,
+            topicId=board_topic_scope or None,
             relatedLogId=None,
             idempotencyKey=log_idem,
             type="system",
@@ -5361,16 +5087,12 @@ def _orchestration_resolve_scope(
     *,
     session_key: str | None,
     topic_id: str | None,
-    task_id: str | None,
 ) -> tuple[str | None, str | None]:
     resolved_topic = str(topic_id or "").strip() or None
-    resolved_task = str(task_id or "").strip() or None
-    parsed_topic, parsed_task = _parse_board_session_key(session_key or "")
-    if parsed_task and not resolved_task:
-        resolved_task = str(parsed_task).strip() or None
+    parsed_topic = _parse_board_session_key(session_key or "")
     if parsed_topic and not resolved_topic:
         resolved_topic = str(parsed_topic).strip() or None
-    return resolved_topic, resolved_task
+    return resolved_topic, None
 
 
 def _orchestration_create_or_get_run(
@@ -5383,24 +5105,16 @@ def _orchestration_create_or_get_run(
     sent_at: str,
     space_id: str | None = None,
     topic_id: str | None = None,
-    task_id: str | None = None,
     source: str = "chat",
 ) -> OrchestrationRun | None:
     request_base = _orchestration_request_base(request_id)
     if not request_base:
         return None
-    resolved_topic_id, resolved_task_id = _orchestration_resolve_scope(
+    resolved_topic_id, _ = _orchestration_resolve_scope(
         session_key=session_key,
         topic_id=topic_id,
-        task_id=task_id,
     )
     resolved_space_id = _normalize_space_id(space_id)
-    if not resolved_space_id and resolved_task_id:
-        task_row = session.get(Task, resolved_task_id)
-        if task_row is not None:
-            resolved_space_id = _space_id_for_task(task_row)
-            if not resolved_topic_id:
-                resolved_topic_id = str(getattr(task_row, "topicId", "") or "").strip() or None
     if not resolved_space_id and resolved_topic_id:
         topic_row = session.get(Topic, resolved_topic_id)
         if topic_row is not None:
@@ -5411,13 +5125,9 @@ def _orchestration_create_or_get_run(
         changed = False
         now_value = now_iso()
         existing_topic = str(getattr(existing, "topicId", "") or "").strip() or None
-        existing_task = str(getattr(existing, "taskId", "") or "").strip() or None
         existing_space = _normalize_space_id(getattr(existing, "spaceId", None))
         if resolved_topic_id and not existing_topic:
             existing.topicId = resolved_topic_id
-            changed = True
-        if resolved_task_id and not existing_task:
-            existing.taskId = resolved_task_id
             changed = True
         if resolved_space_id and not existing_space:
             existing.spaceId = resolved_space_id
@@ -5440,7 +5150,7 @@ def _orchestration_create_or_get_run(
             session.add(existing)
             # If this run was created from an unscoped recovery path, emit the run-created
             # in-band status once board scope becomes available.
-            if str(getattr(existing, "topicId", "") or "").strip() or str(getattr(existing, "taskId", "") or "").strip():
+            if str(getattr(existing, "topicId", "") or "").strip():
                 _orchestration_append_in_band_log(
                     session,
                     run_id=existing.runId,
@@ -5453,7 +5163,7 @@ def _orchestration_create_or_get_run(
         elif str(source or "").strip().lower() != "log_recovery":
             # openclaw_chat can race with synchronous log recovery run creation in the same request.
             # Ensure run_created still appears in-band for live board interactions.
-            if str(getattr(existing, "topicId", "") or "").strip() or str(getattr(existing, "taskId", "") or "").strip():
+            if str(getattr(existing, "topicId", "") or "").strip():
                 _orchestration_append_in_band_log(
                     session,
                     run_id=existing.runId,
@@ -5476,7 +5186,6 @@ def _orchestration_create_or_get_run(
         baseSessionKey=base_session_key or session_key,
         spaceId=resolved_space_id,
         topicId=resolved_topic_id,
-        taskId=resolved_task_id,
         mode="single",
         status="running",
         objective=_clip(_sanitize_log_text(message or ""), 800) or None,
@@ -6594,23 +6303,23 @@ def _orchestration_completed_subagent_follow_up_message(
             min_created_at=str(getattr(item, "startedAt", "") or getattr(item, "createdAt", "") or ""),
             max_chars=420,
         )
-        detail = result_excerpt or "(result already visible in the current task thread; rely on injected Clawboard context)"
+        detail = result_excerpt or "(result already visible in the current topic thread; rely on injected Clawboard context)"
         suffix = " ..." if result_truncated and result_excerpt else ""
         specialist_segments.append(f"{agent_id} ({item_session}): {detail}{suffix}")
     if len(ordered_items) > 3:
         specialist_segments.append(
-            f"+{len(ordered_items) - 3} more completed specialist result(s) already visible in the current task thread."
+            f"+{len(ordered_items) - 3} more completed specialist result(s) already visible in the current topic thread."
         )
     plural = len(ordered_items) != 1
     completed_summary = " ".join(specialist_segments)
     return (
         "[ORCHESTRATION_FOLLOW_UP] This is an internal delegated-completion wake-up, not a new user request. "
         f"{'Multiple delegated specialists have' if plural else 'A delegated specialist has'} already completed and "
-        f"{'their results are' if plural else 'the result is'} already visible in the current task thread. "
-        "Read the injected current task thread before replying. Do not re-dispatch specialists that already spawned or completed for this task. "
+        f"{'their results are' if plural else 'the result is'} already visible in the current topic thread. "
+        "Read the injected current topic thread before replying. Do not re-dispatch specialists that already spawned or completed for this topic. "
         "If the user can already see the result, do not restate or paraphrase the full body. Do not send another status-only promise. "
         "Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains. "
-        "Stay on the current task/session and avoid broad recovery or unrelated search. "
+        "Stay on the current topic/session and avoid broad recovery or unrelated search. "
         "Do not use sessions_send(...) as a routine way to ask already-running specialists for results; rely on the queued completion rail, surfaced child results, and session_status(...) first. "
         "Use sessions_send(...) only when you truly need to redirect or correct an active child session. "
         f"Completed specialist context: {completed_summary} "
@@ -6694,8 +6403,8 @@ def _orchestration_has_assistant_completion_log(
     still active when the assistant reply arrived (sync_log one-shot gate missed it), or because an
     exception silently swallowed the completion branch.
 
-    The search covers both the canonical board key (e.g. "clawboard:task:topic-xxx:task-yyy") and any
-    agent-prefixed variant (e.g. "agent:main:clawboard:task:topic-xxx:task-yyy") via a LIKE pattern, because
+    The search covers both the canonical board key (e.g. "clawboard:topic:topic-xxx") and any
+    agent-prefixed variant (e.g. "agent:main:clawboard:topic:topic-xxx") via a LIKE pattern, because
     the main agent logs its conversation entries under the agent-prefixed session key while
     run.baseSessionKey stores the canonical board key.
     """
@@ -6917,7 +6626,6 @@ def _orchestration_sync_log(log_id: str) -> None:
                 ):
                     scope_space_id = _normalize_space_id(getattr(entry, "spaceId", None) or source.get("boardScopeSpaceId"))
                     scope_topic_id = str(getattr(entry, "topicId", None) or source.get("boardScopeTopicId") or "").strip() or None
-                    scope_task_id = str(getattr(entry, "taskId", None) or source.get("boardScopeTaskId") or "").strip() or None
                     run = _orchestration_create_or_get_run(
                         session,
                         request_id=request_id,
@@ -6927,7 +6635,6 @@ def _orchestration_sync_log(log_id: str) -> None:
                         sent_at=str(getattr(entry, "createdAt", "") or now_iso()),
                         space_id=scope_space_id,
                         topic_id=scope_topic_id,
-                        task_id=scope_task_id,
                         source="log_recovery",
                     )
             if run is None:
@@ -7232,7 +6939,6 @@ def _orchestration_recover_missing_runs(session: Any, *, now_dt: datetime, limit
             sent_at=str(getattr(row, "createdAt", "") or now_iso()),
             space_id=getattr(row, "spaceId", None),
             topic_id=getattr(row, "topicId", None),
-            task_id=getattr(row, "taskId", None),
             source="log_recovery_scan",
         )
         if created is not None:
@@ -7874,8 +7580,8 @@ def _run_openclaw_chat(
     dispatch_retry_suffix: str | None = None
     if dispatch_attempt_num > 1:
         dispatch_retry_suffix = f"retry-{dispatch_attempt_num - 1}"
-    board_topic_scope_id, board_task_scope_id = _parse_board_session_key(session_key)
-    is_board_session = bool(board_topic_scope_id or board_task_scope_id)
+    board_topic_scope_id = _parse_board_session_key(session_key)
+    is_board_session = bool(board_topic_scope_id)
 
     send_params: dict[str, Any] = {
         "sessionKey": session_key,
@@ -8010,7 +7716,7 @@ def _run_openclaw_chat(
         used_board_probe_fallback = False
         if probe_seconds <= 0:
             if is_board_session:
-                # Board topic/task sessions should not sit idle waiting for long-stall watchdog paths.
+                # Board topic sessions should not sit idle waiting for long-stall watchdog paths.
                 probe_seconds = _openclaw_chat_board_in_flight_probe_seconds()
                 used_board_probe_fallback = probe_seconds > 0
         if probe_seconds > 0 and status in {"started", "accepted", "in_flight"}:
@@ -8335,7 +8041,7 @@ def _openclaw_chat_request_has_non_user_activity(
     sent = normalize_iso(sent_at)
     rid_prefix = f"{rid}:%"
     base_key = (str(session_key or "").split("|", 1)[0] or "").strip()
-    topic_id, task_id = _parse_board_session_key(base_key)
+    topic_id = _parse_board_session_key(base_key)
     if not rid or not sent:
         return False
     try:
@@ -8383,9 +8089,9 @@ def _openclaw_chat_request_has_non_user_activity(
                     "base_key": base_key,
                     "like_key": f"{base_key}|%",
                 }
-                if task_id:
-                    session_conditions.append("json_extract(source, '$.sessionKey') LIKE :contains_task_key")
-                    fallback_params["contains_task_key"] = f"%:clawboard:task:{topic_id}:{task_id}%"
+                if topic_id:
+                    session_conditions.append("json_extract(source, '$.sessionKey') LIKE :contains_topic_key")
+                    fallback_params["contains_topic_key"] = f"%:clawboard:topic:{topic_id}%"
                 fallback_query = fallback_query.where(
                     text(
                         f"({' OR '.join(session_conditions)}) "
@@ -8398,8 +8104,8 @@ def _openclaw_chat_request_has_non_user_activity(
             else:
                 session_expr = LogEntry.source["sessionKey"].as_string()
                 session_exprs = [session_expr == base_key, session_expr.like(f"{base_key}|%")]
-                if task_id:
-                    session_exprs.append(session_expr.like(f"%:clawboard:task:{topic_id}:{task_id}%"))
+                if topic_id:
+                    session_exprs.append(session_expr.like(f"%:clawboard:topic:{topic_id}%"))
                 fallback_query = fallback_query.where(or_(*session_exprs))
                 fallback_query = fallback_query.where(func.coalesce(LogEntry.source["requestId"].as_string(), "") == "")
                 fallback_query = fallback_query.where(func.coalesce(LogEntry.source["messageId"].as_string(), "") == "")
@@ -9319,8 +9025,8 @@ class _OpenClawAssistantLogWatchdog:
                     return None
 
                 # If any assistant log shows up for this session after the send, the logger plugin is working.
-                # Match exact session key, thread variant, and known board task patterns.
-                topic_id, task_id = _parse_board_session_key(base_key)
+                # Match exact session key, thread variant, and known board topic patterns.
+                topic_id = _parse_board_session_key(base_key)
                 query = select(LogEntry.id)
                 if DATABASE_URL.startswith("sqlite"):
                     conditions = [
@@ -9331,18 +9037,18 @@ class _OpenClawAssistantLogWatchdog:
                         "base_key": base_key,
                         "like_key": f"{base_key}|%",
                     }
-                    if task_id:
-                        condition = "json_extract(source, '$.sessionKey') LIKE :contains_task_key"
+                    if topic_id:
+                        condition = "json_extract(source, '$.sessionKey') LIKE :contains_topic_key"
                         conditions.append(condition)
-                        query_params["contains_task_key"] = f"%:clawboard:task:{topic_id}:{task_id}%"
+                        query_params["contains_topic_key"] = f"%:clawboard:topic:{topic_id}%"
                     query = query.where(
                         text(f"({' OR '.join(conditions)})")
                     ).params(**query_params)
                 else:
                     expr = LogEntry.source["sessionKey"].as_string()
                     exprs = [expr == base_key, expr.like(f"{base_key}|%")]
-                    if task_id:
-                        exprs.append(expr.like(f"%:clawboard:task:{topic_id}:{task_id}%"))
+                    if topic_id:
+                        exprs.append(expr.like(f"%:clawboard:topic:{topic_id}%"))
                     query = query.where(or_(*exprs))
                 query = (
                     query.where(func.lower(LogEntry.agentId) == "assistant")
@@ -9406,9 +9112,6 @@ class _OpenClawAssistantLogWatchdog:
                                 "base_key": base_key,
                                 "like_key": f"{base_key}|%",
                             }
-                            if task_id:
-                                session_conditions.append("json_extract(source, '$.sessionKey') LIKE :contains_task_key")
-                                fallback_params["contains_task_key"] = f"%:clawboard:task:{topic_id}:{task_id}%"
                             fallback_query = fallback_query.where(
                                 text(
                                     f"({' OR '.join(session_conditions)}) "
@@ -9421,8 +9124,6 @@ class _OpenClawAssistantLogWatchdog:
                         else:
                             expr = LogEntry.source["sessionKey"].as_string()
                             session_exprs = [expr == base_key, expr.like(f"{base_key}|%")]
-                            if task_id:
-                                session_exprs.append(expr.like(f"%:clawboard:task:{topic_id}:{task_id}%"))
                             fallback_query = fallback_query.where(or_(*session_exprs))
                             fallback_query = fallback_query.where(
                                 func.coalesce(LogEntry.source["requestId"].as_string(), "") == ""
@@ -10174,9 +9875,6 @@ def _openclaw_history_scope_metadata(message: dict[str, Any], session_key: str) 
         candidate_topic = str(row.get("boardScopeTopicId") or row.get("topicId") or "").strip()
         if candidate_topic and "boardScopeTopicId" not in source:
             source["boardScopeTopicId"] = _clip(candidate_topic, 240)
-        candidate_task = str(row.get("boardScopeTaskId") or row.get("taskId") or "").strip()
-        if candidate_task and "boardScopeTaskId" not in source:
-            source["boardScopeTaskId"] = _clip(candidate_task, 240)
         if "boardScopeKind" not in source:
             candidate_kind = _coerce_board_scope_kind(
                 row.get("boardScopeKind")
@@ -10191,19 +9889,12 @@ def _openclaw_history_scope_metadata(message: dict[str, Any], session_key: str) 
             if parsed_lock is not None:
                 source["boardScopeLock"] = parsed_lock
 
-    topic_id, task_id = _parse_board_session_key(session_key)
+    topic_id = _parse_board_session_key(session_key)
     if topic_id and "boardScopeTopicId" not in source:
         source["boardScopeTopicId"] = topic_id
-    if task_id and "boardScopeTaskId" not in source:
-        source["boardScopeTaskId"] = task_id
-    if task_id:
-        source.setdefault("boardScopeKind", "task")
+        source.setdefault("boardScopeKind", "topic")
         source.setdefault("boardScopeLock", True)
-    elif topic_id:
         source.pop("boardScopeTaskId", None)
-        source.pop("boardScopeKind", None)
-        source.pop("boardScopeLock", None)
-        source.pop("boardScopeTopicId", None)
     return source
 
 
@@ -10376,8 +10067,8 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
 
     subagent_parts = _openclaw_history_subagent_parts(session_key)
     is_subagent_session = subagent_parts is not None
-    session_board_topic_id, session_board_task_id = _parse_board_session_key(session_key)
-    is_board_session = bool(session_board_topic_id or session_board_task_id)
+    session_board_topic_id = _parse_board_session_key(session_key)
+    is_board_session = bool(session_board_topic_id)
     with get_session() as session:
         for (timestamp_ms, row), disp_ts_ms in zip(ordered_rows, display_ms):
             if timestamp_ms < since_ms:
@@ -11214,9 +10905,7 @@ def _resolve_board_send_target(
     message: str,
     source_space_id: str | None,
     selected_topic_id: str | None,
-    selected_task_id: str | None,
     force_new_topic: bool,
-    force_new_task: bool,
     resolver_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
     normalized_message = _sanitize_log_text(message)
@@ -11229,9 +10918,7 @@ def _resolve_board_send_target(
         raise HTTPException(status_code=400, detail="spaceId not found")
 
     normalized_selected_topic_id = str(selected_topic_id or "").strip() or None
-    normalized_selected_task_id = str(selected_task_id or "").strip() or None
     explicit_new_topic = bool(force_new_topic)
-    explicit_new_task = bool(force_new_task)
 
     def create_new_topic() -> Topic:
         proposed_topic_name = _resolver_derive_topic_name(normalized_message, context_payload=resolver_context)
@@ -11266,54 +10953,8 @@ def _resolve_board_send_target(
         session.add(topic)
         return topic
 
-    def create_new_task(topic: Topic) -> Task:
-        selected_topic_id_resolved = str(topic.id or "").strip()
-        if not selected_topic_id_resolved:
-            raise HTTPException(status_code=503, detail="Resolved topic is invalid")
-        proposed_task_title = _resolver_derive_task_title(normalized_message, context_payload=resolver_context)
-        stamp = now_iso()
-        task = Task(
-            id=create_id("task"),
-            spaceId=_space_id_for_topic(topic),
-            topicId=selected_topic_id_resolved,
-            title=proposed_task_title,
-            sortIndex=_next_sort_index_for_new_task(session, selected_topic_id_resolved, False),
-            color=None,
-            status="todo",
-            pinned=False,
-            priority="medium",
-            dueDate=None,
-            snoozedUntil=None,
-            tags=[],
-            createdAt=stamp,
-            updatedAt=stamp,
-        )
-        session.add(task)
-        return task
-
-    if normalized_selected_task_id:
-        selected_task = session.get(Task, normalized_selected_task_id)
-        if not selected_task:
-            raise HTTPException(status_code=400, detail="selectedTaskId not found")
-        selected_task_topic_id = str(getattr(selected_task, "topicId", "") or "").strip()
-        if not selected_task_topic_id:
-            raise HTTPException(status_code=400, detail="selectedTaskId is missing topic linkage")
-        if normalized_selected_topic_id and normalized_selected_topic_id != selected_task_topic_id:
-            raise HTTPException(status_code=400, detail="selectedTaskId does not belong to selectedTopicId")
-        selected_topic = session.get(Topic, selected_task_topic_id)
-        if not selected_topic:
-            raise HTTPException(status_code=400, detail="selectedTaskId topic not found")
-        return {
-            "topic": selected_topic,
-            "task": selected_task,
-            "topicCreated": False,
-            "taskCreated": False,
-            "decisionSource": "direct_selected_task",
-        }
-
     selected_topic: Topic | None = None
     selected_topic_created = False
-    selected_task_created = False
     decision_source = "heuristic"
 
     if explicit_new_topic:
@@ -11324,7 +10965,7 @@ def _resolve_board_send_target(
         selected_topic = session.get(Topic, normalized_selected_topic_id)
         if not selected_topic:
             raise HTTPException(status_code=400, detail="selectedTopicId not found")
-        decision_source = "direct_selected_topic_new_task" if explicit_new_task else "selected_topic_fallback"
+        decision_source = "direct_selected_topic"
     else:
         semantic_topic_id = _resolver_pick_semantic_topic_id(
             session,
@@ -11351,42 +10992,9 @@ def _resolve_board_send_target(
     if not selected_topic:
         raise HTTPException(status_code=503, detail="Failed to resolve topic for board send")
 
-    selected_topic_id_resolved = str(selected_topic.id or "").strip()
-    if not selected_topic_id_resolved:
-        raise HTTPException(status_code=503, detail="Resolved topic is invalid")
-
-    selected_task: Task | None = None
-    if explicit_new_task:
-        selected_task = create_new_task(selected_topic)
-        selected_task_created = True
-    else:
-        selected_task = _resolver_pick_semantic_task(
-            session,
-            topic_id=selected_topic_id_resolved,
-            context_payload=resolver_context,
-        )
-        if not selected_task:
-            proposed_task_title = _resolver_derive_task_title(normalized_message, context_payload=resolver_context)
-            duplicate_task = _find_similar_task(
-                session,
-                selected_topic_id_resolved,
-                proposed_task_title,
-                threshold=_resolver_task_similarity_threshold(),
-            )
-            if duplicate_task:
-                selected_task = duplicate_task
-            else:
-                selected_task = create_new_task(selected_topic)
-                selected_task_created = True
-
-    if not selected_task:
-        raise HTTPException(status_code=503, detail="Failed to resolve task for board send")
-
     return {
         "topic": selected_topic,
-        "task": selected_task,
         "topicCreated": selected_topic_created,
-        "taskCreated": selected_task_created,
         "decisionSource": decision_source,
     }
 
@@ -11403,9 +11011,7 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
         raise HTTPException(status_code=400, detail="message is required")
 
     selected_topic_id = str(payload.selectedTopicId or "").strip() or None
-    selected_task_id = str(payload.selectedTaskId or "").strip() or None
     force_new_topic = bool(getattr(payload, "forceNewTopic", False))
-    force_new_task = bool(getattr(payload, "forceNewTask", False))
     explicit_space_id = _normalize_space_id(payload.spaceId)
 
     started = time.monotonic()
@@ -11413,8 +11019,8 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
     context_payload: dict[str, Any] | None = None
     try:
         context_session_key = None
-        if selected_topic_id and selected_task_id:
-            context_session_key = f"clawboard:task:{selected_topic_id}:{selected_task_id}"
+        if selected_topic_id:
+            context_session_key = f"clawboard:topic:{selected_topic_id}"
         context_result = context(
             q=message,
             sessionKey=context_session_key,
@@ -11441,7 +11047,6 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
         routing_hints = _resolver_recent_routing_hints(
             session,
             selected_topic_id=selected_topic_id,
-            selected_task_id=selected_task_id,
             limit=16,
         )
         resolver_context_package = {
@@ -11456,31 +11061,20 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
             message=message,
             source_space_id=resolved_space_id,
             selected_topic_id=selected_topic_id,
-            selected_task_id=selected_task_id,
             force_new_topic=force_new_topic,
-            force_new_task=force_new_task,
             resolver_context=resolver_context_package,
         )
 
         topic = resolved["topic"]
-        task = resolved["task"]
         topic_created = bool(resolved["topicCreated"])
-        task_created = bool(resolved["taskCreated"])
         decision_source = str(resolved["decisionSource"] or "heuristic").strip() or "heuristic"
 
-        created_any = topic_created or task_created
-        if created_any:
+        if topic_created:
             session.commit()
-            if topic_created:
-                try:
-                    session.refresh(topic)
-                except Exception:
-                    pass
-            if task_created:
-                try:
-                    session.refresh(task)
-                except Exception:
-                    pass
+            try:
+                session.refresh(topic)
+            except Exception:
+                pass
         else:
             session.rollback()
 
@@ -11504,36 +11098,15 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
                     ).strip(),
                 }
             )
-        if task_created:
-            event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
-            enqueue_reindex_request(
-                {
-                    "op": "upsert",
-                    "kind": "task",
-                    "id": task.id,
-                    "topicId": task.topicId,
-                    "text": " ".join(
-                        [
-                            str(task.title or "").strip(),
-                            str(task.status or "").strip(),
-                            " ".join(str(tag).strip() for tag in (task.tags or []) if str(tag).strip()),
-                        ]
-                    ).strip(),
-                }
-            )
 
         telemetry_payload = {
             "decisionSource": decision_source,
             "fallbackMode": fallback_mode,
             "topicCreated": topic_created,
-            "taskCreated": task_created,
             "latencyMs": int(max(0.0, (time.monotonic() - started) * 1000.0)),
             "topicId": str(topic.id or "").strip(),
-            "taskId": str(task.id or "").strip(),
             "selectedTopicId": selected_topic_id,
-            "selectedTaskId": selected_task_id,
             "forceNewTopic": force_new_topic,
-            "forceNewTask": force_new_task,
             "spaceId": resolved_space_id,
         }
         event_hub.publish(
@@ -11545,15 +11118,11 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
         )
 
         topic_name = _resolver_clean_name(str(getattr(topic, "name", "") or ""), fallback="Untitled Topic")
-        task_title = _resolver_clean_name(str(getattr(task, "title", "") or ""), fallback="New Task", max_chars=84)
-        session_key = f"clawboard:task:{topic.id}:{task.id}"
+        session_key = f"clawboard:topic:{topic.id}"
         return {
             "topicId": str(topic.id),
             "topicName": topic_name,
             "topicCreated": topic_created,
-            "taskId": str(task.id),
-            "taskTitle": task_title,
-            "taskCreated": task_created,
             "sessionKey": session_key,
             "decisionSource": decision_source,
         }
@@ -11589,12 +11158,7 @@ def openclaw_chat(payload: OpenClawChatRequest, _background_tasks: BackgroundTas
 
     # Persist the user message immediately so the UI can render it without waiting for OpenClaw plugins.
     # OpenClaw is still responsible for logging assistant output + tool traces via plugins.
-    topic_id, task_id = _parse_board_session_key(session_key)
-    if topic_id and not task_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Topic sessions are no longer supported. Resolve board sends to a task session first.",
-        )
+    topic_id = _parse_board_session_key(session_key)
     created_at = now_iso()
     try:
         attachments_meta: list[dict[str, Any]] | None = None
@@ -11641,15 +11205,12 @@ def openclaw_chat(payload: OpenClawChatRequest, _background_tasks: BackgroundTas
                 source_meta["boardScopeSpaceId"] = space_scope_id
             if topic_id:
                 source_meta["boardScopeTopicId"] = topic_id
-            if task_id:
-                source_meta["boardScopeTaskId"] = task_id
-                source_meta["boardScopeKind"] = "task"
+                source_meta["boardScopeKind"] = "topic"
                 source_meta["boardScopeLock"] = True
 
             payload_log = LogAppend(
                 spaceId=space_scope_id,
                 topicId=topic_id,
-                taskId=task_id,
                 type="conversation",
                 content=message,
                 summary=_clip(_sanitize_log_text(message), 160),
@@ -11699,7 +11260,6 @@ def openclaw_chat(payload: OpenClawChatRequest, _background_tasks: BackgroundTas
                         sent_at=created_at,
                         space_id=space_scope_id,
                         topic_id=topic_id,
-                        task_id=task_id,
                         source="openclaw_chat",
                     )
                     session.commit()
@@ -12680,8 +12240,8 @@ def admin_start_fresh_replay(
 ):
     """Admin-only: replay classifier state from existing logs.
 
-    Default mode (`reclassify`) keeps existing topic/task links and only re-queues unassigned/failed
-    conversation logs for classification. `fresh` clears derived topics/tasks first.
+    Default mode (`reclassify`) keeps existing topic links and only re-queues unassigned/failed
+    conversation logs for classification. `fresh` clears derived topics first.
     """
     timestamp = now_iso()
     with get_session() as session:
@@ -12705,7 +12265,6 @@ def admin_start_fresh_replay(
                     """
                     UPDATE logentry
                     SET "topicId" = NULL,
-                        "taskId" = NULL,
                         "classificationStatus" = 'pending',
                         "classificationAttempts" = 0,
                         "classificationError" = NULL,
@@ -12717,7 +12276,6 @@ def admin_start_fresh_replay(
 
             # Derived objects: wipe so classifier can rebuild cleanly.
             session.exec(text("DELETE FROM ingestqueue;"))
-            session.exec(text("DELETE FROM task;"))
             session.exec(text("DELETE FROM topic;"))
         else:
             session_key_expr = (
@@ -12726,7 +12284,7 @@ def admin_start_fresh_replay(
                 else "COALESCE(source->>'sessionKey', '') <> ''"
             )
             # Non-destructive replay: preserve existing links and only re-queue logs that still
-            # need allocation (missing topic/task) or previously failed classification.
+            # need allocation (missing topic) or previously failed classification.
             session.exec(
                 text(
                     f"""
@@ -12739,7 +12297,6 @@ def admin_start_fresh_replay(
                       AND {session_key_expr}
                       AND (
                         "topicId" IS NULL
-                        OR "taskId" IS NULL
                         OR "classificationStatus" = 'failed'
                       )
                     ;
@@ -13566,16 +13123,10 @@ def delete_topic(topic_id: str):
     with get_session() as session:
         topic = session.get(Topic, topic_id)
         if not topic:
-            return {"ok": True, "deleted": False, "detachedTasks": 0, "detachedLogs": 0}
+            return {"ok": True, "deleted": False, "detachedLogs": 0}
 
         detached_at = now_iso()
-        tasks = session.exec(select(Task).where(Task.topicId == topic_id)).all()
         logs = session.exec(select(LogEntry).where(LogEntry.topicId == topic_id)).all()
-
-        for task in tasks:
-            task.topicId = None
-            task.updatedAt = detached_at
-            session.add(task)
 
         for entry in logs:
             entry.topicId = None
@@ -13587,27 +13138,7 @@ def delete_topic(topic_id: str):
         _record_deleted_entity_tombstone(session, DeletedTopic, topic_id, detached_at)
 
         enqueue_reindex_request({"op": "delete", "kind": "topic", "id": topic_id})
-        for task in tasks:
-            enqueue_reindex_request(
-                {
-                            "op": "upsert",
-                            "kind": "task",
-                            "id": task.id,
-                            "topicId": task.topicId,
-                            "text": " ".join(
-                                [
-                                    str(task.title or "").strip(),
-                                    str(task.status or "").strip(),
-                                    " ".join(
-                                        [str(t).strip() for t in (task.tags or []) if str(t).strip() and not str(t).strip().lower().startswith("system:")]
-                                    ),
-                                ]
-                            ).strip(),
-                        }
-                    )
 
-        for task in tasks:
-            event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
         for entry in logs:
             event_hub.publish({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
         event_hub.publish({"type": "topic.deleted", "data": {"id": topic_id}, "eventTs": detached_at})
@@ -13616,545 +13147,13 @@ def delete_topic(topic_id: str):
             "ok": True,
             "deleted": True,
             "id": topic_id,
-            "detachedTasks": len(tasks),
             "detachedLogs": len(logs),
         }
 
 
-@app.get("/api/tasks", response_model=List[TaskOut], tags=["tasks"])
-def list_tasks(
-    topicId: str | None = Query(
-        default=None,
-        description="Filter tasks by topic ID.",
-        example="topic-1",
-    ),
-    sessionKey: str | None = Query(default=None, description="Session key continuity scope (source.sessionKey)."),
-    spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
-    allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
-):
-    """List tasks (pinned first, newest activity first)."""
-    with get_session() as session:
-        tasks = session.exec(select(Task)).all()
-        resolved_source_space_id = _resolve_source_space_id(
-            session,
-            explicit_space_id=spaceId,
-            session_key=sessionKey,
-        )
-        allowed_space_ids = _resolve_allowed_space_ids(
-            session,
-            source_space_id=resolved_source_space_id,
-            allowed_space_ids_raw=allowedSpaceIds,
-        )
-        if allowed_space_ids is not None:
-            topic_by_id = _load_topics_by_ids(
-                session,
-                [str(getattr(task, "topicId", "") or "").strip() for task in tasks],
-            )
-            tasks = [item for item in tasks if _task_matches_allowed_spaces(item, allowed_space_ids, topic_by_id)]
-        if topicId:
-            tasks = [t for t in tasks if t.topicId == topicId]
-        tasks.sort(key=lambda t: t.updatedAt, reverse=True)
-        tasks.sort(key=lambda t: getattr(t, "sortIndex", 0))
-        tasks.sort(key=lambda t: not bool(getattr(t, "pinned", False)))
-        return tasks
 
+# Task API routes removed — topology flattened to Space→Topic.
 
-@app.get("/api/tasks/{task_id}", response_model=TaskOut, tags=["tasks"])
-def get_task(task_id: str):
-    """Fetch one task by id."""
-    with get_session() as session:
-        task = session.get(Task, task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-        return task
-
-
-@app.patch("/api/tasks/{task_id}", dependencies=[Depends(require_token)], response_model=TaskOut, tags=["tasks"])
-def patch_task(task_id: str, payload: TaskPatch = Body(...)):
-    """Patch an existing task (partial update)."""
-    with get_session() as session:
-        task = session.get(Task, task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        fields = payload.model_fields_set
-        stamp = now_iso()
-        touched = False
-        reindex_needed = False
-        space_changed = False
-
-        if "spaceId" in fields:
-            normalized_space_id = _normalize_space_id(payload.spaceId)
-            if not normalized_space_id:
-                raise HTTPException(status_code=400, detail="spaceId is required")
-            _ensure_default_space(session)
-            target_space = session.get(Space, normalized_space_id)
-            if not target_space:
-                raise HTTPException(status_code=400, detail="spaceId not found")
-            if _space_id_for_task(task) != normalized_space_id:
-                space_changed = True
-            task.spaceId = normalized_space_id
-            touched = True
-
-        if "title" in fields:
-            title = (payload.title or "").strip()
-            if not title:
-                raise HTTPException(status_code=400, detail="title cannot be empty")
-            if title != task.title:
-                reindex_needed = True
-            task.title = title
-            touched = True
-
-        if "color" in fields:
-            if payload.color is None:
-                task.color = None
-                # Color-only changes intentionally do not set touched=True so that
-                # updatedAt is not bumped (e.g. Shuffle Board Colors must not reorder tasks).
-            else:
-                normalized = _normalize_hex_color(payload.color)
-                if not normalized:
-                    raise HTTPException(status_code=400, detail="Invalid color (expected #RRGGBB)")
-                task.color = normalized
-                # same: color change alone does not advance updatedAt
-
-        if "topicId" in fields:
-            if payload.topicId:
-                parent = session.get(Topic, payload.topicId)
-                if not parent:
-                    raise HTTPException(status_code=400, detail="topicId not found")
-                task.topicId = payload.topicId
-                parent_space_id = _space_id_for_topic(parent)
-                if _space_id_for_task(task) != parent_space_id:
-                    task.spaceId = parent_space_id
-                    space_changed = True
-            else:
-                task.topicId = None
-            touched = True
-            reindex_needed = True
-
-        if "status" in fields:
-            task.status = payload.status or task.status
-            touched = True
-            reindex_needed = True
-
-        if "priority" in fields:
-            task.priority = payload.priority
-            touched = True
-
-        if "dueDate" in fields:
-            task.dueDate = payload.dueDate
-            touched = True
-
-        if "snoozedUntil" in fields:
-            task.snoozedUntil = payload.snoozedUntil
-            touched = True
-
-        if "pinned" in fields:
-            task.pinned = payload.pinned
-            touched = True
-
-        if "tags" in fields:
-            task.tags = _normalize_tags(payload.tags or [])
-            touched = True
-            reindex_needed = True
-
-        # Digest fields are system-managed and should not reorder tasks by activity.
-        if "digest" in fields:
-            task.digest = payload.digest
-        if "digestUpdatedAt" in fields:
-            task.digestUpdatedAt = payload.digestUpdatedAt
-
-        if touched:
-            task.updatedAt = stamp
-
-        session.add(task)
-        session.commit()
-        session.refresh(task)
-        if space_changed:
-            task_space_id = _space_id_for_task(task)
-            scoped_logs = session.exec(select(LogEntry).where(LogEntry.taskId == task.id)).all()
-            for scoped_log in scoped_logs:
-                scoped_log.spaceId = task_space_id
-                scoped_log.updatedAt = stamp
-                session.add(scoped_log)
-            session.commit()
-            session.refresh(task)
-        event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
-
-        if reindex_needed:
-            task_text = " ".join(
-                [
-                    str(task.title or "").strip(),
-                    str(task.status or "").strip(),
-                    " ".join(
-                        [
-                            str(t).strip()
-                            for t in (task.tags or [])
-                            if str(t).strip() and not str(t).strip().lower().startswith("system:")
-                        ]
-                    ),
-                ]
-            ).strip()
-            enqueue_reindex_request(
-                {
-                    "op": "upsert",
-                    "kind": "task",
-                    "id": task.id,
-                    "topicId": task.topicId,
-                    "text": task_text,
-                }
-            )
-
-        return task
-
-
-@app.post("/api/tasks/reorder", dependencies=[Depends(require_token)], tags=["tasks"])
-def reorder_tasks(payload: TaskReorderRequest):
-    """Persist a manual task order within a topic by assigning sortIndex sequentially."""
-    ordered_ids = [value.strip() for value in payload.orderedIds if value.strip()]
-    with get_session() as session:
-        query = select(Task)
-        if payload.topicId is None:
-            query = query.where(Task.topicId.is_(None))
-        else:
-            query = query.where(Task.topicId == payload.topicId)
-        scope_tasks = session.exec(query).all()
-        scope_ids = {task.id for task in scope_tasks}
-        provided = set(ordered_ids)
-        missing = sorted(scope_ids - provided)
-        extra = sorted(provided - scope_ids)
-        if missing or extra:
-            detail = {
-                "missing": missing[:50],
-                "extra": extra[:50],
-                "message": "orderedIds must contain every task id for the provided topic scope.",
-            }
-            raise HTTPException(status_code=400, detail=detail)
-
-        tasks_by_id = {task.id: task for task in scope_tasks}
-        # Reordering is not a meaningful content update; do not touch updatedAt.
-        event_ts = now_iso()
-        for idx, task_id in enumerate(ordered_ids):
-            task = tasks_by_id.get(task_id)
-            if not task:
-                continue
-            task.sortIndex = idx
-            session.add(task)
-        session.commit()
-        for task_id in ordered_ids:
-            task = tasks_by_id.get(task_id)
-            if not task:
-                continue
-            event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": event_ts})
-        return {"ok": True, "count": len(ordered_ids)}
-
-
-@app.post("/api/tasks", dependencies=[Depends(require_token)], response_model=TaskOut, tags=["tasks"])
-def upsert_task(
-    payload: TaskUpsert = Body(
-        ...,
-        examples={
-            "default": {
-                "summary": "Upsert task",
-                "value": {
-                    "id": "task-1",
-                    "topicId": "topic-1",
-                    "title": "Ship onboarding wizard",
-                    "status": "doing",
-                    "pinned": True,
-                    "priority": "high",
-                    "dueDate": "2026-02-05T00:00:00.000Z",
-                },
-            }
-        },
-    )
-):
-    """Create or update a task."""
-    with get_session() as session:
-        _ensure_default_space(session)
-        task = session.get(Task, payload.id) if payload.id else None
-        timestamp = now_iso()
-        fields = payload.model_fields_set
-        scope_changed = False
-        if task:
-            original_topic_id = str(task.topicId or "")
-            original_space_id = _space_id_for_task(task)
-            task.title = payload.title or task.title
-            if "color" in fields:
-                if payload.color is None:
-                    task.color = None
-                else:
-                    normalized_color = _normalize_hex_color(payload.color)
-                    if normalized_color:
-                        task.color = normalized_color
-            if "topicId" in fields:
-                task.topicId = payload.topicId
-                if payload.topicId:
-                    parent = session.get(Topic, payload.topicId)
-                    if not parent:
-                        raise HTTPException(status_code=400, detail="topicId not found")
-                    task.spaceId = _space_id_for_topic(parent)
-            if "spaceId" in fields and ("topicId" not in fields or not payload.topicId):
-                normalized_space_id = _normalize_space_id(payload.spaceId)
-                if not normalized_space_id:
-                    raise HTTPException(status_code=400, detail="spaceId is required")
-                target_space = session.get(Space, normalized_space_id)
-                if not target_space:
-                    raise HTTPException(status_code=400, detail="spaceId not found")
-                task.spaceId = normalized_space_id
-            if "status" in fields and payload.status is not None:
-                task.status = payload.status
-            if "priority" in fields:
-                task.priority = payload.priority
-            if "dueDate" in fields:
-                task.dueDate = payload.dueDate
-            if "pinned" in fields:
-                task.pinned = payload.pinned
-            if "tags" in fields:
-                task.tags = _normalize_tags(payload.tags or [])
-            if "snoozedUntil" in fields:
-                task.snoozedUntil = payload.snoozedUntil
-            task.updatedAt = timestamp
-            scope_changed = (
-                str(task.topicId or "") != original_topic_id
-                or _space_id_for_task(task) != original_space_id
-            )
-        else:
-            parent_space_id_for_create = None
-            if payload.topicId:
-                parent_for_create = session.get(Topic, payload.topicId)
-                if not parent_for_create:
-                    raise HTTPException(status_code=400, detail="topicId not found")
-                parent_space_id_for_create = _space_id_for_topic(parent_for_create)
-            requested_space_id = parent_space_id_for_create or _normalize_space_id(payload.spaceId) or DEFAULT_SPACE_ID
-            duplicate = _find_similar_task(
-                session,
-                payload.topicId,
-                payload.title,
-                space_id=requested_space_id,
-            )
-            if duplicate:
-                original_duplicate_topic_id = str(duplicate.topicId or "")
-                original_duplicate_space_id = _space_id_for_task(duplicate)
-                if "color" in fields:
-                    if payload.color is None:
-                        duplicate.color = None
-                    else:
-                        normalized_color = _normalize_hex_color(payload.color)
-                        if normalized_color:
-                            duplicate.color = normalized_color
-                elif not _normalize_hex_color(getattr(duplicate, "color", None)):
-                    used_colors = {
-                        _normalize_hex_color(getattr(item, "color", None))
-                        for item in session.exec(select(Task)).all()
-                        if _normalize_hex_color(getattr(item, "color", None))
-                    }
-                    duplicate.color = _auto_pick_color(f"task:{duplicate.id}:{duplicate.title}", used_colors, 21.0)
-                if "status" in fields and payload.status is not None:
-                    duplicate.status = payload.status
-                if "topicId" in fields:
-                    duplicate.topicId = payload.topicId
-                    if payload.topicId:
-                        parent = session.get(Topic, payload.topicId)
-                        if not parent:
-                            raise HTTPException(status_code=400, detail="topicId not found")
-                        duplicate.spaceId = _space_id_for_topic(parent)
-                elif "spaceId" in fields and ("topicId" not in fields or not payload.topicId):
-                    normalized_space_id = _normalize_space_id(payload.spaceId)
-                    if not normalized_space_id:
-                        raise HTTPException(status_code=400, detail="spaceId is required")
-                    target_space = session.get(Space, normalized_space_id)
-                    if not target_space:
-                        raise HTTPException(status_code=400, detail="spaceId not found")
-                    duplicate.spaceId = normalized_space_id
-                if "priority" in fields:
-                    duplicate.priority = payload.priority
-                if "dueDate" in fields:
-                    duplicate.dueDate = payload.dueDate
-                if "pinned" in fields:
-                    duplicate.pinned = payload.pinned
-                if "tags" in fields:
-                    duplicate.tags = _normalize_tags(payload.tags or [])
-                if "snoozedUntil" in fields:
-                    duplicate.snoozedUntil = payload.snoozedUntil
-                duplicate.updatedAt = timestamp
-                duplicate_scope_changed = (
-                    str(duplicate.topicId or "") != original_duplicate_topic_id
-                    or _space_id_for_task(duplicate) != original_duplicate_space_id
-                )
-                session.add(duplicate)
-                session.commit()
-                session.refresh(duplicate)
-                if duplicate_scope_changed:
-                    duplicate_space_id = _space_id_for_task(duplicate)
-                    scoped_logs = session.exec(select(LogEntry).where(LogEntry.taskId == duplicate.id)).all()
-                    for scoped_log in scoped_logs:
-                        scoped_log.spaceId = duplicate_space_id
-                        scoped_log.updatedAt = timestamp
-                        session.add(scoped_log)
-                    session.commit()
-                    session.refresh(duplicate)
-                event_hub.publish({"type": "task.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
-                enqueue_reindex_request(
-                    {
-                        "op": "upsert",
-                        "kind": "task",
-                        "id": duplicate.id,
-                        "topicId": duplicate.topicId,
-                        "text": " ".join(
-                            [
-                                str(duplicate.title or "").strip(),
-                                str(duplicate.status or "").strip(),
-                                " ".join(
-                                    [
-                                        str(t).strip()
-                                        for t in (duplicate.tags or [])
-                                        if str(t).strip() and not str(t).strip().lower().startswith("system:")
-                                    ]
-                                ),
-                            ]
-                        ).strip(),
-                    }
-                )
-                return duplicate
-            used_colors = {
-                _normalize_hex_color(getattr(item, "color", None))
-                for item in session.exec(select(Task)).all()
-                if _normalize_hex_color(getattr(item, "color", None))
-            }
-            resolved_color = _normalize_hex_color(payload.color)
-            if not resolved_color:
-                resolved_color = _auto_pick_color(f"task:{payload.id or ''}:{payload.title}", used_colors, 21.0)
-            sort_index = _next_sort_index_for_new_task(session, payload.topicId, bool(payload.pinned or False))
-            resolved_space_id = requested_space_id
-            target_space = session.get(Space, resolved_space_id)
-            if not target_space:
-                raise HTTPException(status_code=400, detail="spaceId not found")
-            task = Task(
-                id=payload.id or create_id("task"),
-                spaceId=resolved_space_id,
-                topicId=payload.topicId,
-                title=payload.title,
-                sortIndex=sort_index,
-                color=resolved_color,
-                status=payload.status or "todo",
-                pinned=payload.pinned or False,
-                priority=payload.priority or "medium",
-                dueDate=payload.dueDate,
-                snoozedUntil=payload.snoozedUntil,
-                tags=_normalize_tags(payload.tags or []),
-                createdAt=timestamp,
-                updatedAt=timestamp,
-            )
-        session.add(task)
-        session.commit()
-        session.refresh(task)
-        if scope_changed:
-            task_space_id = _space_id_for_task(task)
-            scoped_logs = session.exec(select(LogEntry).where(LogEntry.taskId == task.id)).all()
-            for scoped_log in scoped_logs:
-                scoped_log.spaceId = task_space_id
-                scoped_log.updatedAt = timestamp
-                session.add(scoped_log)
-            session.commit()
-            session.refresh(task)
-        event_hub.publish({"type": "task.upserted", "data": task.model_dump(), "eventTs": task.updatedAt})
-        enqueue_reindex_request(
-            {
-                "op": "upsert",
-                "kind": "task",
-                "id": task.id,
-                "topicId": task.topicId,
-                "text": " ".join(
-                    [
-                        str(task.title or "").strip(),
-                        str(task.status or "").strip(),
-                        " ".join(
-                            [str(t).strip() for t in (task.tags or []) if str(t).strip() and not str(t).strip().lower().startswith("system:")]
-                        ),
-                    ]
-                ).strip(),
-            }
-        )
-        return task
-
-
-@app.delete("/api/tasks/unassigned/empty", dependencies=[Depends(require_token)], tags=["tasks"])
-def empty_unassigned_tasks():
-    """Delete all unassigned tasks and detach their logs in a single transaction."""
-    with get_session() as session:
-        tasks = session.exec(select(Task).where(Task.topicId.is_(None))).all()
-        if not tasks:
-            return {
-                "ok": True,
-                "deleted": False,
-                "deletedTasks": 0,
-                "detachedLogs": 0,
-            }
-
-        task_ids = [task.id for task in tasks]
-        logs = session.exec(select(LogEntry).where(LogEntry.taskId.in_(task_ids))).all()
-        detached_at = now_iso()
-
-        for entry in logs:
-            entry.taskId = None
-            entry.updatedAt = detached_at
-            session.add(entry)
-
-        for task in tasks:
-            session.delete(task)
-
-        session.commit()
-        for task_id in task_ids:
-            _record_deleted_entity_tombstone(session, DeletedTask, task_id, detached_at)
-
-        for task_id in task_ids:
-            enqueue_reindex_request({"op": "delete", "kind": "task", "id": task_id})
-        for entry in logs:
-            event_hub.publish({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
-        for task_id in task_ids:
-            event_hub.publish({"type": "task.deleted", "data": {"id": task_id}, "eventTs": detached_at})
-
-        return {
-            "ok": True,
-            "deleted": True,
-            "deletedTasks": len(task_ids),
-            "detachedLogs": len(logs),
-        }
-
-
-@app.delete("/api/tasks/{task_id}", dependencies=[Depends(require_token)], tags=["tasks"])
-def delete_task(task_id: str):
-    """Delete a task and detach dependent logs so conversation history remains visible."""
-    with get_session() as session:
-        task = session.get(Task, task_id)
-        if not task:
-            return {"ok": True, "deleted": False, "detachedLogs": 0}
-
-        detached_at = now_iso()
-        logs = session.exec(select(LogEntry).where(LogEntry.taskId == task_id)).all()
-
-        for entry in logs:
-            entry.taskId = None
-            entry.updatedAt = detached_at
-            session.add(entry)
-
-        session.delete(task)
-        session.commit()
-        _record_deleted_entity_tombstone(session, DeletedTask, task_id, detached_at)
-
-        enqueue_reindex_request({"op": "delete", "kind": "task", "id": task_id})
-
-        for entry in logs:
-            event_hub.publish({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
-        event_hub.publish({"type": "task.deleted", "data": {"id": task_id}, "eventTs": detached_at})
-
-        return {
-            "ok": True,
-            "deleted": True,
-            "id": task_id,
-            "detachedLogs": len(logs),
-        }
 
 
 @app.get("/api/classifier/pending", response_model=List[LogOutLite], tags=["classifier"])
@@ -14184,8 +13183,8 @@ def list_pending_conversations_for_classifier(
         )
         rows = session.exec(query).all()
         if allowed_space_ids is not None:
-            topic_by_id, task_by_id = _load_related_maps_for_logs(session, rows)
-            rows = [row for row in rows if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id, task_by_id)]
+            topic_by_id = _load_related_maps_for_logs(session, rows)
+            rows = [row for row in rows if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id)]
         if offset > 0:
             rows = rows[offset:]
         if limit >= 0:
@@ -14241,8 +13240,6 @@ def append_session_routing_memory(payload: SessionRoutingAppend):
         "ts": ts,
         "topicId": payload.topicId,
         "topicName": _clip_text(payload.topicName, 200),
-        "taskId": payload.taskId,
-        "taskTitle": _clip_text(payload.taskTitle, 200),
         "anchor": _clip_text(payload.anchor, 800),
     }
 
@@ -14277,7 +13274,7 @@ def append_session_routing_memory(payload: SessionRoutingAppend):
 def replay_classifier_bundle(payload: ClassifierReplayRequest):
     """Mark a request/response bundle as pending so the classifier re-runs routing/summaries.
 
-    This is a user-triggered escape hatch when a Task Chat thread should be re-checked for
+    This is a user-triggered escape hatch when a topic chat thread should be re-checked for
     task allocation (or other classifier updates) starting from an anchor user message.
     """
 
@@ -14395,9 +13392,9 @@ def replay_classifier_bundle(payload: ClassifierReplayRequest):
         if not base_session_key:
             raise HTTPException(status_code=400, detail="Anchor log sessionKey is invalid")
 
-        topic_id, task_id = _parse_board_session_key(base_session_key)
-        if not topic_id or not task_id:
-            raise HTTPException(status_code=400, detail="Replay is only supported for Task Chat sessions")
+        topic_id = _parse_board_session_key(base_session_key)
+        if not topic_id:
+            raise HTTPException(status_code=400, detail="Replay is only supported for Topic Chat sessions")
 
         query = select(LogEntry)
         if DATABASE_URL.startswith("sqlite"):
@@ -14501,7 +13498,6 @@ def replay_classifier_bundle(payload: ClassifierReplayRequest):
 @app.get("/api/log", response_model=List[LogOut], tags=["logs"])
 def list_logs(
     topicId: str | None = Query(default=None, description="Filter logs by topic ID.", example="topic-1"),
-    taskId: str | None = Query(default=None, description="Filter logs by task ID.", example="task-1"),
     relatedLogId: str | None = Query(
         default=None,
         description="Filter logs by relatedLogId (comma-separated allowed).",
@@ -14544,8 +13540,6 @@ def list_logs(
             query = query.options(defer(LogEntry.raw))
         if topicId:
             query = query.where(LogEntry.topicId == topicId)
-        if taskId:
-            query = query.where(LogEntry.taskId == taskId)
         if relatedLogId:
             related_ids = {rid.strip() for rid in relatedLogId.split(",") if rid.strip()}
             if related_ids:
@@ -14582,9 +13576,9 @@ def list_logs(
             chunk = session.exec(ordered_query.offset(scan_offset).limit(page_size)).all()
             if not chunk:
                 break
-            topic_by_id, task_by_id = _load_related_maps_for_logs(session, chunk)
+            topic_by_id = _load_related_maps_for_logs(session, chunk)
             for row in chunk:
-                if not _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id, task_by_id):
+                if not _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id):
                     continue
                 if skip > 0:
                     skip -= 1
@@ -14687,42 +13681,39 @@ def get_log_chat_counts(
     spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
     allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
 ):
-    """Return aggregate task chat entry counts without loading full log payloads."""
+    """Return aggregate topic chat entry counts without loading full log payloads."""
     with get_session() as session:
         allowed_space_ids = _resolve_allowed_space_ids(
             session,
             source_space_id=spaceId,
             allowed_space_ids_raw=allowedSpaceIds,
         )
-        task_query = (
-            select(LogEntry.taskId, func.count(LogEntry.id))
-            .where(LogEntry.taskId.is_not(None))
+        topic_query = (
+            select(LogEntry.topicId, func.count(LogEntry.id))
+            .where(LogEntry.topicId.is_not(None))
             .where(_visible_chat_count_log_predicate())
         )
         if allowed_space_ids is not None:
             space_values = [item for item in sorted(allowed_space_ids) if item]
             if space_values:
-                task_query = task_query.where(LogEntry.spaceId.in_(space_values))
+                topic_query = topic_query.where(LogEntry.spaceId.in_(space_values))
             else:
-                # No visible spaces: return empty maps fast.
-                return {"taskChatCounts": {}}
+                return {"topicChatCounts": {}}
 
-        task_rows = session.exec(task_query.group_by(LogEntry.taskId)).all()
+        topic_rows = session.exec(topic_query.group_by(LogEntry.topicId)).all()
 
-        task_counts: dict[str, int] = {}
-        for row in task_rows:
+        topic_counts: dict[str, int] = {}
+        for row in topic_rows:
             try:
-                task_id = str(row[0] or "").strip()
+                tid = str(row[0] or "").strip()
                 count_value = int(row[1] or 0)
             except Exception:
                 continue
-            if not task_id:
+            if not tid:
                 continue
-            task_counts[task_id] = max(0, count_value)
+            topic_counts[tid] = max(0, count_value)
 
-        return {
-            "taskChatCounts": task_counts,
-        }
+        return {"topicChatCounts": topic_counts}
 
 
 @app.get("/api/log/{log_id}", response_model=LogOut, tags=["logs"])
@@ -14756,7 +13747,6 @@ def append_log(
                 "summary": "Append log entry",
                 "value": {
                     "topicId": "topic-1",
-                    "taskId": "task-1",
                     "type": "conversation",
                     "content": "Defined onboarding wizard steps and token flow.",
                     "summary": "Defined onboarding wizard steps.",
@@ -14805,12 +13795,8 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
         entry = session.get(LogEntry, log_id)
         if not entry:
             raise HTTPException(status_code=404, detail="Log not found")
-        previous_task_id = str(getattr(entry, "taskId", "") or "").strip()
 
         fields = payload.model_fields_set
-        classifier_patch = bool(
-            {"classificationStatus", "classificationAttempts", "classificationError"} & set(fields)
-        )
         if "spaceId" in fields:
             normalized_space_id = _normalize_space_id(payload.spaceId)
             if not normalized_space_id:
@@ -14829,42 +13815,9 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
                     entry.topicId = topic.id
                     entry.spaceId = _space_id_for_topic(topic)
                 else:
-                    # Classifier retries can carry stale scoped IDs from old boards; keep patch idempotent.
                     entry.topicId = None
-                    if "taskId" not in fields:
-                        entry.taskId = None
             else:
                 entry.topicId = None
-                if "taskId" not in fields:
-                    entry.taskId = None
-        if "taskId" in fields:
-            if payload.taskId:
-                task = session.get(Task, payload.taskId)
-                if not task:
-                    if classifier_patch:
-                        entry.taskId = None
-                        if "topicId" not in fields:
-                            entry.topicId = None
-                    else:
-                        raise HTTPException(status_code=400, detail="Task not found")
-                else:
-                    if "topicId" in fields:
-                        if entry.topicId and task.topicId != entry.topicId:
-                            if classifier_patch:
-                                # Classifier retries can carry stale scoped IDs; align to the task
-                                # so patching stays idempotent instead of hard-failing.
-                                entry.topicId = task.topicId
-                            else:
-                                raise HTTPException(status_code=400, detail="Task does not belong to selected topic")
-                        if not entry.topicId:
-                            entry.topicId = task.topicId
-                    else:
-                        # Align topic to the task if topic wasn't explicitly patched.
-                        entry.topicId = task.topicId
-                    entry.taskId = task.id
-                    entry.spaceId = _space_id_for_task(task)
-            else:
-                entry.taskId = None
         if "relatedLogId" in fields:
             entry.relatedLogId = payload.relatedLogId
         if "content" in fields:
@@ -14880,18 +13833,8 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
         if "classificationError" in fields:
             entry.classificationError = _coerce_safe_text(payload.classificationError) or None
 
-        # If only topicId changed (taskId not explicitly provided), drop taskId if it no longer matches.
-        if "topicId" in fields and "taskId" not in fields and entry.taskId:
-            task = session.get(Task, entry.taskId)
-            if not task or task.topicId != entry.topicId:
-                entry.taskId = None
-
-        # Keep log space in sync with routed entity ownership.
-        if entry.taskId:
-            task = session.get(Task, entry.taskId)
-            if task:
-                entry.spaceId = _space_id_for_task(task)
-        elif entry.topicId:
+        # Keep log space in sync with routed topic ownership.
+        if entry.topicId:
             topic = session.get(Topic, entry.topicId)
             if topic:
                 entry.spaceId = _space_id_for_topic(topic)
@@ -14903,19 +13846,17 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
         if source_map:
             canonical_space = _normalize_space_id(entry.spaceId)
             canonical_topic = str(entry.topicId or "").strip()
-            canonical_task = str(entry.taskId or "").strip()
             if canonical_space:
                 source_map["boardScopeSpaceId"] = canonical_space
-            if canonical_topic and canonical_task:
+            if canonical_topic:
                 source_map["boardScopeTopicId"] = canonical_topic
-                source_map["boardScopeKind"] = "task"
+                source_map["boardScopeKind"] = "topic"
                 source_map["boardScopeLock"] = True
-                source_map["boardScopeTaskId"] = canonical_task
             else:
                 source_map.pop("boardScopeTopicId", None)
-                source_map.pop("boardScopeTaskId", None)
                 source_map.pop("boardScopeKind", None)
                 source_map.pop("boardScopeLock", None)
+            source_map.pop("boardScopeTaskId", None)
             entry.source = source_map or None
 
         stamp = now_iso()
@@ -14930,24 +13871,13 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
                 session_key=source_session_key,
                 space_id=str(entry.spaceId or "").strip() or None,
                 topic_id=str(entry.topicId or "").strip() or None,
-                task_id=str(entry.taskId or "").strip() or None,
                 source_log_id=str(entry.id or "").strip() or None,
             )
 
-        # Best-effort: if a conversation is routed into a snoozed/archived topic or task,
-        # revive it so it surfaces again in the Unified view.
+        # Best-effort: if a conversation is routed into a snoozed/archived topic, revive it.
         revived_topic: Topic | None = None
-        revived_task: Task | None = None
         if str(getattr(entry, "type", "") or "").strip().lower() == "conversation":
             try:
-                if entry.taskId:
-                    task = session.get(Task, entry.taskId)
-                    if task and task.snoozedUntil:
-                        task.snoozedUntil = None
-                        task.updatedAt = stamp
-                        session.add(task)
-                        revived_task = task
-
                 if entry.topicId:
                     topic = session.get(Topic, entry.topicId)
                     if topic and (
@@ -14961,7 +13891,6 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
                         revived_topic = topic
             except Exception:
                 revived_topic = None
-                revived_task = None
 
         entry.updatedAt = stamp
 
@@ -14990,12 +13919,10 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
         if (
             source_request_id
             and entry.topicId
-            and entry.taskId
             and request_route_event
             and (
                 bool(request_route_event.get("promotion"))
                 or str(request_route_event.get("previousTopicId") or "").strip() != str(entry.topicId or "").strip()
-                or str(request_route_event.get("previousTaskId") or "").strip() != str(entry.taskId or "").strip()
             )
         ):
             try:
@@ -15005,7 +13932,6 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
                     session_key=source_session_key,
                     space_id=str(entry.spaceId or "").strip() or None,
                     topic_id=str(entry.topicId or "").strip() or None,
-                    task_id=str(entry.taskId or "").strip() or None,
                     source_log_id=str(entry.id or "").strip() or None,
                 )
             except Exception:
@@ -15017,8 +13943,6 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
         _enqueue_log_reindex(entry)
         if revived_topic:
             event_hub.publish({"type": "topic.upserted", "data": revived_topic.model_dump(), "eventTs": revived_topic.updatedAt})
-        if revived_task:
-            event_hub.publish({"type": "task.upserted", "data": revived_task.model_dump(), "eventTs": revived_task.updatedAt})
         if request_route_event:
             event_hub.publish(
                 {
@@ -15125,7 +14049,7 @@ def delete_log(log_id: str):
     tags=["logs"],
 )
 def purge_log_forward(log_id: str):
-    """Permanently delete the given log entry and everything after it in the same Task Chat session."""
+    """Permanently delete the given log entry and everything after it in the same topic chat session."""
     anchor_id = (log_id or "").strip()
     if not anchor_id:
         raise HTTPException(status_code=400, detail="log_id is required")
@@ -15136,16 +14060,13 @@ def purge_log_forward(log_id: str):
             raise HTTPException(status_code=404, detail="Anchor log not found")
 
         topic_id = str(getattr(anchor, "topicId", "") or "").strip()
-        task_id = getattr(anchor, "taskId", None)
         if not topic_id:
-            raise HTTPException(status_code=400, detail="Anchor log has no topicId; purge forward requires a task chat entry")
-        if task_id is None:
-            raise HTTPException(status_code=400, detail="Anchor log must belong to Task Chat")
+            raise HTTPException(status_code=400, detail="Anchor log has no topicId; purge forward requires a scoped entry")
 
-        # Scope the query to the anchor's task chat thread.
-        q_filter = (LogEntry.topicId == topic_id, LogEntry.taskId == task_id)
-        scope_label = "Task Chat"
-        scope_err = "Anchor log is not part of Task Chat"
+        # Scope the query to the anchor's topic thread.
+        q_filter = (LogEntry.topicId == topic_id,)
+        scope_label = "Topic Chat"
+        scope_err = "Anchor log is not part of Topic Chat"
 
         query = (
             select(LogEntry)
@@ -15197,12 +14118,10 @@ def _serialize_changes_payload(
     *,
     spaces: list[Space],
     topics: list[Topic],
-    tasks: list[Task],
     logs: list[LogEntry],
     drafts: list[Draft],
     deleted_log_ids: list[str],
     deleted_topics: list[dict[str, Any]],
-    deleted_tasks: list[dict[str, Any]],
     openclaw_typing: list[dict[str, Any]],
     openclaw_thread_work: list[dict[str, Any]],
     cursor: str | None,
@@ -15211,7 +14130,6 @@ def _serialize_changes_payload(
         "cursor": str(cursor or "").strip() or None,
         "spaces": [SpaceOut.model_validate(row).model_dump() for row in spaces],
         "topics": [TopicOut.model_validate(row).model_dump() for row in topics],
-        "tasks": [TaskOut.model_validate(row).model_dump() for row in tasks],
         "logs": [LogOutLite.model_validate(row).model_dump() for row in logs],
         "drafts": [DraftOut.model_validate(row).model_dump() for row in drafts],
         "deletedLogIds": [str(item) for item in deleted_log_ids if str(item).strip()],
@@ -15221,14 +14139,6 @@ def _serialize_changes_payload(
                 "deletedAt": str(item.get("deletedAt") or "").strip(),
             }
             for item in deleted_topics
-            if str(item.get("id") or "").strip() and str(item.get("deletedAt") or "").strip()
-        ],
-        "deletedTasks": [
-            {
-                "id": str(item.get("id") or "").strip(),
-                "deletedAt": str(item.get("deletedAt") or "").strip(),
-            }
-            for item in deleted_tasks
             if str(item.get("id") or "").strip() and str(item.get("deletedAt") or "").strip()
         ],
         "openclawTyping": [
@@ -15268,7 +14178,6 @@ def _build_changes_payload(
     if not since:
         space_query = select(Space)
         topic_query = select(Topic)
-        task_query = select(Task)
         if allowed_space_ids is not None:
             space_query = space_query.where(Space.id.in_(list(allowed_space_ids)))
         spaces = session.exec(space_query).all()
@@ -15276,14 +14185,6 @@ def _build_changes_payload(
         if allowed_space_ids is not None:
             topics = [topic for topic in topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
         topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in topics if getattr(topic, "id", None)}
-        tasks = session.exec(task_query).all()
-        if allowed_space_ids is not None:
-            parent_topics = _load_topics_by_ids(
-                session,
-                [str(getattr(task, "topicId", "") or "").strip() for task in tasks],
-            )
-            merged_topic_by_id = {**parent_topics, **topic_by_id}
-            tasks = [task for task in tasks if _task_matches_allowed_spaces(task, allowed_space_ids, merged_topic_by_id)]
         drafts = session.exec(select(Draft)).all()
         log_query = select(LogEntry).order_by(
             LogEntry.createdAt.desc(),
@@ -15295,22 +14196,19 @@ def _build_changes_payload(
             log_query = log_query.options(defer(LogEntry.raw))
         logs = session.exec(log_query).all()
         if allowed_space_ids is not None:
-            seeded_tasks = {str(getattr(task, "id", "") or ""): task for task in tasks if getattr(task, "id", None)}
-            topic_by_id_for_logs, task_by_id_for_logs = _load_related_maps_for_logs(
+            topic_by_id_for_logs = _load_related_maps_for_logs(
                 session,
                 logs,
                 seeded_topics=topic_by_id,
-                seeded_tasks=seeded_tasks,
             )
             logs = [
                 row
                 for row in logs
-                if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id_for_logs, task_by_id_for_logs)
+                if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id_for_logs)
             ]
     else:
         space_query = select(Space).where(Space.updatedAt >= since)
         topic_query = select(Topic).where(Topic.updatedAt >= since)
-        task_query = select(Task).where(Task.updatedAt >= since)
         if allowed_space_ids is not None:
             space_query = space_query.where(Space.id.in_(list(allowed_space_ids)))
         spaces = session.exec(space_query).all()
@@ -15318,14 +14216,6 @@ def _build_changes_payload(
         if allowed_space_ids is not None:
             topics = [topic for topic in topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
         topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in topics if getattr(topic, "id", None)}
-        tasks = session.exec(task_query).all()
-        if allowed_space_ids is not None:
-            parent_topics = _load_topics_by_ids(
-                session,
-                [str(getattr(task, "topicId", "") or "").strip() for task in tasks],
-            )
-            merged_topic_by_id = {**parent_topics, **topic_by_id}
-            tasks = [task for task in tasks if _task_matches_allowed_spaces(task, allowed_space_ids, merged_topic_by_id)]
         drafts = session.exec(select(Draft).where(Draft.updatedAt >= since)).all()
         log_query = (
             select(LogEntry)
@@ -15338,17 +14228,15 @@ def _build_changes_payload(
             log_query = log_query.options(defer(LogEntry.raw))
         logs = session.exec(log_query).all()
         if allowed_space_ids is not None:
-            seeded_tasks = {str(getattr(task, "id", "") or ""): task for task in tasks if getattr(task, "id", None)}
-            topic_by_id_for_logs, task_by_id_for_logs = _load_related_maps_for_logs(
+            topic_by_id_for_logs = _load_related_maps_for_logs(
                 session,
                 logs,
                 seeded_topics=topic_by_id,
-                seeded_tasks=seeded_tasks,
             )
             logs = [
                 row
                 for row in logs
-                if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id_for_logs, task_by_id_for_logs)
+                if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id_for_logs)
             ]
 
     if not include_raw:
@@ -15357,13 +14245,11 @@ def _build_changes_payload(
 
     spaces.sort(key=lambda s: s.updatedAt, reverse=True)
     topics.sort(key=lambda t: t.updatedAt, reverse=True)
-    tasks.sort(key=lambda t: t.updatedAt, reverse=True)
     drafts.sort(key=lambda d: d.updatedAt, reverse=True)
 
     deleted_log_ids: list[str] = []
     deleted_log_timestamps: list[str] = []
     deleted_topics: list[dict[str, Any]] = []
-    deleted_tasks: list[dict[str, Any]] = []
     if since:
         try:
             deleted_rows = session.exec(select(DeletedLog).where(DeletedLog.deletedAt >= since)).all()
@@ -15380,23 +14266,13 @@ def _build_changes_payload(
             ]
         except Exception:
             deleted_topics = []
-        try:
-            deleted_tasks = [
-                {"id": row.id, "deletedAt": row.deletedAt}
-                for row in session.exec(select(DeletedTask).where(DeletedTask.deletedAt >= since)).all()
-                if getattr(row, "id", None) and getattr(row, "deletedAt", None)
-            ]
-        except Exception:
-            deleted_tasks = []
 
     openclaw_typing, openclaw_thread_work = _build_openclaw_live_signal_snapshots(session)
     cursor = ""
-    for collection in (spaces, topics, tasks, logs, drafts):
+    for collection in (spaces, topics, logs, drafts):
         for row in collection:
             cursor = _iso_text_max(cursor, getattr(row, "updatedAt", None) or getattr(row, "createdAt", None))
     for row in deleted_topics:
-        cursor = _iso_text_max(cursor, row.get("deletedAt"))
-    for row in deleted_tasks:
         cursor = _iso_text_max(cursor, row.get("deletedAt"))
     for deleted_at in deleted_log_timestamps:
         cursor = _iso_text_max(cursor, deleted_at)
@@ -15410,12 +14286,10 @@ def _build_changes_payload(
     return _serialize_changes_payload(
         spaces=spaces,
         topics=topics,
-        tasks=tasks,
         logs=logs,
         drafts=drafts,
         deleted_log_ids=deleted_log_ids,
         deleted_topics=deleted_topics,
-        deleted_tasks=deleted_tasks,
         openclaw_typing=openclaw_typing,
         openclaw_thread_work=openclaw_thread_work,
         cursor=cursor or None,
@@ -15444,7 +14318,7 @@ def list_changes(
     spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
     allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
 ):
-    """Return topics/tasks/logs changed since timestamp (ISO).
+    """Return topics/logs changed since timestamp (ISO).
 
     NOTE: Returning *all* logs can be heavy on large instances.
     Use `limitLogs` to apply a safety cap when needed.
@@ -15551,13 +14425,6 @@ def _build_clawgraph_payload(
         if allowed_space_ids is not None
         else all_topics
     )
-    all_tasks = session.exec(select(Task)).all()
-    tasks = (
-        [task for task in all_tasks if _task_matches_allowed_spaces(task, allowed_space_ids, all_topic_by_id)]
-        if allowed_space_ids is not None
-        else all_tasks
-    )
-    all_task_by_id = {str(getattr(task, "id", "") or ""): task for task in all_tasks if getattr(task, "id", None)}
     # Raw payloads can be very large; exclude from bulk graph extraction.
     log_query = select(LogEntry).options(defer(LogEntry.raw))
     if not include_pending:
@@ -15572,12 +14439,11 @@ def _build_clawgraph_payload(
         logs = [
             entry
             for entry in logs
-            if _log_matches_allowed_spaces(entry, allowed_space_ids, all_topic_by_id, all_task_by_id)
+            if _log_matches_allowed_spaces(entry, allowed_space_ids, all_topic_by_id)
         ]
 
     graph = build_clawgraph(
         topics,
-        tasks,
         logs,
         max_entities=max_entities,
         max_nodes=max_nodes,
@@ -15597,7 +14463,7 @@ def clawgraph(
     spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
     allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
 ):
-    """Build and return an entity-relationship graph from topics/tasks/logs."""
+    """Build and return an entity-relationship graph from topics/logs."""
     with get_session() as session:
         allowed_space_ids = _resolve_allowed_space_ids(
             session,
@@ -15642,7 +14508,6 @@ def _search_result_cache_key(
     session_key: str | None,
     include_pending: bool,
     limit_topics: int,
-    limit_tasks: int,
     limit_logs: int,
     allow_deep_content_scan: bool,
     allowed_space_ids: set[str] | None,
@@ -15658,7 +14523,6 @@ def _search_result_cache_key(
             str(session_key or "").strip(),
             "1" if include_pending else "0",
             str(int(limit_topics)),
-            str(int(limit_tasks)),
             str(int(limit_logs)),
             "1" if allow_deep_content_scan else "0",
             str(SEARCH_MODE),
@@ -15805,11 +14669,9 @@ def _resolve_search_engine_for_request(
 def _cheap_semantic_search(
     query: str,
     topics_payload: list[dict[str, Any]],
-    tasks_payload: list[dict[str, Any]],
     log_payloads: list[dict[str, Any]],
     *,
     topic_limit: int,
-    task_limit: int,
     log_limit: int,
 ) -> dict[str, Any]:
     normalized_query = _sanitize_log_text(query).lower()
@@ -15876,19 +14738,6 @@ def _cheap_semantic_search(
         ),
         limit=topic_limit,
     )
-    task_rows = _rank_rows(
-        tasks_payload,
-        lambda row: " ".join(
-            part
-            for part in [
-                str(row.get("title") or ""),
-                str(row.get("status") or ""),
-                str(row.get("searchText") or ""),
-            ]
-            if part
-        ),
-        limit=task_limit,
-    )
     log_rows = _rank_rows(
         log_payloads,
         lambda row: " ".join(
@@ -15906,7 +14755,6 @@ def _cheap_semantic_search(
         "query": query,
         "mode": "lexical-fast",
         "topics": topic_rows,
-        "tasks": task_rows,
         "logs": log_rows,
     }
 
@@ -15920,7 +14768,6 @@ def _search_impl(
     session_key: str | None,
     include_pending: bool,
     limit_topics: int,
-    limit_tasks: int,
     limit_logs: int,
     allow_deep_content_scan: bool = True,
     semantic_query: str | None = None,
@@ -15935,7 +14782,6 @@ def _search_impl(
         propagation_scale = 0.72 if max_query_token_length >= 5 else 0.9
 
     effective_limit_topics = max(1, min(int(limit_topics), max(1, SEARCH_EFFECTIVE_LIMIT_TOPICS)))
-    effective_limit_tasks = max(1, min(int(limit_tasks), max(1, SEARCH_EFFECTIVE_LIMIT_TASKS)))
     effective_limit_logs = max(10, min(int(limit_logs), max(10, SEARCH_EFFECTIVE_LIMIT_LOGS)))
 
     allowed_space_values = sorted(allowed_space_ids) if allowed_space_ids is not None else []
@@ -15953,19 +14799,6 @@ def _search_impl(
         if allowed_space_ids is not None
         else all_topics
     )
-    if allowed_space_ids is not None:
-        if not allowed_space_values:
-            all_tasks = []
-        else:
-            all_tasks = session.exec(select(Task).where(Task.spaceId.in_(allowed_space_values))).all()
-    else:
-        all_tasks = session.exec(select(Task)).all()
-    tasks = (
-        [task for task in all_tasks if _task_matches_allowed_spaces(task, allowed_space_ids, all_topic_by_id)]
-        if allowed_space_ids is not None
-        else all_tasks
-    )
-    all_task_by_id = {str(getattr(task, "id", "") or ""): task for task in all_tasks if getattr(task, "id", None)}
     # Never load the entire log table into memory for search.
     # This endpoint is used from the UI and must remain safe for large instances.
     window_multiplier = max(1, min(SEARCH_WINDOW_MULTIPLIER, max(1, SEARCH_WINDOW_MULTIPLIER_CAP)))
@@ -15999,7 +14832,6 @@ def _search_impl(
                 (
                     row_id,
                     row_topic_id,
-                    row_task_id,
                     row_related_log_id,
                     row_idempotency_key,
                     row_type,
@@ -16017,7 +14849,6 @@ def _search_impl(
                     return None
                 row_id = mapping.get("id")
                 row_topic_id = mapping.get("topicId")
-                row_task_id = mapping.get("taskId")
                 row_related_log_id = mapping.get("relatedLogId")
                 row_idempotency_key = mapping.get("idempotencyKey")
                 row_type = mapping.get("type")
@@ -16033,7 +14864,6 @@ def _search_impl(
             return SimpleNamespace(
                 id=row_id,
                 topicId=row_topic_id,
-                taskId=row_task_id,
                 relatedLogId=row_related_log_id,
                 idempotencyKey=row_idempotency_key,
                 type=row_type,
@@ -16051,7 +14881,6 @@ def _search_impl(
         log_query = select(
             LogEntry.id,
             LogEntry.topicId,
-            LogEntry.taskId,
             LogEntry.relatedLogId,
             LogEntry.idempotencyKey,
             LogEntry.type,
@@ -16138,7 +14967,6 @@ def _search_impl(
                 rescue_query = select(
                     LogEntry.id,
                     LogEntry.topicId,
-                    LogEntry.taskId,
                     LogEntry.relatedLogId,
                     LogEntry.idempotencyKey,
                     LogEntry.type,
@@ -16237,7 +15065,6 @@ def _search_impl(
             dense_candidates = dense_candidate_ids(
                 dense_query_for_expansion,
                 topic_limit=max(32, int(effective_limit_topics)),
-                task_limit=max(64, int(effective_limit_tasks)),
                 log_limit=max(80, int(dense_log_limit)),
             )
             dense_candidate_ids_raw = list(dense_candidates.get("logs") or [])
@@ -16260,7 +15087,6 @@ def _search_impl(
                     dense_logs_query = select(
                         LogEntry.id,
                         LogEntry.topicId,
-                        LogEntry.taskId,
                         LogEntry.relatedLogId,
                         LogEntry.idempotencyKey,
                         LogEntry.type,
@@ -16418,11 +15244,7 @@ def _search_impl(
                     merged = _clip(" ".join(part for part in [prior, snippet] if part), max(280, SEARCH_LOG_CONTENT_SNIPPET_CHARS))
                     content_preview_by_log_id[log_id] = merged
 
-    if topic_id:
-        tasks = [task for task in tasks if task.topicId == topic_id]
-
     topic_map: dict[str, Topic] = {item.id: item for item in topics}
-    task_map: dict[str, Task] = {item.id: item for item in tasks}
     log_map: dict[str, LogEntry] = {item.id: item for item in logs}
 
     notes = [entry for entry in logs if entry.type == "note" and entry.relatedLogId]
@@ -16436,7 +15258,6 @@ def _search_impl(
         note_items_by_log.setdefault(related_id, []).append(note)
 
     note_weight_by_topic: dict[str, float] = {}
-    note_weight_by_task: dict[str, float] = {}
     for related_id, count in note_count_by_log.items():
         related = log_map.get(related_id)
         if not related:
@@ -16444,11 +15265,8 @@ def _search_impl(
         weight = min(0.24, 0.07 * count)
         if related.topicId:
             note_weight_by_topic[related.topicId] = (note_weight_by_topic.get(related.topicId) or 0.0) + weight
-        if related.taskId:
-            note_weight_by_task[related.taskId] = (note_weight_by_task.get(related.taskId) or 0.0) + weight
 
     session_topic_ids: set[str] = set()
-    session_task_ids: set[str] = set()
     session_log_ids: set[str] = set()
     if session_key:
         for entry in logs:
@@ -16457,8 +15275,6 @@ def _search_impl(
             session_log_ids.add(entry.id)
             if entry.topicId:
                 session_topic_ids.add(entry.topicId)
-            if entry.taskId:
-                session_task_ids.add(entry.taskId)
 
     routing_items: list[dict[str, Any]] = []
     if session_key:
@@ -16472,17 +15288,12 @@ def _search_impl(
         filtered_routing_items: list[dict[str, Any]] = []
         for item in routing_items:
             topic_id_hint = str(item.get("topicId") or "").strip()
-            task_id_hint = str(item.get("taskId") or "").strip()
             allowed = False
-            if task_id_hint:
-                candidate_task = all_task_by_id.get(task_id_hint)
-                if candidate_task and _task_matches_allowed_spaces(candidate_task, allowed_space_ids, all_topic_by_id):
-                    allowed = True
-            if not allowed and topic_id_hint:
+            if topic_id_hint:
                 candidate_topic = all_topic_by_id.get(topic_id_hint)
                 if candidate_topic and _topic_matches_allowed_spaces(candidate_topic, allowed_space_ids):
                     allowed = True
-            if not topic_id_hint and not task_id_hint:
+            if not topic_id_hint:
                 allowed = True
             if allowed:
                 filtered_routing_items.append(item)
@@ -16510,19 +15321,7 @@ def _search_impl(
             semantic_hints.append(clipped)
 
         scoped_context = False
-        board_topic_id, board_task_id = _parse_board_session_key(session_key or "")
-        if board_task_id:
-            board_task = task_map.get(board_task_id)
-            if board_task:
-                scoped_context = True
-                semantic_hint_sources.add("board_scope")
-                _append_semantic_hint(str(getattr(board_task, "title", "") or ""), max_chars=120)
-                board_task_topic_id = str(getattr(board_task, "topicId", "") or "").strip()
-                if board_task_topic_id:
-                    board_topic = topic_map.get(board_task_topic_id)
-                    if board_topic:
-                        _append_semantic_hint(str(getattr(board_topic, "name", "") or ""), max_chars=120)
-
+        board_topic_id = _parse_board_session_key(session_key or "")
         if board_topic_id:
             board_topic = topic_map.get(board_topic_id)
             if board_topic:
@@ -16545,20 +15344,13 @@ def _search_impl(
                     break
                 before_count = len(semantic_hints)
                 topic_hint_id = str(item.get("topicId") or "").strip()
-                task_hint_id = str(item.get("taskId") or "").strip()
                 topic_hint_name = _sanitize_log_text(str(item.get("topicName") or ""))
-                task_hint_title = _sanitize_log_text(str(item.get("taskTitle") or ""))
                 anchor_hint = _sanitize_log_text(str(item.get("anchor") or ""))
                 if not topic_hint_name and topic_hint_id:
                     topic_hint_row = topic_map.get(topic_hint_id)
                     if topic_hint_row:
                         topic_hint_name = _sanitize_log_text(str(getattr(topic_hint_row, "name", "") or ""))
-                if not task_hint_title and task_hint_id:
-                    task_hint_row = task_map.get(task_hint_id)
-                    if task_hint_row:
-                        task_hint_title = _sanitize_log_text(str(getattr(task_hint_row, "title", "") or ""))
                 _append_semantic_hint(topic_hint_name, max_chars=120)
-                _append_semantic_hint(task_hint_title, max_chars=140)
                 _append_semantic_hint(anchor_hint, max_chars=220)
                 if len(semantic_hints) > before_count:
                     scoped_context = True
@@ -16616,7 +15408,6 @@ def _search_impl(
             {
                 "id": entry.id,
                 "topicId": entry.topicId,
-                "taskId": entry.taskId,
                 "relatedLogId": entry.relatedLogId,
                 "idempotencyKey": entry.idempotencyKey,
                 "type": entry.type,
@@ -16632,7 +15423,6 @@ def _search_impl(
         )
 
     topic_query_hints: dict[str, list[str]] = {}
-    task_query_hints: dict[str, list[str]] = {}
 
     def _hint_overlaps_query(cleaned_hint_raw: str) -> bool:
         if not hint_query_tokens:
@@ -16643,7 +15433,6 @@ def _search_impl(
         return overlap > 0 or phrase_hit
 
     def _append_hint(
-        hint_map: dict[str, list[str]],
         bucket_id: str | None,
         text_hint: str,
         *,
@@ -16658,54 +15447,28 @@ def _search_impl(
         if hint_query_tokens and not _hint_overlaps_query(cleaned_hint_raw):
             return
         cleaned_hint = _clip(cleaned_hint_raw, 420)
-        bucket = hint_map.setdefault(bucket_key, [])
+        bucket = topic_query_hints.setdefault(bucket_key, [])
         if cleaned_hint in bucket:
             return
         if len(bucket) >= max_items:
             return
         bucket.append(cleaned_hint)
 
-    def _append_topic_hint(topic_id_hint: str | None, text_hint: str, *, max_items: int = 8) -> None:
-        _append_hint(topic_query_hints, topic_id_hint, text_hint, max_items=max_items)
-
-    def _append_task_hint(task_id_hint: str | None, text_hint: str, *, max_items: int = 8) -> None:
-        _append_hint(task_query_hints, task_id_hint, text_hint, max_items=max_items)
-
     if hint_query_tokens:
-        for task in tasks:
-            _append_topic_hint(task.topicId, str(task.title or ""))
-            _append_task_hint(task.id, str(task.title or ""))
         for entry in logs:
             if not _log_allowed_for_semantic_search(entry):
                 continue
-            topic_key = str(entry.topicId or "").strip()
-            task_key = str(entry.taskId or "").strip()
-            if not topic_key:
-                topic_key = None
-            if not task_key:
-                task_key = None
-            _append_topic_hint(topic_key, str(entry.summary or ""))
-            _append_task_hint(task_key, str(entry.summary or ""))
+            topic_key = str(entry.topicId or "").strip() or None
+            _append_hint(topic_key, str(entry.summary or ""))
             preview = content_preview_by_log_id.get(str(entry.id), "")
             if preview:
-                _append_topic_hint(topic_key, preview)
-                _append_task_hint(task_key, preview)
+                _append_hint(topic_key, preview)
         for item in routing_items[-6:]:
             topic_id_hint = str(item.get("topicId") or "").strip() or None
-            task_id_hint = str(item.get("taskId") or "").strip() or None
-            if task_id_hint and not topic_id_hint:
-                candidate_task = task_map.get(task_id_hint)
-                if candidate_task and getattr(candidate_task, "topicId", None):
-                    topic_id_hint = str(candidate_task.topicId or "").strip() or None
             topic_name_hint = str(item.get("topicName") or "")
-            task_title_hint = str(item.get("taskTitle") or "")
             anchor_hint = str(item.get("anchor") or "")
-            _append_topic_hint(topic_id_hint, topic_name_hint)
-            _append_topic_hint(topic_id_hint, task_title_hint)
-            _append_topic_hint(topic_id_hint, anchor_hint)
-            _append_task_hint(task_id_hint, task_title_hint)
-            _append_task_hint(task_id_hint, topic_name_hint)
-            _append_task_hint(task_id_hint, anchor_hint)
+            _append_hint(topic_id_hint, topic_name_hint)
+            _append_hint(topic_id_hint, anchor_hint)
 
     topics_payload: list[dict[str, Any]] = []
     for topic in topics:
@@ -16715,14 +15478,6 @@ def _search_impl(
             payload["searchText"] = _clip(" ".join(hints), 900)
         topics_payload.append(payload)
 
-    tasks_payload: list[dict[str, Any]] = []
-    for task in tasks:
-        payload = task.model_dump()
-        hints = task_query_hints.get(task.id) or []
-        if hints:
-            payload["searchText"] = _clip(" ".join(hints), 900)
-        tasks_payload.append(payload)
-
     semantic_query_for_search = semantic_query_effective or query
     selected_search_engine = _resolve_search_engine_for_request(
         query=semantic_query_for_search,
@@ -16731,18 +15486,12 @@ def _search_impl(
         log_doc_count=len(log_payloads),
     )
     topics_payload_for_search = topics_payload
-    tasks_payload_for_search = tasks_payload
     logs_payload_for_search = log_payloads
     if selected_search_engine == "hybrid":
         topic_prefilter_limit = _hybrid_prefilter_limit(
             effective_limit_topics,
             len(topics_payload),
             SEARCH_HYBRID_MAX_TOPIC_DOCS,
-        )
-        task_prefilter_limit = _hybrid_prefilter_limit(
-            effective_limit_tasks,
-            len(tasks_payload),
-            SEARCH_HYBRID_MAX_TASK_DOCS,
         )
         log_prefilter_limit = _hybrid_prefilter_limit(
             effective_limit_logs,
@@ -16755,14 +15504,6 @@ def _search_impl(
             max_docs=topic_prefilter_limit,
             text_fn=lambda row: " ".join(
                 part for part in [str(row.get("name") or ""), str(row.get("description") or ""), str(row.get("searchText") or "")] if part
-            ),
-        )
-        tasks_payload_for_search = _prefilter_payloads_for_hybrid(
-            semantic_query_for_search,
-            tasks_payload,
-            max_docs=task_prefilter_limit,
-            text_fn=lambda row: " ".join(
-                part for part in [str(row.get("title") or ""), str(row.get("status") or ""), str(row.get("searchText") or "")] if part
             ),
         )
         logs_payload_for_search = _prefilter_payloads_for_hybrid(
@@ -16783,20 +15524,17 @@ def _search_impl(
         search_result = semantic_search(
             semantic_query_for_search,
             topics_payload_for_search,
-            tasks_payload_for_search,
+            [],
             logs_payload_for_search,
             topic_limit=effective_limit_topics,
-            task_limit=effective_limit_tasks,
             log_limit=effective_limit_logs,
         )
     else:
         search_result = _cheap_semantic_search(
             semantic_query_for_search,
             topics_payload,
-            tasks_payload,
             log_payloads,
             topic_limit=effective_limit_topics,
-            task_limit=effective_limit_tasks,
             log_limit=effective_limit_logs,
         )
 
@@ -16805,12 +15543,6 @@ def _search_impl(
     }
     topic_search_rows: dict[str, dict[str, Any]] = {
         str(item.get("id") or ""): item for item in search_result.get("topics", []) if item.get("id")
-    }
-    task_base_score: dict[str, float] = {
-        str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("tasks", [])
-    }
-    task_search_rows: dict[str, dict[str, Any]] = {
-        str(item.get("id") or ""): item for item in search_result.get("tasks", []) if item.get("id")
     }
     log_base_score: dict[str, float] = {
         str(item.get("id") or ""): float(item.get("score") or 0.0) for item in search_result.get("logs", [])
@@ -16845,7 +15577,6 @@ def _search_impl(
     # Parent propagation from matched logs.
     # Keep this bounded so one large topic with many weak matches cannot dominate.
     topic_boost_candidates: dict[str, list[float]] = {}
-    task_boost_candidates: dict[str, list[float]] = {}
     for log_id, score in log_base_score.items():
         entry = log_map.get(log_id)
         if not entry:
@@ -16868,82 +15599,21 @@ def _search_impl(
                     score * TOPIC_LOG_PROPAGATION_FACTOR * propagation_scale,
                 )
             )
-        if entry.taskId:
-            task_boost_candidates.setdefault(entry.taskId, []).append(
-                min(
-                    TASK_LOG_PROPAGATION_PER_LOG_CAP * propagation_scale,
-                    score * TASK_LOG_PROPAGATION_FACTOR * propagation_scale,
-                )
-            )
 
     topic_log_boost = _aggregate_parent_boosts(
         topic_boost_candidates,
         top_k=TOPIC_LOG_PROPAGATION_TOP_K,
         total_cap=TOPIC_LOG_PROPAGATION_CAP,
     )
-    task_log_boost = _aggregate_parent_boosts(
-        task_boost_candidates,
-        top_k=TASK_LOG_PROPAGATION_TOP_K,
-        total_cap=TASK_LOG_PROPAGATION_CAP,
-    )
-    topic_task_boost_candidates: dict[str, list[float]] = {}
-    topic_task_exact_match_bonus: dict[str, float] = {}
-    for task_id2, task_score in task_base_score.items():
-        task = task_map.get(task_id2)
-        topic_id2 = str(getattr(task, "topicId", "") or "")
-        if not topic_id2:
-            continue
-        task_row = task_search_rows.get(task_id2) or {}
-        support = min(
-            TOPIC_TASK_PROPAGATION_PER_TASK_CAP * propagation_scale,
-            float(task_score or 0.0) * TOPIC_TASK_PROPAGATION_FACTOR * propagation_scale,
-        )
-        bm25_score = max(0.0, float(task_row.get("bm25Score") or 0.0))
-        lexical_score = max(0.0, float(task_row.get("lexicalScore") or 0.0))
-        chunk_score = max(0.0, float(task_row.get("chunkScore") or 0.0))
-        support += min(
-            TOPIC_TASK_PROPAGATION_LEXICAL_CAP * propagation_scale,
-            lexical_score * TOPIC_TASK_PROPAGATION_LEXICAL_FACTOR * propagation_scale,
-        )
-        best_chunk = task_row.get("bestChunk")
-        best_chunk_text = ""
-        if isinstance(best_chunk, dict):
-            best_chunk_text = str(best_chunk.get("text") or "").strip().lower()
-        exact_phrase_hit = bool(normalized_query and best_chunk_text and normalized_query in best_chunk_text)
-        if exact_phrase_hit:
-            support += TOPIC_TASK_PROPAGATION_EXACT_BONUS * propagation_scale
-            topic_task_exact_match_bonus[topic_id2] = TOPIC_TASK_PROPAGATION_TOPIC_EXACT_BONUS * propagation_scale
-        if require_sparse_for_propagation and not (bm25_score > 0 or lexical_score > 0 or chunk_score > 0 or exact_phrase_hit):
-            continue
-        support = min(TOPIC_TASK_PROPAGATION_PER_TASK_TOTAL_CAP * propagation_scale, support)
-        if support > 0:
-            topic_task_boost_candidates.setdefault(topic_id2, []).append(support)
-    topic_task_boost = _aggregate_parent_boosts(
-        topic_task_boost_candidates,
-        top_k=TOPIC_TASK_PROPAGATION_TOP_K,
-        total_cap=TOPIC_TASK_PROPAGATION_CAP,
-    )
 
     for topic_id2, boost in topic_log_boost.items():
         topic_base_score[topic_id2] = topic_base_score.get(topic_id2, 0.0) + boost
-    for topic_id2, boost in topic_task_boost.items():
-        topic_base_score[topic_id2] = topic_base_score.get(topic_id2, 0.0) + boost
-    for topic_id2, bonus in topic_task_exact_match_bonus.items():
-        topic_base_score[topic_id2] = topic_base_score.get(topic_id2, 0.0) + bonus
-    for task_id2, boost in task_log_boost.items():
-        task_base_score[task_id2] = task_base_score.get(task_id2, 0.0) + boost
 
     topic_direct_match_boost: dict[str, float] = {}
     for topic in topics:
         boost = _direct_label_match_boost(getattr(topic, "name", None), normalized_query, query_tokens)
         if boost > 0:
             topic_direct_match_boost[topic.id] = boost
-
-    task_direct_match_boost: dict[str, float] = {}
-    for task in tasks:
-        boost = _direct_label_match_boost(getattr(task, "title", None), normalized_query, query_tokens)
-        if boost > 0:
-            task_direct_match_boost[task.id] = boost
 
     topic_rows: list[dict[str, Any]] = []
     for topic_id2, base_score in topic_base_score.items():
@@ -16969,8 +15639,6 @@ def _search_impl(
                 "rerankScore": float((topic_search_rows.get(topic_id2) or {}).get("rerankScore") or 0.0),
                 "bestChunk": (topic_search_rows.get(topic_id2) or {}).get("bestChunk"),
                 "logPropagationWeight": round(topic_log_boost.get(topic_id2, 0.0), 6),
-                "taskPropagationWeight": round(topic_task_boost.get(topic_id2, 0.0), 6),
-                "taskExactMatchBonus": round(topic_task_exact_match_bonus.get(topic_id2, 0.0), 6),
                 "directMatchBoost": round(direct_match_boost, 6),
                 "noteWeight": round(min(0.26, note_weight_by_topic.get(topic_id2, 0.0)), 6),
                 "sessionBoosted": topic_id2 in session_topic_ids,
@@ -16978,39 +15646,6 @@ def _search_impl(
         )
     topic_rows.sort(key=lambda item: float(item["score"]), reverse=True)
     topic_rows = topic_rows[:effective_limit_topics]
-
-    task_rows: list[dict[str, Any]] = []
-    for task_id2, base_score in task_base_score.items():
-        task = task_map.get(task_id2)
-        if not task:
-            continue
-        score = base_score
-        direct_match_boost = task_direct_match_boost.get(task_id2, 0.0)
-        score += direct_match_boost
-        score += min(0.26, note_weight_by_task.get(task_id2, 0.0))
-        if task_id2 in session_task_ids:
-            score += 0.1
-        task_rows.append(
-            {
-                "id": task.id,
-                "topicId": task.topicId,
-                "title": task.title,
-                "status": task.status,
-                "score": round(score, 6),
-                "vectorScore": float((task_search_rows.get(task_id2) or {}).get("vectorScore") or 0.0),
-                "bm25Score": float((task_search_rows.get(task_id2) or {}).get("bm25Score") or 0.0),
-                "lexicalScore": float((task_search_rows.get(task_id2) or {}).get("lexicalScore") or 0.0),
-                "rrfScore": float((task_search_rows.get(task_id2) or {}).get("rrfScore") or 0.0),
-                "rerankScore": float((task_search_rows.get(task_id2) or {}).get("rerankScore") or 0.0),
-                "bestChunk": (task_search_rows.get(task_id2) or {}).get("bestChunk"),
-                "logPropagationWeight": round(task_log_boost.get(task_id2, 0.0), 6),
-                "directMatchBoost": round(direct_match_boost, 6),
-                "noteWeight": round(min(0.26, note_weight_by_task.get(task_id2, 0.0)), 6),
-                "sessionBoosted": task_id2 in session_task_ids,
-            }
-        )
-    task_rows.sort(key=lambda item: float(item["score"]), reverse=True)
-    task_rows = task_rows[:effective_limit_tasks]
 
     log_rows: list[dict[str, Any]] = []
     for log_id2, base_score in log_base_score.items():
@@ -17037,7 +15672,6 @@ def _search_impl(
             {
                 "id": entry.id,
                 "topicId": entry.topicId,
-                "taskId": entry.taskId,
                 "type": entry.type,
                 "agentId": entry.agentId,
                 "agentLabel": entry.agentLabel,
@@ -17081,7 +15715,6 @@ def _search_impl(
                     "id": note.id,
                     "relatedLogId": note.relatedLogId,
                     "topicId": note.topicId,
-                    "taskId": note.taskId,
                     "summary": _clip(_sanitize_log_text(note.summary or ""), 140),
                     "content": _clip(note_content, 280),
                     "createdAt": note.createdAt,
@@ -17094,23 +15727,19 @@ def _search_impl(
         "query": query,
         "mode": search_result.get("mode") or "lexical",
         "topics": topic_rows,
-        "tasks": task_rows,
         "logs": log_rows,
         "notes": note_rows,
         "matchedTopicIds": [item["id"] for item in topic_rows],
-        "matchedTaskIds": [item["id"] for item in task_rows],
         "matchedLogIds": [item["id"] for item in log_rows],
         "searchMeta": {
             "effectiveLimits": {
                 "topics": int(effective_limit_topics),
-                "tasks": int(effective_limit_tasks),
                 "logs": int(effective_limit_logs),
             },
             "searchModeConfigured": str(SEARCH_MODE),
             "searchEngine": str(selected_search_engine),
             "candidateDocs": {
                 "topics": int(len(topics_payload_for_search)) if selected_search_engine == "hybrid" else int(len(topics_payload)),
-                "tasks": int(len(tasks_payload_for_search)) if selected_search_engine == "hybrid" else int(len(tasks_payload)),
                 "logs": int(len(logs_payload_for_search)) if selected_search_engine == "hybrid" else int(len(log_payloads)),
             },
             "queryTokenCount": int(len(query_tokens)),
@@ -17354,36 +15983,6 @@ def _topic_visible(topic: Topic, now: datetime) -> bool:
     return True
 
 
-def _task_visible(task: Task, topic_by_id: dict[str, Topic], now: datetime) -> bool:
-    if _is_snoozed(getattr(task, "snoozedUntil", None), now):
-        return False
-    topic_id = str(getattr(task, "topicId", None) or "").strip()
-    if topic_id:
-        parent = topic_by_id.get(topic_id)
-        if parent and not _topic_visible(parent, now):
-            return False
-    return True
-
-
-def _task_rank(task: Task, now: datetime) -> tuple:
-    pinned = 0 if bool(getattr(task, "pinned", False)) else 1
-    status = str(getattr(task, "status", "") or "").strip().lower()
-    status_bucket = {"blocked": 0, "doing": 1, "todo": 2, "done": 4}.get(status, 3)
-    priority = str(getattr(task, "priority", "medium") or "medium").strip().lower()
-    priority_bucket = {"high": 0, "medium": 1, "low": 2}.get(priority, 1)
-    due_dt = _parse_dt(getattr(task, "dueDate", None))
-    overdue_bucket = 1
-    due_bucket = 2
-    if due_dt:
-        if due_dt < now:
-            overdue_bucket = 0
-            due_bucket = 0
-        elif due_dt < (now + timedelta(days=7)):
-            due_bucket = 1
-    updated = str(getattr(task, "updatedAt", "") or "")
-    return (pinned, status_bucket, overdue_bucket, due_bucket, priority_bucket, updated)
-
-
 @app.get("/api/context", response_model=ContextResponse, tags=["context"])
 def context(
     q: str | None = Query(default=None, description="Current user input/query."),
@@ -17414,8 +16013,8 @@ def context(
         or normalized_query.strip().startswith("/")
         or _is_low_signal_context_query(normalized_query)
     )
-    board_topic_hint_id, board_task_hint_id = _parse_board_session_key(sessionKey or "")
-    board_session_hint = bool(board_topic_hint_id or board_task_hint_id)
+    board_topic_hint_id = _parse_board_session_key(sessionKey or "")
+    board_session_hint = bool(board_topic_hint_id)
     if completion_event:
         run_semantic = False
     elif effective_mode in {"full", "patient"}:
@@ -17455,7 +16054,7 @@ def context(
         lines.append(
             f"- Delegated specialist just completed{f': {completion_task}' if completion_task else ' in the current task'}."
         )
-        lines.append("- Read the current task thread before replying.")
+        lines.append("- Read the current topic thread before replying.")
         lines.append("- If the specialist result is already visible there, do not repeat or paraphrase the full body.")
         if remaining_active_subagents > 0:
             lines.append(
@@ -17499,15 +16098,9 @@ def context(
         timeline: list[dict[str, Any]] = []
         timeline_label = "Recent session timeline:"
         timeline_scope = "session"
-        if timelineLimit > 0 and (sessionKey or board_task_hint_id or board_topic_hint_id):
+        if timelineLimit > 0 and (sessionKey or board_topic_hint_id):
             query_logs = select(LogEntry).options(defer(LogEntry.raw))
-            if board_task_hint_id:
-                timeline_scope = "task_thread"
-                timeline_label = "Recent current task thread:"
-                query_logs = query_logs.where(LogEntry.taskId == board_task_hint_id)
-                if board_topic_hint_id:
-                    query_logs = query_logs.where(LogEntry.topicId == board_topic_hint_id)
-            elif board_topic_hint_id:
+            if board_topic_hint_id:
                 timeline_scope = "topic_thread"
                 timeline_label = "Recent current topic thread:"
                 query_logs = query_logs.where(LogEntry.topicId == board_topic_hint_id)
@@ -17531,7 +16124,7 @@ def context(
                 ).limit(max(20, timelineLimit * 5))
                 rows = session.exec(query_logs).all()
                 if allowed_space_ids is not None:
-                    topic_by_id_for_timeline, task_by_id_for_timeline = _load_related_maps_for_logs(session, rows)
+                    topic_by_id_for_timeline = _load_related_maps_for_logs(session, rows)
                     rows = [
                         entry
                         for entry in rows
@@ -17539,7 +16132,6 @@ def context(
                             entry,
                             allowed_space_ids,
                             topic_by_id_for_timeline,
-                            task_by_id_for_timeline,
                         )
                     ]
                 for entry in rows:
@@ -17556,7 +16148,6 @@ def context(
                         {
                             "id": entry.id,
                             "topicId": entry.topicId,
-                            "taskId": entry.taskId,
                             "agentId": entry.agentId,
                             "agentLabel": entry.agentLabel,
                             "sessionKey": str(source_map.get("sessionKey") or "").strip() or None,
@@ -17579,29 +16170,17 @@ def context(
             else all_topics
         )
         topic_by_id = {t.id: t for t in topics}
-        all_tasks = session.exec(select(Task)).all()
-        tasks = (
-            [task for task in all_tasks if _task_matches_allowed_spaces(task, allowed_space_ids, all_topic_by_id)]
-            if allowed_space_ids is not None
-            else all_tasks
-        )
-        tasks_by_id = {t.id: t for t in tasks}
 
         if routing_items and allowed_space_ids is not None:
             filtered_routing_items: list[dict[str, Any]] = []
             for item in routing_items:
                 topic_id_hint = str(item.get("topicId") or "").strip()
-                task_id_hint = str(item.get("taskId") or "").strip()
                 allowed = False
-                if task_id_hint:
-                    candidate_task = tasks_by_id.get(task_id_hint)
-                    if candidate_task and _task_matches_allowed_spaces(candidate_task, allowed_space_ids, all_topic_by_id):
-                        allowed = True
-                if not allowed and topic_id_hint:
+                if topic_id_hint:
                     candidate_topic = all_topic_by_id.get(topic_id_hint)
                     if candidate_topic and _topic_matches_allowed_spaces(candidate_topic, allowed_space_ids):
                         allowed = True
-                if not topic_id_hint and not task_id_hint:
+                if not topic_id_hint:
                     allowed = True
                 if allowed:
                     filtered_routing_items.append(item)
@@ -17621,47 +16200,28 @@ def context(
         pinned_topics.sort(key=lambda t: getattr(t, "sortIndex", 0))
         pinned_topics.sort(key=lambda t: t.updatedAt, reverse=True)
 
-        visible_tasks = [t for t in tasks if _task_visible(t, topic_by_id, now_dt)]
-        ranked_tasks = [
-            t
-            for t in visible_tasks
-            if str(getattr(t, "status", "") or "").strip().lower() != "done" or bool(getattr(t, "pinned", False))
-        ]
-        ranked_tasks.sort(key=lambda t: _task_rank(t, now_dt))
-
         working_topics = pinned_topics[: max(0, min(12, workingSetLimit))]
-        working_tasks = ranked_tasks[: max(0, min(18, workingSetLimit * 3))]
 
-        # Board chat location: Clawboard Topic/Task chat sessions carry a stable sessionKey that
-        # identifies the active Topic/Task. Always surface that entity first so the model knows
+        # Board chat location: Clawboard Topic chat sessions carry a stable sessionKey that
+        # identifies the active Topic. Always surface that entity first so the model knows
         # "where the user is speaking from" even on vague turns like "resume" or "thoughts?".
-        board_topic_id, board_task_id = _parse_board_session_key(sessionKey or "")
+        board_topic_id = _parse_board_session_key(sessionKey or "")
         board_topic = topic_by_id.get(board_topic_id) if board_topic_id else None
-        board_task = tasks_by_id.get(board_task_id) if board_task_id else None
-        if board_task and board_task.topicId and not board_topic:
-            board_topic = topic_by_id.get(board_task.topicId)
 
-        if board_topic or board_task:
+        if board_topic:
             data["boardSession"] = {
-                "kind": "task",
-                "topicId": board_topic.id if board_topic else board_topic_id or None,
-                "topicName": board_topic.name if board_topic else None,
-                "taskId": board_task.id if board_task else board_task_id or None,
-                "taskTitle": board_task.title if board_task else None,
+                "kind": "topic",
+                "topicId": board_topic.id,
+                "topicName": board_topic.name,
             }
             layers.append("A:board_session")
-            if board_task:
-                status = str(getattr(board_task, "status", "") or "").strip()
-                suffix = f" [{status}]" if status else ""
-                topic_name = board_topic.name if board_topic else (board_topic_id or "Unknown topic")
-                lines.append("Active board location:")
-                lines.append(f"- Task Chat: {topic_name} -> {board_task.title}{suffix}")
+            status = str(getattr(board_topic, "status", "") or "").strip()
+            suffix = f" [{status}]" if status else ""
+            lines.append("Active board location:")
+            lines.append(f"- Topic Chat: {board_topic.name}{suffix}")
 
-            if board_topic:
-                # Promote the active board entity to the top even if it would normally rank lower.
-                working_topics = [board_topic, *[t for t in working_topics if t.id != board_topic.id]]
-            if board_task:
-                working_tasks = [board_task, *[t for t in working_tasks if t.id != board_task.id]]
+            # Promote the active board entity to the top even if it would normally rank lower.
+            working_topics = [board_topic, *[t for t in working_topics if t.id != board_topic.id]]
 
         orchestration_runs = _orchestration_context_snapshot(session, session_key=sessionKey, limit=3)
         if orchestration_runs:
@@ -17694,7 +16254,7 @@ def context(
                     data["turnHint"] = turn_hint
                     lines.append("Delegation handling:")
                     lines.append(
-                        f"- {related_active_subagents} sibling delegated run(s) are still active in this task/workflow."
+                        f"- {related_active_subagents} sibling delegated run(s) are still active in this topic/workflow."
                     )
                     lines.append(
                         "- Treat this completion as internal supervision unless a real blocker or decision needs to be surfaced now."
@@ -17704,21 +16264,14 @@ def context(
                     )
 
         continuity_topic_ids: list[str] = []
-        continuity_task_ids: list[str] = []
         for item in routing_items[-4:]:
             tid = str(item.get("topicId") or "").strip()
             if tid:
                 continuity_topic_ids.append(tid)
-            kid = str(item.get("taskId") or "").strip()
-            if kid:
-                continuity_task_ids.append(kid)
         for item in timeline[: max(0, min(12, timelineLimit * 2))]:
             tid = str(item.get("topicId") or "").strip()
             if tid:
                 continuity_topic_ids.append(tid)
-            kid = str(item.get("taskId") or "").strip()
-            if kid:
-                continuity_task_ids.append(kid)
 
         seen_topic_ids = {t.id for t in working_topics}
         for tid in continuity_topic_ids:
@@ -17729,18 +16282,8 @@ def context(
                 working_topics.append(t)
                 seen_topic_ids.add(tid)
 
-        seen_task_ids = {t.id for t in working_tasks}
-        for kid in continuity_task_ids:
-            if len(working_tasks) >= max(0, min(18, workingSetLimit * 3)):
-                break
-            t = tasks_by_id.get(kid)
-            if t and _task_visible(t, topic_by_id, now_dt) and kid not in seen_task_ids:
-                working_tasks.append(t)
-                seen_task_ids.add(kid)
-
         data["workingSet"] = {
             "topics": [t.model_dump() for t in working_topics[:workingSetLimit]],
-            "tasks": [t.model_dump() for t in working_tasks[:workingSetLimit]],
         }
         layers.append("A:working_set")
 
@@ -17751,33 +16294,15 @@ def context(
                 suffix = f" | digest: {_clip(digest, 140)}" if digest else ""
                 lines.append(f"- {t.name}{suffix}")
 
-        if working_tasks:
-            lines.append("Working set tasks:")
-            for t in working_tasks[:workingSetLimit]:
-                status = str(getattr(t, "status", "") or "").strip()
-                suffix = f" [{status}]" if status else ""
-                extra: list[str] = []
-                if getattr(t, "dueDate", None):
-                    extra.append(f"due {str(getattr(t, 'dueDate'))}")
-                digest = _sanitize_log_text(getattr(t, "digest", None))
-                if digest:
-                    extra.append(f"digest: {_clip(digest, 120)}")
-                tail = f" ({'; '.join(extra)})" if extra else ""
-                lines.append(f"- {t.title}{suffix}{tail}")
-
         if routing_items:
             lines.append("Session routing memory (newest last):")
             for item in routing_items[-4:]:
                 topic_name = str(item.get("topicName") or item.get("topicId") or "").strip()
-                task_title = str(item.get("taskTitle") or item.get("taskId") or "").strip()
                 anchor = str(item.get("anchor") or "").strip()
-                head = topic_name
-                if task_title:
-                    head = f"{head} -> {task_title}"
                 if anchor:
-                    lines.append(f"- {head} | anchor: {_clip(_sanitize_log_text(anchor), 120)}")
+                    lines.append(f"- {topic_name} | anchor: {_clip(_sanitize_log_text(anchor), 120)}")
                 else:
-                    lines.append(f"- {head}")
+                    lines.append(f"- {topic_name}")
 
         if timeline:
             lines.append(timeline_label)
@@ -17787,11 +16312,9 @@ def context(
         semantic = None
         if run_semantic and normalized_query:
             limit_topics = 8
-            limit_tasks = 12
             limit_logs = max(24, timelineLimit * 6)
             if effective_mode == "patient":
                 limit_topics = 12
-                limit_tasks = 18
                 limit_logs = max(60, timelineLimit * 10)
             semantic = _search_impl(
                 session,
@@ -17801,7 +16324,6 @@ def context(
                 session_key=sessionKey,
                 include_pending=includePending,
                 limit_topics=limit_topics,
-                limit_tasks=limit_tasks,
                 limit_logs=limit_logs,
                 allow_deep_content_scan=False,
             )
@@ -17810,17 +16332,14 @@ def context(
 
         if semantic:
             topics_hit_limit = 3
-            tasks_hit_limit = 4
             logs_hit_limit = 6
             notes_hit_limit = 6
             if effective_mode == "patient":
                 topics_hit_limit = 5
-                tasks_hit_limit = 8
                 logs_hit_limit = 12
                 notes_hit_limit = 10
 
             topics_hit = list(semantic.get("topics") or [])[:topics_hit_limit]
-            tasks_hit = list(semantic.get("tasks") or [])[:tasks_hit_limit]
             logs_hit = list(semantic.get("logs") or [])[:logs_hit_limit]
             notes_hit = list(semantic.get("notes") or [])[:notes_hit_limit]
 
@@ -17830,13 +16349,6 @@ def context(
                     name = str(item.get("name") or item.get("id") or "").strip()
                     score = item.get("score")
                     lines.append(f"- {name} (score {score})")
-            if tasks_hit:
-                lines.append("Semantic recall tasks:")
-                for item in tasks_hit:
-                    title = str(item.get("title") or item.get("id") or "").strip()
-                    status = str(item.get("status") or "").strip()
-                    suffix = f" [{status}]" if status else ""
-                    lines.append(f"- {title}{suffix}")
             if logs_hit:
                 lines.append("Semantic recall logs:")
                 for item in logs_hit:
@@ -17878,10 +16390,9 @@ def search(
     allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
     includePending: bool = Query(default=True, description="Include pending logs in matching."),
     limitTopics: int = Query(default=24, ge=1, le=800, description="Max topic matches."),
-    limitTasks: int = Query(default=48, ge=1, le=2000, description="Max task matches."),
     limitLogs: int = Query(default=360, ge=10, le=5000, description="Max log matches."),
 ):
-    """Hybrid semantic + lexical search across topics, tasks, and logs."""
+    """Hybrid semantic + lexical search across topics and logs."""
     query = (q or "").strip()
     started_at = time.perf_counter()
     query_tokens = _search_query_tokens(query.lower())
@@ -17891,11 +16402,9 @@ def search(
             "query": "",
             "mode": "empty",
             "topics": [],
-            "tasks": [],
             "logs": [],
             "notes": [],
             "matchedTopicIds": [],
-            "matchedTaskIds": [],
             "matchedLogIds": [],
             "searchMeta": {
                 "degraded": False,
@@ -17911,14 +16420,12 @@ def search(
     gate_wait_ms = round((time.perf_counter() - gate_wait_started) * 1000.0, 2)
     degraded_busy_fallback = not acquired
     effective_limit_topics = int(limitTopics)
-    effective_limit_tasks = int(limitTasks)
     effective_limit_logs = int(limitLogs)
     allow_deep_content_scan = bool(query_has_deep_signal)
     if degraded_busy_fallback:
         # If the deep-search gate is saturated, run a bounded degraded pass instead of
         # returning a hard 429. This preserves semantic ordering while avoiding UI fallback.
         effective_limit_topics = min(effective_limit_topics, max(1, SEARCH_BUSY_FALLBACK_LIMIT_TOPICS))
-        effective_limit_tasks = min(effective_limit_tasks, max(1, SEARCH_BUSY_FALLBACK_LIMIT_TASKS))
         effective_limit_logs = min(effective_limit_logs, max(10, SEARCH_BUSY_FALLBACK_LIMIT_LOGS))
         allow_deep_content_scan = False
     try:
@@ -17942,7 +16449,6 @@ def search(
                 session_key=sessionKey,
                 include_pending=includePending,
                 limit_topics=effective_limit_topics,
-                limit_tasks=effective_limit_tasks,
                 limit_logs=effective_limit_logs,
                 allow_deep_content_scan=allow_deep_content_scan,
                 allowed_space_ids=allowed_space_ids,
@@ -17960,7 +16466,6 @@ def search(
                         "allowDeepContentScan": bool(allow_deep_content_scan),
                         "effectiveLimits": {
                             "topics": int(effective_limit_topics),
-                            "tasks": int(effective_limit_tasks),
                             "logs": int(effective_limit_logs),
                         },
                         "cacheHit": True,
@@ -17980,7 +16485,6 @@ def search(
                 session_key=sessionKey,
                 include_pending=includePending,
                 limit_topics=effective_limit_topics,
-                limit_tasks=effective_limit_tasks,
                 limit_logs=effective_limit_logs,
                 allow_deep_content_scan=allow_deep_content_scan,
                 semantic_query=semanticQuery,
@@ -17996,7 +16500,6 @@ def search(
                     "allowDeepContentScan": bool(allow_deep_content_scan),
                     "effectiveLimits": {
                         "topics": int(effective_limit_topics),
-                        "tasks": int(effective_limit_tasks),
                         "logs": int(effective_limit_logs),
                     },
                     "cacheHit": False,
@@ -18044,16 +16547,13 @@ def _build_metrics_payload(session: Any) -> dict[str, Any]:
     ).one()
 
     topics_total = int(session.exec(select(func.count()).select_from(Topic)).one() or 0)
-    tasks_total = int(session.exec(select(func.count()).select_from(Task)).one() or 0)
 
     cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=24)
     cutoff_iso = cutoff_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     topics_created_24h = int(session.exec(select(func.count()).select_from(Topic).where(Topic.createdAt >= cutoff_iso)).one() or 0)
-    tasks_created_24h = int(session.exec(select(func.count()).select_from(Task).where(Task.createdAt >= cutoff_iso)).one() or 0)
 
     gate = {
         "topics": {"allowedTotal": 0, "blockedTotal": 0, "allowed24h": 0, "blocked24h": 0},
-        "tasks": {"allowedTotal": 0, "blockedTotal": 0, "allowed24h": 0, "blocked24h": 0},
     }
     audit_path = _creation_audit_path()
 
@@ -18087,9 +16587,9 @@ def _build_metrics_payload(session: Any) -> dict[str, Any]:
                         continue
                     kind = str(item.get("kind") or "").lower()
                     decision = str(item.get("decision") or "").lower()
-                    if kind not in ("topic", "task"):
+                    if kind != "topic":
                         continue
-                    bucket = gate["topics" if kind == "topic" else "tasks"]
+                    bucket = gate["topics"]
                     is_allowed = decision == "allow"
                     if is_allowed:
                         bucket["allowedTotal"] += 1
@@ -18159,7 +16659,6 @@ def _build_metrics_payload(session: Any) -> dict[str, Any]:
         },
         "creation": {
             "topics": {"total": topics_total, "created24h": topics_created_24h},
-            "tasks": {"total": tasks_total, "created24h": tasks_created_24h},
             "gate": gate,
         },
         "openclaw": {

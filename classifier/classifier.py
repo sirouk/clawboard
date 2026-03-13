@@ -55,7 +55,7 @@ OPENCLAW_INTERNAL_SESSION_PREFIX = os.environ.get(
     "internal:clawboard-classifier:",
 ).strip()
 
-BOARD_TASK_SESSION_PREFIX = "clawboard:task:"
+BOARD_TOPIC_SESSION_PREFIX = "clawboard:topic:"
 
 INTERVAL = int(os.environ.get("CLASSIFIER_INTERVAL_SECONDS", "10"))
 MAX_ATTEMPTS = int(os.environ.get("CLASSIFIER_MAX_ATTEMPTS", "3"))
@@ -110,10 +110,10 @@ def _parse_board_session_key(session_key: str) -> tuple[str | None, str | None]:
     if not base:
         return (None, None)
 
-    # Task-only board sessions (Topic Chat removed in hard-cut).
-    task_match = re.search(r"clawboard:task:(topic-[a-zA-Z0-9-]+):(task-[a-zA-Z0-9-]+)", base)
-    if task_match:
-        return (task_match.group(1), task_match.group(2))
+    topic_match = re.search(r"clawboard:topic:([a-zA-Z0-9-]+)", base)
+    if topic_match:
+        topic_id = topic_match.group(1)
+        return (topic_id, topic_id)
 
     return (None, None)
 
@@ -2083,12 +2083,12 @@ def _resolve_allowed_space_ids_for_session(session_key: str) -> tuple[str, ...] 
                             source_space_id = candidate
                             break
 
-        if not source_space_id and task_id:
+        if not source_space_id and task_id and task_id != topic_id:
             if _negative_cache_has(_MISSING_TASK_SCOPE_CACHE, task_id):
                 task_missing = True
             else:
                 task_res = requests.get(
-                    f"{CLAWBOARD_API_BASE}/api/tasks/{task_id}",
+                    f"{CLAWBOARD_API_BASE}/api/topics/{task_id}",
                     headers=headers_clawboard(),
                     timeout=8,
                 )
@@ -2307,7 +2307,7 @@ def list_logs_by_topic(topic_id: str, limit: int = 50, offset: int = 0):
 
 
 def list_logs_by_task(task_id: str, limit: int = 50, offset: int = 0):
-    return list_logs({"taskId": task_id, "limit": limit, "offset": offset})
+    return list_logs({"topicId": task_id, "limit": limit, "offset": offset})
 
 
 def list_notes_by_related_ids(related_ids: list[str], limit: int = 200):
@@ -2329,14 +2329,13 @@ def list_topics():
 
 
 def list_tasks(topic_id: str):
-    r = requests.get(
-        f"{CLAWBOARD_API_BASE}/api/tasks",
-        params=_space_scope_params({"topicId": topic_id}),
-        headers=headers_clawboard(),
-        timeout=15,
-    )
-    r.raise_for_status()
-    return r.json()
+    topics = list_topics()
+    normalized_topic_id = str(topic_id or "").strip()
+    return [
+        _topic_as_task(topic)
+        for topic in topics
+        if str(topic.get("parentId") or "").strip() == normalized_topic_id
+    ]
 
 
 def _clip_text(value: str, limit: int = 1400) -> str:
@@ -2375,6 +2374,15 @@ def _task_index_text(task: dict) -> str:
     tag_text = " ".join(_indexable_tags(task.get("tags")))
     parts = [title, status, tag_text]
     return _clip_text(" ".join([p for p in parts if p]).strip(), 1400)
+
+
+def _topic_as_task(topic: dict) -> dict:
+    parent_id = str(topic.get("parentId") or "").strip() or None
+    return {
+        **topic,
+        "title": str(topic.get("name") or "").strip() or str(topic.get("title") or "").strip(),
+        "topicId": parent_id or str(topic.get("id") or "").strip() or None,
+    }
 
 
 def upsert_topic(topic_id: str | None, name: str, *, tags: list[str] | None = None, status: str | None = None):
@@ -2420,20 +2428,20 @@ def _ensure_topic_indexed(topic: dict) -> None:
 
 
 def upsert_task(task_id: str | None, topic_id: str, title: str, status: str = "todo"):
-    payload = {"topicId": topic_id, "title": title, "status": status}
+    payload = {"parentId": topic_id, "name": title, "status": status}
     if task_id:
         payload["id"] = task_id
     source_space_id = _space_scope_source_id()
     if source_space_id:
         payload["spaceId"] = source_space_id
     r = requests.post(
-        f"{CLAWBOARD_API_BASE}/api/tasks",
+        f"{CLAWBOARD_API_BASE}/api/topics",
         headers=headers_clawboard(),
         data=json.dumps(payload),
         timeout=15,
     )
     r.raise_for_status()
-    task = r.json()
+    task = _topic_as_task(r.json())
     try:
         text = _task_index_text(task) or str(task.get("id") or "")
         embed_upsert(f"task:{task['topicId']}", task["id"], embed_text(text))
@@ -2465,14 +2473,19 @@ def patch_topic(topic_id: str, patch: dict):
 
 
 def patch_task(task_id: str, patch: dict):
+    payload = dict(patch)
+    if "title" in payload:
+        payload["name"] = payload.pop("title")
+    if "topicId" in payload:
+        payload["parentId"] = str(payload.pop("topicId") or "").strip() or None
     r = requests.patch(
-        f"{CLAWBOARD_API_BASE}/api/tasks/{task_id}",
+        f"{CLAWBOARD_API_BASE}/api/topics/{task_id}",
         headers=headers_clawboard(),
-        data=json.dumps(patch),
+        data=json.dumps(payload),
         timeout=15,
     )
     r.raise_for_status()
-    return r.json()
+    return _topic_as_task(r.json())
 
 
 def _now_iso_ms() -> str:
@@ -3986,7 +3999,7 @@ def classify_session(session_key: str):
             forced_topic_id = latest_topic_scope
 
     if forced_topic_id and forced_task_id:
-        # Task Chat: clawboard:task:<topicId>:<taskId> — messages MUST stay in this task only.
+        # Topic-scoped board chat: keep the promoted topic id fixed for the whole session.
         # Never reallocate; no LLM, no candidate retrieval. Patch all scope_logs with this topic+task.
         for e in scope_logs:
             entry_status = str(e.get("classificationStatus") or "pending")

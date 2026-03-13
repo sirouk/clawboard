@@ -29,17 +29,17 @@ export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; de
     setSaving(true);
     try {
       const res = await apiFetch(
-        "/api/tasks",
+        "/api/topics",
         {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          title: title.trim(),
-          topicId: topicId || null,
-          status: "todo",
-        }),
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            name: title.trim(),
+            parentId: topicId || null,
+            status: "todo",
+          }),
         },
         token
       );

@@ -48,7 +48,6 @@ import {
   DEFAULT_CONTEXT_FETCH_TIMEOUT_MS,
   DEFAULT_CONTEXT_LOG_LIMIT,
   DEFAULT_CONTEXT_MAX_CHARS,
-  DEFAULT_CONTEXT_TASK_LIMIT,
   DEFAULT_CONTEXT_TOPIC_LIMIT,
   DEFAULT_POST_TIMEOUT_MS,
   DEFAULT_QUEUE,
@@ -74,13 +73,11 @@ import {
   normalizeBaseUrl,
   normalizeBaseUrlCandidate,
   normalizeChannelId,
-  normalizeTaskIdentity,
   normalizeWhitespace,
   parseBaseUrlList,
   parseContextModes,
   parseHookNameList,
   redact,
-  resolveBoardTaskPatchId,
   sanitizeMessageContent,
   sanitizeRetrievedContextBlock,
   isHeartbeatControlPlaneText,
@@ -112,7 +109,6 @@ export default function register(api: OpenClawPluginApi) {
   const useQueue = rawConfig.queue === true;
   const ingestPath = (rawConfig.ingestPath as string | undefined) ?? (useQueue ? "/api/ingest" : "/api/log");
   const defaultTopicId = rawConfig.defaultTopicId;
-  const defaultTaskId = rawConfig.defaultTaskId;
   // Default OFF: session buckets are not meaningful topics.
   // Stage-2 classifier will attach real topics asynchronously.
   const autoTopicBySession = rawConfig.autoTopicBySession === true;
@@ -135,10 +131,6 @@ export default function register(api: OpenClawPluginApi) {
     typeof rawConfig.contextTopicLimit === "number" && Number.isFinite(rawConfig.contextTopicLimit)
       ? Math.max(1, Math.min(8, Math.floor(rawConfig.contextTopicLimit)))
       : DEFAULT_CONTEXT_TOPIC_LIMIT;
-  const contextTaskLimit =
-    typeof rawConfig.contextTaskLimit === "number" && Number.isFinite(rawConfig.contextTaskLimit)
-      ? Math.max(1, Math.min(12, Math.floor(rawConfig.contextTaskLimit)))
-      : DEFAULT_CONTEXT_TASK_LIMIT;
   const contextLogLimit =
     typeof rawConfig.contextLogLimit === "number" && Number.isFinite(rawConfig.contextLogLimit)
       ? Math.max(2, Math.min(20, Math.floor(rawConfig.contextLogLimit)))
@@ -337,11 +329,10 @@ export default function register(api: OpenClawPluginApi) {
     }
 
     saveBoardScope(agentId: string, scope: BoardScope) {
-      const taskId = scope.kind === "task" && scope.taskId ? scope.taskId : null;
       this.scopeInsertStmt.run(
         agentId,
         scope.topicId,
-        taskId,
+        null,
         scope.kind,
         scope.sessionKey ?? null,
         scope.updatedAt,
@@ -366,15 +357,13 @@ export default function register(api: OpenClawPluginApi) {
       }>;
       const row = rows?.[0];
       if (!row) return undefined;
-      const scope: BoardScope = {
+      return {
         topicId: row.topicId,
-        kind: "task",
+        kind: "topic",
         sessionKey: row.sessionKey ?? "",
         inherited: true,
         updatedAt: row.updatedAt,
       };
-      if (row.taskId) scope.taskId = row.taskId;
-      return scope;
     }
 
     getFreshBoardScopeForSession(sessionKey: string, cutoffMs: number): BoardScope | undefined {
@@ -501,12 +490,6 @@ export default function register(api: OpenClawPluginApi) {
     return topicId;
   }
 
-  function resolveTaskId(sessionKey: string | undefined | null) {
-    const route = parseBoardSessionKey(sessionKey);
-    if (route?.kind === "task") return route.taskId;
-    return defaultTaskId;
-  }
-
   function resolveAgentLabel(agentId?: string | null, sessionKey?: string | null) {
     const fromCtx = agentId && agentId !== "agent" ? agentId : undefined;
     let fromSession: string | undefined;
@@ -583,7 +566,7 @@ export default function register(api: OpenClawPluginApi) {
     if (base) keys.add(base);
     const boardRoute = parseBoardSessionKey(normalized);
     if (boardRoute) {
-      const canonical = `clawboard:task:${boardRoute.topicId}:${boardRoute.taskId}`;
+      const canonical = `clawboard:topic:${boardRoute.topicId}`;
       keys.add(canonical);
     }
     return Array.from(keys);
@@ -621,8 +604,7 @@ export default function register(api: OpenClawPluginApi) {
     if (!route) return undefined;
     return {
       topicId: route.topicId,
-      taskId: route.taskId,
-      kind: "task",
+      kind: "topic",
       sessionKey: key,
       inherited: false,
       updatedAt: nowMs(),
@@ -895,9 +877,6 @@ export default function register(api: OpenClawPluginApi) {
       source.boardScopeSessionKey = boardScope.sessionKey;
       source.boardScopeInherited = Boolean(boardScope.inherited);
       source.boardScopeLock = true;
-      if (boardScope.taskId) {
-        source.boardScopeTaskId = boardScope.taskId;
-      }
     }
 
     const flow = params.flow;
@@ -930,11 +909,10 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   function hasToolRoutingAnchor(routing: RoutingScope) {
-    if (routing.topicId || routing.taskId) return true;
+    if (routing.topicId) return true;
     const scope = routing.boardScope;
     if (!scope) return false;
-    if (scope.topicId) return true;
-    return scope.kind === "task" && Boolean(scope.taskId);
+    return Boolean(scope.topicId);
   }
 
   function extractSpawnedSubagentSessionKeys(value: unknown) {
@@ -1042,7 +1020,6 @@ export default function register(api: OpenClawPluginApi) {
         });
         return {
           topicId: cached.topicId,
-          taskId: cached.taskId,
           boardScope: cached,
         };
       }
@@ -1058,7 +1035,6 @@ export default function register(api: OpenClawPluginApi) {
       });
       return {
         topicId: direct.topicId,
-        taskId: direct.taskId,
         boardScope: direct,
       };
     }
@@ -1110,17 +1086,14 @@ export default function register(api: OpenClawPluginApi) {
         }
         return {
           topicId: nextScope.topicId,
-          taskId: nextScope.taskId,
           boardScope: nextScope,
         };
       }
     }
     const resolvedTopicId = await resolveTopicId(normalizedSessionKey);
-    const resolvedTaskId = resolveTaskId(normalizedSessionKey);
 
     return {
       topicId: resolvedTopicId,
-      taskId: resolvedTaskId,
       boardScope: undefined,
     };
   }
@@ -1354,7 +1327,6 @@ export default function register(api: OpenClawPluginApi) {
   type ApiLogEntry = {
     id?: string;
     topicId?: string | null;
-    taskId?: string | null;
     relatedLogId?: string | null;
     type?: string;
     content?: string;
@@ -1513,7 +1485,7 @@ export default function register(api: OpenClawPluginApi) {
         tools.push({
           name: "clawboard_search",
           label: "Clawboard Search",
-          description: "Search Clawboard topics, tasks, logs, and curated notes (hybrid semantic + lexical).",
+          description: "Search Clawboard topics, logs, and curated notes (hybrid semantic + lexical).",
           parameters: {
             type: "object",
             additionalProperties: false,
@@ -1523,7 +1495,6 @@ export default function register(api: OpenClawPluginApi) {
               topicId: { type: "string", description: "Optional topic scope restriction." },
               includePending: { type: "boolean", description: "Include pending (unclassified) logs." },
               limitTopics: { type: "integer", description: "Max topic matches." },
-              limitTasks: { type: "integer", description: "Max task matches." },
               limitLogs: { type: "integer", description: "Max log matches." },
             },
             required: ["q"],
@@ -1538,7 +1509,6 @@ export default function register(api: OpenClawPluginApi) {
             const includePending = coerceBool(params.includePending, true);
             const topicId = typeof params.topicId === "string" ? params.topicId.trim() : "";
             const limitTopics = coerceInt(params.limitTopics, 24, 1, 2000);
-            const limitTasks = coerceInt(params.limitTasks, 48, 1, 5000);
             const limitLogs = coerceInt(params.limitLogs, 360, 10, 5000);
             const lowerQuery = q.toLowerCase();
 
@@ -1547,61 +1517,52 @@ export default function register(api: OpenClawPluginApi) {
             // semantic search so watchdog continuity remains reliable under load.
             if (lowerQuery === "delegating") {
               const startedFast = nowMs();
-              const taskRes = await toolFetchJson({
-                pathname: "/api/tasks",
+              const topicRes = await toolFetchJson({
+                pathname: "/api/topics",
                 query: {
                   sessionKey: sk,
-                  topicId: topicId || undefined,
                 },
                 timeoutMs: 12000,
               });
-              if (taskRes.ok) {
-                const tasks = toolDataArray(taskRes.data)
+              if (topicRes.ok) {
+                const topics = toolDataArray(topicRes.data)
                   .filter((item) => item && typeof item === "object")
                   .map((item) => item as Record<string, unknown>)
-                  .filter((task) => {
-                    const status = String(task.status ?? "").trim().toLowerCase();
+                  .filter((topic) => {
+                    const status = String(topic.status ?? "").trim().toLowerCase();
                     if (status === "done") return false;
-                    const tags = Array.isArray(task.tags) ? task.tags : [];
+                    const tags = Array.isArray(topic.tags) ? topic.tags : [];
                     return tags.some((tag) => String(tag ?? "").trim().toLowerCase() === "delegating");
                   })
-                  .slice(0, Math.max(1, limitTasks));
-                const matchedTopicIds = new Set<string>();
-                const matchedTaskIds: string[] = [];
-                for (const task of tasks) {
-                  const topicIdValue = String(task.topicId ?? "").trim();
-                  if (topicIdValue) matchedTopicIds.add(topicIdValue);
-                  const taskIdValue = String(task.id ?? "").trim();
-                  if (taskIdValue) matchedTaskIds.push(taskIdValue);
-                }
+                  .slice(0, Math.max(1, limitTopics));
+                const matchedTopicIds = topics
+                  .map((topic) => String(topic.id ?? "").trim())
+                  .filter(Boolean);
                 return toolJsonResult({
                   ok: true,
                   status: 200,
                   data: {
                     query: q,
                     mode: "delegating-fast-path",
-                    topics: [],
-                    tasks,
+                    topics,
                     logs: [],
                     notes: [],
-                    matchedTopicIds: Array.from(matchedTopicIds),
-                    matchedTaskIds,
+                    matchedTopicIds,
                     matchedLogIds: [],
                     degraded: true,
                     searchMeta: {
-                      fastPath: "tasks-tag-filter",
+                      fastPath: "topics-tag-filter",
                       durationMs: Math.max(0, nowMs() - startedFast),
                       effectiveLimits: {
-                        topics: 0,
-                        tasks: Math.max(1, limitTasks),
+                        topics: Math.max(1, limitTopics),
                         logs: 0,
                       },
                     },
                   },
                 });
               }
-              if (!isToolTransientFailure(taskRes)) {
-                return toolJsonResult(taskRes);
+              if (!isToolTransientFailure(topicRes)) {
+                return toolJsonResult(topicRes);
               }
             }
 
@@ -1611,7 +1572,6 @@ export default function register(api: OpenClawPluginApi) {
               topicId: topicId || undefined,
               includePending,
               limitTopics,
-              limitTasks,
               limitLogs,
             };
 
@@ -1623,14 +1583,12 @@ export default function register(api: OpenClawPluginApi) {
             if (!isToolTransientFailure(res)) return toolJsonResult(res);
 
             const retryLimitTopics = Math.max(1, Math.min(limitTopics, 12));
-            const retryLimitTasks = Math.max(1, Math.min(limitTasks, 24));
             const retryLimitLogs = Math.max(10, Math.min(limitLogs, 120));
             const retry = await toolFetchJson({
               pathname: "/api/search",
               query: {
                 ...baseQuery,
                 limitTopics: retryLimitTopics,
-                limitTasks: retryLimitTasks,
                 limitLogs: retryLimitLogs,
               },
               timeoutMs: 20000,
@@ -1644,7 +1602,6 @@ export default function register(api: OpenClawPluginApi) {
               meta.retryReason = toolErrorText(res) || `status:${res.status}`;
               meta.retryLimits = {
                 topics: retryLimitTopics,
-                tasks: retryLimitTasks,
                 logs: retryLimitLogs,
               };
               retryData.searchMeta = meta;
@@ -1685,7 +1642,7 @@ export default function register(api: OpenClawPluginApi) {
             const res = await toolFetchJson({
               pathname: "/api/context",
               query: {
-                q: q || "current conversation continuity, active topics, active tasks, and curated notes",
+                q: q || "current conversation continuity, active topics, and curated notes",
                 sessionKey: sk,
                 mode,
                 maxChars,
@@ -1711,24 +1668,6 @@ export default function register(api: OpenClawPluginApi) {
             const id = typeof params.id === "string" ? params.id.trim() : "";
             if (!id) return toolJsonResult({ ok: false, error: "id required" });
             const res = await toolFetchJson({ pathname: `/api/topics/${encodeURIComponent(id)}` });
-            return toolJsonResult(res);
-          },
-        });
-
-        tools.push({
-          name: "clawboard_get_task",
-          label: "Get Clawboard Task",
-          description: "Fetch a Clawboard task by id.",
-          parameters: {
-            type: "object",
-            additionalProperties: false,
-            properties: { id: { type: "string", description: "Task id." } },
-            required: ["id"],
-          },
-          async execute(_toolCallId: string, params: Record<string, unknown>) {
-            const id = typeof params.id === "string" ? params.id.trim() : "";
-            if (!id) return toolJsonResult({ ok: false, error: "id required" });
-            const res = await toolFetchJson({ pathname: `/api/tasks/${encodeURIComponent(id)}` });
             return toolJsonResult(res);
           },
         });
@@ -1769,7 +1708,6 @@ export default function register(api: OpenClawPluginApi) {
               relatedLogId: { type: "string", description: "Log id this note attaches to." },
               text: { type: "string", description: "Note text (concise, durable, factual)." },
               topicId: { type: "string", description: "Optional explicit topic id." },
-              taskId: { type: "string", description: "Optional explicit task id." },
             },
             required: ["relatedLogId", "text"],
           },
@@ -1780,12 +1718,10 @@ export default function register(api: OpenClawPluginApi) {
             if (!text) return toolJsonResult({ ok: false, error: "text required" });
             const clipped = clip(text, 1600);
             const topicId = typeof params.topicId === "string" ? params.topicId.trim() : "";
-            const taskId = typeof params.taskId === "string" ? params.taskId.trim() : "";
             const payload = {
               type: "note",
               relatedLogId,
               topicId: topicId || undefined,
-              taskId: taskId || undefined,
               content: clipped,
               summary: summarize(clipped),
               createdAt: new Date().toISOString(),
@@ -1805,26 +1741,26 @@ export default function register(api: OpenClawPluginApi) {
         });
 
         tools.push({
-          name: "clawboard_update_task",
-          label: "Update Clawboard Task",
-          description: "Patch a task (status/priority/due/pin/snooze/tags) without needing the full task payload.",
+          name: "clawboard_update_topic",
+          label: "Update Clawboard Topic",
+          description: "Patch a topic (status/priority/due/pin/snooze/tags) without needing the full topic payload.",
           parameters: {
             type: "object",
             additionalProperties: false,
             properties: {
-              id: { type: "string", description: "Task id." },
+              id: { type: "string", description: "Topic id." },
               status: { type: "string", description: "todo|doing|blocked|done" },
               priority: { type: "string", description: "low|medium|high" },
               dueDate: { type: "string", description: "ISO due date" },
-              pinned: { type: "boolean", description: "Pin/unpin task" },
+              pinned: { type: "boolean", description: "Pin/unpin topic" },
               snoozedUntil: { type: "string", description: "ISO snooze-until timestamp (nullable string to clear)" },
               tags: { type: "array", items: { type: "string" }, description: "Tags list" },
             },
             required: ["id"],
           },
           async execute(_toolCallId: string, params: Record<string, unknown>) {
-            const requestedId = typeof params.id === "string" ? params.id.trim() : "";
-            if (!requestedId) return toolJsonResult({ ok: false, error: "id required" });
+            const id = typeof params.id === "string" ? params.id.trim() : "";
+            if (!id) return toolJsonResult({ ok: false, error: "id required" });
             const patch: Record<string, unknown> = {};
             if (typeof params.status === "string" && params.status.trim()) patch.status = params.status.trim();
             if (typeof params.priority === "string" && params.priority.trim()) patch.priority = params.priority.trim();
@@ -1833,10 +1769,8 @@ export default function register(api: OpenClawPluginApi) {
             if (typeof params.snoozedUntil === "string") patch.snoozedUntil = params.snoozedUntil.trim() || null;
             if (Array.isArray(params.tags)) patch.tags = params.tags.filter((t) => typeof t === "string").map((t) => t.trim()).filter(Boolean);
             if (Object.keys(patch).length === 0) return toolJsonResult({ ok: false, error: "no patch fields provided" });
-            const id = resolveBoardTaskPatchId(requestedId, defaultSessionKey, defaultTaskId);
-            if (!id) return toolJsonResult({ ok: false, error: "task id unavailable for current board session" });
             const res = await toolFetchJson({
-              pathname: `/api/tasks/${encodeURIComponent(id)}`,
+              pathname: `/api/topics/${encodeURIComponent(id)}`,
               method: "PATCH",
               body: patch,
             });
@@ -1851,10 +1785,9 @@ export default function register(api: OpenClawPluginApi) {
           "clawboard_search",
           "clawboard_context",
           "clawboard_get_topic",
-          "clawboard_get_task",
           "clawboard_get_log",
           "clawboard_create_note",
-          "clawboard_update_task",
+          "clawboard_update_topic",
         ],
       },
     );
@@ -1958,7 +1891,7 @@ export default function register(api: OpenClawPluginApi) {
           includePending: "1",
           maxChars: String(contextMaxChars),
           // Working set should be a bit larger than semantic shortlist.
-          workingSetLimit: String(Math.max(6, contextTaskLimit)),
+          workingSetLimit: String(Math.max(6, contextTopicLimit)),
           timelineLimit: String(contextLogLimit),
         },
         initFactory: () => ({ headers: apiHeaders, signal: controller.signal }),
@@ -2214,8 +2147,8 @@ export default function register(api: OpenClawPluginApi) {
   };
 
   const canonicalBoardScopeSessionKey = (scope: BoardScope | undefined) => {
-    if (!scope?.topicId || !scope.taskId) return undefined;
-    return `clawboard:task:${scope.topicId}:${scope.taskId}`;
+    if (!scope?.topicId) return undefined;
+    return `clawboard:topic:${scope.topicId}`;
   };
 
   const resolveOpenclawRequestIdForBoardScope = async (params: {
@@ -2251,7 +2184,7 @@ export default function register(api: OpenClawPluginApi) {
     for (const candidate of candidates) {
       const route = parseBoardSessionKey(candidate);
       if (!route) continue;
-      lookupSessionKeys.add(`clawboard:task:${route.topicId}:${route.taskId}`);
+      lookupSessionKeys.add(`clawboard:topic:${route.topicId}`);
     }
     if (lookupSessionKeys.size === 0) return explicitRequestId ?? params.requestId;
     for (const lookupSessionKey of lookupSessionKeys) {
@@ -2557,7 +2490,9 @@ export default function register(api: OpenClawPluginApi) {
           : undefined;
     if (!value) return undefined;
     const normalized = value.trim().toLowerCase();
-    if (normalized === "task") return normalized;
+    if (normalized === "topic") return normalized;
+    // Backward compat: old sources may still send "task"
+    if (normalized === "task") return "topic";
     return undefined;
   };
 
@@ -2666,7 +2601,6 @@ export default function register(api: OpenClawPluginApi) {
       boardScope: routing.boardScope,
     });
     const topicId = routing.topicId;
-    const taskId = routing.taskId;
 
     const metaSummary = meta?.summary;
     const summary =
@@ -2688,7 +2622,6 @@ export default function register(api: OpenClawPluginApi) {
       : "User";
     sendAsync({
       topicId,
-      taskId,
       type: "conversation",
       content: cleanRaw,
       summary,
@@ -2882,7 +2815,6 @@ export default function register(api: OpenClawPluginApi) {
       boardScope: routing.boardScope,
     });
     const topicId = routing.topicId;
-    const taskId = routing.taskId;
 
     // Outbound message content is always assistant-side.
     const agentId = "assistant";
@@ -2903,7 +2835,6 @@ export default function register(api: OpenClawPluginApi) {
 
     sendAsync({
       topicId,
-      taskId,
       type: "conversation",
       content: cleanRaw,
       summary,
@@ -3003,7 +2934,6 @@ export default function register(api: OpenClawPluginApi) {
 
     sendAsync({
       topicId: routing.topicId,
-      taskId: routing.taskId,
       type: "action",
       content,
       summary: content,
@@ -3089,7 +3019,6 @@ export default function register(api: OpenClawPluginApi) {
 
     sendAsync({
       topicId: routing.topicId,
-      taskId: routing.taskId,
       type: "action",
       content,
       summary: content,
@@ -3151,11 +3080,9 @@ export default function register(api: OpenClawPluginApi) {
       routing,
     });
     const topicId = routing.topicId;
-    const taskId = routing.taskId;
 
     sendAsync({
       topicId,
-      taskId,
       type: "action",
       content: `Tool call: ${event.toolName}`,
       summary: `Tool call: ${event.toolName}`,
@@ -3230,11 +3157,9 @@ export default function register(api: OpenClawPluginApi) {
       }
     }
     const topicId = routing.topicId;
-    const taskId = routing.taskId;
 
     sendAsync({
       topicId,
-      taskId,
       type: "action",
       content: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
       summary: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
@@ -3337,7 +3262,6 @@ export default function register(api: OpenClawPluginApi) {
       boardScope: routing.boardScope,
     });
     const topicId = routing.topicId;
-    const taskId = routing.taskId;
 
     // agent_end is always this agent's run: treat assistant-role messages as assistant output.
     const agentId = "assistant";
@@ -3353,7 +3277,6 @@ export default function register(api: OpenClawPluginApi) {
         }));
         sendAsync({
           topicId,
-          taskId,
           type: "action",
           content: "clawboard-logger: agent_end message shape",
           summary: "clawboard-logger: agent_end message shape",
@@ -3458,7 +3381,6 @@ export default function register(api: OpenClawPluginApi) {
           agentEndSeq += 1;
           sendAsync({
             topicId,
-            taskId,
             type: "conversation",
             content: cleanedContent,
             summary,
@@ -3493,7 +3415,6 @@ export default function register(api: OpenClawPluginApi) {
           agentEndSeq += 1;
           sendAsync({
             topicId,
-            taskId,
             type: "conversation",
             content: cleanedContent,
             summary,
@@ -3526,7 +3447,6 @@ export default function register(api: OpenClawPluginApi) {
     if (!event.success || debug) {
       sendAsync({
         topicId,
-        taskId,
         type: "action",
         content: event.success ? "Agent run complete" : "Agent run failed",
         summary: event.success ? "Agent run complete" : "Agent run failed",
@@ -3608,7 +3528,6 @@ export default function register(api: OpenClawPluginApi) {
         const content = `Hook event: ${hookName}`;
         sendAsync({
           topicId: routing.topicId,
-          taskId: routing.taskId,
           type: "action",
           content,
           summary: content,
@@ -3642,6 +3561,4 @@ export {
   normalizeWhitespace,
   tokenSet,
   lexicalSimilarity,
-  normalizeTaskIdentity,
-  resolveBoardTaskPatchId,
 } from "./strings.js";

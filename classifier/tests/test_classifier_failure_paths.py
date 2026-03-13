@@ -181,7 +181,7 @@ class ClassifierFailurePathTests(unittest.TestCase):
         self.assertIsNone(patched[0][1].get("classificationError"))
 
     def test_cls_023_forced_topic_stays_pinned_when_llm_times_out(self):
-        session_key = "clawboard:task:topic-forced:task-forced"
+        session_key = "clawboard:topic:topic-forced"
         logs = [_pending_log(session_key=session_key)]
         patched: list[tuple[str, dict]] = []
 

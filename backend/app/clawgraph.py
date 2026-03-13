@@ -124,7 +124,6 @@ ENTITY_TYPE_WEIGHT = {
 }
 
 TOPIC_COLOR = "#ff8a4a"
-TASK_COLOR = "#4ea1ff"
 ENTITY_COLOR = "#45c4a0"
 AGENT_COLOR = "#f2c84b"
 
@@ -364,7 +363,6 @@ def _edge_key(source: str, target: str, kind: str, undirected: bool = False) -> 
 def _node_size(kind: str, score: float) -> float:
     base = {
         "topic": 20.0,
-        "task": 15.0,
         "entity": 10.5,
         "agent": 11.5,
     }.get(kind, 10.0)
@@ -375,7 +373,6 @@ def _node_size(kind: str, score: float) -> float:
 def _node_color(kind: str) -> str:
     return {
         "topic": TOPIC_COLOR,
-        "task": TASK_COLOR,
         "entity": ENTITY_COLOR,
         "agent": AGENT_COLOR,
     }.get(kind, "#aab7c4")
@@ -395,7 +392,6 @@ def _build_node(node: NodeBuild) -> Dict[str, Any]:
 
 def build_clawgraph(
     topics: Iterable[Any],
-    tasks: Iterable[Any],
     logs: Iterable[Any],
     *,
     max_entities: int = 120,
@@ -403,7 +399,6 @@ def build_clawgraph(
     min_edge_weight: float = 0.16,
 ) -> Dict[str, Any]:
     topic_rows = list(topics)
-    task_rows = list(tasks)
     log_rows = list(logs)
 
     nodes: Dict[str, NodeBuild] = {}
@@ -442,36 +437,10 @@ def build_clawgraph(
             },
         )
 
-    for task in task_rows:
-        task_id = str(getattr(task, "id", "") or "")
-        if not task_id:
-            continue
-        topic_id = str(getattr(task, "topicId", "") or "")
-        node_id = f"task:{task_id}"
-        status = str(getattr(task, "status", "") or "todo")
-        status_boost = {"doing": 0.9, "blocked": 0.7, "todo": 0.45, "done": 0.1}.get(status, 0.3)
-        nodes[node_id] = NodeBuild(
-            id=node_id,
-            label=str(getattr(task, "title", "") or task_id),
-            kind="task",
-            score=1.1 + status_boost + (0.45 if bool(getattr(task, "pinned", False)) else 0.0),
-            meta={
-                "taskId": task_id,
-                "topicId": topic_id or None,
-                "status": status,
-                "pinned": bool(getattr(task, "pinned", False)),
-            },
-        )
-        if topic_id and f"topic:{topic_id}" in nodes:
-            key = _edge_key(f"topic:{topic_id}", node_id, "has_task")
-            edge_weights[key] += 1.0 + status_boost * 0.25
-            edge_evidence[key] += 1
-
     entity_score: Dict[str, float] = defaultdict(float)
     entity_label: Dict[str, str] = {}
     entity_type: Dict[str, str] = {}
     topic_entities: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    task_entities: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
     agent_entities: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
 
     created_values = [_parse_iso(getattr(row, "createdAt", None)) for row in log_rows]
@@ -498,7 +467,6 @@ def build_clawgraph(
             continue
 
         topic_id = str(getattr(row, "topicId", "") or "")
-        task_id = str(getattr(row, "taskId", "") or "")
         agent_label = str(getattr(row, "agentLabel", "") or getattr(row, "agentId", "") or "").strip()
         if agent_label:
             agent_node = f"agent:{_slug(agent_label)}"
@@ -553,8 +521,6 @@ def build_clawgraph(
             entity_ids.append(entity_id)
             if topic_id:
                 topic_entities[topic_id][entity_id] += weighted
-            if task_id:
-                task_entities[task_id][entity_id] += weighted
             if agent_label:
                 agent_entities[agent_label][entity_id] += weighted * 0.85
 
@@ -600,18 +566,6 @@ def build_clawgraph(
             edge_evidence[key] += 1
             nodes[source].score += weight * 0.05
 
-    for task_id, ent_map in task_entities.items():
-        source = f"task:{task_id}"
-        if source not in nodes:
-            continue
-        for ent_id, weight in ent_map.items():
-            if ent_id not in selected_entity_ids:
-                continue
-            key = _edge_key(source, ent_id, "mentions")
-            edge_weights[key] += weight
-            edge_evidence[key] += 1
-            nodes[source].score += weight * 0.035
-
     for agent_label, ent_map in agent_entities.items():
         source = f"agent:{_slug(agent_label)}"
         if source not in nodes:
@@ -644,31 +598,7 @@ def build_clawgraph(
             edge_weights[key] += score
             edge_evidence[key] += 1
 
-    # Task-task relatedness inside same topic via shared entities.
-    tasks_by_topic: Dict[str, List[str]] = defaultdict(list)
-    for task in task_rows:
-        tid = str(getattr(task, "id", "") or "")
-        topic_id = str(getattr(task, "topicId", "") or "")
-        if tid and topic_id:
-            tasks_by_topic[topic_id].append(tid)
-    for topic_id, task_ids in tasks_by_topic.items():
-        for i in range(len(task_ids)):
-            for j in range(i + 1, len(task_ids)):
-                left = task_ids[i]
-                right = task_ids[j]
-                left_map = task_entities.get(left, {})
-                right_map = task_entities.get(right, {})
-                shared = 0.0
-                for ent_id, lw in left_map.items():
-                    if ent_id in selected_entity_ids and ent_id in right_map:
-                        shared += min(lw, right_map[ent_id])
-                if shared < 0.95:
-                    continue
-                key = _edge_key(f"task:{left}", f"task:{right}", "related_task", undirected=True)
-                edge_weights[key] += shared * 0.11
-                edge_evidence[key] += 1
-
-    structural_nodes = {node_id for node_id, node in nodes.items() if node.kind in {"topic", "task", "agent"}}
+    structural_nodes = {node_id for node_id, node in nodes.items() if node.kind in {"topic", "agent"}}
     ranked_entity_nodes = [
         node_id
         for node_id, node in sorted(
@@ -685,7 +615,7 @@ def build_clawgraph(
     for (source, target, kind), weight in sorted(edge_weights.items(), key=lambda item: item[1], reverse=True):
         if source not in kept_nodes or target not in kept_nodes:
             continue
-        if weight < min_edge_weight and kind not in {"has_task"}:
+        if weight < min_edge_weight:
             continue
         evidence = int(edge_evidence.get((source, target, kind), 1))
         edge_list.append(
@@ -706,7 +636,6 @@ def build_clawgraph(
         used_nodes.add(edge["source"])
         used_nodes.add(edge["target"])
     used_nodes.update(node_id for node_id in kept_nodes if node_id.startswith("topic:"))
-    used_nodes.update(node_id for node_id in kept_nodes if node_id.startswith("task:"))
 
     node_list = []
     for node_id, node in sorted(nodes.items(), key=lambda item: (item[1].kind, -item[1].score, item[1].label)):
@@ -719,7 +648,6 @@ def build_clawgraph(
         edge["id"] = f"edge-{idx + 1}"
 
     topic_count = sum(1 for node in node_list if node["type"] == "topic")
-    task_count = sum(1 for node in node_list if node["type"] == "task")
     entity_count = sum(1 for node in node_list if node["type"] == "entity")
     agent_count = sum(1 for node in node_list if node["type"] == "agent")
     density_base = max(1.0, len(node_list) * (len(node_list) - 1) / 2)
@@ -731,7 +659,6 @@ def build_clawgraph(
             "nodeCount": len(node_list),
             "edgeCount": len(edge_list),
             "topicCount": topic_count,
-            "taskCount": task_count,
             "entityCount": entity_count,
             "agentCount": agent_count,
             "density": round(density, 4),

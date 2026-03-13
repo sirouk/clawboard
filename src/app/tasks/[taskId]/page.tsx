@@ -7,5 +7,5 @@ export default async function TaskRedirect({ params }: { params: MaybePromise<{ 
   const resolved = await params;
   const taskId = String(resolved?.taskId ?? "").trim();
   if (!taskId) redirect("/u");
-  redirect(`/u/task/${encodeURIComponent(taskId)}`);
+  redirect(`/u/topic/${encodeURIComponent(taskId)}`);
 }

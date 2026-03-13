@@ -25,7 +25,7 @@ const jetBrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: "Clawboard",
-  description: "OpenClaw companion for topics, tasks, and logs.",
+  description: "OpenClaw companion for topics, conversations, and logs.",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,

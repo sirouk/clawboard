@@ -10,7 +10,7 @@ from sqlmodel import select
 
 from .db import DATABASE_URL, get_session
 from .events import event_hub
-from .models import Space, Topic, Task, LogEntry, SessionRoutingMemory
+from .models import Space, Topic, LogEntry, SessionRoutingMemory
 
 __all__ = [
     "DEFAULT_SPACE_ID",
@@ -30,7 +30,6 @@ __all__ = [
     "_clean_tag_label",
     "_normalize_tags",
     "_space_id_for_topic",
-    "_space_id_for_task",
     "_space_id_from_log_scope",
     "_infer_space_id_from_session_key",
     "_resolve_source_space_id",
@@ -42,9 +41,7 @@ __all__ = [
     "_resolve_space_id_from_topic_tags",
     "_topic_space_ids",
     "_topic_matches_allowed_spaces",
-    "_task_matches_allowed_spaces",
     "_load_topics_by_ids",
-    "_load_tasks_by_ids",
     "_load_related_maps_for_logs",
     "_log_matches_allowed_spaces",
     "_propagate_topic_space",
@@ -344,13 +341,6 @@ def _space_id_for_topic(topic: Topic | None) -> str:
     return normalized or DEFAULT_SPACE_ID
 
 
-def _space_id_for_task(task: Task | None) -> str:
-    if not task:
-        return DEFAULT_SPACE_ID
-    normalized = _normalize_space_id(getattr(task, "spaceId", None))
-    return normalized or DEFAULT_SPACE_ID
-
-
 def _space_id_from_log_scope(entry: LogEntry | None) -> str | None:
     if not entry:
         return None
@@ -370,7 +360,7 @@ def _infer_space_id_from_session_key(session: Any, session_key: str | None) -> s
     # Late import to avoid circular dependency.
     from .main import _parse_board_session_key
 
-    board_topic_id, board_task_id = _parse_board_session_key(normalized_session_key)
+    board_topic_id = _parse_board_session_key(normalized_session_key)
     base_session_key = normalized_session_key.split("|", 1)[0].strip()
     session_candidates = [normalized_session_key]
     if base_session_key and base_session_key != normalized_session_key:
@@ -412,10 +402,6 @@ def _infer_space_id_from_session_key(session: Any, session_key: str | None) -> s
             if scoped:
                 return scoped
 
-    if board_task_id:
-        task = session.get(Task, board_task_id)
-        if task:
-            return _space_id_for_task(task)
     if board_topic_id:
         topic = session.get(Topic, board_topic_id)
         if topic:
@@ -425,16 +411,16 @@ def _infer_space_id_from_session_key(session: Any, session_key: str | None) -> s
         memory = session.get(SessionRoutingMemory, candidate)
         if not memory:
             continue
-        task_id = str(getattr(memory, "taskId", "") or "").strip()
-        if task_id:
-            task = session.get(Task, task_id)
-            if task:
-                return _space_id_for_task(task)
-        topic_id = str(getattr(memory, "topicId", "") or "").strip()
-        if topic_id:
-            topic = session.get(Topic, topic_id)
-            if topic:
-                return _space_id_for_topic(topic)
+        items = getattr(memory, "items", None)
+        if isinstance(items, list):
+            for item in reversed(items):
+                if not isinstance(item, dict):
+                    continue
+                topic_id = str(item.get("topicId", "") or "").strip()
+                if topic_id:
+                    topic = session.get(Topic, topic_id)
+                    if topic:
+                        return _space_id_for_topic(topic)
 
     return None
 
@@ -596,20 +582,6 @@ def _topic_matches_allowed_spaces(topic: Topic | None, allowed_space_ids: set[st
     return bool(_topic_space_ids(topic) & allowed_space_ids)
 
 
-def _task_matches_allowed_spaces(task: Task | None, allowed_space_ids: set[str], topic_by_id: dict[str, Topic]) -> bool:
-    if not task:
-        return False
-    if _space_id_for_task(task) in allowed_space_ids:
-        return True
-    topic_id = str(getattr(task, "topicId", "") or "").strip()
-    if not topic_id:
-        return False
-    topic = topic_by_id.get(topic_id)
-    if not topic:
-        return False
-    return _topic_matches_allowed_spaces(topic, allowed_space_ids)
-
-
 # ---------------------------------------------------------------------------
 # Bulk loading
 # ---------------------------------------------------------------------------
@@ -635,68 +607,31 @@ def _load_topics_by_ids(session: Any, topic_ids: Iterable[str]) -> dict[str, Top
     return out
 
 
-def _load_tasks_by_ids(session: Any, task_ids: Iterable[str]) -> dict[str, Task]:
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for raw in task_ids:
-        task_id = str(raw or "").strip()
-        if not task_id or task_id in seen:
-            continue
-        seen.add(task_id)
-        normalized.append(task_id)
-    if not normalized:
-        return {}
-    out: dict[str, Task] = {}
-    for chunk in _chunked_values(normalized, 300):
-        rows = session.exec(select(Task).where(Task.id.in_(chunk))).all()
-        for row in rows:
-            row_id = str(getattr(row, "id", "") or "").strip()
-            if row_id:
-                out[row_id] = row
-    return out
-
-
 def _load_related_maps_for_logs(
     session: Any,
     logs: Iterable[LogEntry],
     *,
     seeded_topics: dict[str, Topic] | None = None,
-    seeded_tasks: dict[str, Task] | None = None,
-) -> tuple[dict[str, Topic], dict[str, Task]]:
+) -> dict[str, Topic]:
     topic_by_id: dict[str, Topic] = dict(seeded_topics or {})
-    task_by_id: dict[str, Task] = dict(seeded_tasks or {})
-
-    missing_task_ids: set[str] = set()
     missing_topic_ids: set[str] = set()
 
     for entry in logs:
-        task_id = str(getattr(entry, "taskId", "") or "").strip()
-        if task_id and task_id not in task_by_id:
-            missing_task_ids.add(task_id)
         topic_id = str(getattr(entry, "topicId", "") or "").strip()
         if topic_id and topic_id not in topic_by_id:
             missing_topic_ids.add(topic_id)
-
-    if missing_task_ids:
-        loaded_tasks = _load_tasks_by_ids(session, missing_task_ids)
-        task_by_id.update(loaded_tasks)
-        for task in loaded_tasks.values():
-            topic_id = str(getattr(task, "topicId", "") or "").strip()
-            if topic_id and topic_id not in topic_by_id:
-                missing_topic_ids.add(topic_id)
 
     if missing_topic_ids:
         loaded_topics = _load_topics_by_ids(session, missing_topic_ids)
         topic_by_id.update(loaded_topics)
 
-    return topic_by_id, task_by_id
+    return topic_by_id
 
 
 def _log_matches_allowed_spaces(
     entry: LogEntry | None,
     allowed_space_ids: set[str],
     topic_by_id: dict[str, Topic],
-    task_by_id: dict[str, Task],
 ) -> bool:
     if not entry:
         return False
@@ -704,12 +639,6 @@ def _log_matches_allowed_spaces(
     direct_space_id = _normalize_space_id(getattr(entry, "spaceId", None)) or DEFAULT_SPACE_ID
     if direct_space_id in allowed_space_ids:
         return True
-
-    task_id = str(getattr(entry, "taskId", "") or "").strip()
-    if task_id:
-        task = task_by_id.get(task_id)
-        if task and _task_matches_allowed_spaces(task, allowed_space_ids, topic_by_id):
-            return True
 
     topic_id = str(getattr(entry, "topicId", "") or "").strip()
     if topic_id:
@@ -722,13 +651,6 @@ def _log_matches_allowed_spaces(
 
 def _propagate_topic_space(session: Any, topic: Topic, *, stamp: str) -> None:
     topic_space_id = _space_id_for_topic(topic)
-    scoped_tasks = session.exec(select(Task).where(Task.topicId == topic.id)).all()
-    for scoped_task in scoped_tasks:
-        if _space_id_for_task(scoped_task) == topic_space_id:
-            continue
-        scoped_task.spaceId = topic_space_id
-        scoped_task.updatedAt = stamp
-        session.add(scoped_task)
     scoped_logs = session.exec(select(LogEntry).where(LogEntry.topicId == topic.id)).all()
     for scoped_log in scoped_logs:
         current_log_space = _normalize_space_id(getattr(scoped_log, "spaceId", None)) or DEFAULT_SPACE_ID

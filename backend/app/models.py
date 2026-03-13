@@ -74,11 +74,15 @@ class Topic(SQLModel, table=True):
     )
     status: Optional[str] = Field(
         default="active",
-        description="Status (active | snoozed | archived).",
+        description="Status (active | todo | doing | blocked | done | snoozed | archived).",
     )
     snoozedUntil: Optional[str] = Field(
         default=None,
         description="ISO timestamp when a snoozed topic should re-activate (nullable).",
+    )
+    dueDate: Optional[str] = Field(
+        default=None,
+        description="Optional due date (ISO).",
     )
     tags: List[str] = Field(
         default_factory=list,
@@ -109,67 +113,6 @@ class Topic(SQLModel, table=True):
     )
 
 
-class Task(SQLModel, table=True):
-    id: str = Field(primary_key=True, description="Task ID.")
-    spaceId: str = Field(
-        default="space-default",
-        foreign_key="space.id",
-        description="Owning space ID.",
-    )
-    topicId: Optional[str] = Field(
-        default=None,
-        foreign_key="topic.id",
-        description="Parent topic ID (nullable).",
-    )
-    title: str = Field(description="Task title.")
-    sortIndex: int = Field(
-        default=0,
-        description="Manual ordering index within the topic (lower comes first).",
-    )
-    color: Optional[str] = Field(
-        default=None,
-        description="Task display color in #RRGGBB format.",
-    )
-    status: str = Field(
-        description="Task status (todo | doing | blocked | done).",
-    )
-    tags: List[str] = Field(
-        default_factory=list,
-        sa_column=Column(JSON),
-        description="Freeform tags.",
-    )
-    snoozedUntil: Optional[str] = Field(
-        default=None,
-        description="ISO timestamp when a snoozed task should re-activate (nullable).",
-    )
-    pinned: Optional[bool] = Field(
-        default=False,
-        description="Pinned tasks sort to the top within their topic.",
-    )
-    priority: Optional[str] = Field(
-        default="medium",
-        description="Priority level (low | medium | high).",
-    )
-    dueDate: Optional[str] = Field(
-        default=None,
-        description="Optional due date (ISO).",
-    )
-    digest: Optional[str] = Field(
-        default=None,
-        description="Durable task digest (system-managed summary; optional).",
-    )
-    digestUpdatedAt: Optional[str] = Field(
-        default=None,
-        description="ISO timestamp when digest was last updated (nullable).",
-    )
-    createdAt: str = Field(
-        description="ISO timestamp when the task was created.",
-    )
-    updatedAt: str = Field(
-        description="ISO timestamp of last update.",
-    )
-
-
 class LogEntry(SQLModel, table=True):
     id: str = Field(primary_key=True, description="Log entry ID.")
     spaceId: str = Field(
@@ -181,11 +124,6 @@ class LogEntry(SQLModel, table=True):
         default=None,
         foreign_key="topic.id",
         description="Associated topic ID (nullable).",
-    )
-    taskId: Optional[str] = Field(
-        default=None,
-        foreign_key="task.id",
-        description="Associated task ID (nullable).",
     )
     relatedLogId: Optional[str] = Field(
         default=None,
@@ -270,13 +208,6 @@ class DeletedTopic(SQLModel, table=True):
     deletedAt: str = Field(description="ISO timestamp when the topic was deleted.")
 
 
-class DeletedTask(SQLModel, table=True):
-    """Task tombstones for incremental /api/changes reconciliation."""
-
-    id: str = Field(primary_key=True, description="Deleted task ID.")
-    deletedAt: str = Field(description="ISO timestamp when the task was deleted.")
-
-
 class SessionRoutingMemory(SQLModel, table=True):
     """Small per-session memory to improve routing under low-signal follow-ups.
 
@@ -307,11 +238,9 @@ class OpenClawRequestRoute(SQLModel, table=True):
     baseSessionKey: str = Field(description="Session key without thread suffix.")
     spaceId: Optional[str] = Field(default=None, description="Resolved board space id when known.")
     topicId: Optional[str] = Field(default=None, description="Resolved topic route when known.")
-    taskId: Optional[str] = Field(default=None, description="Resolved task route when promoted/known.")
-    routeKind: str = Field(default="detached", description="detached|topic|task")
-    routeLocked: bool = Field(default=False, description="Whether route is task-locked.")
+    routeKind: str = Field(default="detached", description="detached|topic")
+    routeLocked: bool = Field(default=False, description="Whether route is topic-locked.")
     sourceLogId: Optional[str] = Field(default=None, description="Latest log id that updated the route.")
-    promotedAt: Optional[str] = Field(default=None, description="Timestamp when route promoted topic->task.")
     createdAt: str = Field(description="ISO timestamp when route was first recorded.")
     updatedAt: str = Field(description="ISO timestamp of latest route update.")
 
@@ -373,7 +302,6 @@ class OrchestrationRun(SQLModel, table=True):
     baseSessionKey: str = Field(description="Base session key without thread suffix.")
     spaceId: Optional[str] = Field(default=None, description="Resolved source space id (if known).")
     topicId: Optional[str] = Field(default=None, description="Resolved topic scope (if known).")
-    taskId: Optional[str] = Field(default=None, description="Resolved task scope (if known).")
     mode: str = Field(default="single", description="Execution mode (single|parallel|consensus).")
     status: str = Field(default="running", description="Run state (running|stalled|done|failed|cancelled).")
     objective: Optional[str] = Field(default=None, description="Compact objective extracted from user message.")

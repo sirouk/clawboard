@@ -42,7 +42,6 @@ const DEFAULT_STATE: UnifiedUrlState = {
 function parsePathSelections(pathname: string, basePath: string) {
   const segments = pathname.startsWith(basePath) ? pathname.slice(basePath.length).split("/").filter(Boolean) : [];
   const topics: string[] = [];
-  const tasks: string[] = [];
   for (let i = 0; i < segments.length; i += 1) {
     const key = segments[i];
     const value = segments[i + 1];
@@ -51,11 +50,12 @@ function parsePathSelections(pathname: string, basePath: string) {
       topics.push(value);
       i += 1;
     } else if (key === "task") {
-      tasks.push(value);
+      // Hard cut: former task URLs now resolve directly to topic ids.
+      topics.push(value);
       i += 1;
     }
   }
-  return { topics, tasks };
+  return { topics, tasks: [] as string[] };
 }
 
 function parseRawParam(params: URLSearchParams, mode: RawParseMode, defaultWhenMissing: boolean) {
@@ -88,9 +88,8 @@ export function parseUnifiedUrlState(url: URL, options: ParseUnifiedUrlStateOpti
   let nextTopics = hasPathSelections
     ? mapIdValues(pathSelections.topics, resolveTopicId)
     : mapIdValues(params.getAll("topic"), resolveTopicId);
-  let nextTasks = hasPathSelections
-    ? mapIdValues(pathSelections.tasks, resolveTaskId)
-    : mapIdValues(params.getAll("task"), resolveTaskId);
+  const pathTasks = hasPathSelections ? mapIdValues(pathSelections.tasks, resolveTaskId) : [];
+  let nextTasks = hasPathSelections ? [] : mapIdValues(params.getAll("task"), resolveTaskId);
 
   if (nextTopics.length === 0) {
     const legacyTopics = params.get("topics")?.split(",").filter(Boolean) ?? [];
@@ -101,13 +100,17 @@ export function parseUnifiedUrlState(url: URL, options: ParseUnifiedUrlStateOpti
     nextTasks = mapIdValues(legacyTasks, resolveTaskId);
   }
 
+  if (pathTasks.length > 0) {
+    nextTopics = Array.from(new Set([...nextTopics, ...pathTasks]));
+  }
+
   if (nextTasks.length > 0 && options.taskTopicById) {
-    const parentTopicIds = nextTasks
+    const promotedTaskIds = [...nextTasks];
+    const parentTopicIds = promotedTaskIds
       .map((taskId) => options.taskTopicById?.get(taskId))
       .filter((topicId): topicId is string => Boolean(topicId));
-    if (parentTopicIds.length > 0) {
-      nextTopics = Array.from(new Set([...nextTopics, ...parentTopicIds]));
-    }
+    nextTopics = Array.from(new Set([...nextTopics, ...promotedTaskIds, ...parentTopicIds]));
+    nextTasks = [];
   }
 
   const densityParam = (params.get("density") ?? "").trim().toLowerCase();
@@ -122,16 +125,13 @@ export function parseUnifiedUrlState(url: URL, options: ParseUnifiedUrlStateOpti
     reveal: params.get("reveal") === "1",
     page: sanitizePage(Number(params.get("page") ?? 1)),
     topics: nextTopics,
-    tasks: nextTasks,
+    tasks: [],
   };
 }
 
 export function getInitialUnifiedUrlState(basePath: string): UnifiedUrlState {
-  if (typeof window === "undefined") return DEFAULT_STATE;
-  const rawDefaultWhenMissing = window.matchMedia("(min-width: 768px)").matches;
-  return parseUnifiedUrlState(new URL(window.location.href), {
-    basePath,
-    rawParseMode: "not-zero",
-    rawDefaultWhenMissing,
-  });
+  void basePath;
+  // Keep the server and client first render identical. The mounted sync effect in
+  // UnifiedView applies the real URL state immediately after hydration.
+  return DEFAULT_STATE;
 }

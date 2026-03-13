@@ -2,11 +2,11 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import type { Task, Topic, TaskStatus } from "@/lib/types";
+import type { Topic, TaskStatus } from "@/lib/types";
 import { Button, StatusPill } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { formatRelativeTime } from "@/lib/format";
-import { buildTaskUrl, UNIFIED_BASE } from "@/lib/url";
+import { buildTopicUrl, UNIFIED_BASE } from "@/lib/url";
 import { apiFetch } from "@/lib/api";
 
 const STATUS_TONE: Record<TaskStatus, "muted" | "accent" | "accent2" | "warning" | "success"> = {
@@ -17,79 +17,80 @@ const STATUS_TONE: Record<TaskStatus, "muted" | "accent" | "accent2" | "warning"
 };
 
 export function NowPanel({
-  tasks: initialTasks,
+  tasks: initialTopics,
   topics,
   allowStatusUpdate = true,
   linkEntireCard = false,
 }: {
-  tasks: Task[];
+  tasks: Topic[];
   topics: Topic[];
   allowStatusUpdate?: boolean;
   linkEntireCard?: boolean;
 }) {
   const { token, tokenRequired } = useAppConfig();
-  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const [items, setItems] = useState<Topic[]>(initialTopics);
   const readOnly = tokenRequired && !token;
 
-  const updateTask = async (taskId: string, updates: Partial<Task>) => {
+  const updateTask = async (topicId: string, updates: Partial<Topic>) => {
     if (readOnly) return;
     if (!allowStatusUpdate) return;
-    const current = tasks.find((task) => task.id === taskId);
+    const current = items.find((t) => t.id === topicId);
     if (!current) return;
     const res = await apiFetch(
-      "/api/tasks",
+      `/api/topics/${encodeURIComponent(topicId)}`,
       {
-      method: "POST",
+      method: "PATCH",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ ...current, ...updates }),
+      body: JSON.stringify(updates),
       },
       token
     );
 
     if (!res.ok) return;
-    setTasks((prev) =>
-      prev.map((task) => (task.id === taskId ? { ...task, ...updates, updatedAt: new Date().toISOString() } : task))
+    setItems((prev) =>
+      prev.map((t) => (t.id === topicId ? { ...t, ...updates, updatedAt: new Date().toISOString() } : t))
     );
   };
 
-  const openTasks = [...tasks]
-    .filter((task) => task.status !== "done")
+  const openTasks = [...items]
+    .filter((t) => t.status !== "done")
     .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
     .slice(0, 3);
 
   return (
     <div className="space-y-4">
       {readOnly && (
-        <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token to update tasks.</p>
+        <p className="text-xs text-[rgb(var(--claw-warning))]">Read-only mode. Add a token to update topics.</p>
       )}
       {openTasks.length === 0 && (
         <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-3 text-sm text-[rgb(var(--claw-muted))]">
-          <p>No open tasks yet.</p>
+          <p>No open topics yet.</p>
           <Link href={UNIFIED_BASE} className="mt-2 inline-flex text-xs text-[rgb(var(--claw-accent))]">
-            Open Board to create or triage tasks
+            Open Board to create or triage topics
           </Link>
         </div>
       )}
       {openTasks.map((task) => {
-        const topicLabel = topics.find((topic) => topic.id === task.topicId)?.name ?? "Unassigned";
-        const taskHref = buildTaskUrl(task, topics);
+        const parentLabel = task.parentId ? topics.find((t) => t.id === task.parentId)?.name : undefined;
+        const taskHref = buildTopicUrl(task, topics);
         const titleNode = linkEntireCard && !allowStatusUpdate ? (
-          <span className="text-sm font-semibold">{task.title}</span>
+          <span className="text-sm font-semibold">{task.name}</span>
         ) : (
           <Link className="text-sm font-semibold" href={taskHref}>
-            {task.title}
+            {task.name}
           </Link>
         );
+        const statusKey = (task.status ?? "active") as TaskStatus;
         const CardBody = (
           <>
             <div className="flex items-center justify-between gap-3">
               <div>
                 {titleNode}
-                <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{topicLabel}</div>
+                {parentLabel && <div className="mt-1 text-xs text-[rgb(var(--claw-muted))]">{parentLabel}</div>}
               </div>
-              <StatusPill tone={STATUS_TONE[task.status]} label={task.status} />
+              <StatusPill tone={STATUS_TONE[statusKey] ?? "muted"} label={statusKey} />
             </div>
             <div className="mt-2 flex flex-wrap items-center justify-between gap-3 text-xs text-[rgb(var(--claw-muted))]">
               <span>Updated {formatRelativeTime(task.updatedAt)}</span>

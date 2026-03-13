@@ -73,7 +73,7 @@ export function TaskList({
     return tasks.filter((task) => {
       if (statusFilter === "open" && task.status === "done") return false;
       if (statusFilter !== "all" && statusFilter !== "open" && task.status !== statusFilter) return false;
-      if (search.trim().length > 0 && !task.title.toLowerCase().includes(search.toLowerCase())) return false;
+      if (search.trim().length > 0 && !(task.title ?? task.name).toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     });
   }, [tasks, statusFilter, search]);
@@ -84,17 +84,20 @@ export function TaskList({
     if (readOnly) return;
     const current = tasks.find((task) => task.id === taskId);
     if (!current) return;
+    const nextTitle = String(updates.title ?? current.title ?? current.name).trim();
     const res = await apiFetch(
-      "/api/tasks",
+      "/api/topics",
       {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        ...current,
-        ...updates,
-      }),
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ...current,
+          ...updates,
+          name: nextTitle || current.name,
+          parentId: updates.topicId !== undefined ? updates.topicId : (current.topicId ?? current.parentId ?? null),
+        }),
       },
       token
     );
@@ -104,7 +107,18 @@ export function TaskList({
     }
 
     setTasks((prev) =>
-      prev.map((task) => (task.id === taskId ? { ...task, ...updates, updatedAt: new Date().toISOString() } : task))
+      prev.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              ...updates,
+              title: nextTitle || task.title || task.name,
+              name: nextTitle || task.name,
+              topicId: updates.topicId !== undefined ? updates.topicId : task.topicId,
+              updatedAt: new Date().toISOString(),
+            }
+          : task
+      )
     );
   };
 
@@ -112,7 +126,7 @@ export function TaskList({
   return (
     <div className="space-y-4">
       {readOnly && (
-        <p className="text-sm text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup to update tasks.</p>
+        <p className="text-sm text-[rgb(var(--claw-warning))]">Read-only mode. Add a token in Setup to update topics.</p>
       )}
       {showFilters && (
         <div className="flex flex-wrap items-center gap-3">
@@ -120,7 +134,7 @@ export function TaskList({
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             onClear={() => setSearch("")}
-            placeholder="Search tasks"
+            placeholder="Search topics"
             className="max-w-sm"
           />
           <Select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)} className="max-w-[200px]">
@@ -163,7 +177,7 @@ export function TaskList({
             enableCardNavigation={enableCardNavigation}
           />
         ))}
-        {filtered.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No tasks match yet.</p>}
+        {filtered.length === 0 && <p className="text-sm text-[rgb(var(--claw-muted))]">No topics match yet.</p>}
       </div>
     </div>
   );
@@ -193,9 +207,9 @@ function TaskRow({
   enableCardNavigation: boolean;
 }) {
   const router = useRouter();
-  const [title, setTitle] = useState(task.title);
+  const [title, setTitle] = useState(task.title ?? task.name);
   const [saving, setSaving] = useState(false);
-  const topicName = topics.find((topic) => topic.id === task.topicId)?.name ?? "Unassigned";
+  const topicName = topics.find((topic) => topic.id === (task.topicId ?? task.parentId))?.name ?? "Unassigned";
   const compact = density === "compact";
   const rowPadding = compact ? "p-3" : "p-4";
   const titleClass = compact ? "text-sm" : "text-base";
@@ -205,7 +219,7 @@ function TaskRow({
 
   const handleBlur = async () => {
     if (!allowTitleEdit || readOnly) return;
-    if (title.trim() === task.title) return;
+    if (title.trim() === (task.title ?? task.name)) return;
     setSaving(true);
     try {
       await onUpdate(task.id, { title: title.trim() });
@@ -233,7 +247,7 @@ function TaskRow({
         if (!handleNavigate(event.target as HTMLElement)) return;
         router.push(taskHref);
       }}
-      aria-label={enableCardNavigation ? `View task ${task.title}` : undefined}
+      aria-label={enableCardNavigation ? `View ${task.title ?? task.name}` : undefined}
     >
       <div className={`flex gap-3 ${compact ? "flex-col items-stretch" : "flex-wrap items-center justify-between"}`}>
         <div className="flex flex-1 flex-col gap-2">
@@ -254,10 +268,10 @@ function TaskRow({
           </div>
         </div>
         <div className={`flex flex-wrap items-center gap-3 ${compact ? "w-full" : ""}`}>
-          <StatusPill tone={STATUS_TONE[task.status]} label={STATUS_LABELS[task.status]} />
+          <StatusPill tone={STATUS_TONE[(task.status ?? "todo") as TaskStatus] ?? "muted"} label={STATUS_LABELS[(task.status ?? "todo") as TaskStatus] ?? task.status ?? "todo"} />
           {allowStatusChange && !readOnly && (
             <Select
-              value={task.status}
+              value={task.status ?? "todo"}
               onChange={(event) => onUpdate(task.id, { status: event.target.value as TaskStatus })}
               className={selectClass}
               disabled={readOnly}
@@ -271,7 +285,7 @@ function TaskRow({
           )}
           {showTopicSelect && allowTopicChange && (
             <Select
-              value={task.topicId ?? ""}
+              value={task.topicId ?? task.parentId ?? ""}
               onChange={(event) => onUpdate(task.id, { topicId: event.target.value || null })}
               className={topicSelectClass}
               disabled={readOnly}

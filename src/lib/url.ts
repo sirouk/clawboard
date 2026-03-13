@@ -1,5 +1,5 @@
-import type { Task, Topic } from "@/lib/types";
-import { encodeTaskSlug, encodeTopicSlug } from "@/lib/slug";
+import type { Topic } from "@/lib/types";
+import { encodeTopicSlug } from "@/lib/slug";
 
 export const UNIFIED_BASE = "/u";
 
@@ -25,17 +25,12 @@ export function buildTopicUrl(topic: TopicLike, topics?: TopicLike[]) {
   return `${UNIFIED_BASE}/${segments}`;
 }
 
+/** @deprecated Tasks merged into Topics. Delegates to buildTopicUrl. */
 export function buildTaskUrl(
-  task: Pick<Task, "id" | "title" | "topicId">,
+  task: TopicLike & { title?: string; topicId?: string | null },
   topics?: TopicLike[],
-  overrideTopic?: TopicLike | null
 ) {
-  const topic = overrideTopic ?? topics?.find((item) => item.id === task.topicId) ?? null;
-  if (topic) {
-    const base = buildTopicUrl(topic, topics);
-    return `${base}/task/${encodeTaskSlug({ id: task.id, title: task.title })}`;
-  }
-  return `${UNIFIED_BASE}/task/${encodeTaskSlug({ id: task.id, title: task.title })}`;
+  return buildTopicUrl({ id: task.id, name: task.title ?? task.name, parentId: task.parentId }, topics);
 }
 
 export function withRevealParam(href: string, enabled = true) {

@@ -15,31 +15,22 @@ model WorkspaceConfig {
 }
 
 model Topic {
-  id          String   @id
-  name        String
-  description String?
-  parentId    String?
-  tags        String?
-  color       String?
-  createdAt   DateTime
-  updatedAt   DateTime
+  id           String    @id
+  name         String
+  description  String?
+  parentId     String?
+  tags         String?
+  color        String?
+  status       String?
+  priority     String?
+  dueDate      DateTime?
+  snoozedUntil DateTime?
+  pinned       Boolean   @default(false)
+  createdAt    DateTime
+  updatedAt    DateTime
 
-  tasks Task[]
   logs  ActivityLog[]
   events Event[]
-}
-
-model Task {
-  id        String   @id
-  topicId   String
-  title     String
-  status    String
-  color     String?
-  createdAt DateTime
-  updatedAt DateTime
-
-  topic Topic @relation(fields: [topicId], references: [id], onDelete: Cascade)
-  @@index([topicId])
 }
 
 model ActivityLog {

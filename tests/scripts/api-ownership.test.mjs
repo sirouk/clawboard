@@ -38,8 +38,6 @@ test("canonical overlapping routes are explicit FastAPI proxy shims", async () =
   const expectedProxyRoutes = [
     "src/app/api/topics/route.ts",
     "src/app/api/topics/[id]/route.ts",
-    "src/app/api/tasks/route.ts",
-    "src/app/api/tasks/[id]/route.ts",
     "src/app/api/log/route.ts",
   ];
 
@@ -54,7 +52,6 @@ test("legacy-only next api routes are explicitly blocked", async () => {
   const root = process.cwd();
   const expectedBlockedRoutes = [
     "src/app/api/topics/ensure/route.ts",
-    "src/app/api/tasks/upsert/route.ts",
     "src/app/api/events/route.ts",
     "src/app/api/events/append/route.ts",
     "src/app/api/events/upsert/route.ts",

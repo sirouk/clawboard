@@ -556,9 +556,9 @@ def _session_key_supports_bundle_tool_scoping(session_key: str | None) -> bool:
         return False
     if base.startswith("channel:"):
         return True
-    if base.startswith("clawboard:task:"):
+    if base.startswith("clawboard:topic:"):
         return True
-    return ":clawboard:task:" in base
+    return ":clawboard:topic:" in base
 
 
 def _is_subagent_scaffold_text(content: str | None, summary: str | None, raw: str | None) -> bool:
@@ -684,13 +684,13 @@ def _session_keys_equivalent(source_key: str | None, target_key: str | None) -> 
         return True
 
     # Board sessions can be wrapped by agent prefixes
-    # (`agent:main:clawboard:task:*`, etc.).
+    # (`agent:main:clawboard:topic:*`, etc.).
     # Late import to avoid circular dependency with main.py
     from .main import _parse_board_session_key
 
-    lhs_topic, lhs_task = _parse_board_session_key(lhs)
-    rhs_topic, rhs_task = _parse_board_session_key(rhs)
-    return bool(lhs_topic and rhs_topic and lhs_topic == rhs_topic and lhs_task == rhs_task)
+    lhs_topic = _parse_board_session_key(lhs)
+    rhs_topic = _parse_board_session_key(rhs)
+    return bool(lhs_topic and rhs_topic and lhs_topic == rhs_topic)
 
 
 def _log_matches_session(entry: LogEntry, session_key: str) -> bool:

@@ -26,16 +26,18 @@ export function TaskPinToggle({
     if (readOnly || saving) return;
     setSaving(true);
     const res = await apiFetch(
-      "/api/tasks",
+      "/api/topics",
       {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        ...task,
-        pinned: !task.pinned,
-      }),
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ...task,
+          name: task.title ?? task.name,
+          parentId: task.topicId ?? task.parentId ?? null,
+          pinned: !task.pinned,
+        }),
       },
       token
     );

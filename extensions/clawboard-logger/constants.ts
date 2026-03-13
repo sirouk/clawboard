@@ -8,7 +8,6 @@ export const SUMMARY_MAX = 72;
 export const RAW_MAX = 5000;
 export const DEFAULT_CONTEXT_MAX_CHARS = 2200;
 export const DEFAULT_CONTEXT_TOPIC_LIMIT = 3;
-export const DEFAULT_CONTEXT_TASK_LIMIT = 3;
 export const DEFAULT_CONTEXT_LOG_LIMIT = 6;
 export const DEFAULT_CONTEXT_FETCH_TIMEOUT_MS = 3000;
 export const DEFAULT_CONTEXT_FETCH_RETRIES = 1;

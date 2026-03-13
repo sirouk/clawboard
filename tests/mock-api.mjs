@@ -12,17 +12,48 @@ const fixturePath = process.env.CLAWBOARD_FIXTURE_PATH || join(__dirname, "fixtu
 const store = JSON.parse(readFileSync(fixturePath, "utf8"));
 store.spaces = Array.isArray(store.spaces) ? store.spaces : [];
 store.topics = Array.isArray(store.topics) ? store.topics : [];
-store.tasks = Array.isArray(store.tasks) ? store.tasks : [];
 store.logs = Array.isArray(store.logs) ? store.logs : [];
 store.drafts = Array.isArray(store.drafts) ? store.drafts : [];
+const legacyTasks = Array.isArray(store.tasks) ? store.tasks : [];
+const topicIds = new Set(store.topics.map((topic) => String(topic.id || "").trim()).filter(Boolean));
+for (const task of legacyTasks) {
+  const id = String(task.id || "").trim();
+  if (!id || topicIds.has(id)) continue;
+  const now = nowIso();
+  store.topics.push({
+    id,
+    name: String(task.title || task.name || id).trim() || id,
+    description: task.description ?? null,
+    parentId: task.topicId ?? null,
+    tags: Array.isArray(task.tags) ? task.tags : [],
+    color: task.color ?? null,
+    status: task.status ?? "todo",
+    priority: task.priority ?? "medium",
+    dueDate: task.dueDate ?? null,
+    snoozedUntil: task.snoozedUntil ?? null,
+    pinned: task.pinned ?? false,
+    spaceId: task.spaceId ?? null,
+    createdAt: task.createdAt || now,
+    updatedAt: task.updatedAt || task.createdAt || now,
+  });
+  topicIds.add(id);
+}
+for (const log of store.logs) {
+  if (!log.topicId && log.taskId) {
+    log.topicId = log.taskId;
+  }
+  if ("taskId" in log) {
+    log.taskId = null;
+  }
+}
+delete store.tasks;
 const subscribers = new Set();
 const eventBuffer = [];
 const MAX_EVENTS = 200;
 let nextEventId = 0;
-const BOARD_TASK_SESSION_PREFIX = "clawboard:task:";
+const BOARD_TOPIC_SESSION_PREFIX = "clawboard:topic:";
 const deletedLogs = [];
 const deletedTopics = [];
-const deletedTasks = [];
 const liveTyping = new Map();
 const liveThreadWork = new Map();
 const openclawWorkspaces = [
@@ -190,13 +221,12 @@ function maybeResolveSignalsFromLog(entry) {
 
 function buildChangesCursor(payload) {
   let cursor = "";
-  for (const collection of [payload.spaces, payload.topics, payload.tasks, payload.logs, payload.drafts]) {
+  for (const collection of [payload.spaces, payload.topics, payload.logs, payload.drafts]) {
     for (const item of collection || []) {
       cursor = maxIso(cursor, item.updatedAt || item.createdAt);
     }
   }
   for (const item of payload.deletedTopics || []) cursor = maxIso(cursor, item.deletedAt);
-  for (const item of payload.deletedTasks || []) cursor = maxIso(cursor, item.deletedAt);
   for (const item of payload.deletedLogs || []) cursor = maxIso(cursor, item.deletedAt);
   for (const item of payload.openclawTyping || []) cursor = maxIso(cursor, item.updatedAt);
   for (const item of payload.openclawThreadWork || []) cursor = maxIso(cursor, item.updatedAt);
@@ -205,16 +235,12 @@ function buildChangesCursor(payload) {
 
 function parseBoardSessionKey(sessionKey) {
   const key = String(sessionKey || "").trim();
-  if (!key) return { topicId: null, taskId: null };
-  if (key.startsWith(BOARD_TASK_SESSION_PREFIX)) {
-    const rest = key.slice(BOARD_TASK_SESSION_PREFIX.length).trim();
-    const parts = rest.split(":");
-    if (parts.length < 2) return { topicId: null, taskId: null };
-    const topicId = parts[0].trim();
-    const taskId = parts.slice(1).join(":").trim();
-    return { topicId: topicId || null, taskId: taskId || null };
+  if (!key) return { topicId: null };
+  if (key.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
+    const topicId = key.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim().split(":", 1)[0]?.trim() ?? "";
+    return { topicId: topicId || null };
   }
-  return { topicId: null, taskId: null };
+  return { topicId: null };
 }
 
 function normalizeText(value) {
@@ -337,7 +363,6 @@ function buildMockClawgraph() {
   };
 
   const topicById = new Map(store.topics.map((topic) => [topic.id, topic]));
-  const taskById = new Map(store.tasks.map((task) => [task.id, task]));
   const agentSeen = new Set();
 
   for (const topic of store.topics) {
@@ -350,28 +375,6 @@ function buildMockClawgraph() {
       color: "#ff8a4a",
       meta: { topicId: topic.id },
     });
-  }
-
-  for (const task of store.tasks) {
-    addNode({
-      id: `task:${task.id}`,
-      label: task.title || task.id,
-      type: "task",
-      score: task.status === "doing" ? 1.9 : task.status === "blocked" ? 1.7 : 1.4,
-      size: 14,
-      color: "#4ea1ff",
-      meta: { taskId: task.id, topicId: task.topicId || null, status: task.status || "todo" },
-    });
-    if (task.topicId && topicById.has(task.topicId)) {
-      addEdge({
-        id: `edge:topic-task:${task.topicId}:${task.id}`,
-        source: `topic:${task.topicId}`,
-        target: `task:${task.id}`,
-        type: "has_task",
-        weight: 1.2,
-        evidence: 1,
-      });
-    }
   }
 
   const recentLogs = [...store.logs]
@@ -405,16 +408,6 @@ function buildMockClawgraph() {
         evidence: 1,
       });
     }
-    if (log.taskId && taskById.has(log.taskId)) {
-      addEdge({
-        id: `edge:agent-task:${agentId}:${log.taskId}`,
-        source: agentId,
-        target: `task:${log.taskId}`,
-        type: "mentions",
-        weight: 0.6,
-        evidence: 1,
-      });
-    }
   }
 
   const densityBase = Math.max(1, (nodes.length * (nodes.length - 1)) / 2);
@@ -424,7 +417,7 @@ function buildMockClawgraph() {
       nodeCount: nodes.length,
       edgeCount: edges.length,
       topicCount: nodes.filter((node) => node.type === "topic").length,
-      taskCount: nodes.filter((node) => node.type === "task").length,
+      taskCount: 0,
       entityCount: nodes.filter((node) => node.type === "entity").length,
       agentCount: nodes.filter((node) => node.type === "agent").length,
       density: Math.min(1, Number((edges.length / densityBase).toFixed(4))),
@@ -515,12 +508,10 @@ const server = http.createServer(async (req, res) => {
       cursor: undefined,
       spaces: filterSince(store.spaces, "updatedAt"),
       topics: filterSince(store.topics, "updatedAt"),
-      tasks: filterSince(store.tasks, "updatedAt"),
       logs: filterSince(store.logs, "updatedAt"),
       drafts: filterSince(store.drafts, "updatedAt"),
       deletedLogIds: filterSince(deletedLogs, "deletedAt").map((item) => item.id),
       deletedTopics: filterSince(deletedTopics, "deletedAt"),
-      deletedTasks: filterSince(deletedTasks, "deletedAt"),
       openclawTyping: Array.from(liveTyping.values()),
       openclawThreadWork: Array.from(liveThreadWork.values()),
     };
@@ -541,22 +532,14 @@ const server = http.createServer(async (req, res) => {
         return stamp >= dayAgo;
       }).length;
     const topicsCreated24h = countCreated24h(store.topics);
-    const tasksCreated24h = countCreated24h(store.tasks);
     return sendJson(res, 200, {
       creation: {
         topics: { total: store.topics.length, created24h: topicsCreated24h },
-        tasks: { total: store.tasks.length, created24h: tasksCreated24h },
         gate: {
           topics: {
             allowedTotal: store.topics.length,
             blockedTotal: 0,
             allowed24h: topicsCreated24h,
-            blocked24h: 0,
-          },
-          tasks: {
-            allowedTotal: store.tasks.length,
-            blockedTotal: 0,
-            allowed24h: tasksCreated24h,
             blocked24h: 0,
           },
         },
@@ -581,11 +564,10 @@ const server = http.createServer(async (req, res) => {
     if (!message) return sendJson(res, 400, { detail: "message is required" });
     const requestId = `occhat-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
     const createdAt = nowIso();
-    const { topicId, taskId } = parseBoardSessionKey(sessionKey);
+    const { topicId } = parseBoardSessionKey(sessionKey);
     const entry = normalizeLog({
       id: nextId("log", store.logs),
       topicId,
-      taskId,
       type: "conversation",
       content: message,
       summary: message.length > 72 ? `${message.slice(0, 71).trim()}…` : message,
@@ -627,7 +609,6 @@ const server = http.createServer(async (req, res) => {
     const topicId = url.searchParams.get("topicId");
     const includePending = url.searchParams.get("includePending") !== "false";
     const limitTopics = Number(url.searchParams.get("limitTopics") || 24);
-    const limitTasks = Number(url.searchParams.get("limitTasks") || 48);
     const limitLogs = Number(url.searchParams.get("limitLogs") || 360);
 
     const topics = [...store.topics]
@@ -643,39 +624,16 @@ const server = http.createServer(async (req, res) => {
 
     const topicIdSet = new Set(topics.map((item) => item.id));
 
-    const tasks = [...store.tasks]
-      .filter((task) => (topicId ? task.topicId === topicId : true))
-      .map((task) => {
-        const score = scoreText(q, `${task.title || ""} ${task.status || ""}`);
-        const parentBoost = task.topicId && topicIdSet.has(task.topicId) ? 0.12 : 0;
-        return {
-          id: task.id,
-          topicId: task.topicId ?? null,
-          title: task.title,
-          status: task.status,
-          score: Number((score + parentBoost).toFixed(6)),
-          noteWeight: 0,
-          sessionBoosted: false,
-        };
-      })
-      .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, Math.max(1, limitTasks));
-
-    const taskIdSet = new Set(tasks.map((item) => item.id));
-
     const logs = store.logs
       .map(normalizeLog)
       .filter((entry) => (topicId ? entry.topicId === topicId : true))
       .filter((entry) => (includePending ? true : (entry.classificationStatus || "pending") === "classified"))
       .map((entry) => {
         const score = scoreText(q, `${entry.summary || ""} ${entry.content || ""} ${entry.raw || ""}`);
-        const parentBoost =
-          (entry.topicId && topicIdSet.has(entry.topicId) ? 0.08 : 0) + (entry.taskId && taskIdSet.has(entry.taskId) ? 0.08 : 0);
+        const parentBoost = entry.topicId && topicIdSet.has(entry.topicId) ? 0.08 : 0;
         return {
           id: entry.id,
           topicId: entry.topicId ?? null,
-          taskId: entry.taskId ?? null,
           type: entry.type,
           agentId: entry.agentId || "",
           agentLabel: entry.agentLabel || "",
@@ -696,11 +654,9 @@ const server = http.createServer(async (req, res) => {
       query: q,
       mode: "lexical",
       topics,
-      tasks,
       logs,
       notes: [],
       matchedTopicIds: topics.map((item) => item.id),
-      matchedTaskIds: tasks.map((item) => item.id),
       matchedLogIds: logs.map((item) => item.id),
     });
   }
@@ -747,12 +703,6 @@ const server = http.createServer(async (req, res) => {
     store.topics.splice(idx, 1);
     const now = nowIso();
     recordDeleted(deletedTopics, topicId, now);
-    // Best-effort: detach tasks/logs like the real API does to preserve history.
-    for (const task of store.tasks) {
-      if (task.topicId !== topicId) continue;
-      task.topicId = null;
-      task.updatedAt = now;
-    }
     for (const log of store.logs) {
       if (log.topicId !== topicId) continue;
       log.topicId = null;
@@ -783,78 +733,9 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { ok: true, count: order.length, changed: unique.length });
   }
 
-  if (url.pathname === "/api/tasks") {
-    if (req.method === "GET") {
-      const topicId = url.searchParams.get("topicId");
-      let tasks = [...store.tasks];
-      if (topicId) tasks = tasks.filter((t) => t.topicId === topicId);
-      tasks.sort((a, b) => (a.updatedAt > b.updatedAt ? -1 : 1));
-      tasks.sort((a, b) => (a.pinned === b.pinned ? 0 : a.pinned ? -1 : 1));
-      return sendJson(res, 200, tasks);
-    }
-    if (req.method === "POST") {
-      const payload = await parseBody(req);
-      const now = nowIso();
-      let task = payload.id ? store.tasks.find((t) => t.id === payload.id) : null;
-      if (task) {
-        Object.assign(task, payload, { updatedAt: now });
-      } else {
-        task = {
-          id: payload.id || nextId("task", store.tasks),
-          topicId: payload.topicId ?? null,
-          title: payload.title,
-          status: payload.status ?? "todo",
-          pinned: payload.pinned ?? false,
-          priority: payload.priority ?? "medium",
-          dueDate: payload.dueDate ?? null,
-          tags: payload.tags ?? [],
-          snoozedUntil: payload.snoozedUntil ?? null,
-          createdAt: now,
-          updatedAt: now,
-        };
-        store.tasks.push(task);
-      }
-      pushEvent("task.upserted", task);
-      return sendJson(res, 200, task);
-    }
-  }
-
-  if (url.pathname.startsWith("/api/tasks/")) {
-    const taskId = url.pathname.split("/").pop();
-    if (!taskId) return sendJson(res, 400, { error: "taskId required" });
-
-    if (req.method === "PATCH") {
-      const payload = await parseBody(req);
-      const task = store.tasks.find((row) => row.id === taskId);
-      if (!task) return sendJson(res, 404, { error: "Not found" });
-      Object.assign(task, payload, { updatedAt: nowIso() });
-      const silentEvent = String(req.headers["x-mock-silent-event"] || "").trim() === "1";
-      if (!silentEvent) {
-        pushEvent("task.upserted", task);
-      }
-      return sendJson(res, 200, task);
-    }
-
-    if (req.method === "DELETE") {
-      const idx = store.tasks.findIndex((row) => row.id === taskId);
-      if (idx < 0) return sendJson(res, 200, { ok: true, deleted: false });
-      store.tasks.splice(idx, 1);
-      const now = nowIso();
-      recordDeleted(deletedTasks, taskId, now);
-      for (const log of store.logs) {
-        if (log.taskId !== taskId) continue;
-        log.taskId = null;
-        log.updatedAt = now;
-      }
-      pushEvent("task.deleted", { id: taskId, updatedAt: now });
-      return sendJson(res, 200, { ok: true, deleted: true });
-    }
-  }
-
   if (url.pathname === "/api/log") {
     if (req.method === "GET") {
       const topicId = url.searchParams.get("topicId");
-      const taskId = url.searchParams.get("taskId");
       const sessionKey = url.searchParams.get("sessionKey");
       const type = url.searchParams.get("type");
       const classificationStatus = url.searchParams.get("classificationStatus");
@@ -862,7 +743,6 @@ const server = http.createServer(async (req, res) => {
       const offset = Number(url.searchParams.get("offset") || 0);
       let logs = [...store.logs].map(normalizeLog);
       if (topicId) logs = logs.filter((l) => l.topicId === topicId);
-      if (taskId) logs = logs.filter((l) => l.taskId === taskId);
       if (sessionKey)
         logs = logs.filter((l) => (l.source || {}).sessionKey === sessionKey);
       if (type) logs = logs.filter((l) => l.type === type);
@@ -889,14 +769,14 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/log/chat-counts" && req.method === "GET") {
     const spaceId = String(url.searchParams.get("spaceId") || "").trim();
-    const taskChatCounts = {};
+    const topicChatCounts = {};
     for (const log of store.logs.map(normalizeLog)) {
-      if (!log.taskId) continue;
+      if (!log.topicId) continue;
       if (spaceId && String(log.spaceId || "").trim() !== spaceId) continue;
       if (isChatNoiseLog(log)) continue;
-      taskChatCounts[log.taskId] = (taskChatCounts[log.taskId] || 0) + 1;
+      topicChatCounts[log.topicId] = (topicChatCounts[log.topicId] || 0) + 1;
     }
-    return sendJson(res, 200, { taskChatCounts });
+    return sendJson(res, 200, { topicChatCounts });
   }
 
   if (url.pathname.startsWith("/api/log/") && req.method === "PATCH") {

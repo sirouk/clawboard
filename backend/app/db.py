@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlmodel import SQLModel, create_engine, Session, select
+from sqlalchemy import func
 
 # SQLite + Docker bind mounts can behave poorly with long-lived pooled connections
 # (sporadic "disk I/O error" under concurrent access). Using NullPool keeps each
@@ -109,6 +110,58 @@ def _normalize_space_connectivity(value: object) -> dict[str, bool]:
     return out
 
 
+def _topic_has_meaningful_metadata(topic: object) -> bool:
+    description = str(getattr(topic, "description", "") or "").strip()
+    digest = str(getattr(topic, "digest", "") or "").strip()
+    tags = getattr(topic, "tags", None) or []
+    due_date = str(getattr(topic, "dueDate", "") or "").strip()
+    snoozed_until = str(getattr(topic, "snoozedUntil", "") or "").strip()
+    color = str(getattr(topic, "color", "") or "").strip()
+    pinned = bool(getattr(topic, "pinned", False))
+    priority = str(getattr(topic, "priority", "") or "medium").strip().lower()
+    status = str(getattr(topic, "status", "") or "active").strip().lower()
+    return bool(
+        description
+        or digest
+        or [str(item or "").strip() for item in tags if str(item or "").strip()]
+        or due_date
+        or snoozed_until
+        or color
+        or pinned
+        or priority not in {"", "medium"}
+        or status not in {"", "active"}
+    )
+
+
+def _prune_redundant_parent_topics(topic_ids: set[str]) -> None:
+    if not topic_ids:
+        return
+
+    from .models import Topic, LogEntry
+
+    try:
+        with Session(engine) as session:
+            changed = False
+            for topic_id in sorted(topic_ids):
+                candidate = session.get(Topic, topic_id)
+                if not candidate:
+                    continue
+                has_logs = bool(
+                    session.exec(
+                        select(func.count()).select_from(LogEntry).where(LogEntry.topicId == topic_id)
+                    ).one()
+                    or 0
+                )
+                if has_logs or _topic_has_meaningful_metadata(candidate):
+                    continue
+                session.delete(candidate)
+                changed = True
+            if changed:
+                session.commit()
+    except Exception:
+        pass
+
+
 def _ensure_runtime_indexes() -> None:
     """Create non-model indexes required for retrieval/classifier performance."""
     source_session_key_index = (
@@ -146,8 +199,7 @@ def _ensure_runtime_indexes() -> None:
         'ON logentry("type", "agentId", "createdAt");',
         "CREATE INDEX IF NOT EXISTS ix_logentry_topic_created_at "
         'ON logentry("topicId", "createdAt");',
-        "CREATE INDEX IF NOT EXISTS ix_logentry_task_created_at "
-        'ON logentry("taskId", "createdAt");',
+        # Legacy ix_logentry_task_created_at kept for rollback safety; harmless on fresh installs.
         "CREATE INDEX IF NOT EXISTS ix_logentry_related_created_at "
         'ON logentry("relatedLogId", "createdAt");',
         "CREATE INDEX IF NOT EXISTS ix_logentry_space_created_at "
@@ -160,8 +212,8 @@ def _ensure_runtime_indexes() -> None:
         'ON sessionroutingmemory("updatedAt");',
         "CREATE INDEX IF NOT EXISTS ix_openclawrequestroute_session_updated "
         'ON openclawrequestroute("baseSessionKey", "updatedAt");',
-        "CREATE INDEX IF NOT EXISTS ix_openclawrequestroute_topic_task_updated "
-        'ON openclawrequestroute("topicId", "taskId", "updatedAt");',
+        "CREATE INDEX IF NOT EXISTS ix_openclawrequestroute_topic_updated "
+        'ON openclawrequestroute("topicId", "updatedAt");',
         "CREATE INDEX IF NOT EXISTS ix_openclawrequestroute_updated_at "
         'ON openclawrequestroute("updatedAt");',
         "CREATE INDEX IF NOT EXISTS ix_openclawgatewayhistorycursor_updated_at "
@@ -202,10 +254,6 @@ def _ensure_runtime_indexes() -> None:
         'ON topic("spaceId", "updatedAt");',
         "CREATE INDEX IF NOT EXISTS ix_topic_created_at "
         'ON topic("createdAt");',
-        "CREATE INDEX IF NOT EXISTS ix_task_space_updated_at "
-        'ON task("spaceId", "updatedAt");',
-        "CREATE INDEX IF NOT EXISTS ix_task_created_at "
-        'ON task("createdAt");',
     ]
     if not DATABASE_URL.startswith("sqlite"):
         # Full-text search index for scalable lexical rescue over historical logs.
@@ -229,6 +277,7 @@ def init_db() -> None:
 
     # Create tables.
     SQLModel.metadata.create_all(engine)
+    legacy_parent_topic_ids: set[str] = set()
 
     # Lightweight migration for sqlite (create_all does not add columns).
     if DATABASE_URL.startswith("sqlite"):
@@ -296,10 +345,7 @@ def init_db() -> None:
                 "CREATE INDEX IF NOT EXISTS ix_logentry_topic_created_at "
                 'ON logentry("topicId", "createdAt");'
             )
-            conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_logentry_task_created_at "
-                'ON logentry("taskId", "createdAt");'
-            )
+            # Legacy logentry.taskId index no longer created (flat topology).
             conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_logentry_related_created_at "
                 'ON logentry("relatedLogId", "createdAt");'
@@ -375,62 +421,44 @@ def init_db() -> None:
             conn.exec_driver_sql(
                 f"UPDATE topic SET spaceId = '{DEFAULT_SPACE_ID}' WHERE spaceId IS NULL OR trim(spaceId) = '';"
             )
+            if "dueDate" not in topic_existing:
+                conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN dueDate TEXT;")
 
-            task_cols = conn.exec_driver_sql("PRAGMA table_info(task);").fetchall()
-            task_existing = {row[1] for row in task_cols}
-            if "color" not in task_existing:
-                conn.exec_driver_sql("ALTER TABLE task ADD COLUMN color TEXT;")
-            if "sortIndex" not in task_existing:
-                conn.exec_driver_sql("ALTER TABLE task ADD COLUMN sortIndex INTEGER NOT NULL DEFAULT 0;")
-                # Preserve current ordering within each topic (pinned first, most recently updated first).
-                rows = conn.exec_driver_sql(
-                    'SELECT id, "topicId" FROM task '
-                    'ORDER BY COALESCE("topicId", \'\') ASC, COALESCE(pinned, 0) DESC, "updatedAt" DESC, id ASC;'
+            # ---------- Task -> Topic migration (flat topology) ----------
+            # If the legacy task table exists and has rows, migrate each task into a topic.
+            try:
+                parent_rows = conn.exec_driver_sql(
+                    'SELECT DISTINCT "topicId" FROM task WHERE "topicId" IS NOT NULL AND trim("topicId") != \'\';'
                 ).fetchall()
-                last_topic_id = object()
-                local_idx = 0
-                for row in rows:
-                    task_id, topic_id = row[0], row[1]
-                    if topic_id != last_topic_id:
-                        last_topic_id = topic_id
-                        local_idx = 0
-                    conn.exec_driver_sql("UPDATE task SET sortIndex = ? WHERE id = ?;", (local_idx, task_id))
-                    local_idx += 1
-            if "tags" not in task_existing:
-                conn.exec_driver_sql("ALTER TABLE task ADD COLUMN tags JSON;")
-            if "snoozedUntil" not in task_existing:
-                conn.exec_driver_sql("ALTER TABLE task ADD COLUMN snoozedUntil TEXT;")
-            if "digest" not in task_existing:
-                conn.exec_driver_sql("ALTER TABLE task ADD COLUMN digest TEXT;")
-            if "digestUpdatedAt" not in task_existing:
-                conn.exec_driver_sql("ALTER TABLE task ADD COLUMN digestUpdatedAt TEXT;")
-            if "spaceId" not in task_existing:
-                conn.exec_driver_sql(
-                    f"ALTER TABLE task ADD COLUMN spaceId TEXT NOT NULL DEFAULT '{DEFAULT_SPACE_ID}';"
-                )
-            conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_task_space_updated_at "
-                'ON task("spaceId", "updatedAt");'
-            )
-            conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_task_created_at "
-                'ON task("createdAt");'
-            )
-            conn.exec_driver_sql("UPDATE task SET tags = '[]' WHERE tags IS NULL;")
-            conn.exec_driver_sql(
-                "UPDATE task "
-                "SET spaceId = COALESCE((SELECT spaceId FROM topic WHERE topic.id = task.topicId), spaceId, "
-                f"'{DEFAULT_SPACE_ID}') "
-                "WHERE topicId IS NOT NULL;"
-            )
-            conn.exec_driver_sql(
-                f"UPDATE task SET spaceId = '{DEFAULT_SPACE_ID}' WHERE spaceId IS NULL OR trim(spaceId) = '';"
-            )
+                legacy_parent_topic_ids.update(str(row[0] or "").strip() for row in parent_rows if str(row[0] or "").strip())
+                task_count = conn.exec_driver_sql("SELECT COUNT(*) FROM task;").fetchone()
+                if task_count and task_count[0] > 0:
+                    # Migrate tasks as topics (keep task ID so references resolve).
+                    conn.exec_driver_sql(
+                        "INSERT OR IGNORE INTO topic "
+                        "(id, spaceId, name, createdBy, sortIndex, color, description, priority, status, "
+                        " snoozedUntil, dueDate, tags, parentId, pinned, digest, digestUpdatedAt, createdAt, updatedAt) "
+                        "SELECT id, COALESCE(spaceId, 'space-default'), title, 'import', "
+                        "  COALESCE(sortIndex, 0), color, NULL, COALESCE(priority, 'medium'), "
+                        "  COALESCE(status, 'todo'), snoozedUntil, dueDate, COALESCE(tags, '[]'), "
+                        "  NULL, COALESCE(pinned, 0), digest, digestUpdatedAt, createdAt, updatedAt "
+                        "FROM task;"
+                    )
+                    # Re-point logs that referenced a task to the migrated topic.
+                    conn.exec_driver_sql(
+                        'UPDATE logentry SET "topicId" = "taskId" '
+                        'WHERE "taskId" IS NOT NULL AND "taskId" != \'\';'
+                    )
+                    conn.exec_driver_sql(
+                        'UPDATE logentry SET "taskId" = NULL;'
+                    )
+            except Exception:
+                pass  # task table may not exist on fresh installs
 
-            # Keep log space in sync with task/topic ownership.
+            # Keep log space in sync with topic ownership.
             conn.exec_driver_sql(
                 "UPDATE logentry "
-                "SET spaceId = COALESCE((SELECT spaceId FROM task WHERE task.id = logentry.taskId), "
+                "SET spaceId = COALESCE("
                 "(SELECT spaceId FROM topic WHERE topic.id = logentry.topicId), spaceId, "
                 f"'{DEFAULT_SPACE_ID}');"
             )
@@ -576,12 +604,57 @@ def init_db() -> None:
             except Exception:
                 conn.rollback()
 
+        # Postgres: add dueDate to topic + task->topic migration (flat topology).
+        with engine.connect() as conn:
+            try:
+                conn.exec_driver_sql(
+                    'ALTER TABLE topic ADD COLUMN IF NOT EXISTS "dueDate" TEXT;'
+                )
+                # Check if the legacy task table exists and has rows.
+                has_task_table = conn.exec_driver_sql(
+                    "SELECT EXISTS ("
+                    "  SELECT 1 FROM information_schema.tables "
+                    "  WHERE table_name = 'task'"
+                    ");"
+                ).fetchone()
+                if has_task_table and has_task_table[0]:
+                    parent_rows = conn.exec_driver_sql(
+                        'SELECT DISTINCT "topicId" FROM task WHERE "topicId" IS NOT NULL AND trim("topicId") != \'\';'
+                    ).fetchall()
+                    legacy_parent_topic_ids.update(
+                        str(row[0] or "").strip() for row in parent_rows if str(row[0] or "").strip()
+                    )
+                    task_count = conn.exec_driver_sql("SELECT COUNT(*) FROM task;").fetchone()
+                    if task_count and task_count[0] > 0:
+                        conn.exec_driver_sql(
+                            'INSERT INTO topic '
+                            '(id, "spaceId", name, "createdBy", "sortIndex", color, description, priority, status, '
+                            ' "snoozedUntil", "dueDate", tags, "parentId", pinned, digest, "digestUpdatedAt", "createdAt", "updatedAt") '
+                            "SELECT id, COALESCE(\"spaceId\", 'space-default'), title, 'import', "
+                            '  COALESCE("sortIndex", 0), color, NULL, COALESCE(priority, \'medium\'), '
+                            "  COALESCE(status, 'todo'), \"snoozedUntil\", \"dueDate\", COALESCE(tags, '[]'::json), "
+                            '  NULL, COALESCE(pinned, false), digest, "digestUpdatedAt", "createdAt", "updatedAt" '
+                            "FROM task "
+                            "ON CONFLICT (id) DO NOTHING;"
+                        )
+                        conn.exec_driver_sql(
+                            'UPDATE logentry SET "topicId" = "taskId" '
+                            "WHERE \"taskId\" IS NOT NULL AND \"taskId\" != '';"
+                        )
+                        conn.exec_driver_sql(
+                            'UPDATE logentry SET "taskId" = NULL;'
+                        )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+
     # Non-model indexes are required on both SQLite and Postgres.
     _ensure_runtime_indexes()
+    _prune_redundant_parent_topics(legacy_parent_topic_ids)
 
-    # Backfill missing topic/task colors once so existing instances get stable hues.
+    # Backfill missing topic colors once so existing instances get stable hues.
     try:
-        from .models import Topic, Task, Space  # local import avoids circulars at module import time
+        from .models import Topic, Space  # local import avoids circulars at module import time
 
         with Session(engine) as session:
             if not session.get(Space, DEFAULT_SPACE_ID):
@@ -620,32 +693,7 @@ def init_db() -> None:
                     topic.spaceId = DEFAULT_SPACE_ID
                     topic_updates += 1
 
-            tasks = session.exec(select(Task)).all()
-            task_updates = 0
-            for task in tasks:
-                topic_space_id = None
-                if getattr(task, "topicId", None):
-                    parent = next((item for item in topics if item.id == task.topicId), None)
-                    if parent and str(getattr(parent, "spaceId", "") or "").strip():
-                        topic_space_id = parent.spaceId
-                if topic_space_id:
-                    if task.spaceId != topic_space_id:
-                        task.spaceId = topic_space_id
-                        task_updates += 1
-                elif not str(getattr(task, "spaceId", "") or "").strip():
-                    task.spaceId = DEFAULT_SPACE_ID
-                    task_updates += 1
-
-                normalized = _normalize_hex_color(getattr(task, "color", None))
-                if normalized:
-                    if task.color != normalized:
-                        task.color = normalized
-                        task_updates += 1
-                    continue
-                task.color = _auto_color(f"task:{task.id}:{task.title}", 21.0)
-                task_updates += 1
-
-            if topic_updates or task_updates:
+            if topic_updates:
                 session.commit()
     except Exception:
         pass

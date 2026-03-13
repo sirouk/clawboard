@@ -7,7 +7,6 @@ export const PUSH_ENABLED_KEY = "clawboard:push-enabled";
 export const CLAWBOARD_NOTIFICATION_CLICK_EVENT = "clawboard:notification-clicked";
 export const CLAWBOARD_NOTIFICATION_CLICK_MESSAGE_TYPE = "clawboard:notification-clicked";
 export const CLAWBOARD_NOTIFY_TOPIC_PARAM = "cbn_topic";
-export const CLAWBOARD_NOTIFY_TASK_PARAM = "cbn_task";
 export const CLAWBOARD_NOTIFY_CHAT_PARAM = "cbn_chat";
 const PWA_ICON = "/icons/icon-192.png";
 const PWA_BADGE = "/icons/icon-192.png";
@@ -81,7 +80,6 @@ export function canSendPwaNotifications(enabled = true) {
 export type PwaNotificationClickData = {
   url?: string;
   topicId?: string;
-  taskId?: string;
   chatKey?: string;
 };
 
@@ -98,12 +96,10 @@ export function parsePwaNotificationClickData(input: unknown): PwaNotificationCl
   const value = input as Record<string, unknown>;
   const url = String(value.url ?? "").trim();
   const topicId = String(value.topicId ?? "").trim();
-  const taskId = String(value.taskId ?? "").trim();
   const chatKey = String(value.chatKey ?? "").trim();
   const out: PwaNotificationClickData = {};
   if (url) out.url = url;
   if (topicId) out.topicId = topicId;
-  if (taskId) out.taskId = taskId;
   if (chatKey) out.chatKey = chatKey;
   return out;
 }
