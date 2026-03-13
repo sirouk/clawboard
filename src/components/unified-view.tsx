@@ -56,6 +56,7 @@ import { SnoozeModal } from "@/components/snooze-modal";
 import { useUnifiedExpansionState } from "@/components/unified-view-state";
 import { getInitialUnifiedUrlState, parseUnifiedUrlState } from "@/components/unified-view-url-state";
 import { workspaceRoute } from "@/lib/openclaw-workspaces";
+import { compareByBoardOrder, optimisticTopSortIndex } from "@/lib/topic-order";
 
 const STATUS_TONE: Record<string, "muted" | "accent" | "accent2" | "warning" | "success"> = {
   todo: "muted",
@@ -1688,12 +1689,16 @@ function pickVibrantDistinctColor({
     const vibrancy = colorVibrancy(candidate);
     const usagePenalty = usageCount ? usageCount.get(candidate) ?? 0 : 0;
     const jitter = (Math.abs(hashString(`jitter:${seed}:${candidate}`)) % 1000) / 10000;
+    const primaryCollisionPenalty = minPrimary < 0.22 ? (0.22 - minPrimary) * 18 : 0;
+    const secondaryCollisionPenalty = minSecondary < 0.14 ? (0.14 - minSecondary) * 9 : 0;
     const score =
-      minPrimary * 5.5 +
-      avgPrimary * 1.4 +
-      minSecondary * 1.6 +
-      vibrancy * 0.8 -
-      usagePenalty * 2.2 +
+      minPrimary * 8.4 +
+      avgPrimary * 1.9 +
+      minSecondary * 2.4 +
+      vibrancy * 1.1 -
+      usagePenalty * 2.6 -
+      primaryCollisionPenalty -
+      secondaryCollisionPenalty +
       jitter;
     if (score > bestScore) {
       best = candidate;
@@ -1701,6 +1706,38 @@ function pickVibrantDistinctColor({
     }
   }
   return best;
+}
+
+function uniqueNormalizedColors(values: Array<string | null | undefined>) {
+  return Array.from(
+    new Set(values.map((value) => normalizeHexColor(value)).filter(Boolean) as string[])
+  );
+}
+
+function sortTopicsForColorAssignment(topics: Topic[], seed: string, visibleTopicIds: string[] = []) {
+  const visibleSet = new Set(visibleTopicIds);
+  const scopeSizes = new Map<string, number>();
+  for (const topic of topics) {
+    const keys = new Set(topicColorScopeKeys(topic));
+    for (const key of keys) {
+      scopeSizes.set(key, (scopeSizes.get(key) ?? 0) + 1);
+    }
+  }
+
+  return [...topics].sort((a, b) => {
+    const aVisible = visibleSet.has(a.id) ? 1 : 0;
+    const bVisible = visibleSet.has(b.id) ? 1 : 0;
+    if (aVisible !== bVisible) return bVisible - aVisible;
+
+    const aScopeDensity = Math.max(...topicColorScopeKeys(a).map((key) => scopeSizes.get(key) ?? 0), 0);
+    const bScopeDensity = Math.max(...topicColorScopeKeys(b).map((key) => scopeSizes.get(key) ?? 0), 0);
+    if (aScopeDensity !== bScopeDensity) return bScopeDensity - aScopeDensity;
+
+    const aHash = hashString(`${seed}:${a.id}`);
+    const bHash = hashString(`${seed}:${b.id}`);
+    if (aHash !== bHash) return aHash - bHash;
+    return a.id.localeCompare(b.id);
+  });
 }
 
 function topicGlowStyle(color: string, index: number, expanded: boolean): CSSProperties {
@@ -1819,28 +1856,15 @@ function topicColorScopeKeys(topic: Pick<Topic, "spaceId" | "tags"> | null | und
   return ids.length > 0 ? ids : ["space-default"];
 }
 
-function sortBySeed<T>(values: T[], seed: string, key: (value: T) => string) {
-  return [...values].sort((a, b) => {
-    const aKey = key(a);
-    const bKey = key(b);
-    const aHash = hashString(`${seed}:${aKey}`);
-    const bHash = hashString(`${seed}:${bKey}`);
-    if (aHash !== bHash) return aHash - bHash;
-    return aKey.localeCompare(bKey);
-  });
-}
-
-export function ColorShuffleTrigger({ 
-  topics, 
-  tasks, 
-  onTopicsUpdate, 
-  onTasksUpdate,
-  token
-}: { 
-  topics: Topic[]; 
-  tasks: Task[]; 
+export function ColorShuffleTrigger({
+  topics,
+  visibleTopicIds,
+  onTopicsUpdate,
+  token,
+}: {
+  topics: Topic[];
+  visibleTopicIds: string[];
   onTopicsUpdate: (topics: Topic[]) => void;
-  onTasksUpdate: (tasks: Task[]) => void;
   token?: string;
 }) {
   const [shuffling, setShuffling] = useState(false);
@@ -1868,16 +1892,19 @@ export function ColorShuffleTrigger({
         allAssigned.push(color);
       };
 
-      const topicOrder = sortBySeed(topics, `${runSeed}:topics`, (topic) => topic.id);
+      const topicOrder = sortTopicsForColorAssignment(topics, `${runSeed}:topics`, visibleTopicIds);
       for (const topic of topicOrder) {
         const scopeKeys = topicColorScopeKeys(topic);
-        const sameSpaceColors = Array.from(
-          new Set(scopeKeys.flatMap((scopeKey) => topicColorsBySpace.get(scopeKey) ?? []))
+        const sameSpaceColors = uniqueNormalizedColors(
+          scopeKeys.flatMap((scopeKey) => topicColorsBySpace.get(scopeKey) ?? [])
+        );
+        const visibleColors = uniqueNormalizedColors(
+          visibleTopicIds.map((topicId) => topicColorById.get(topicId))
         );
         const color = pickVibrantDistinctColor({
           palette: TOPIC_FALLBACK_COLORS,
           seed: `${runSeed}:topic:${topic.id}:${topic.name}`,
-          primaryAvoid: sameSpaceColors,
+          primaryAvoid: [...sameSpaceColors, ...visibleColors],
           secondaryAvoid: allAssigned,
           usageCount: topicUsage,
         });
@@ -1901,25 +1928,6 @@ export function ColorShuffleTrigger({
         );
       }
       onTopicsUpdate(nextTopics);
-
-      // In flat topology task = topic — apply the same colors
-      const nextTasks = tasks.map((task) => {
-        const color = topicColorById.get(task.id) ?? normalizeHexColor(task.color) ?? "#4EA1FF";
-        return { ...task, color };
-      });
-
-      for (const task of nextTasks) {
-        await apiFetch(
-          `/api/topics/${encodeURIComponent(task.id)}`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ color: task.color }),
-          },
-          token
-        );
-      }
-      onTasksUpdate(nextTasks);
     } finally {
       setShuffling(false);
     }
@@ -2523,7 +2531,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setTaskTagsPendingEntry(false);
     setTaskRenameActiveSuggestionIndex(0);
   }, []);
-  const patchedTaskColorsRef = useRef<Set<string>>(new Set());
   const [activeComposer, setActiveComposer] = useState<{ kind: "task"; topicId: string; taskId: string } | null>(null);
   const [autoFocusTask, setAutoFocusTask] = useState<{ topicId: string; taskId: string } | null>(null);
   const [chatMetaExpandEpoch, setChatMetaExpandEpoch] = useState(0);
@@ -3316,7 +3323,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         if (aBoosted !== bBoosted) return aBoosted ? -1 : 1;
         if (aBoosted && bBoosted && aBump !== bBump) return bBump - aBump;
 
-        return a.updatedAt < b.updatedAt ? 1 : -1;
+        return compareByBoardOrder(a, b);
       });
     }
     return map;
@@ -3462,15 +3469,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const topicReorderEnabled = !readOnly && normalizedSearch.length === 0 && statusFilter === "all";
   const taskReorderEnabled = topicReorderEnabled;
 
-  const chatKeyFromSessionKey = useCallback((sessionKey: string) => {
+  const topicIdFromSessionKey = useCallback((sessionKey: string) => {
     const key = normalizeBoardSessionKey(sessionKey);
     if (!key) return "";
     if (key.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
-      const topicId = key.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim().split(":", 1)[0]?.trim() ?? "";
-      return topicId ? `topic:${topicId}` : "";
+      return key.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim().split(":", 1)[0]?.trim() ?? "";
     }
     return "";
   }, []);
+
+  const chatKeyFromSessionKey = useCallback((sessionKey: string) => {
+    const topicId = topicIdFromSessionKey(sessionKey);
+    return topicId ? `topic:${topicId}` : "";
+  }, [topicIdFromSessionKey]);
 
   const findPendingMessagesBySession = useCallback(
     (sessionKey: string) => {
@@ -3499,6 +3510,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (!sessionKey) return;
       markRecentBoardSend(sessionKey);
       if (event.phase === "sending") {
+        const topicId = topicIdFromSessionKey(sessionKey);
+        if (topicId) {
+          const optimisticTs = new Date().toISOString();
+          setTopics((prev) => {
+            const nextSortIndex = optimisticTopSortIndex(prev, topicId);
+            return prev.map((row) =>
+              row.id === topicId
+                ? { ...row, updatedAt: optimisticTs, sortIndex: nextSortIndex }
+                : row
+            );
+          });
+          markBumped("topic", topicId);
+        }
         setAwaitingAssistant((prev) => ({
           ...prev,
           [sessionKey]: { sentAt: event.createdAt },
@@ -3542,7 +3566,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         scheduleScrollChatToBottom(chatKey);
       }
     },
-    [chatKeyFromSessionKey, markRecentBoardSend, scheduleScrollChatToBottom]
+    [chatKeyFromSessionKey, markBumped, markRecentBoardSend, scheduleScrollChatToBottom, setTopics, topicIdFromSessionKey]
   );
 
   const getChatLastLogId = useCallback(
@@ -4140,7 +4164,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const aScore = topicSearchScores.get(a.id) ?? 0;
           const bScore = topicSearchScores.get(b.id) ?? 0;
           if (aScore !== bScore) return bScore - aScore;
-          return a.lastActivity < b.lastActivity ? 1 : -1;
+          return compareByBoardOrder(
+            { id: a.id, sortIndex: a.sortIndex, updatedAt: a.lastActivity },
+            { id: b.id, sortIndex: b.sortIndex, updatedAt: b.lastActivity }
+          );
         }
 
         const aBump = topicBumpAt[a.id] ?? 0;
@@ -4150,7 +4177,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         if (aBoosted !== bBoosted) return aBoosted ? -1 : 1;
         if (aBoosted && bBoosted && aBump !== bBump) return bBump - aBump;
 
-        return a.lastActivity < b.lastActivity ? 1 : -1;
+        return compareByBoardOrder(a, b);
       });
 
     const filtered = base.filter((topic) => {
@@ -4255,7 +4282,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const showSendTargetButtons = searchTargetsReady;
 
   const topicDisplayColors = useMemo(() => {
-    // Assign in stable ID order so drag/reorder never changes colors.
+    const visibleTopicIds = orderedTopics.map((topic) => topic.id);
     const map = new Map<string, string>();
     const usage = new Map<string, number>();
     const allAssigned: string[] = [];
@@ -4273,26 +4300,29 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       allAssigned.push(color);
     };
 
-    const stableTopics = topics.slice().sort((a, b) => a.id.localeCompare(b.id));
-    for (const topic of stableTopics) {
+    const prioritizedTopics = sortTopicsForColorAssignment(topics, "topic:auto:display", visibleTopicIds);
+    for (const topic of prioritizedTopics) {
       const stored = normalizeHexColor(topic.color);
       if (stored) {
         register(topic, stored);
         continue;
       }
       const scopeKeys = topicColorScopeKeys(topic);
-      const sameScopeColors = Array.from(new Set(scopeKeys.flatMap((scopeKey) => scopeColors.get(scopeKey) ?? [])));
+      const sameScopeColors = uniqueNormalizedColors(
+        scopeKeys.flatMap((scopeKey) => scopeColors.get(scopeKey) ?? [])
+      );
+      const visibleColors = uniqueNormalizedColors(visibleTopicIds.map((topicId) => map.get(topicId)));
       const color = pickVibrantDistinctColor({
         palette: TOPIC_FALLBACK_COLORS,
         seed: `topic:auto:${topic.id}:${topic.name}:${scopeKeys.join("|")}`,
-        primaryAvoid: sameScopeColors,
+        primaryAvoid: [...sameScopeColors, ...visibleColors],
         secondaryAvoid: allAssigned,
         usageCount: usage,
       });
       register(topic, color);
     }
     return map;
-  }, [topics]);
+  }, [orderedTopics, topics]);
 
   // In flat topology task = topic (same entity, same ID). Reuse topic colors directly.
   const taskDisplayColors = useMemo(() => {
@@ -4334,10 +4364,67 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
   }, [token, writeHeaders]);
 
+  const applyOptimisticTopicPatch = useCallback(
+    (topicId: string, patch: Partial<Topic>, options?: { promote?: boolean }) => {
+      const promote = Boolean(options?.promote);
+      const optimisticTs = new Date().toISOString();
+      setTopics((prev) => {
+        const nextSortIndex = promote ? optimisticTopSortIndex(prev, topicId) : undefined;
+        return prev.map((row) =>
+          row.id === topicId
+            ? {
+                ...row,
+                ...patch,
+                ...(promote ? { updatedAt: optimisticTs, sortIndex: nextSortIndex } : {}),
+              }
+            : row
+        );
+      });
+      if (promote) markBumped("topic", topicId);
+      return optimisticTs;
+    },
+    [markBumped, setTopics]
+  );
+
+  const applyOptimisticTaskPatch = useCallback(
+    (taskId: string, patch: Partial<Task>, options?: { promote?: boolean }) => {
+      const promote = Boolean(options?.promote);
+      const optimisticTs = new Date().toISOString();
+      setTasks((prev) => {
+        const nextSortIndex = promote ? optimisticTopSortIndex(prev, taskId) : undefined;
+        return prev.map((task) =>
+          task.id === taskId
+            ? {
+                ...task,
+                ...patch,
+                ...(promote ? { updatedAt: optimisticTs, sortIndex: nextSortIndex } : {}),
+              }
+            : task
+        );
+      });
+      if (promote) {
+        markBumped("task", taskId);
+        markBumped("topic", taskId);
+      }
+      return optimisticTs;
+    },
+    [markBumped, setTasks]
+  );
+
+  const shouldPromoteTopicTouch = useCallback((patch: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(patch)) {
+      if (typeof value === "undefined") continue;
+      if (key === "color") continue;
+      return true;
+    }
+    return false;
+  }, []);
+
   const updateTask = useCallback(async (taskId: string, updates: Partial<Task>) => {
     if (readOnly) return;
     const current = tasks.find((task) => task.id === taskId);
     if (!current) return;
+    const snapshot = tasks;
     const body: Record<string, unknown> = { ...updates };
     if (Object.prototype.hasOwnProperty.call(body, "title")) {
       body.name = String(updates.title ?? current.title ?? current.name).trim() || current.name;
@@ -4348,6 +4435,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       body.parentId = nextTopicId && nextTopicId !== taskId ? nextTopicId : null;
       delete body.topicId;
     }
+    const shouldPromote = shouldPromoteTopicTouch(body);
+    applyOptimisticTaskPatch(taskId, updates, { promote: shouldPromote });
     const res = await apiFetch(
       `/api/topics/${encodeURIComponent(taskId)}`,
       {
@@ -4359,6 +4448,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     );
 
     if (!res.ok) {
+      setTasks(snapshot);
       return;
     }
 
@@ -4404,7 +4494,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       }
     }
   }, [
+    applyOptimisticTaskPatch,
     readOnly,
+    setTasks,
     tasks,
     writeHeaders,
     token,
@@ -4412,10 +4504,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     mobileLayer,
     mobileChatTarget,
     setMobileForcedCollapsedTaskIds,
-    setTasks,
     setExpandedTasks,
     setMobileLayer,
     setMobileChatTarget,
+    shouldPromoteTopicTouch,
   ]);
 
   const persistTopicOrder = useCallback(async (orderedIds: string[]) => {
@@ -4691,8 +4783,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         return;
       }
       const updated = parseTopicPayload(await res.json().catch(() => null));
+      markBumped("topic", topic.id);
       if (updated?.id) {
-        // Treat the rename endpoint as a partial update; keep local pinned/status metadata stable.
         setTopics((prev) =>
           prev.map((item) =>
             item.id === topic.id
@@ -4807,8 +4899,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         return;
       }
       const updated = parseTaskPayload(await res.json().catch(() => null));
+      markBumped("task", task.id);
+      markBumped("topic", task.id);
       if (updated?.id) {
-        // Treat the rename endpoint as a partial update; keep local pinned/status metadata stable.
         setTasks((prev) =>
           prev.map((item) =>
             item.id === task.id
@@ -4999,6 +5092,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const resolvedTopicId = (created.topicId ?? scopeTopicId ?? "").trim();
       setTasks((prev) => (prev.some((item) => item.id === created.id) ? prev : [created, ...prev]));
       markBumped("task", created.id);
+      markBumped("topic", created.id);
 
       setExpandedTopics((prev) => {
         const next = new Set(prev);
@@ -5039,16 +5133,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const current = topics.find((item) => item.id === topicId);
       if (!current) return;
       const snapshot = topics;
-      const optimisticTs = new Date().toISOString();
-      setTopics((prev) => prev.map((row) => (row.id === topicId ? { ...row, ...patch, updatedAt: optimisticTs } : row)));
+      const shouldPromote = shouldPromoteTopicTouch(patch as Record<string, unknown>);
+      applyOptimisticTopicPatch(topicId, patch, { promote: shouldPromote });
       try {
         const res = await apiFetch(
-          "/api/topics",
+          `/api/topics/${encodeURIComponent(topicId)}`,
           {
-            method: "POST",
+            method: "PATCH",
             headers: writeHeaders,
-            // TopicUpsert requires a name, even for partial updates.
-            body: JSON.stringify({ id: topicId, name: patch.name ?? current.name, ...patch }),
+            body: JSON.stringify(patch),
           },
           token
         );
@@ -5062,10 +5155,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         console.error(err);
       }
     },
-    [readOnly, setTopics, token, topics, writeHeaders]
+    [applyOptimisticTopicPatch, readOnly, setTopics, shouldPromoteTopicTouch, token, topics, writeHeaders]
   );
 
-  // Persist computed colors exactly once for topics/tasks missing explicit colors.
+  // Persist computed topic colors exactly once for rows missing explicit colors.
   // This makes colors stable across drag/drop reorder and across sessions.
   useEffect(() => {
     if (readOnly) return;
@@ -5078,18 +5171,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       void patchTopic(topic.id, { color });
     }
   }, [patchTopic, readOnly, topicDisplayColors, topics]);
-
-  useEffect(() => {
-    if (readOnly) return;
-    for (const task of tasks) {
-      if (normalizeHexColor(task.color)) continue;
-      const color = taskDisplayColors.get(task.id);
-      if (!color) continue;
-      if (patchedTaskColorsRef.current.has(task.id)) continue;
-      patchedTaskColorsRef.current.add(task.id);
-      void updateTask(task.id, { color });
-    }
-  }, [readOnly, taskDisplayColors, tasks, updateTask]);
 
   const deleteUnassignedTasks = async () => {
     if (readOnly) return;
@@ -8197,9 +8278,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           <div className="pointer-events-auto">
             <ColorShuffleTrigger
               topics={topics}
-              tasks={tasks}
+              visibleTopicIds={orderedTopics.map((topic) => topic.id)}
               onTopicsUpdate={setTopics}
-              onTasksUpdate={setTasks}
               token={token}
             />
           </div>

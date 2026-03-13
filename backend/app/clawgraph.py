@@ -429,11 +429,10 @@ def build_clawgraph(
             id=node_id,
             label=str(getattr(topic, "name", "") or topic_id),
             kind="topic",
-            score=1.6 + (0.65 if bool(getattr(topic, "pinned", False)) else 0.0),
+            score=1.6,
             meta={
                 "topicId": topic_id,
                 "description": getattr(topic, "description", None),
-                "pinned": bool(getattr(topic, "pinned", False)),
             },
         )
 

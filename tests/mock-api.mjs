@@ -31,8 +31,8 @@ for (const task of legacyTasks) {
     priority: task.priority ?? "medium",
     dueDate: task.dueDate ?? null,
     snoozedUntil: task.snoozedUntil ?? null,
-    pinned: task.pinned ?? false,
     spaceId: task.spaceId ?? null,
+    sortIndex: Number.isFinite(task.sortIndex) ? Number(task.sortIndex) : store.topics.length,
     createdAt: task.createdAt || now,
     updatedAt: task.updatedAt || task.createdAt || now,
   });
@@ -664,8 +664,13 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/topics") {
     if (req.method === "GET") {
       const topics = [...store.topics];
-      topics.sort((a, b) => (a.updatedAt > b.updatedAt ? -1 : 1));
-      topics.sort((a, b) => (a.pinned === b.pinned ? 0 : a.pinned ? -1 : 1));
+      topics.sort((a, b) => {
+        const aSortIndex = Number.isFinite(a.sortIndex) ? Number(a.sortIndex) : Number.MAX_SAFE_INTEGER;
+        const bSortIndex = Number.isFinite(b.sortIndex) ? Number(b.sortIndex) : Number.MAX_SAFE_INTEGER;
+        if (aSortIndex !== bSortIndex) return aSortIndex - bSortIndex;
+        if (a.updatedAt !== b.updatedAt) return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+        return String(a.id || "").localeCompare(String(b.id || ""));
+      });
       return sendJson(res, 200, topics);
     }
     if (req.method === "POST") {
@@ -684,7 +689,7 @@ const server = http.createServer(async (req, res) => {
           snoozedUntil: payload.snoozedUntil ?? null,
           tags: payload.tags ?? [],
           parentId: payload.parentId ?? null,
-          pinned: payload.pinned ?? false,
+          sortIndex: Number.isFinite(payload.sortIndex) ? Number(payload.sortIndex) : -1,
           createdAt: now,
           updatedAt: now,
         };

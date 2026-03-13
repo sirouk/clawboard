@@ -93,10 +93,6 @@ class Topic(SQLModel, table=True):
         default=None,
         description="Parent topic ID (for subtopics).",
     )
-    pinned: Optional[bool] = Field(
-        default=False,
-        description="Pinned topics sort to the top.",
-    )
     digest: Optional[str] = Field(
         default=None,
         description="Durable topic digest (system-managed summary; optional).",

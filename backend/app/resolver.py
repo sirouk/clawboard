@@ -30,6 +30,7 @@ __all__ = [
     "_resolver_pick_semantic_topic_id",
     "_resolver_recent_routing_hints",
     "_next_sort_index_for_new_topic",
+    "_promote_topic_sort_index",
 ]
 
 
@@ -283,12 +284,18 @@ def _resolver_recent_routing_hints(
     return out
 
 
-def _next_sort_index_for_new_topic(session, pinned: bool) -> int:
-    """Return a sortIndex that places new topics at the top of their pinned group."""
+def _next_sort_index_for_new_topic(session) -> int:
+    """Return a sortIndex that places a topic at the top of the board order."""
     topics = session.exec(select(Topic)).all()
-    indices = [int(getattr(topic, "sortIndex", 0)) for topic in topics if bool(getattr(topic, "pinned", False)) == pinned]
+    indices = [int(getattr(topic, "sortIndex", 0)) for topic in topics]
     if not indices:
         return 0
     return min(indices) - 1
 
+
+def _promote_topic_sort_index(session, topic: Topic) -> int:
+    """Move an existing topic ahead of the current board order without touching peers."""
+    next_index = _next_sort_index_for_new_topic(session)
+    topic.sortIndex = next_index
+    return next_index
 

@@ -24,6 +24,7 @@ import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "
 import { buildTopicUrl, withRevealParam, withSpaceParam } from "@/lib/url";
 import { apiFetch, getApiBase } from "@/lib/api";
 import type { OpenClawWorkspace, Space, Topic } from "@/lib/types";
+import { compareByBoardOrder } from "@/lib/topic-order";
 
 const ICONS: Record<string, React.ReactElement> = {
   home: (
@@ -821,7 +822,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	      const as = (a.status ?? "active") === "archived" ? 1 : 0;
 	      const bs = (b.status ?? "active") === "archived" ? 1 : 0;
 	      if (as !== bs) return as - bs;
-	      return b.updatedAt.localeCompare(a.updatedAt);
+	      return compareByBoardOrder(a, b);
 	    });
       if (!query) {
         // Default nav should focus on active topics; snoozed topics only surface via search.
@@ -877,7 +878,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
       const as = (a.status ?? "active") === "archived" ? 1 : 0;
       const bs = (b.status ?? "active") === "archived" ? 1 : 0;
       if (as !== bs) return as - bs;
-      return b.updatedAt.localeCompare(a.updatedAt);
+      return compareByBoardOrder(a, b);
     });
     return base.map((topic) => topic.id);
   }, [topics]);

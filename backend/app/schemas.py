@@ -217,7 +217,6 @@ class TopicOut(ModelBase):
     dueDate: Optional[str] = Field(description="Optional due date (ISO).", examples=["2026-02-05T00:00:00.000Z"])
     tags: List[str] = Field(description="Freeform tags.", examples=[["product", "platform"]])
     parentId: Optional[str] = Field(description="Parent topic ID (for subtopics).", examples=["topic-1"])
-    pinned: Optional[bool] = Field(description="Pinned topics sort to the top.", examples=[True])
     digest: Optional[str] = Field(
         default=None,
         description="Durable topic digest (system-managed summary; optional).",
@@ -311,7 +310,6 @@ class TopicUpsert(BaseModel):
                 "dueDate": "2026-02-05T00:00:00.000Z",
                 "tags": ["product", "platform"],
                 "parentId": "topic-1",
-                "pinned": True,
             }
         }
     )
@@ -330,7 +328,6 @@ class TopicUpsert(BaseModel):
     dueDate: Optional[str] = Field(default=None, description="Optional due date (ISO).", examples=["2026-02-05T00:00:00.000Z"])
     tags: Optional[List[str]] = Field(default=None, description="Tags list.", examples=[["product", "platform"]])
     parentId: Optional[str] = Field(default=None, description="Parent topic ID.", examples=["topic-1"])
-    pinned: Optional[bool] = Field(default=None, description="Pin topic to top.", examples=[True])
 
     @field_validator("name", "description", "priority", "status", "parentId", mode="before")
     @classmethod
@@ -463,7 +460,6 @@ class TopicPatch(BaseModel):
     dueDate: Optional[str] = Field(default=None, description="Optional due date (ISO).")
     tags: Optional[List[str]] = Field(default=None, description="Freeform tags.")
     parentId: Optional[str] = Field(default=None, description="Parent topic id.")
-    pinned: Optional[bool] = Field(default=None, description="Pinned topic.")
     digest: Optional[str] = Field(default=None, description="Durable digest text (system-managed).")
     digestUpdatedAt: Optional[str] = Field(default=None, description="Digest updated timestamp (ISO).")
 

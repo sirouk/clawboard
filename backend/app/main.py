@@ -201,6 +201,7 @@ from .resolver import (  # noqa: F401
     _resolver_pick_semantic_topic_id,
     _resolver_recent_routing_hints,
     _next_sort_index_for_new_topic,
+    _promote_topic_sort_index,
 )
 from .precompile import (  # noqa: F401
     PRECOMPILE_ENABLED,
@@ -1260,8 +1261,7 @@ def _snooze_worker() -> None:
                         status = str(topic.status or "active").strip().lower()
                         if status in {"snoozed", "paused"}:
                             topic.status = "active"
-                        topic.updatedAt = now
-                        session.add(topic)
+                        _touch_topic_activity(session, topic, stamp=now)
 
                     session.commit()
 
@@ -3908,53 +3908,52 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     except Exception:
         pass
 
-    # Gmail-style behavior: new conversation activity should revive snoozed items.
-    revived_topic: Topic | None = None
-    if str(payload.type or "").strip().lower() == "conversation":
-        now = entry.updatedAt
-        try:
-            if topic_id:
-                row = topic_row or session.get(Topic, topic_id)
-                if row and (
+    # Any new activity should revive snoozed topics and promote them to the front.
+    touched_topic: Topic | None = None
+    try:
+        if topic_id:
+            now = entry.updatedAt
+            row = topic_row or session.get(Topic, topic_id)
+            if row:
+                if str(payload.type or "").strip().lower() == "conversation" and (
                     row.snoozedUntil
                     or str(row.status or "active").strip().lower() in {"snoozed", "paused", "archived"}
                 ):
                     row.snoozedUntil = None
                     row.status = "active"
-                    row.updatedAt = now
-                    session.add(row)
-                    revived_topic = row
+                _touch_topic_activity(session, row, stamp=now)
+                touched_topic = row
 
-            if revived_topic:
-                try:
-                    session.commit()
-                except OperationalError as exc:
-                    if not DATABASE_URL.startswith("sqlite") or "database is locked" not in str(exc).lower():
-                        session.rollback()
-                        revived_topic = None
-                    else:
-                        session.rollback()
-                        last_exc: OperationalError | None = exc
-                        for attempt in range(6):
-                            try:
-                                time.sleep(min(0.75, 0.05 * (2**attempt)))
-                                session.commit()
-                                last_exc = None
-                                break
-                            except OperationalError as retry_exc:
-                                if "database is locked" not in str(retry_exc).lower():
-                                    raise
-                                session.rollback()
-                                last_exc = retry_exc
-                        if last_exc is not None:
-                            revived_topic = None
-        except Exception:
-            # Best-effort only: never break log ingestion for snooze revival.
+        if touched_topic:
             try:
-                session.rollback()
-            except Exception:
-                pass
-            revived_topic = None
+                session.commit()
+            except OperationalError as exc:
+                if not DATABASE_URL.startswith("sqlite") or "database is locked" not in str(exc).lower():
+                    session.rollback()
+                    touched_topic = None
+                else:
+                    session.rollback()
+                    last_exc: OperationalError | None = exc
+                    for attempt in range(6):
+                        try:
+                            time.sleep(min(0.75, 0.05 * (2**attempt)))
+                            session.commit()
+                            last_exc = None
+                            break
+                        except OperationalError as retry_exc:
+                            if "database is locked" not in str(retry_exc).lower():
+                                raise
+                            session.rollback()
+                            last_exc = retry_exc
+                    if last_exc is not None:
+                        touched_topic = None
+    except Exception:
+        # Best-effort only: never break log ingestion because topic promotion fails.
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        touched_topic = None
 
     retro_scoped_rows: list[LogEntry] = []
     if source_session_key and _is_subagent_session_key(source_session_key) and topic_id:
@@ -3972,8 +3971,8 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     if board_route_retro_scoped_rows:
         retro_scoped_rows.extend(board_route_retro_scoped_rows)
 
-    if revived_topic:
-        event_hub.publish({"type": "topic.upserted", "data": revived_topic.model_dump(), "eventTs": revived_topic.updatedAt})
+    if touched_topic:
+        event_hub.publish({"type": "topic.upserted", "data": touched_topic.model_dump(), "eventTs": touched_topic.updatedAt})
 
     # raw payloads can be large; keep log events lightweight for SSE + in-memory buffer safety.
     event_hub.publish({"type": "log.appended", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
@@ -10938,7 +10937,7 @@ def _resolve_board_send_target(
             spaceId=normalized_space_id,
             name=proposed_topic_name,
             createdBy="user",
-            sortIndex=_next_sort_index_for_new_topic(session, False),
+            sortIndex=_next_sort_index_for_new_topic(session),
             color=color,
             description=None,
             priority="medium",
@@ -10946,7 +10945,6 @@ def _resolve_board_send_target(
             snoozedUntil=None,
             tags=[],
             parentId=None,
-            pinned=False,
             createdAt=stamp,
             updatedAt=stamp,
         )
@@ -12510,8 +12508,7 @@ def cleanup_space_tag(space_id: str):
                 continue
 
             prior_space_by_topic_id[topic_id] = prior_space_id
-            topic.updatedAt = stamp
-            session.add(topic)
+            _touch_topic_activity(session, topic, stamp=stamp)
             changed_topic_ids.append(topic_id)
 
         if changed_topic_ids:
@@ -12581,6 +12578,24 @@ def cleanup_space_tag(space_id: str):
             "removedTagCount": removed_tag_count,
         }
 
+def _topic_order_key(topic: Topic) -> tuple[int, float, str]:
+    updated_at = str(getattr(topic, "updatedAt", "") or "")
+    updated_ts = _iso_to_timestamp(updated_at) or float("-inf")
+    return (
+        int(getattr(topic, "sortIndex", 0) or 0),
+        -updated_ts,
+        str(getattr(topic, "id", "") or ""),
+    )
+
+
+def _touch_topic_activity(session: Any, topic: Topic, *, stamp: str | None = None, promote: bool = True) -> str:
+    resolved_stamp = str(stamp or now_iso())
+    topic.updatedAt = resolved_stamp
+    if promote:
+        _promote_topic_sort_index(session, topic)
+    session.add(topic)
+    return resolved_stamp
+
 
 @app.get("/api/topics", response_model=List[TopicOut], tags=["topics"])
 def list_topics(
@@ -12588,7 +12603,7 @@ def list_topics(
     spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
     allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
 ):
-    """List topics (pinned first, newest activity first)."""
+    """List topics in board order."""
     with get_session() as session:
         topics = session.exec(select(Topic)).all()
         resolved_source_space_id = _resolve_source_space_id(
@@ -12603,10 +12618,7 @@ def list_topics(
         )
         if allowed_space_ids is not None:
             topics = [item for item in topics if _topic_matches_allowed_spaces(item, allowed_space_ids)]
-        # Most recently updated first, then manual order, then pinned first.
-        topics.sort(key=lambda t: t.updatedAt, reverse=True)
-        topics.sort(key=lambda t: getattr(t, "sortIndex", 0))
-        topics.sort(key=lambda t: not bool(getattr(t, "pinned", False)))
+        topics.sort(key=_topic_order_key)
         return topics
 
 
@@ -12684,6 +12696,10 @@ def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
             topic.status = normalize_topic_status(payload.status)
             touched = True
 
+        if "dueDate" in fields:
+            topic.dueDate = payload.dueDate
+            touched = True
+
         if "snoozedUntil" in fields:
             topic.snoozedUntil = payload.snoozedUntil
             touched = True
@@ -12732,18 +12748,16 @@ def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
             topic.parentId = payload.parentId
             touched = True
 
-        if "pinned" in fields:
-            topic.pinned = payload.pinned
-            touched = True
-
-        # Digest fields are system-managed and should not reorder topics by activity.
+        # Digest updates are system touches and should keep the topic fresh in the board order.
         if "digest" in fields:
             topic.digest = payload.digest
+            touched = True
         if "digestUpdatedAt" in fields:
             topic.digestUpdatedAt = payload.digestUpdatedAt
+            touched = True
 
         if touched:
-            topic.updatedAt = stamp
+            _touch_topic_activity(session, topic, stamp=stamp)
 
         space_changed = _space_id_for_topic(topic) != prior_space_id
 
@@ -12800,17 +12814,9 @@ def reorder_topics(payload: TopicReorderRequest):
             }
             raise HTTPException(status_code=400, detail=detail)
 
-        # Start from the persisted order (pinned first) so partial reorders keep hidden topics
+        # Start from the persisted board order so partial reorders keep hidden topics
         # in their existing slots (ex: snoozed topics that are not currently visible).
-        persisted = sorted(
-            topics,
-            key=lambda t: (
-                0 if bool(getattr(t, "pinned", False)) else 1,
-                int(getattr(t, "sortIndex", 0) or 0),
-                getattr(t, "updatedAt", "") or "",
-                t.id,
-            ),
-        )
+        persisted = sorted(topics, key=_topic_order_key)
         persisted_ids = [topic.id for topic in persisted]
         if not ordered_ids:
             final_ids = persisted_ids
@@ -12873,9 +12879,9 @@ def upsert_topic(
                     "description": "Product work.",
                     "priority": "high",
                     "status": "active",
+                    "dueDate": "2026-02-05T00:00:00.000Z",
                     "tags": ["product", "platform"],
                     "parentId": "topic-1",
-                    "pinned": True,
                 },
             }
         },
@@ -12912,6 +12918,8 @@ def upsert_topic(
                 topic.priority = payload.priority
             if "status" in fields:
                 topic.status = normalize_topic_status(payload.status)
+            if "dueDate" in fields:
+                topic.dueDate = payload.dueDate
             if "snoozedUntil" in fields:
                 topic.snoozedUntil = payload.snoozedUntil
             if "tags" in fields:
@@ -12930,8 +12938,6 @@ def upsert_topic(
                     )
             if "parentId" in fields:
                 topic.parentId = payload.parentId
-            if "pinned" in fields:
-                topic.pinned = payload.pinned
 
             normalized_status = normalize_topic_status(topic.status) or "active"
             if "snoozedUntil" in fields and payload.snoozedUntil is None and "status" not in fields:
@@ -12944,8 +12950,7 @@ def upsert_topic(
             elif topic.snoozedUntil is not None and normalized_status != "snoozed":
                 topic.status = "snoozed"
 
-            topic.updatedAt = timestamp
-            session.add(topic)
+            _touch_topic_activity(session, topic, stamp=timestamp)
             session.commit()
             session.refresh(topic)
             if _space_id_for_topic(topic) != prior_space_id:
@@ -13003,10 +13008,10 @@ def upsert_topic(
                     duplicate.priority = payload.priority
                 if "status" in fields:
                     duplicate.status = normalize_topic_status(payload.status)
+                if "dueDate" in fields:
+                    duplicate.dueDate = payload.dueDate
                 if "snoozedUntil" in fields:
                     duplicate.snoozedUntil = payload.snoozedUntil
-                if "pinned" in fields:
-                    duplicate.pinned = payload.pinned
                 if "spaceId" in fields:
                     normalized_space_id = _normalize_space_id(payload.spaceId)
                     if not normalized_space_id:
@@ -13033,8 +13038,7 @@ def upsert_topic(
                 elif duplicate.snoozedUntil is not None and normalized_status != "snoozed":
                     duplicate.status = "snoozed"
 
-                duplicate.updatedAt = timestamp
-                session.add(duplicate)
+                _touch_topic_activity(session, duplicate, stamp=timestamp)
                 session.commit()
                 session.refresh(duplicate)
                 if _space_id_for_topic(duplicate) != duplicate_prior_space_id:
@@ -13066,8 +13070,9 @@ def upsert_topic(
             resolved_color = _normalize_hex_color(payload.color)
             if not resolved_color:
                 resolved_color = _auto_pick_color(f"topic:{payload.id or ''}:{payload.name}", used_colors, 0.0)
-            sort_index = _next_sort_index_for_new_topic(session, bool(payload.pinned or False))
+            sort_index = _next_sort_index_for_new_topic(session)
             resolved_status = normalize_topic_status(payload.status) or "active"
+            resolved_due_date = payload.dueDate
             resolved_snoozed_until = payload.snoozedUntil
             if resolved_status in {"active", "archived"}:
                 resolved_snoozed_until = None
@@ -13086,10 +13091,10 @@ def upsert_topic(
                 description=payload.description,
                 priority=payload.priority or "medium",
                 status=resolved_status,
+                dueDate=resolved_due_date,
                 snoozedUntil=resolved_snoozed_until,
                 tags=_normalize_tags(payload.tags or []),
                 parentId=payload.parentId,
-                pinned=payload.pinned or False,
                 createdAt=timestamp,
                 updatedAt=timestamp,
             )
@@ -13874,23 +13879,21 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
                 source_log_id=str(entry.id or "").strip() or None,
             )
 
-        # Best-effort: if a conversation is routed into a snoozed/archived topic, revive it.
-        revived_topic: Topic | None = None
-        if str(getattr(entry, "type", "") or "").strip().lower() == "conversation":
-            try:
-                if entry.topicId:
-                    topic = session.get(Topic, entry.topicId)
-                    if topic and (
+        touched_topic: Topic | None = None
+        try:
+            if entry.topicId:
+                topic = session.get(Topic, entry.topicId)
+                if topic:
+                    if str(getattr(entry, "type", "") or "").strip().lower() == "conversation" and (
                         topic.snoozedUntil
                         or str(topic.status or "active").strip().lower() in {"snoozed", "paused", "archived"}
                     ):
                         topic.snoozedUntil = None
                         topic.status = "active"
-                        topic.updatedAt = stamp
-                        session.add(topic)
-                        revived_topic = topic
-            except Exception:
-                revived_topic = None
+                    _touch_topic_activity(session, topic, stamp=stamp)
+                    touched_topic = topic
+        except Exception:
+            touched_topic = None
 
         entry.updatedAt = stamp
 
@@ -13941,8 +13944,8 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
             event_hub.publish({"type": "log.patched", "data": scoped.model_dump(exclude={"raw"}), "eventTs": scoped.updatedAt})
             _enqueue_log_reindex(scoped)
         _enqueue_log_reindex(entry)
-        if revived_topic:
-            event_hub.publish({"type": "topic.upserted", "data": revived_topic.model_dump(), "eventTs": revived_topic.updatedAt})
+        if touched_topic:
+            event_hub.publish({"type": "topic.upserted", "data": touched_topic.model_dump(), "eventTs": touched_topic.updatedAt})
         if request_route_event:
             event_hub.publish(
                 {
@@ -16196,11 +16199,9 @@ def context(
             layers.append("A:routing_memory")
 
         visible_topics = [t for t in topics if _topic_visible(t, now_dt)]
-        pinned_topics = [t for t in visible_topics if bool(getattr(t, "pinned", False))]
-        pinned_topics.sort(key=lambda t: getattr(t, "sortIndex", 0))
-        pinned_topics.sort(key=lambda t: t.updatedAt, reverse=True)
+        visible_topics.sort(key=_topic_order_key)
 
-        working_topics = pinned_topics[: max(0, min(12, workingSetLimit))]
+        working_topics = visible_topics[: max(0, min(12, workingSetLimit))]
 
         # Board chat location: Clawboard Topic chat sessions carry a stable sessionKey that
         # identifies the active Topic. Always surface that entity first so the model knows

@@ -25,7 +25,6 @@ model Topic {
   priority     String?
   dueDate      DateTime?
   snoozedUntil DateTime?
-  pinned       Boolean   @default(false)
   createdAt    DateTime
   updatedAt    DateTime
 

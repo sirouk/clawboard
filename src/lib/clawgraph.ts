@@ -263,11 +263,10 @@ export function buildClawgraphFromData(
       id: nodeId,
       label: topic.name || topic.id,
       type: "topic",
-      score: 1.6 + (topic.pinned ? 0.65 : 0),
+      score: 1.6,
       meta: {
         topicId: topic.id,
         description: topic.description ?? "",
-        pinned: Boolean(topic.pinned),
       },
     });
   }

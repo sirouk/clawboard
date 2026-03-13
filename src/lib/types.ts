@@ -16,7 +16,6 @@ export type Topic = {
   snoozedUntil?: string | null;
   tags?: string[];
   parentId?: string | null;
-  pinned?: boolean;
   createdAt: string;
   updatedAt: string;
 };

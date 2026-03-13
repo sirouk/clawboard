@@ -12,7 +12,6 @@ export function TopicCreateForm() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState("medium");
-  const [pinned, setPinned] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -38,7 +37,6 @@ export function TopicCreateForm() {
           name: name.trim(),
           description: description.trim(),
           priority,
-          pinned,
         }),
         },
         token
@@ -51,7 +49,6 @@ export function TopicCreateForm() {
       setName("");
       setDescription("");
       setPriority("medium");
-      setPinned(false);
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
@@ -72,7 +69,7 @@ export function TopicCreateForm() {
         <label className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Description</label>
         <TextArea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What is this topic about?" />
       </div>
-      <div className="grid gap-3 md:grid-cols-2">
+      <div>
         <div>
           <label className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Priority</label>
           <Select value={priority} onChange={(event) => setPriority(event.target.value)}>
@@ -80,18 +77,6 @@ export function TopicCreateForm() {
             <option value="medium">Medium</option>
             <option value="low">Low</option>
           </Select>
-        </div>
-        <div className="flex items-end gap-2">
-          <input
-            id="pinned"
-            type="checkbox"
-            className="h-5 w-5 rounded border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))]"
-            checked={pinned}
-            onChange={(event) => setPinned(event.target.checked)}
-          />
-          <label htmlFor="pinned" className="text-sm text-[rgb(var(--claw-muted))]">
-            Pin this topic
-          </label>
         </div>
       </div>
       {readOnly && (

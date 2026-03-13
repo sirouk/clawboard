@@ -117,7 +117,6 @@ def _topic_has_meaningful_metadata(topic: object) -> bool:
     due_date = str(getattr(topic, "dueDate", "") or "").strip()
     snoozed_until = str(getattr(topic, "snoozedUntil", "") or "").strip()
     color = str(getattr(topic, "color", "") or "").strip()
-    pinned = bool(getattr(topic, "pinned", False))
     priority = str(getattr(topic, "priority", "") or "medium").strip().lower()
     status = str(getattr(topic, "status", "") or "active").strip().lower()
     return bool(
@@ -127,7 +126,6 @@ def _topic_has_meaningful_metadata(topic: object) -> bool:
         or due_date
         or snoozed_until
         or color
-        or pinned
         or priority not in {"", "medium"}
         or status not in {"", "active"}
     )
@@ -390,10 +388,10 @@ def init_db() -> None:
                 conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN color TEXT;")
             if "sortIndex" not in topic_existing:
                 conn.exec_driver_sql("ALTER TABLE topic ADD COLUMN sortIndex INTEGER NOT NULL DEFAULT 0;")
-                # Preserve current ordering (pinned first, most recently updated first) so upgrading instances
+                # Preserve current recency ordering so upgrading instances
                 # do not suddenly reshuffle topics when the UI starts using sortIndex.
                 rows = conn.exec_driver_sql(
-                    'SELECT id FROM topic ORDER BY COALESCE(pinned, 0) DESC, "updatedAt" DESC, id ASC;'
+                    'SELECT id FROM topic ORDER BY "updatedAt" DESC, id ASC;'
                 ).fetchall()
                 for idx, row in enumerate(rows):
                     conn.exec_driver_sql("UPDATE topic SET sortIndex = ? WHERE id = ?;", (idx, row[0]))
@@ -437,11 +435,11 @@ def init_db() -> None:
                     conn.exec_driver_sql(
                         "INSERT OR IGNORE INTO topic "
                         "(id, spaceId, name, createdBy, sortIndex, color, description, priority, status, "
-                        " snoozedUntil, dueDate, tags, parentId, pinned, digest, digestUpdatedAt, createdAt, updatedAt) "
+                        " snoozedUntil, dueDate, tags, parentId, digest, digestUpdatedAt, createdAt, updatedAt) "
                         "SELECT id, COALESCE(spaceId, 'space-default'), title, 'import', "
                         "  COALESCE(sortIndex, 0), color, NULL, COALESCE(priority, 'medium'), "
                         "  COALESCE(status, 'todo'), snoozedUntil, dueDate, COALESCE(tags, '[]'), "
-                        "  NULL, COALESCE(pinned, 0), digest, digestUpdatedAt, createdAt, updatedAt "
+                        "  NULL, digest, digestUpdatedAt, createdAt, updatedAt "
                         "FROM task;"
                     )
                     # Re-point logs that referenced a task to the migrated topic.
@@ -629,11 +627,11 @@ def init_db() -> None:
                         conn.exec_driver_sql(
                             'INSERT INTO topic '
                             '(id, "spaceId", name, "createdBy", "sortIndex", color, description, priority, status, '
-                            ' "snoozedUntil", "dueDate", tags, "parentId", pinned, digest, "digestUpdatedAt", "createdAt", "updatedAt") '
+                            ' "snoozedUntil", "dueDate", tags, "parentId", digest, "digestUpdatedAt", "createdAt", "updatedAt") '
                             "SELECT id, COALESCE(\"spaceId\", 'space-default'), title, 'import', "
                             '  COALESCE("sortIndex", 0), color, NULL, COALESCE(priority, \'medium\'), '
                             "  COALESCE(status, 'todo'), \"snoozedUntil\", \"dueDate\", COALESCE(tags, '[]'::json), "
-                            '  NULL, COALESCE(pinned, false), digest, "digestUpdatedAt", "createdAt", "updatedAt" '
+                            '  NULL, digest, "digestUpdatedAt", "createdAt", "updatedAt" '
                             "FROM task "
                             "ON CONFLICT (id) DO NOTHING;"
                         )
