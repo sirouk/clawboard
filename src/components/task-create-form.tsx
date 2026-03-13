@@ -22,7 +22,7 @@ export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; de
     setError(null);
 
     if (!title.trim()) {
-      setError("Task title is required.");
+      setError("Topic title is required.");
       return;
     }
 
@@ -45,7 +45,7 @@ export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; de
       );
 
       if (!res.ok) {
-        throw new Error("Failed to create task.");
+        throw new Error("Failed to create topic.");
       }
 
       setTitle("");
@@ -61,7 +61,7 @@ export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; de
     <form className="space-y-3" onSubmit={handleSubmit}>
       <div>
         <label className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Title</label>
-        <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Add a new task" />
+        <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Add a new topic" />
       </div>
       <div>
         <label className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Topic</label>
@@ -77,7 +77,7 @@ export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; de
       {readOnly && <p className="text-sm text-[rgb(var(--claw-warning))]">Token required for changes. Set it in Setup.</p>}
       {error && <p className="text-sm text-[rgb(var(--claw-danger))]">{error}</p>}
       <Button type="submit" disabled={saving || readOnly}>
-        {saving ? "Adding..." : "Add task"}
+        {saving ? "Adding..." : "Add topic"}
       </Button>
     </form>
   );

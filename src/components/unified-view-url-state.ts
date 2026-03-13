@@ -49,10 +49,6 @@ function parsePathSelections(pathname: string, basePath: string) {
     if (key === "topic") {
       topics.push(value);
       i += 1;
-    } else if (key === "task") {
-      // Hard cut: former task URLs now resolve directly to topic ids.
-      topics.push(value);
-      i += 1;
     }
   }
   return { topics, tasks: [] as string[] };
@@ -77,7 +73,6 @@ function mapIdValues(values: string[], resolve: (value: string) => string) {
 
 export function parseUnifiedUrlState(url: URL, options: ParseUnifiedUrlStateOptions): UnifiedUrlState {
   const resolveTopicId = options.resolveTopicId ?? decodeSlugId;
-  const resolveTaskId = options.resolveTaskId ?? decodeSlugId;
   const rawParseMode = options.rawParseMode ?? "not-zero";
   const rawDefaultWhenMissing = options.rawDefaultWhenMissing ?? false;
 
@@ -88,29 +83,10 @@ export function parseUnifiedUrlState(url: URL, options: ParseUnifiedUrlStateOpti
   let nextTopics = hasPathSelections
     ? mapIdValues(pathSelections.topics, resolveTopicId)
     : mapIdValues(params.getAll("topic"), resolveTopicId);
-  const pathTasks = hasPathSelections ? mapIdValues(pathSelections.tasks, resolveTaskId) : [];
-  let nextTasks = hasPathSelections ? [] : mapIdValues(params.getAll("task"), resolveTaskId);
 
   if (nextTopics.length === 0) {
     const legacyTopics = params.get("topics")?.split(",").filter(Boolean) ?? [];
     nextTopics = mapIdValues(legacyTopics, resolveTopicId);
-  }
-  if (nextTasks.length === 0) {
-    const legacyTasks = params.get("tasks")?.split(",").filter(Boolean) ?? [];
-    nextTasks = mapIdValues(legacyTasks, resolveTaskId);
-  }
-
-  if (pathTasks.length > 0) {
-    nextTopics = Array.from(new Set([...nextTopics, ...pathTasks]));
-  }
-
-  if (nextTasks.length > 0 && options.taskTopicById) {
-    const promotedTaskIds = [...nextTasks];
-    const parentTopicIds = promotedTaskIds
-      .map((taskId) => options.taskTopicById?.get(taskId))
-      .filter((topicId): topicId is string => Boolean(topicId));
-    nextTopics = Array.from(new Set([...nextTopics, ...promotedTaskIds, ...parentTopicIds]));
-    nextTasks = [];
   }
 
   const densityParam = (params.get("density") ?? "").trim().toLowerCase();

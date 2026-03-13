@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Draft, LogEntry, Space, Task, Topic } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
-import { useLiveUpdates } from "@/lib/use-live-updates";
+import { useLiveUpdates, type ConnectionInfo } from "@/lib/use-live-updates";
 import { LiveEvent, mergeById, mergeLogs, maxTimestamp, removeById, upsertById } from "@/lib/live-utils";
 import { normalizeBoardSessionKey } from "@/lib/board-session";
 import { CLAWBOARD_CONFIG_UPDATED_EVENT } from "@/lib/config-events";
@@ -45,6 +45,8 @@ type DataContextValue = {
   openclawThreadWork: Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }>;
   hydrated: boolean;
   sseConnected: boolean;
+  connectionStatus: "connected" | "reconnecting" | "offline";
+  disconnectedSince: number | null;
   setSpaces: React.Dispatch<React.SetStateAction<Space[]>>;
   setTopics: React.Dispatch<React.SetStateAction<Topic[]>>;
   setTasks: React.Dispatch<React.SetStateAction<Task[]>>;
@@ -87,9 +89,7 @@ function clipNotificationText(value: string, max = 140) {
 }
 
 const UNSNOOZE_TOPIC_TAG_PREFIX = "clawboard-unsnooze-topic-";
-const UNSNOOZE_TASK_TAG_PREFIX = "clawboard-unsnooze-task-";
 const UNSNOOZE_TOPICS_SUMMARY_TAG = "clawboard-unsnooze-topics";
-const UNSNOOZE_TASKS_SUMMARY_TAG = "clawboard-unsnooze-tasks";
 const CHAT_TAG_PREFIX = "clawboard-chat-";
 const CHAT_SUMMARY_TAG = "clawboard-chat-summary";
 const DEFAULT_INITIAL_CHANGES_LIMIT_LOGS = 2000;
@@ -306,10 +306,6 @@ function unsnoozedTopicTag(topicId: string) {
   return `${UNSNOOZE_TOPIC_TAG_PREFIX}${topicId}`;
 }
 
-function unsnoozedTaskTag(taskId: string) {
-  return `${UNSNOOZE_TASK_TAG_PREFIX}${taskId}`;
-}
-
 function chatTag(chatKey: string) {
   return `${CHAT_TAG_PREFIX}${chatKey}`;
 }
@@ -323,34 +319,45 @@ function readNotificationClickDataFromSearchParams(searchParams: URLSearchParams
   return out;
 }
 
-function topicToTask(topic: Topic): Task {
+function topicToTask(topic: Topic): Task | null {
+  const parentId = String(topic.parentId ?? "").trim();
+  if (!parentId) return null;
   return {
     ...topic,
     title: topic.name,
-    topicId: topic.id,
+    topicId: parentId,
   };
 }
 
 function taskToTopic(task: Task, fallback?: Topic): Topic {
   const name = String(task.title ?? task.name ?? fallback?.name ?? "").trim();
+  const parentId = String(task.topicId ?? task.parentId ?? fallback?.parentId ?? "").trim();
   return {
     ...(fallback ?? {}),
     ...task,
     name: name || fallback?.name || "",
-    parentId: task.topicId && task.topicId !== task.id ? task.topicId : (task.parentId ?? fallback?.parentId ?? null),
+    parentId: parentId || null,
   };
 }
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [topics, setTopics] = useState<Topic[]>([]);
-  const tasks: Task[] = useMemo(() => topics.map(topicToTask), [topics]);
+  const tasks: Task[] = useMemo(
+    () =>
+      topics
+        .map(topicToTask)
+        .filter((topic): topic is Task => Boolean(topic)),
+    [topics]
+  );
   const setTasks: React.Dispatch<React.SetStateAction<Task[]>> = useCallback((next) => {
     setTopics((previousTopics) => {
-      const previousTasks = previousTopics.map(topicToTask);
+      const previousTasks = previousTopics.map(topicToTask).filter((topic): topic is Task => Boolean(topic));
       const resolvedTasks = typeof next === "function" ? next(previousTasks) : next;
+      const previousTaskIds = new Set(previousTasks.map((task) => task.id));
       const previousById = new Map(previousTopics.map((topic) => [topic.id, topic]));
-      return resolvedTasks.map((task) => taskToTopic(task, previousById.get(task.id)));
+      const staticTopics = previousTopics.filter((topic) => !previousTaskIds.has(topic.id));
+      return [...staticTopics, ...resolvedTasks.map((task) => taskToTopic(task, previousById.get(task.id)))];
     });
   }, []);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -363,6 +370,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   >({});
   const [hydrated, setHydrated] = useState(false);
   const [sseConnected, setSseConnected] = useState(false);
+  const [disconnectedSince, setDisconnectedSince] = useState<number | null>(null);
+  const [browserOnline, setBrowserOnline] = useState(() =>
+    typeof navigator !== "undefined" ? navigator.onLine : true
+  );
   const unsnoozedTopicsRaw = useLocalStorageItem(UNSNOOZED_TOPICS_KEY) ?? "{}";
   const chatSeenRaw = useLocalStorageItem(CHAT_SEEN_AT_KEY) ?? "{}";
   const notificationsEnabledRaw = useLocalStorageItem(PUSH_ENABLED_KEY);
@@ -379,8 +390,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
     return count;
   }, [topics, unsnoozedTopicBadges]);
-  const activeUnsnoozedTaskCount = 0;
-
   const unreadMessageCount = useMemo(() => {
     const seenAtMs = new Map<string, number>();
     for (const [chatKey, seenAt] of Object.entries(chatSeenByKey)) {
@@ -410,7 +419,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const upsertSpace = (space: Space) => setSpaces((prev) => upsertById(prev, space));
   const upsertTopic = (topic: Topic) => setTopics((prev) => upsertById(prev, topic));
-  const upsertTask = (task: Task) => upsertTopic({ ...task, name: task.title ?? task.name });
+  const upsertTask = useCallback((task: Task) => {
+    upsertTopic(taskToTopic(task));
+  }, []);
   const appendLog = (log: LogEntry) => setLogs((prev) => mergeLogs(prev, [log]));
   const upsertDraft = (draft: Draft) =>
     setDrafts((prev) => {
@@ -514,6 +525,33 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       }
     };
   }, [handleNotificationClickData]);
+
+  // Track browser online/offline state for the connection status indicator.
+  useEffect(() => {
+    const onOnline = () => setBrowserOnline(true);
+    const onOffline = () => setBrowserOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
+
+  const handleConnectionChange = useCallback((info: ConnectionInfo) => {
+    setSseConnected(info.connected);
+    if (info.connected) {
+      setDisconnectedSince(null);
+    } else {
+      setDisconnectedSince((prev) => prev ?? Date.now());
+    }
+  }, []);
+
+  const connectionStatus: "connected" | "reconnecting" | "offline" = useMemo(() => {
+    if (!browserOnline) return "offline";
+    if (sseConnected) return "connected";
+    return "reconnecting";
+  }, [browserOnline, sseConnected]);
 
   const reconcile = useCallback(async (since?: string) => {
     const params = new URLSearchParams();
@@ -628,7 +666,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useLiveUpdates({
-    onConnectionChange: setSseConnected,
+    onConnectionChange: handleConnectionChange,
     onEvent: (event: LiveEvent) => {
       if (!event || !event.type) return;
       if (event.type === "space.upserted" && event.data && typeof event.data === "object") {
@@ -726,7 +764,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   });
 
   const topicById = useMemo(() => new Map(topics.map((topic) => [topic.id, topic])), [topics]);
-  const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
   const knownLogIdsRef = useRef<Set<string> | null>(null);
   const prevTopicStatusRef = useRef<Map<string, { status: string; snoozedUntil: string | null }> | null>(null);
   const seededSeenMapRef = useRef(false);
@@ -944,6 +981,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       openclawThreadWork,
       hydrated,
       sseConnected,
+      connectionStatus,
+      disconnectedSince,
       setSpaces,
       setTopics,
       setTasks,
@@ -973,7 +1012,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       openclawThreadWork,
       hydrated,
       sseConnected,
+      connectionStatus,
+      disconnectedSince,
+      setTasks,
       markChatSeen,
+      upsertTask,
       dismissUnsnoozedTopicBadge,
       dismissUnsnoozedTaskBadge,
     ]

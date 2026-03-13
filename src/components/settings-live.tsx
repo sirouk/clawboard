@@ -319,11 +319,11 @@ export function SettingsLive() {
       if (resetAt) {
         const stamp = Number.isNaN(Date.parse(resetAt)) ? resetAt : new Date(resetAt).toLocaleString();
         setMessage(
-          `Backfill replay started (${stamp}). Existing topic/task links were preserved; unassigned or failed conversation logs are now pending for re-allocation.`
+          `Backfill replay started (${stamp}). Existing topic links were preserved; unassigned or failed conversation logs are now pending for re-allocation.`
         );
       } else {
         setMessage(
-          "Backfill replay started. Existing topic/task links were preserved; unassigned or failed conversation logs are now pending for re-allocation."
+          "Backfill replay started. Existing topic links were preserved; unassigned or failed conversation logs are now pending for re-allocation."
         );
       }
     } catch (err) {
@@ -621,7 +621,7 @@ export function SettingsLive() {
           <div>
             <h2 className="text-lg font-semibold">Backfill Replay</h2>
             <p className="mt-1 text-sm text-[rgb(var(--claw-muted))]">
-              Reclassify existing conversation logs and re-allocate them across current topics/tasks.
+              Reclassify existing conversation logs and re-allocate them across current topics.
             </p>
           </div>
           <Badge tone={localIntegration === "full" ? "accent2" : "muted"}>{localIntegration === "full" ? "Full mode" : "Not full mode"}</Badge>
@@ -633,7 +633,7 @@ export function SettingsLive() {
             <span className="text-[rgb(var(--claw-text))]">full</span> (write + replay/backfill workflows).
           </p>
           <p className="text-[rgb(var(--claw-muted))]">
-            Default replay is non-destructive: existing topic/task links stay in place; only unassigned or failed conversation logs are re-queued.
+            Default replay is non-destructive: existing topic links stay in place; only unassigned or failed conversation logs are re-queued.
           </p>
         </div>
         <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -922,7 +922,7 @@ export function SettingsLive() {
             <div className="flex-1">
               <h3 className="text-sm font-semibold">Unread Badge Count</h3>
               <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
-                Show unread Topic/Task chat replies plus unsnoozed topics and tasks on the app icon badge.
+                Show unread topic chat replies plus unsnoozed topics on the app icon badge.
               </p>
             </div>
             <div className="flex flex-none items-center">

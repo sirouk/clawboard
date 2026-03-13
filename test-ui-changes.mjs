@@ -20,7 +20,7 @@ const SCREENSHOTS_DIR = './test-screenshots';
 // Create screenshots directory
 try {
   mkdirSync(SCREENSHOTS_DIR, { recursive: true });
-} catch (e) {
+} catch {
   // Directory already exists
 }
 
@@ -61,13 +61,12 @@ async function testUIChanges() {
     try {
       textarea = page.locator('textarea[placeholder*="Write freeform"]').first();
       await textarea.waitFor({ state: 'visible', timeout: 5000 });
-    } catch (e) {
+    } catch {
       console.log('   Trying alternative textarea selector...');
       textarea = page.locator('textarea').first();
       await textarea.waitFor({ state: 'visible', timeout: 5000 });
     }
     
-    const textareaBox = await textarea.boundingBox();
     const computedStyle = await textarea.evaluate(el => {
       const style = window.getComputedStyle(el);
       return {
@@ -104,7 +103,6 @@ async function testUIChanges() {
     await textarea.fill(multilineText);
     await sleep(500);
     
-    const expandedBox = await textarea.boundingBox();
     const expandedStyle = await textarea.evaluate(el => ({
       height: el.offsetHeight,
       scrollHeight: el.scrollHeight
@@ -160,15 +158,6 @@ async function testUIChanges() {
     console.log(`   Found ${topicCount} potential topics/tasks`);
     
     // Try to find and expand a topic if not already expanded
-    const topicHeaders = page.locator('div').filter({ 
-      has: page.locator('text=/topic|task/i') 
-    });
-    
-    // Look for topic cards
-    const topicCards = page.locator('[class*="rounded"]').filter({
-      has: page.locator('text=/./') // Has some text
-    });
-    
     console.log('   Looking for expandable topics...');
     await sleep(1000);
     

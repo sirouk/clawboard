@@ -28,8 +28,6 @@ SLASH_COMMANDS = {
     "/new",
     "/topic",
     "/topics",
-    "/task",
-    "/tasks",
     "/log",
     "/logs",
     "/board",

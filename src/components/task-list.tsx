@@ -6,7 +6,7 @@ import type { Task, TaskStatus, Topic } from "@/lib/types";
 import { Button, SearchInput, Select, StatusPill } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { formatRelativeTime } from "@/lib/format";
-import { buildTaskUrl } from "@/lib/url";
+import { buildTopicUrl } from "@/lib/url";
 import { apiFetch } from "@/lib/api";
 
 const STATUS_OPTIONS: TaskStatus[] = ["todo", "doing", "blocked", "done"];
@@ -103,7 +103,7 @@ export function TaskList({
     );
 
     if (!res.ok) {
-      throw new Error("Failed to update task.");
+      throw new Error("Failed to update topic.");
     }
 
     setTasks((prev) =>
@@ -234,7 +234,7 @@ function TaskRow({
     return true;
   };
 
-  const taskHref = buildTaskUrl(task, topics);
+  const taskHref = buildTopicUrl(task, topics);
 
   return (
     <div

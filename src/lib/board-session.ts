@@ -31,6 +31,7 @@ export function isBoardSessionKey(value: string | undefined | null) {
 }
 
 /** @deprecated Use topicSessionKey. In the flat topology, only topicId is needed. */
-export function taskSessionKey(topicId: string, _taskId?: string) {
-  return topicSessionKey(topicId);
+export function taskSessionKey(topicId: string, taskId?: string) {
+  const resolvedTopicId = String(taskId ?? "").trim() || String(topicId ?? "").trim();
+  return resolvedTopicId ? topicSessionKey(resolvedTopicId) : "";
 }

@@ -12,14 +12,14 @@ export async function handleSkillCommand(params: {
   sessionKey?: string;
   agentId?: string;
 }) {
-  const { commandName, args, topicId, sessionKey, agentId } = params;
+  const { commandName, args, topicId, sessionKey } = params;
 
   console.log(`Executing slash command: /${commandName}`, { args, topicId, sessionKey });
 
   // Example: simple response for /help
   if (commandName === "help" || commandName === "h") {
     await appendLog({
-      message: "Available commands: /help, /status, /model, /skill, /topic, /task, /log, /browser, /message, /subagents",
+      message: "Available commands: /help, /status, /model, /skill, /topic, /log, /browser, /message, /subagents",
       topicId,
       agentId: "system",
       agentLabel: "System",

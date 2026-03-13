@@ -7,6 +7,11 @@ import type { LiveEvent } from "@/lib/live-utils";
 
 type ReconcileFn = (since?: string) => Promise<string | void>;
 
+export type ConnectionInfo = {
+  connected: boolean;
+  reconnectAttempt: number;
+};
+
 // Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s (max), with ±25% jitter.
 function backoffDelayMs(retryCount: number): number {
   const base = Math.min(30_000, 1_000 * Math.pow(2, retryCount));
@@ -14,10 +19,17 @@ function backoffDelayMs(retryCount: number): number {
   return Math.max(500, Math.round(base + jitter));
 }
 
+// Minimum interval between reconcile calls to prevent storms from overlapping triggers.
+const MIN_RECONCILE_INTERVAL_MS = 2_000;
+
+// If the last SSE message arrived within this window, skip forced reconnect on focus —
+// the connection is still healthy and only needs a reconcile to fill any gaps.
+const RECENT_MESSAGE_THRESHOLD_MS = 35_000;
+
 export function useLiveUpdates(options: {
   onEvent: (event: LiveEvent) => void;
   reconcile?: ReconcileFn;
-  onConnectionChange?: (connected: boolean) => void;
+  onConnectionChange?: (info: ConnectionInfo) => void;
 }) {
   const handlerRef = useRef(options.onEvent);
   const reconcileRef = useRef<ReconcileFn | undefined>(options.reconcile);
@@ -74,14 +86,17 @@ export function useLiveUpdates(options: {
     const STALE_SSE_MS = 70_000;
 
     const notifyConnected = (connected: boolean) => {
-      if (currentlyConnected === connected) return;
+      if (currentlyConnected === connected && connected) return;
       currentlyConnected = connected;
-      onConnectionChangeRef.current?.(connected);
+      onConnectionChangeRef.current?.({ connected, reconnectAttempt: retryCount });
     };
 
     const runReconcile = async () => {
       if (!reconcileRef.current) return;
       if (reconciling) return;
+      // Throttle: don't reconcile more often than MIN_RECONCILE_INTERVAL_MS.
+      const now = Date.now();
+      if (now - lastReconcileAt.current < MIN_RECONCILE_INTERVAL_MS) return;
       reconciling = true;
       try {
         lastReconcileAt.current = Date.now();
@@ -99,9 +114,16 @@ export function useLiveUpdates(options: {
 
     const startPoll = () => {
       if (pollTimer) return;
+      // Don't poll when the browser reports offline — saves battery and avoids error noise.
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
       // Fallback: if SSE is blocked by a proxy/network hiccup, keep the UI current.
       pollTimer = setInterval(() => {
         if (closed) return;
+        // Stop polling if we went offline while the timer was running.
+        if (typeof navigator !== "undefined" && navigator.onLine === false) {
+          stopPoll();
+          return;
+        }
         void runReconcile();
       }, 2_000);
     };
@@ -290,7 +312,11 @@ export function useLiveUpdates(options: {
     const onForeground = () => {
       if (closed) return;
       void runReconcile();
-      reconnect();
+      // Only force reconnect if the stream appears stale (no message received recently).
+      // If the stream is healthy, reconcile alone fills any gaps without disrupting the connection.
+      if (Date.now() - lastMessageAt.current > RECENT_MESSAGE_THRESHOLD_MS) {
+        reconnect();
+      }
     };
 
     const onVisibilityChange = () => {
@@ -309,8 +335,9 @@ export function useLiveUpdates(options: {
 
     const onOffline = () => {
       if (closed) return;
-      // Browser reports offline — abort the stream, cancel reconnect timer, and mark disconnected.
+      // Browser reports offline — abort the stream, cancel reconnect/poll timers, and mark disconnected.
       // We won't reschedule reconnection; the "online" event will trigger it.
+      stopPoll();
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;

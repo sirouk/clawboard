@@ -857,8 +857,6 @@ SLASH_COMMANDS = {
     "/new",
     "/topic",
     "/topics",
-    "/task",
-    "/tasks",
     "/log",
     "/logs",
     "/board",
@@ -950,8 +948,6 @@ SLASH_COMMANDS = {
     "/skill",
     "/topic",
     "/topics",
-    "/task",
-    "/tasks",
     "/log",
     "/logs",
     "/board",
@@ -4168,7 +4164,9 @@ def _parse_board_session_key(session_key: str) -> str | None:
             continue
 
         # New format: clawboard:topic:<topicId>
-        topic_match = re.search(r"clawboard:topic:(topic-[a-zA-Z0-9-]+)", candidate)
+        # Accept any persisted topic id after the prefix so migrated rows keep working
+        # even when their ids predate the topic-only topology.
+        topic_match = re.search(r"clawboard:topic:([^\s|]+)", candidate)
         if topic_match:
             return topic_match.group(1)
 

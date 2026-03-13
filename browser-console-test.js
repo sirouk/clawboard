@@ -112,9 +112,6 @@
   console.log(`Found ${stickyElements.length} sticky elements:`);
   
   const stickyBar = stickyElements.find(el => el.className.includes('z-30'));
-  const topicHeaders = stickyElements.filter(el => el.className.includes('z-20') && !el.className.includes('z-30'));
-  const taskHeaders = stickyElements.filter(el => el.className.includes('z-10') && !el.className.includes('z-20'));
-
   if (stickyBar) {
     logInfo(`✓ Sticky bar (z-30): Found - This is the main composer bar`);
   }

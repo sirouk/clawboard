@@ -110,7 +110,7 @@ def _parse_board_session_key(session_key: str) -> tuple[str | None, str | None]:
     if not base:
         return (None, None)
 
-    topic_match = re.search(r"clawboard:topic:([a-zA-Z0-9-]+)", base)
+    topic_match = re.search(r"clawboard:topic:([^\s|]+)", base)
     if topic_match:
         topic_id = topic_match.group(1)
         return (topic_id, topic_id)
@@ -309,8 +309,6 @@ SLASH_COMMANDS = {
     "/new",
     "/topic",
     "/topics",
-    "/task",
-    "/tasks",
     "/log",
     "/logs",
     "/board",

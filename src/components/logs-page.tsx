@@ -35,7 +35,7 @@ function readUrlFilters(): UrlFilters {
 }
 
 export function LogsPage() {
-  const { logs, topics, tasks } = useDataStore();
+  const { logs, topics } = useDataStore();
   const [showRawAll, setShowRawAll] = useState(true);
   const [urlFilters, setUrlFilters] = useState<UrlFilters>(DEFAULT_URL_FILTERS);
 
@@ -88,7 +88,6 @@ export function LogsPage() {
         <LogList
           logs={sortedLogs}
           topics={topics}
-          tasks={tasks}
           showFilters
           showRawToggle
           showRawAll={showRawAll}

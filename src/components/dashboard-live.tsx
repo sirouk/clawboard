@@ -5,7 +5,7 @@ import Link from "next/link";
 import { Card, CardHeader, Badge } from "@/components/ui";
 import { NowPanel } from "@/components/now-panel";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
-import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam } from "@/lib/url";
+import { buildTopicUrl, UNIFIED_BASE, withRevealParam } from "@/lib/url";
 import type { LogEntry } from "@/lib/types";
 import { useDataStore } from "@/components/data-provider";
 
@@ -20,15 +20,11 @@ export function DashboardLive() {
   const blockedTasks = tasks.filter((task) => task.status === "blocked");
 
   const buildLogUrl = (entry: LogEntry) => {
-    if (entry.taskId) {
-      const task = tasks.find((item) => item.id === entry.taskId);
-      if (task) return withRevealParam(buildTaskUrl(task, topics));
-      return `${UNIFIED_BASE}/task/${encodeURIComponent(entry.taskId)}`;
-    }
-    if (entry.topicId) {
-      const topic = topics.find((item) => item.id === entry.topicId);
+    const topicId = String(entry.taskId ?? entry.topicId ?? "").trim();
+    if (topicId) {
+      const topic = topics.find((item) => item.id === topicId);
       if (topic) return withRevealParam(buildTopicUrl(topic, topics));
-      return `${UNIFIED_BASE}/topic/${encodeURIComponent(entry.topicId)}`;
+      return `${UNIFIED_BASE}/topic/${encodeURIComponent(topicId)}`;
     }
     return UNIFIED_BASE;
   };
@@ -39,10 +35,10 @@ export function DashboardLive() {
 	        <Link href={UNIFIED_BASE} className="block">
 	          <Card className="h-full">
 	            <CardHeader>
-              <h2 className="text-lg font-semibold">Active Tasks</h2>
+              <h2 className="text-lg font-semibold">Active Topics</h2>
               <Badge tone="accent">{openTasks.length}</Badge>
             </CardHeader>
-            <p className="text-sm text-[rgb(var(--claw-muted))]">Tasks not marked done.</p>
+            <p className="text-sm text-[rgb(var(--claw-muted))]">Topics not marked done.</p>
           </Card>
         </Link>
         <Link href={UNIFIED_BASE} className="block">

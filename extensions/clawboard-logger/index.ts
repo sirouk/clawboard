@@ -64,7 +64,6 @@ import {
   ensureDir,
   envBool,
   envInt,
-  extractTextLoose,
   isClassifierPayloadText,
   isContextMode,
   isRetryableFetchError,
@@ -72,7 +71,6 @@ import {
   lexicalSimilarity,
   normalizeBaseUrl,
   normalizeBaseUrlCandidate,
-  normalizeChannelId,
   normalizeWhitespace,
   parseBaseUrlList,
   parseContextModes,
@@ -2467,33 +2465,6 @@ export default function register(api: OpenClawPluginApi) {
     if (parseSubagentSession(metaSession)) return metaSession;
     const metaObj = (meta as Record<string, unknown> | undefined) ?? undefined;
     return computeEffectiveSessionKey(metaObj, ctx2);
-  };
-
-  const parseMetaBoolean = (value: unknown): boolean | undefined => {
-    if (typeof value === "boolean") return value;
-    if (typeof value === "number") return value === 1;
-    if (typeof value === "string") {
-      const normalized = value.trim().toLowerCase();
-      if (!normalized) return undefined;
-      if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") return true;
-      if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") return false;
-    }
-    return undefined;
-  };
-
-  const parseBoardScopeKindFromMeta = (meta: Record<string, unknown> | undefined): BoardScope["kind"] | undefined => {
-    const value =
-      typeof meta?.boardScopeKind === "string"
-        ? meta.boardScopeKind
-        : typeof meta?.boardScope_kind === "string"
-          ? meta.boardScope_kind
-          : undefined;
-    if (!value) return undefined;
-    const normalized = value.trim().toLowerCase();
-    if (normalized === "topic") return normalized;
-    // Backward compat: old sources may still send "task"
-    if (normalized === "task") return "topic";
-    return undefined;
   };
 
   const normalizeEventMeta = (

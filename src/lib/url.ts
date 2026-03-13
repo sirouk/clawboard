@@ -25,14 +25,6 @@ export function buildTopicUrl(topic: TopicLike, topics?: TopicLike[]) {
   return `${UNIFIED_BASE}/${segments}`;
 }
 
-/** @deprecated Tasks merged into Topics. Delegates to buildTopicUrl. */
-export function buildTaskUrl(
-  task: TopicLike & { title?: string; topicId?: string | null },
-  topics?: TopicLike[],
-) {
-  return buildTopicUrl({ id: task.id, name: task.title ?? task.name, parentId: task.parentId }, topics);
-}
-
 export function withRevealParam(href: string, enabled = true) {
   const [withoutHash, hash = ""] = href.split("#", 2);
   const [path, query = ""] = withoutHash.split("?", 2);

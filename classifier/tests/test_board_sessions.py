@@ -17,6 +17,12 @@ class BoardSessionKeyTests(unittest.TestCase):
             ("topic-123", "topic-123"),
         )
 
+    def test_parse_board_session_key_accepts_promoted_legacy_ids(self):
+        self.assertEqual(
+            c._parse_board_session_key("clawboard:topic:task-123"),
+            ("task-123", "task-123"),
+        )
+
     def test_parse_board_session_key_rejects_non_board_values(self):
         self.assertEqual(c._parse_board_session_key(""), (None, None))
         self.assertEqual(c._parse_board_session_key("channel:discord-123"), (None, None))

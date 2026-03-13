@@ -35,8 +35,7 @@ export function QuickLogForm({ topicId, taskId }: { topicId?: string | null; tas
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          topicId: topicId ?? null,
-          taskId: taskId ?? null,
+          topicId: taskId ?? topicId ?? null,
           type,
           content: content.trim(),
           summary: content.trim(),

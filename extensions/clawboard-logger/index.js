@@ -2672,37 +2672,6 @@ export default function register(api) {
         const metaObj = meta ?? undefined;
         return computeEffectiveSessionKey(metaObj, ctx2);
     };
-    const parseMetaBoolean = (value) => {
-        if (typeof value === "boolean")
-            return value;
-        if (typeof value === "number")
-            return value === 1;
-        if (typeof value === "string") {
-            const normalized = value.trim().toLowerCase();
-            if (!normalized)
-                return undefined;
-            if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on")
-                return true;
-            if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off")
-                return false;
-        }
-        return undefined;
-    };
-    const parseBoardScopeKindFromMeta = (meta) => {
-        const value = typeof meta?.boardScopeKind === "string"
-            ? meta.boardScopeKind
-            : typeof meta?.boardScope_kind === "string"
-                ? meta.boardScope_kind
-                : undefined;
-        if (!value)
-            return undefined;
-        const normalized = value.trim().toLowerCase();
-        if (normalized === "topic")
-            return normalized;
-        if (normalized === "task")
-            return "topic";
-        return undefined;
-    };
     const normalizeEventMeta = (meta, topLevelSessionKey) => {
         const merged = {
             ...(meta && typeof meta === "object" ? meta : {}),

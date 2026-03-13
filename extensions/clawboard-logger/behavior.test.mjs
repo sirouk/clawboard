@@ -229,7 +229,7 @@ test("clawboard_search uses delegating fast path without calling /api/search", a
   const originalFetch = globalThis.fetch;
   try {
     const calls = [];
-    globalThis.fetch = async (url, _options = {}) => {
+    globalThis.fetch = async (url) => {
       const target = String(url);
       calls.push(target);
       if (target.includes("/api/tasks")) {
@@ -293,7 +293,7 @@ test("clawboard_search retries transient /api/search failures with degraded limi
   try {
     const calls = [];
     let searchCalls = 0;
-    globalThis.fetch = async (url, _options = {}) => {
+    globalThis.fetch = async (url) => {
       const target = String(url);
       calls.push(target);
       if (target.includes("/api/search")) {
@@ -623,7 +623,7 @@ test("agent_end ignores non-subagent user-role echoes", async () => {
 test("before_agent_start adds no-reply-directive hint for board sessions", async () => {
   const originalFetch = globalThis.fetch;
   try {
-    globalThis.fetch = async (url, _options = {}) => {
+    globalThis.fetch = async (url) => {
       if (String(url).includes("/api/context")) {
         return {
           ok: true,
@@ -676,7 +676,7 @@ test("before_agent_start adds no-reply-directive hint for board sessions", async
 test("before_agent_start strips nested context markers and reply directives from retrieved context", async () => {
   const originalFetch = globalThis.fetch;
   try {
-    globalThis.fetch = async (url, _options = {}) => {
+    globalThis.fetch = async (url) => {
       if (String(url).includes("/api/context")) {
         return {
           ok: true,
@@ -736,7 +736,7 @@ test("before_agent_start strips nested context markers and reply directives from
 test("before_agent_start skips no-reply-directive hint for non-board sessions", async () => {
   const originalFetch = globalThis.fetch;
   try {
-    globalThis.fetch = async (url, _options = {}) => {
+    globalThis.fetch = async (url) => {
       if (String(url).includes("/api/context")) {
         return {
           ok: true,
@@ -789,7 +789,7 @@ test("before_agent_start skips no-reply-directive hint for non-board sessions", 
 test("before_agent_start defaults to clawboard-only memory instruction", async () => {
   const originalFetch = globalThis.fetch;
   try {
-    globalThis.fetch = async (url, _options = {}) => {
+    globalThis.fetch = async (url) => {
       if (String(url).includes("/api/context")) {
         return {
           ok: true,
@@ -842,7 +842,7 @@ test("before_agent_start defaults to clawboard-only memory instruction", async (
 test("before_agent_start can allow openclaw memory merge when explicitly enabled", async () => {
   const originalFetch = globalThis.fetch;
   try {
-    globalThis.fetch = async (url, _options = {}) => {
+    globalThis.fetch = async (url) => {
       if (String(url).includes("/api/context")) {
         return {
           ok: true,
@@ -896,7 +896,7 @@ test("before_agent_start skips context retrieval for heartbeat control-plane pro
   const originalFetch = globalThis.fetch;
   try {
     const calls = [];
-    globalThis.fetch = async (url, _options = {}) => {
+    globalThis.fetch = async (url) => {
       calls.push(String(url));
       return {
         ok: true,
@@ -939,7 +939,7 @@ test("before_agent_start falls back to configured context mode when primary mode
   const originalFetch = globalThis.fetch;
   try {
     const calls = [];
-    globalThis.fetch = async (url, _options = {}) => {
+    globalThis.fetch = async (url) => {
       const rawUrl = String(url);
       calls.push(rawUrl);
       if (!rawUrl.includes("/api/context")) {
@@ -1019,7 +1019,7 @@ test("before_agent_start injects context for subagent scaffold prompts using gen
   const originalFetch = globalThis.fetch;
   try {
     const calls = [];
-    globalThis.fetch = async (url, _options = {}) => {
+    globalThis.fetch = async (url) => {
       const rawUrl = String(url);
       calls.push(rawUrl);
       if (rawUrl.includes("/api/context")) {

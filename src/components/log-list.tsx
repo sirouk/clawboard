@@ -1,11 +1,11 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { LogEntry, Task, Topic } from "@/lib/types";
+import type { LogEntry, Topic } from "@/lib/types";
 import { Badge, Button, Input, SearchInput, Select, TextArea } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
-import { buildTaskUrl, buildTopicUrl, UNIFIED_BASE, withRevealParam, withSpaceParam } from "@/lib/url";
+import { buildTopicUrl, UNIFIED_BASE, withRevealParam, withSpaceParam } from "@/lib/url";
 import { useAppConfig } from "@/components/providers";
 import { useDataStore } from "@/components/data-provider";
 import { apiFetch } from "@/lib/api";
@@ -34,7 +34,6 @@ type MessageDensity = "comfortable" | "compact";
 type LogListVariant = "cards" | "chat";
 type LogPatchPayload = Partial<{
   topicId: string | null;
-  taskId: string | null;
   content: string;
   summary: string | null;
   raw: string | null;
@@ -45,6 +44,18 @@ const SUMMARY_TRUNCATE_LIMIT = 96;
 type ToolEventKind = "call" | "result" | "error";
 type ToolEvent = { kind: ToolEventKind; toolName: string };
 type SourceMetaItem = { key: string; label: string; value: string; abbreviate?: boolean };
+
+function effectiveLogTopicId(entry: Pick<LogEntry, "topicId" | "taskId">) {
+  return String(entry.taskId ?? entry.topicId ?? "").trim();
+}
+
+function effectiveLogParentTopicId(
+  entry: Pick<LogEntry, "topicId" | "taskId">,
+  topicById: ReadonlyMap<string, Topic>
+) {
+  const topic = topicById.get(effectiveLogTopicId(entry));
+  return String(topic?.parentId ?? entry.topicId ?? "").trim();
+}
 
 const TOOL_EVENT_RE = /^(Tool call|Tool result|Tool error)\s*:\s*(.+)\s*$/i;
 
@@ -343,7 +354,6 @@ function formatDateGroupLabel(dateKey: string): string {
 export function LogList({
   logs: initialLogs,
   topics,
-  tasks: tasksOverride,
   scopeTopicId,
   scopeTaskId,
   showFilters = true,
@@ -371,7 +381,6 @@ export function LogList({
 }: {
   logs: LogEntry[];
   topics: Topic[];
-  tasks?: Task[];
   scopeTopicId?: string | null;
   scopeTaskId?: string | null;
   showFilters?: boolean;
@@ -400,8 +409,6 @@ export function LogList({
   const { token, tokenRequired } = useAppConfig();
   const { setLogs: setStoreLogs } = useDataStore();
   const [logs, setLogs] = useState<LogEntry[]>(initialLogs);
-  const [tasksCache, setTasksCache] = useState<Record<string, Task[]>>({});
-  const [tasksLoading, setTasksLoading] = useState<Record<string, boolean>>({});
   const [topicFilter, setTopicFilter] = useState(initialTopicFilter || "all");
   const [typeFilter, setTypeFilter] = useState(initialTypeFilter || "all");
   const [agentFilter, setAgentFilter] = useState(initialAgentFilter || "all");
@@ -441,92 +448,56 @@ export function LogList({
   useEffect(() => {
     if (areLogsEquivalent(lastInitialLogsRef.current, initialLogs)) return;
     lastInitialLogsRef.current = initialLogs;
-    setLogs(initialLogs);
+    startTransition(() => {
+      setLogs(initialLogs);
+    });
   }, [initialLogs]);
 
   useEffect(() => {
     const next = initialSearch || "";
-    setSearch((prev) => (prev === next ? prev : next));
+    startTransition(() => {
+      setSearch((prev) => (prev === next ? prev : next));
+    });
   }, [initialSearch]);
 
   useEffect(() => {
     const next = initialTypeFilter || "all";
-    setTypeFilter((prev) => (prev === next ? prev : next));
+    startTransition(() => {
+      setTypeFilter((prev) => (prev === next ? prev : next));
+    });
   }, [initialTypeFilter]);
 
   useEffect(() => {
     const next = initialAgentFilter || "all";
-    setAgentFilter((prev) => (prev === next ? prev : next));
+    startTransition(() => {
+      setAgentFilter((prev) => (prev === next ? prev : next));
+    });
   }, [initialAgentFilter]);
 
   useEffect(() => {
     const next = initialTopicFilter || "all";
-    setTopicFilter((prev) => (prev === next ? prev : next));
+    startTransition(() => {
+      setTopicFilter((prev) => (prev === next ? prev : next));
+    });
   }, [initialTopicFilter]);
 
   useEffect(() => {
     const next = initialLaneFilter || "all";
-    setLaneFilter((prev) => (prev === next ? prev : next));
+    startTransition(() => {
+      setLaneFilter((prev) => (prev === next ? prev : next));
+    });
   }, [initialLaneFilter]);
 
   useEffect(() => {
     if (!loadMoreEnabled) return;
     const next = initialVisibleCount!;
-    setVisibleCount((prev) => (prev === next ? prev : next));
+    startTransition(() => {
+      setVisibleCount((prev) => (prev === next ? prev : next));
+    });
   }, [agentFilter, groupByDay, initialVisibleCount, laneFilter, loadMoreEnabled, search, topicFilter, typeFilter]);
 
   const readOnly = tokenRequired && !token;
-  const topicKey = useCallback((topicId: string | null | undefined) => (topicId ? topicId : "__null__"), []);
-
-  // Stable reference: avoid a new array literal on every render when tasksOverride is undefined.
-  const tasksFromOverride = useMemo(() => tasksOverride ?? [], [tasksOverride]);
-
-  const getTasksForTopic = useCallback(
-    (topicId: string | null) => {
-      if (tasksFromOverride.length > 0) {
-        return tasksFromOverride.filter((task) => (topicId ? task.topicId === topicId : task.topicId == null));
-      }
-      return tasksCache[topicKey(topicId)] ?? [];
-    },
-    [tasksFromOverride, tasksCache, topicKey]
-  );
-
-  const ensureTasksForTopic = useCallback(
-    async (topicId: string | null) => {
-      if (tasksFromOverride.length > 0) return;
-      const key = topicKey(topicId);
-      if (tasksCache[key]) return;
-      if (tasksLoading[key]) return;
-      setTasksLoading((prev) => ({ ...prev, [key]: true }));
-      try {
-        const url = "/api/topics";
-        const res = await apiFetch(url, { cache: "no-store" });
-        if (!res.ok) return;
-        const raw = await res.json().catch(() => null);
-        const payload = Array.isArray(raw)
-          ? (raw as Topic[])
-          : raw && typeof raw === "object" && Array.isArray((raw as { topics?: unknown }).topics)
-            ? ((raw as { topics: Topic[] }).topics ?? [])
-            : null;
-        if (!payload || !Array.isArray(payload)) return;
-        const mapped = payload.map((topic) => ({
-          ...topic,
-          title: topic.name,
-          topicId: topic.parentId ?? topic.id,
-        }));
-        const next = topicId ? mapped.filter((task) => task.topicId === topicId) : [];
-        setTasksCache((prev) => ({ ...prev, [key]: next }));
-      } finally {
-        setTasksLoading((prev) => ({ ...prev, [key]: false }));
-      }
-    },
-    [tasksFromOverride, tasksCache, tasksLoading, topicKey]
-  );
-
-  const isTasksLoadingForTopic = useCallback(
-    (topicId: string | null) => Boolean(tasksLoading[topicKey(topicId)]),
-    [tasksLoading, topicKey]
-  );
+  const topicById = useMemo(() => new Map(topics.map((topic) => [topic.id, topic])), [topics]);
 
   const patchLogEntry = useCallback(
     async (entry: LogEntry, patch: LogPatchPayload) => {
@@ -553,17 +524,19 @@ export function LogList({
         const scoped = scopeTopicId !== undefined || scopeTaskId !== undefined;
         if (!scoped) return next;
         return next.filter((row) => {
+          const rowTopicId = effectiveLogTopicId(row) || null;
+          const rowParentTopicId = effectiveLogParentTopicId(row, topicById) || null;
           if (scopeTopicId !== undefined) {
             if (scopeTopicId == null) {
-              if (row.topicId != null) return false;
-            } else if (row.topicId !== scopeTopicId) {
+              if (rowParentTopicId != null) return false;
+            } else if (rowParentTopicId !== scopeTopicId) {
               return false;
             }
           }
           if (scopeTaskId !== undefined) {
             if (scopeTaskId == null) {
-              if (row.taskId != null) return false;
-            } else if ((row.taskId ?? null) !== scopeTaskId) {
+              if (rowTopicId != null) return false;
+            } else if (rowTopicId !== scopeTaskId) {
               return false;
             }
           }
@@ -572,7 +545,7 @@ export function LogList({
       });
       return { ok: true, entry: updated };
     },
-    [readOnly, token, setStoreLogs, scopeTopicId, scopeTaskId]
+    [readOnly, token, setStoreLogs, scopeTopicId, scopeTaskId, topicById]
   );
 
   const replayClassifierBundle = useCallback(
@@ -743,18 +716,20 @@ export function LogList({
   const [expandedToolAnchors, setExpandedToolAnchors] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    setExpandedToolAnchors((prev) => {
-      let changed = false;
-      const next: Record<string, boolean> = {};
-      for (const key of Object.keys(prev)) {
-        if (!visibleEntryIds.has(key)) {
-          changed = true;
-          continue;
+    startTransition(() => {
+      setExpandedToolAnchors((prev) => {
+        let changed = false;
+        const next: Record<string, boolean> = {};
+        for (const key of Object.keys(prev)) {
+          if (!visibleEntryIds.has(key)) {
+            changed = true;
+            continue;
+          }
+          if (prev[key]) next[key] = true;
         }
-        if (prev[key]) next[key] = true;
-      }
-      if (!changed && Object.keys(prev).length === Object.keys(next).length) return prev;
-      return next;
+        if (!changed && Object.keys(prev).length === Object.keys(next).length) return prev;
+        return next;
+      });
     });
   }, [visibleEntryIds]);
 
@@ -770,29 +745,33 @@ export function LogList({
 
   useEffect(() => {
     if (!groupByDay) {
-      setCollapsedDays((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+      startTransition(() => {
+        setCollapsedDays((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+      });
       return;
     }
     const dates = Object.keys(grouped).sort(compareDateKeysDesc);
     if (dates.length === 0) return;
     const mostRecent = dates[0];
-    setCollapsedDays((prev) => {
-      let changed = false;
-      const next: Record<string, boolean> = {};
-      for (const date of dates) {
-        if (Object.prototype.hasOwnProperty.call(prev, date)) {
-          next[date] = prev[date];
-        } else {
-          next[date] = date !== mostRecent;
+    startTransition(() => {
+      setCollapsedDays((prev) => {
+        let changed = false;
+        const next: Record<string, boolean> = {};
+        for (const date of dates) {
+          if (Object.prototype.hasOwnProperty.call(prev, date)) {
+            next[date] = prev[date];
+          } else {
+            next[date] = date !== mostRecent;
+            changed = true;
+          }
+        }
+        if (Object.keys(prev).length !== dates.length) {
+          changed = true;
+        } else if (!dates.every((date) => prev[date] === next[date])) {
           changed = true;
         }
-      }
-      if (Object.keys(prev).length !== dates.length) {
-        changed = true;
-      } else if (!dates.every((date) => prev[date] === next[date])) {
-        changed = true;
-      }
-      return changed ? next : prev;
+        return changed ? next : prev;
+      });
     });
   }, [groupByDay, grouped]);
 
@@ -818,8 +797,7 @@ export function LogList({
     async (entry: LogEntry, note: string) => {
       if (readOnly) return { ok: false, error: "Read-only mode. Add a token in Setup." };
       const payload = {
-        topicId: entry.topicId,
-        taskId: entry.taskId ?? null,
+        topicId: effectiveLogTopicId(entry) || null,
         relatedLogId: entry.id,
         type: "note",
         content: note,
@@ -1034,7 +1012,7 @@ export function LogList({
                       <LogRow
                         key={`${entry.id}:${metaExpandEpoch}:${metaCollapseEpoch}:${metaDefaultCollapsed ? 1 : 0}`}
                         entry={entry}
-                        topicLabel={topicsMap.get(entry.topicId ?? "") ?? "Off-topic"}
+                        topicLabel={topicsMap.get(effectiveLogTopicId(entry)) ?? "Off-topic"}
                         topics={topics}
                         scopeTopicId={scopeTopicId}
                         scopeTaskId={scopeTaskId}
@@ -1047,9 +1025,6 @@ export function LogList({
                         onPatch={patchLogEntry}
                         onReplayClassifier={replayClassifierBundle}
                         onPurgeForward={purgeForward}
-                        getTasksForTopic={getTasksForTopic}
-                        ensureTasksForTopic={ensureTasksForTopic}
-                        isTasksLoadingForTopic={isTasksLoadingForTopic}
                         readOnly={readOnly}
                         enableNavigation={enableNavigation}
                         variant={variant}
@@ -1117,9 +1092,6 @@ type LogRowProps = {
   ) => Promise<{ ok: boolean; error?: string; entry?: LogEntry }>;
   onReplayClassifier: (anchorLogId: string) => Promise<{ ok: boolean; error?: string; logCount?: number }>;
   onPurgeForward: (anchorLogId: string) => Promise<{ ok: boolean; error?: string; deletedCount?: number }>;
-  getTasksForTopic: (topicId: string | null) => Task[];
-  ensureTasksForTopic: (topicId: string | null) => Promise<void>;
-  isTasksLoadingForTopic: (topicId: string | null) => boolean;
   readOnly: boolean;
   enableNavigation: boolean;
   variant: LogListVariant;
@@ -1146,9 +1118,6 @@ const LogRow = memo(function LogRow({
   onPatch,
   onReplayClassifier,
   onPurgeForward,
-  getTasksForTopic,
-  ensureTasksForTopic,
-  isTasksLoadingForTopic,
   readOnly,
   enableNavigation,
   variant,
@@ -1171,8 +1140,8 @@ const LogRow = memo(function LogRow({
   const notePanelRef = useRef<HTMLDivElement | null>(null);
   const noteTextAreaRef = useRef<HTMLTextAreaElement | null>(null);
   const [editOpen, setEditOpen] = useState(false);
-  const [editTopicId, setEditTopicId] = useState(entry.topicId ?? "");
-  const [editTaskId, setEditTaskId] = useState(entry.taskId ?? "");
+  const initialTopicId = effectiveLogTopicId(entry);
+  const [editTopicId, setEditTopicId] = useState(initialTopicId);
   const [editContent, setEditContent] = useState(entry.content ?? "");
   const [editSummary, setEditSummary] = useState(entry.summary ?? "");
   const [editStatus, setEditStatus] = useState<string | null>(null);
@@ -1183,7 +1152,8 @@ const LogRow = memo(function LogRow({
   const [purgeStatus, setPurgeStatus] = useState<string | null>(null);
   const showFullMessage = showRawAll || expanded;
   const summary = entry.summary ?? entry.content;
-  const resolvedTopic = entry.topicId ? topics.find((topic) => topic.id === entry.topicId) : null;
+  const topicsById = useMemo(() => new Map(topics.map((topic) => [topic.id, topic])), [topics]);
+  const resolvedTopic = initialTopicId ? topicsById.get(initialTopicId) ?? null : null;
   const destinationBase = resolvedTopic
     ? buildTopicUrl(resolvedTopic, topics)
     : UNIFIED_BASE;
@@ -1280,9 +1250,6 @@ const LogRow = memo(function LogRow({
   const sourceMetaParts = sourceMetaItems.map((item) => `${item.label}: ${item.value}`);
   const sourceMeta = sourceMetaParts.length > 0 ? sourceMetaParts.join(" · ") : null;
   const editTopicValue = editTopicId || "";
-  const editTopicNullable = editTopicId ? editTopicId : null;
-  const taskOptions = getTasksForTopic(editTopicNullable);
-  const tasksLoadingForEdit = isTasksLoadingForTopic(editTopicNullable);
 
   const [toolRawLoaded, setToolRawLoaded] = useState(() => {
     if (typeof entry.raw === "string" && entry.raw.trim()) return true;
@@ -1493,12 +1460,10 @@ const LogRow = memo(function LogRow({
                             setDeleteStatus(null);
                             setPurgeArmed(false);
                             setPurgeStatus(null);
-                            setEditTopicId(entry.topicId ?? "");
-                            setEditTaskId(entry.taskId ?? "");
+                            setEditTopicId(effectiveLogTopicId(entry));
                             setEditContent(entry.content ?? "");
                             setEditSummary(entry.summary ?? "");
                             setEditStatus(null);
-                            void ensureTasksForTopic(entry.topicId ?? null);
                           }}
                         >
                           Edit
@@ -1594,11 +1559,8 @@ const LogRow = memo(function LogRow({
                         <Select
                           value={editTopicValue}
                           onChange={(event) => {
-                            const next = event.target.value;
-                            setEditTopicId(next);
-                            setEditTaskId("");
+                            setEditTopicId(event.target.value);
                             setEditStatus(null);
-                            void ensureTasksForTopic(next ? next : null);
                           }}
                         >
                           <option value="">Unassigned</option>
@@ -1608,25 +1570,6 @@ const LogRow = memo(function LogRow({
                             </option>
                           ))}
                         </Select>
-                      </div>
-                      <div className="space-y-1">
-                        <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Task</div>
-                        <Select
-                          value={editTaskId || ""}
-                          disabled={tasksLoadingForEdit}
-                          onChange={(event) => {
-                            setEditTaskId(event.target.value);
-                            setEditStatus(null);
-                          }}
-                        >
-                          <option value="">No task</option>
-                          {taskOptions.map((task) => (
-                            <option key={task.id} value={task.id}>
-                              {task.title}
-                            </option>
-                          ))}
-                        </Select>
-                        {tasksLoadingForEdit && <div className="text-xs text-[rgb(var(--claw-muted))]">Loading tasks…</div>}
                       </div>
                     </div>
 
@@ -1661,7 +1604,6 @@ const LogRow = memo(function LogRow({
                           setEditStatus(null);
                           const result = await onPatch(entry, {
                             topicId: editTopicId ? editTopicId : null,
-                            taskId: editTaskId ? editTaskId : null,
                             content: editContent ?? "",
                             summary: editSummary.trim() ? editSummary.trim() : null,
                           });
@@ -1762,8 +1704,8 @@ const LogRow = memo(function LogRow({
                                 }}
                                 title={
                                   scopeTaskId
-                                    ? "Delete this message and everything after it in this Task Chat"
-                                    : "Delete this message and everything after it in this Task Chat"
+                                    ? "Delete this message and everything after it in this Topic Chat"
+                                    : "Delete this message and everything after it in this Topic Chat"
                                 }
                               >
                                 Purge from here
@@ -1923,12 +1865,10 @@ const LogRow = memo(function LogRow({
                           setEditOpen(true);
                           setDeleteArmed(false);
                           setDeleteStatus(null);
-                          setEditTopicId(entry.topicId ?? "");
-                          setEditTaskId(entry.taskId ?? "");
+                          setEditTopicId(effectiveLogTopicId(entry));
                           setEditContent(entry.content ?? "");
                           setEditSummary(entry.summary ?? "");
                           setEditStatus(null);
-                          void ensureTasksForTopic(entry.topicId ?? null);
                         }}
                       >
                         Edit
@@ -2015,11 +1955,8 @@ const LogRow = memo(function LogRow({
                       <Select
                         value={editTopicValue}
                         onChange={(event) => {
-                          const next = event.target.value;
-                          setEditTopicId(next);
-                          setEditTaskId("");
+                          setEditTopicId(event.target.value);
                           setEditStatus(null);
-                          void ensureTasksForTopic(next ? next : null);
                         }}
                       >
                         <option value="">Unassigned</option>
@@ -2029,25 +1966,6 @@ const LogRow = memo(function LogRow({
                           </option>
                         ))}
                       </Select>
-                    </div>
-                    <div className="space-y-1">
-                      <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Task</div>
-                      <Select
-                        value={editTaskId || ""}
-                        disabled={tasksLoadingForEdit}
-                        onChange={(event) => {
-                          setEditTaskId(event.target.value);
-                          setEditStatus(null);
-                        }}
-                      >
-                        <option value="">No task</option>
-                        {taskOptions.map((task) => (
-                          <option key={task.id} value={task.id}>
-                            {task.title}
-                          </option>
-                        ))}
-                      </Select>
-                      {tasksLoadingForEdit && <div className="text-xs text-[rgb(var(--claw-muted))]">Loading tasks…</div>}
                     </div>
                   </div>
 
@@ -2078,7 +1996,6 @@ const LogRow = memo(function LogRow({
                         setEditStatus(null);
                         const result = await onPatch(entry, {
                           topicId: editTopicId ? editTopicId : null,
-                          taskId: editTaskId ? editTaskId : null,
                           content: editContent ?? "",
                           summary: editSummary.trim() ? editSummary.trim() : null,
                         });
@@ -2176,8 +2093,8 @@ const LogRow = memo(function LogRow({
                             }}
                             title={
                               scopeTaskId
-                                ? "Delete this message and everything after it in this Task Chat"
-                                : "Delete this message and everything after it in this Task Chat"
+                                ? "Delete this message and everything after it in this Topic Chat"
+                                : "Delete this message and everything after it in this Topic Chat"
                             }
                           >
                             Purge from here
@@ -2404,12 +2321,10 @@ const LogRow = memo(function LogRow({
                 setEditOpen(true);
                 setDeleteArmed(false);
                 setDeleteStatus(null);
-                setEditTopicId(entry.topicId ?? "");
-                setEditTaskId(entry.taskId ?? "");
+                setEditTopicId(effectiveLogTopicId(entry));
                 setEditContent(entry.content ?? "");
                 setEditSummary(entry.summary ?? "");
                 setEditStatus(null);
-                void ensureTasksForTopic(entry.topicId ?? null);
               }}
             >
               Edit
@@ -2494,11 +2409,8 @@ const LogRow = memo(function LogRow({
                 <Select
                   value={editTopicValue}
                   onChange={(event) => {
-                    const next = event.target.value;
-                    setEditTopicId(next);
-                    setEditTaskId("");
+                    setEditTopicId(event.target.value);
                     setEditStatus(null);
-                    void ensureTasksForTopic(next ? next : null);
                   }}
                 >
                   <option value="">Unassigned</option>
@@ -2508,25 +2420,6 @@ const LogRow = memo(function LogRow({
                     </option>
                   ))}
                 </Select>
-              </div>
-              <div className="space-y-1">
-                <div className="text-[10px] uppercase tracking-[0.14em] text-[rgb(var(--claw-muted))]">Task</div>
-                <Select
-                  value={editTaskId || ""}
-                  disabled={tasksLoadingForEdit}
-                  onChange={(event) => {
-                    setEditTaskId(event.target.value);
-                    setEditStatus(null);
-                  }}
-                >
-                  <option value="">No task</option>
-                  {taskOptions.map((task) => (
-                    <option key={task.id} value={task.id}>
-                      {task.title}
-                    </option>
-                  ))}
-                </Select>
-                {tasksLoadingForEdit && <div className="text-xs text-[rgb(var(--claw-muted))]">Loading tasks…</div>}
               </div>
             </div>
 
@@ -2557,7 +2450,6 @@ const LogRow = memo(function LogRow({
                   setEditStatus(null);
                   const result = await onPatch(entry, {
                     topicId: editTopicId ? editTopicId : null,
-                    taskId: editTaskId ? editTaskId : null,
                     content: editContent ?? "",
                     summary: editSummary.trim() ? editSummary.trim() : null,
                   });
@@ -2655,8 +2547,8 @@ const LogRow = memo(function LogRow({
                       }}
                       title={
                         scopeTaskId
-                          ? "Delete this message and everything after it in this Task Chat"
-                          : "Delete this message and everything after it in this Task Chat"
+                          ? "Delete this message and everything after it in this Topic Chat"
+                          : "Delete this message and everything after it in this Topic Chat"
                       }
                     >
                       Purge from here
@@ -2734,8 +2626,5 @@ const LogRow = memo(function LogRow({
   if (prev.onPatch !== next.onPatch) return false;
   if (prev.onReplayClassifier !== next.onReplayClassifier) return false;
   if (prev.onPurgeForward !== next.onPurgeForward) return false;
-  if (prev.getTasksForTopic !== next.getTasksForTopic) return false;
-  if (prev.ensureTasksForTopic !== next.ensureTasksForTopic) return false;
-  if (prev.isTasksLoadingForTopic !== next.isTasksLoadingForTopic) return false;
   return true;
 });

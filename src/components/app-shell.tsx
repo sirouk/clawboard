@@ -8,6 +8,7 @@ import { SearchInput, Select } from "@/components/ui";
 import { useAppConfig, useOpenClawWorkspaces } from "@/components/providers";
 import { cn } from "@/lib/cn";
 import { CommandPalette } from "@/components/command-palette";
+import { ConnectionStatusBanner } from "@/components/connection-status-banner";
 import { DataProvider, useDataStore } from "@/components/data-provider";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { formatRelativeTime } from "@/lib/format";
@@ -217,27 +218,21 @@ const BOARD_TOPICS_SEARCH_KEY = "clawboard.board.topics.search";
 const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
 const HEADER_COMPACT_KEY = "clawboard.header.compact";
 const ACTIVE_SPACE_KEY = "clawboard.space.active";
-const NAV_SEARCH_TASKS_LIMIT = 5;
 const NAV_SEARCH_TOPICS_LIMIT = 5;
 
 function parseBoardPathIds(value: string | null | undefined) {
   const cleanPath = String(value || "").split(/[?#]/, 1)[0] ?? "";
-  if (!cleanPath.startsWith("/u")) return { topicId: null as string | null, taskId: null as string | null };
+  if (!cleanPath.startsWith("/u")) return { topicId: null as string | null };
   const parts = cleanPath.split("/").filter(Boolean);
   let topicId: string | null = null;
-  let taskId: string | null = null;
   for (let i = 0; i < parts.length; i += 1) {
     if (parts[i] === "topic" && parts[i + 1]) {
       const raw = parts[i + 1] ?? "";
       topicId = raw.includes("--") ? raw.slice(raw.lastIndexOf("--") + 2) : raw;
       i += 1;
-    } else if (parts[i] === "task" && parts[i + 1]) {
-      const raw = parts[i + 1] ?? "";
-      taskId = raw.includes("--") ? raw.slice(raw.lastIndexOf("--") + 2) : raw;
-      i += 1;
     }
   }
-  return { topicId, taskId };
+  return { topicId };
 }
 
 function statusIconColor(status: string) {
@@ -421,7 +416,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 function AppShellLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { spaces: storeSpaces, logs: storeLogs, topics: storeTopics, tasks: storeTasks, setTopics, hydrated, sseConnected } = useDataStore();
+  const { spaces: storeSpaces, topics: storeTopics, tasks: storeTasks, setTopics, hydrated, sseConnected } = useDataStore();
   const { instanceTitle, token, tokenRequired, tokenConfigured, remoteReadLocked } = useAppConfig();
   const { configured: workspaceConfigured, workspaces: resolvedWorkspaces } = useOpenClawWorkspaces();
   const collapsed = useLocalStorageItem("clawboard.navCollapsed") === "true";
@@ -511,8 +506,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 
   const allowedSpaceSet = useMemo(() => new Set(allowedSpaceIds), [allowedSpaceIds]);
   const storeTopicById = useMemo(() => new Map(storeTopics.map((topic) => [topic.id, topic])), [storeTopics]);
-  const storeTaskById = useMemo(() => new Map(storeTasks.map((task) => [task.id, task])), [storeTasks]);
-
   const topics = useMemo(() => {
     if (!selectedSpaceId || allowedSpaceSet.size === 0) return storeTopics;
     return storeTopics.filter((topic) => topicSpaceIds(topic).some((spaceId) => allowedSpaceSet.has(spaceId)));
@@ -531,34 +524,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
       return false;
     });
   }, [allowedSpaceSet, selectedSpaceId, storeTasks, storeTopicById]);
-
-  const logs = useMemo(() => {
-    if (!selectedSpaceId || allowedSpaceSet.size === 0) return storeLogs;
-    return storeLogs.filter((entry) => {
-      const directSpace = String(entry.spaceId ?? "").trim();
-      if (directSpace) return allowedSpaceSet.has(directSpace);
-      if (entry.taskId) {
-        const task = storeTaskById.get(entry.taskId);
-        if (task) {
-          const taskSpace = String(task.spaceId ?? "").trim();
-          if (taskSpace) return allowedSpaceSet.has(taskSpace);
-          if (task.topicId) {
-            const parent = storeTopicById.get(task.topicId);
-            if (parent) {
-              return topicSpaceIds(parent).some((spaceId) => allowedSpaceSet.has(spaceId));
-            }
-          }
-        }
-      }
-      if (entry.topicId) {
-        const topic = storeTopicById.get(entry.topicId);
-        if (topic) {
-          return topicSpaceIds(topic).some((spaceId) => allowedSpaceSet.has(spaceId));
-        }
-      }
-      return false;
-    });
-  }, [allowedSpaceSet, selectedSpaceId, storeLogs, storeTaskById, storeTopicById]);
 
   const apiBase = getApiBase();
   const showBoardTopics = boardTopicsExpanded && !collapsed;
@@ -749,26 +714,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
         subtitle: "Direct conversations with OpenClaw.",
       };
     }
-    if (cleanPath === "/tasks") {
-      return {
-        title: "Topics",
-        subtitle: "All topics.",
-      };
-    }
     if (cleanPath === "/topics") {
       return {
         title: "Topics",
         subtitle: "All tracked topics.",
-      };
-    }
-    if (cleanPath.startsWith("/tasks/")) {
-      const parts = cleanPath.split("/").filter(Boolean);
-      const taskId = parts.length >= 2 ? decodeURIComponent(parts[1] ?? "") : "";
-      const task = taskId ? tasks.find((row) => row.id === taskId) ?? null : null;
-      const topic = task?.topicId ? topics.find((row) => row.id === task.topicId) ?? null : null;
-      return {
-        title: task?.title?.trim() || "Topic",
-        subtitle: topic?.name?.trim() || "Unassigned",
       };
     }
     if (cleanPath.startsWith("/topics/")) {
@@ -781,7 +730,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
       };
     }
     return { title: "Clawboard", subtitle: "" };
-  }, [pathname, tasks, topics]);
+  }, [pathname, topics]);
 
   const normalizedTopicSearch = topicPanelSearch.trim().toLowerCase();
 
@@ -1357,7 +1306,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                              boardTopicsForNav.map((topic) => {
 			                                const selected = topic.id === activeBoardIds.topicId;
 			                                const href = buildTopicUrl(topic, topics);
-			                                const topicDestination = withSpaceParam(withRevealParam(href, true), topic.spaceId);
 			                                const go = () => {
 			                                  router.push(withSpaceParam(withRevealParam(href, true), topic.spaceId));
 			                                };
@@ -1514,6 +1462,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                </div>
 	              </div>
             </header>
+                <ConnectionStatusBanner />
 	            <main className="mr-auto w-full max-w-[1280px] px-3 py-3 sm:px-4 sm:py-4 lg:pl-5 lg:pr-6 lg:py-8">{children}</main>
 	          </div>
 	        </div>

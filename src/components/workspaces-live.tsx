@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { startTransition, useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/cn";
 import { useOpenClawWorkspaces } from "@/components/providers";
 import { WORKSPACE_NAV_SYNC_EVENT, orderOpenClawWorkspaces, workspaceLabel, workspaceRoute } from "@/lib/openclaw-workspaces";
@@ -25,15 +25,17 @@ export function WorkspacesLive({ selectedAgentId }: { selectedAgentId?: string |
   useEffect(() => {
     const availableKeys = ordered.map((workspace) => normalizeAgentId(workspace.agentId)).filter(Boolean);
     const availableKeySet = new Set(availableKeys);
-    setMountedWorkspaceKeys((current) => current.filter((key) => availableKeySet.has(key)));
-    setSelectedWorkspaceKey((current) => {
-      if (selectedWorkspaceKeyFromRoute && availableKeySet.has(selectedWorkspaceKeyFromRoute)) {
-        return selectedWorkspaceKeyFromRoute;
-      }
-      if (current && availableKeySet.has(current)) {
-        return current;
-      }
-      return availableKeys[0] ?? "";
+    startTransition(() => {
+      setMountedWorkspaceKeys((current) => current.filter((key) => availableKeySet.has(key)));
+      setSelectedWorkspaceKey((current) => {
+        if (selectedWorkspaceKeyFromRoute && availableKeySet.has(selectedWorkspaceKeyFromRoute)) {
+          return selectedWorkspaceKeyFromRoute;
+        }
+        if (current && availableKeySet.has(current)) {
+          return current;
+        }
+        return availableKeys[0] ?? "";
+      });
     });
   }, [ordered, selectedWorkspaceKeyFromRoute]);
 

@@ -35,9 +35,9 @@ test("settings PWA notifications can be enabled and toggled", async ({ page }) =
         return "granted";
       }
 
-      constructor(_title?: string, _options?: Record<string, unknown>) {}
+      constructor() {}
 
-      addEventListener(_type: string, _listener: EventListenerOrEventListenerObject, _options?: AddEventListenerOptions | boolean) {}
+      addEventListener() {}
 
       close() {}
     }
@@ -122,7 +122,7 @@ test("settings badging support does not trigger hydration mismatch", async ({ pa
     Object.defineProperty(nav, "setAppBadge", {
       configurable: true,
       writable: true,
-      value: async (_count?: number) => undefined,
+      value: async () => undefined,
     });
     Object.defineProperty(nav, "clearAppBadge", {
       configurable: true,
@@ -167,9 +167,9 @@ test("settings test button falls back to title badge when native badging is unav
         return "granted";
       }
 
-      constructor(_title?: string, _options?: Record<string, unknown>) {}
+      constructor() {}
 
-      addEventListener(_type: string, _listener: EventListenerOrEventListenerObject, _options?: AddEventListenerOptions | boolean) {}
+      addEventListener() {}
 
       close() {}
     }
