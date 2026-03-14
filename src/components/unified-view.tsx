@@ -2306,6 +2306,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   );
   const [moveTaskId, setMoveTaskId] = useState<string | null>(null);
   const [editingTopicId, setEditingTopicId] = useState<string | null>(null);
+  const [topicEditMode, setTopicEditMode] = useState<TopicEditFocusTarget>("name");
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [statusMenuTopicId, setStatusMenuTopicId] = useState<string | null>(null);
   const [statusMenuTaskId, setStatusMenuTaskId] = useState<string | null>(null);
@@ -2819,11 +2820,33 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     []
   );
 
+  const computeOlderChatStart = useCallback((logs: LogEntry[] | undefined, currentStart: number, userTurns: number) => {
+    const all = logs ?? [];
+    if (all.length === 0) return 0;
+    const normalizedCurrentStart = clamp(Math.floor(currentStart), 0, Math.max(0, all.length - 1));
+    if (normalizedCurrentStart <= 0) return 0;
+
+    let remainingTurns = Math.max(1, Math.floor(userTurns));
+    for (let i = normalizedCurrentStart - 1; i >= 0; i -= 1) {
+      const entry = all[i];
+      const type = String(entry.type ?? "").trim().toLowerCase();
+      const agentId = String(entry.agentId ?? "").trim().toLowerCase();
+      if (type === "conversation" && agentId === "user") {
+        remainingTurns -= 1;
+        if (remainingTurns <= 0) return i;
+      }
+    }
+    return 0;
+  }, []);
+
   const loadOlderChat = useCallback(
-    (chatKey: string, step: number, len: number, initialLimit: number) => {
+    (chatKey: string, userTurns: number, logs: LogEntry[] | undefined, initialLimit: number) => {
       if (typeof window === "undefined") return;
       const key = (chatKey ?? "").trim();
       if (!key) return;
+      const allLogs = logs ?? [];
+      const len = allLogs.length;
+      if (len <= 0) return;
       if (chatHistoryLoadingOlderRef.current.has(key)) return;
       chatHistoryLoadingOlderRef.current.add(key);
       chatHistoryLoadedOlderRef.current.add(key);
@@ -2834,7 +2857,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
       setChatHistoryStarts((prev) => {
         const current = computeChatStart(prev, key, len, initialLimit);
-        const nextStart = Math.max(0, current - Math.max(1, Math.floor(step)));
+        const nextStart = computeOlderChatStart(allLogs, current, userTurns);
         if (nextStart >= current) return prev;
         changed = true;
         return { ...prev, [key]: nextStart };
@@ -2864,7 +2887,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         }, 90);
       });
     },
-    [computeChatStart, setChatHistoryStarts]
+    [computeChatStart, computeOlderChatStart, setChatHistoryStarts]
   );
 
   const derivedAwaitingAssistant = useMemo<Record<string, { sentAt: string; requestId?: string }>>(() => {
@@ -4928,6 +4951,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     if (!nameChanged && !colorChanged && !tagsChanged) {
       if (shouldClose) {
         setEditingTopicId(null);
+        setTopicEditMode("name");
         setTopicNameDraft("");
         setTopicColorDraft(currentColor);
         setTopicTagsDraft(formatTags(currentTags));
@@ -5021,6 +5045,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       }
       if (shouldClose) {
         setEditingTopicId(null);
+        setTopicEditMode("name");
         setTopicNameDraft("");
         setTopicColorDraft(currentColor);
         setTopicTagsDraft("");
@@ -5191,6 +5216,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   const cancelTopicEdit = useCallback((topic: Topic, currentColor: string) => {
     setEditingTopicId(null);
+    setTopicEditMode("name");
     setTopicNameDraft("");
     setTopicColorDraft(currentColor);
     setTopicTagsDraft("");
@@ -5213,6 +5239,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       setTaskNameDraft("");
       setTaskColorDraft(TASK_FALLBACK_COLORS[0]);
       setEditingTopicId(topic.id);
+      setTopicEditMode(focusTarget);
       setTopicNameDraft(topic.name);
       setTopicColorDraft(currentColor);
       setTopicTagsDraft(formatTags(topic.tags));
@@ -5272,7 +5299,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   useEffect(() => {
     if (!editingTopicId) return;
-    const focusTarget = topicEditFocusTargetRef.current;
+    const focusTarget = topicEditMode;
     const raf = window.requestAnimationFrame(() => {
       if (focusTarget === "tags") {
         topicTagsInputRef.current?.focus();
@@ -5281,14 +5308,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       }
       if (focusTarget === "color") {
         topicColorInputRef.current?.focus();
-        topicColorInputRef.current?.click();
         return;
       }
       topicNameInputRef.current?.focus();
       topicNameInputRef.current?.select();
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [editingTopicId]);
+  }, [editingTopicId, topicEditMode]);
 
   useEffect(() => {
     if (editingTaskId) {
@@ -5307,34 +5333,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       if (taskAutosaveTimerRef.current != null) window.clearTimeout(taskAutosaveTimerRef.current);
     };
   }, []);
-
-  useEffect(() => {
-    if (readOnly) return;
-    if (!editingTopicId) return;
-    const topic = topics.find((item) => item.id === editingTopicId);
-    if (!topic) return;
-    if (skipTopicAutosaveRef.current) {
-      skipTopicAutosaveRef.current = false;
-      return;
-    }
-    if (!topicNameDraft.trim()) return;
-    const currentColor =
-      normalizeHexColor(topic.color) ??
-      topicDisplayColors.get(topic.id) ??
-      colorFromSeed(`topic:${topic.id}:${topic.name}`, TOPIC_FALLBACK_COLORS);
-    const nextColor = normalizeHexColor(topicColorDraft) ?? currentColor;
-    const currentTags = (topic.tags ?? []).map((tag) => String(tag ?? "").trim()).filter(Boolean);
-    const nextTags = parseTags(topicTagsDraft);
-    if (nextColor !== currentColor || nextTags.join("|") !== currentTags.join("|")) return;
-    if (topicAutosaveTimerRef.current != null) window.clearTimeout(topicAutosaveTimerRef.current);
-    topicAutosaveTimerRef.current = window.setTimeout(() => {
-      void saveTopicRename(topic, { close: false });
-    }, 650);
-    return () => {
-      if (topicAutosaveTimerRef.current != null) window.clearTimeout(topicAutosaveTimerRef.current);
-      topicAutosaveTimerRef.current = null;
-    };
-  }, [editingTopicId, readOnly, saveTopicRename, topicColorDraft, topicDisplayColors, topicNameDraft, topicTagsDraft, topics]);
 
   useEffect(() => {
     if (readOnly) return;
@@ -6801,7 +6799,6 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const topicCards = renderedTopics.map((topic, topicIndex) => {
           const topicId = topic.id;
           const isUnassigned = topicId === "unassigned";
-          const deleteKey = `topic:${topic.id}`;
           const taskList = orderedTasksByTopic.get(topicId) ?? [];
           const topicSelectedForSend = selectedComposerTarget?.kind === "topic" && selectedComposerTarget.topic.id === topicId;
           const selectedTaskIdForSend = selectedComposerTarget?.kind === "task" ? selectedComposerTarget.task.id : "";
@@ -7096,233 +7093,29 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                      >
 		                        <GripIcon />
 		                      </button>
-		                    {editingTopicId === topic.id ? (
-		                      <div
-                            className="flex flex-wrap items-center gap-2"
-                            onKeyDownCapture={(event) => {
-                              if (event.key !== "Escape") return;
-                              event.preventDefault();
-                              event.stopPropagation();
-                              cancelTopicEdit(topic, topicColor);
-                            }}
-                          >
-		                        <Input
-		                          data-testid={`rename-topic-input-${topic.id}`}
-                              ref={topicNameInputRef}
-		                          value={topicNameDraft}
-                          onClick={(event) => event.stopPropagation()}
-                          onChange={(event) => setTopicNameDraft(event.target.value)}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") {
-                              event.preventDefault();
-                              void saveTopicRename(topic);
-                            }
-                          }}
-		                          placeholder="Rename topic"
-		                          className="h-9 w-[260px] max-w-[70vw]"
-		                        />
-		                        <div className="relative">
-		                          <Input
-                                data-testid={`rename-topic-tags-${topic.id}`}
-                                ref={topicTagsInputRef}
-		                            value={topicTagsDraft}
-		                            onClick={(event) => event.stopPropagation()}
-		                            onChange={(event) => {
-                                  const nextValue = event.target.value;
-                                  setTopicTagsDraft(nextValue);
-                                  setTopicTagsPendingEntry(isTagDraftPending(nextValue));
-                                  setTopicRenameActiveSuggestionIndex(0);
-                                }}
-		                            onFocus={() => setActiveTopicTagField("rename-topic")}
-		                            onBlur={() =>
-		                              setActiveTopicTagField((current) => (current === "rename-topic" ? null : current))
-		                            }
-		                            onKeyDown={(event) => {
-                                  if (event.key === "ArrowDown" && topicRenameTagSuggestions.length > 0) {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    setTopicRenameActiveSuggestionIndex((prev) => (prev + 1) % topicRenameTagSuggestions.length);
-                                    return;
-                                  }
-                                  if (event.key === "ArrowUp" && topicRenameTagSuggestions.length > 0) {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    setTopicRenameActiveSuggestionIndex((prev) =>
-                                      prev <= 0 ? topicRenameTagSuggestions.length - 1 : prev - 1
-                                    );
-                                    return;
-                                  }
-                                  if ((event.key === "Enter" || event.key === "Tab") && topicRenameTagMenuOpen) {
-                                    const suggestion =
-                                      topicRenameTagSuggestions[topicRenameActiveSuggestionIndex] ?? topicRenameTagSuggestions[0];
-                                    if (suggestion) {
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      applyTopicRenameTagSuggestion(suggestion);
-                                      return;
-                                    }
-                                  }
-                                  if (event.key === "Escape") {
-                                    setActiveTopicTagField(null);
-                                    setTopicRenameActiveSuggestionIndex(0);
-                                    return;
-                                  }
-		                              if (event.key !== "Enter") return;
-		                              event.preventDefault();
-		                              event.stopPropagation();
-                                  if (topicTagsPendingEntry) {
-                                    commitPendingTopicTagDraft();
-                                    return;
-                                  }
-                                  void saveTopicRename(topic);
-		                            }}
-                                    role="combobox"
-                                    aria-haspopup="listbox"
-                                    aria-autocomplete="list"
-                                    aria-expanded={topicRenameTagMenuOpen}
-                                    aria-controls={topicRenameTagMenuOpen ? topicRenameTagListboxId : undefined}
-                                    aria-activedescendant={
-                                      topicRenameTagMenuOpen
-                                        ? `${topicRenameTagListboxId}-option-${topicRenameActiveSuggestionIndex}`
-                                        : undefined
-                                    }
-                                    autoCapitalize="none"
-                                    autoCorrect="off"
-                                    spellCheck={false}
-                                    enterKeyHint="done"
-		                            placeholder="Tags (comma separated)"
-		                            className="h-11 w-[min(28rem,calc(100vw-4rem))] max-w-full md:h-9 md:w-[240px]"
-		                          />
-		                          {topicRenameTagMenuOpen ? (
-		                            <div
-                                      id={topicRenameTagListboxId}
-                                      role="listbox"
-                                      aria-label="Topic tag suggestions"
-                                      className="absolute left-0 top-full z-40 mt-1.5 max-h-56 w-full overflow-auto rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.35)]"
-                                    >
-		                              {topicRenameTagSuggestions.map((suggestion, index) => (
-		                                <button
-                                          id={`${topicRenameTagListboxId}-option-${index}`}
-		                                  key={`rename-topic-tag-${suggestion}`}
-		                                  type="button"
-                                          role="option"
-                                          aria-selected={index === topicRenameActiveSuggestionIndex}
-		                                  className={cn(
-                                            "flex min-h-11 w-full items-center rounded-[var(--radius-xs)] px-3 py-2 text-left text-sm text-[rgb(var(--claw-text))] transition md:min-h-9 md:px-2 md:py-1.5 md:text-xs",
-                                            index === topicRenameActiveSuggestionIndex
-                                              ? "bg-[rgb(var(--claw-panel-2))] text-[rgb(var(--claw-text))]"
-                                              : "hover:bg-[rgb(var(--claw-panel-2))]"
-                                          )}
-                                          onMouseEnter={() => setTopicRenameActiveSuggestionIndex(index)}
-		                                  onPointerDown={(event) => {
-		                                    event.preventDefault();
-		                                    event.stopPropagation();
-		                                    applyTopicRenameTagSuggestion(suggestion);
-		                                  }}
-		                                >
-                                          <span className="truncate">{suggestion}</span>
-                                          <span className="ml-auto pl-3 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))] md:text-[9px]">
-                                            Match
-                                          </span>
-		                                </button>
-		                              ))}
-		                            </div>
-		                          ) : null}
-		                        </div>
-		                        <label
-		                          className="flex h-9 items-center gap-2 rounded-full border border-[rgb(var(--claw-border))] px-2 text-[10px] uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]"
-		                          onClick={(event) => event.stopPropagation()}
-		                        >
-                          Color
-                          <input
-                            data-testid={`rename-topic-color-${topic.id}`}
-                            ref={topicColorInputRef}
-                            type="color"
-                            value={topicColorDraft}
-                            disabled={readOnly}
+		                    {editingTopicId === topic.id && topicEditMode === "name" ? (
+                          <Input
+                            data-testid={`rename-topic-input-${topic.id}`}
+                            ref={topicNameInputRef}
+                            value={topicNameDraft}
                             onClick={(event) => event.stopPropagation()}
-                            onChange={(event) => {
-                              const next = normalizeHexColor(event.target.value);
-                              if (next) setTopicColorDraft(next);
-                            }}
-                            className="h-6 w-7 cursor-pointer rounded border border-[rgb(var(--claw-border))] bg-transparent p-0 disabled:cursor-not-allowed"
-                          />
-                        </label>
-                        <Button
-                          data-testid={`save-topic-rename-${topic.id}`}
-                          size="sm"
-                          variant="secondary"
-                          disabled={
-                            readOnly ||
-                            renameSavingKey === `topic:${topic.id}` ||
-                            !topicNameDraft.trim() ||
-                            !normalizeHexColor(topicColorDraft)
-                          }
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void saveTopicRename(topic);
-                          }}
-                        >
-                          Save
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-		                          onClick={(event) => {
-		                            event.stopPropagation();
-                            cancelTopicEdit(topic, topicColor);
-                          }}
-                        >
-                          Cancel
-                        </Button>
-                        {deleteArmedKey === deleteKey ? (
-                          <>
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              className="border-[rgba(239,68,68,0.45)] text-[rgb(var(--claw-danger))]"
-                              disabled={readOnly || deleteInFlightKey === deleteKey}
-                              onClick={(event) => {
+                            onChange={(event) => setTopicNameDraft(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Escape") {
+                                event.preventDefault();
                                 event.stopPropagation();
-                                void deleteTopic(topic);
-                              }}
-                            >
-                              {deleteInFlightKey === deleteKey
-                                ? isUnassigned
-                                  ? "Clearing..."
-                                  : "Deleting..."
-                                : isUnassigned
-                                  ? "Confirm clear"
-                                  : "Confirm delete"}
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                setDeleteArmedKey(null);
-                              }}
-                            >
-                              Keep
-                            </Button>
-                          </>
-                        ) : (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="text-[rgb(var(--claw-danger))]"
-                            disabled={readOnly}
-                            onClick={(event) => {
+                                cancelTopicEdit(topic, topicColor);
+                                return;
+                              }
+                              if (event.key !== "Enter") return;
+                              event.preventDefault();
                               event.stopPropagation();
-                              setDeleteArmedKey(deleteKey);
-                              setRenameError(deleteKey);
+                              void saveTopicRename(topic);
                             }}
-                          >
-                            {isUnassigned ? "Clear unassigned" : "Delete"}
-                          </Button>
-                        )}
-			              </div>
-                    ) : (
+                            placeholder="Rename topic"
+                            className="h-10 w-[min(28rem,calc(100vw-6rem))] max-w-full text-base font-semibold md:h-9 md:text-lg"
+                          />
+                        ) : (
                       <>
                         <h2
                           className="truncate text-base font-semibold md:text-lg"
@@ -7358,31 +7151,226 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       topicSwipeOpen ? "opacity-0 pointer-events-none" : ""
                     )}
                   >
-                    {(visibleTopicTags.length > 0 ? visibleTopicTags : [""]).map((tag, tagIndex) => (
-                      <span
-                        key={`topic-tag-${topic.id}-${tag || "empty"}-${tagIndex}`}
-                        className={cn(
-                          "inline-flex min-h-6 items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-[0.08em] transition",
-                          tag
-                            ? "border-[rgba(148,163,184,0.22)] bg-[rgba(148,163,184,0.07)] text-[rgb(var(--claw-muted))]"
-                            : "border-[rgba(148,163,184,0.14)] bg-[rgba(148,163,184,0.03)] text-[rgba(148,163,184,0.55)]"
-                        )}
-                        title={tag ? "Double click to edit tags" : "Double click to add tags"}
-                        {...topicTagsEditHandlers}
+                    {editingTopicId === topic.id && topicEditMode === "tags" ? (
+                      <div
+                        className="relative"
+                        onKeyDownCapture={(event) => {
+                          if (event.key !== "Escape") return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          cancelTopicEdit(topic, topicColor);
+                        }}
                       >
-                        {tag || "\u00A0"}
-                      </span>
-                    ))}
-                    <button
-                      type="button"
-                      aria-label={`Change color for ${topic.name}`}
-                      title="Double click or long press to change color"
-                      className="h-4 w-4 rounded-[4px] border border-[rgba(255,255,255,0.18)] shadow-[0_0_0_1px_rgba(0,0,0,0.18)]"
-                      style={{ backgroundColor: topicColor }}
-                      onClick={(event) => event.stopPropagation()}
-                      {...topicColorEditHandlers}
-                    />
-                      <span>{topicChatMetricsLabel}</span>
+                        <Input
+                          data-testid={`rename-topic-tags-${topic.id}`}
+                          ref={topicTagsInputRef}
+                          value={topicTagsDraft}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) => {
+                            const nextValue = event.target.value;
+                            setTopicTagsDraft(nextValue);
+                            setTopicTagsPendingEntry(isTagDraftPending(nextValue));
+                            setTopicRenameActiveSuggestionIndex(0);
+                          }}
+                          onFocus={() => setActiveTopicTagField("rename-topic")}
+                          onBlur={() =>
+                            setActiveTopicTagField((current) => (current === "rename-topic" ? null : current))
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === "ArrowDown" && topicRenameTagSuggestions.length > 0) {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              setTopicRenameActiveSuggestionIndex((prev) => (prev + 1) % topicRenameTagSuggestions.length);
+                              return;
+                            }
+                            if (event.key === "ArrowUp" && topicRenameTagSuggestions.length > 0) {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              setTopicRenameActiveSuggestionIndex((prev) =>
+                                prev <= 0 ? topicRenameTagSuggestions.length - 1 : prev - 1
+                              );
+                              return;
+                            }
+                            if ((event.key === "Enter" || event.key === "Tab") && topicRenameTagMenuOpen) {
+                              const suggestion =
+                                topicRenameTagSuggestions[topicRenameActiveSuggestionIndex] ?? topicRenameTagSuggestions[0];
+                              if (suggestion) {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                applyTopicRenameTagSuggestion(suggestion);
+                                return;
+                              }
+                            }
+                            if (event.key === "Escape") {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              cancelTopicEdit(topic, topicColor);
+                              return;
+                            }
+                            if (event.key !== "Enter") return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            if (topicTagsPendingEntry) {
+                              commitPendingTopicTagDraft();
+                              return;
+                            }
+                            void saveTopicRename(topic);
+                          }}
+                          role="combobox"
+                          aria-haspopup="listbox"
+                          aria-autocomplete="list"
+                          aria-expanded={topicRenameTagMenuOpen}
+                          aria-controls={topicRenameTagMenuOpen ? topicRenameTagListboxId : undefined}
+                          aria-activedescendant={
+                            topicRenameTagMenuOpen
+                              ? `${topicRenameTagListboxId}-option-${topicRenameActiveSuggestionIndex}`
+                              : undefined
+                          }
+                          autoCapitalize="none"
+                          autoCorrect="off"
+                          spellCheck={false}
+                          enterKeyHint="done"
+                          placeholder="Tags (comma separated)"
+                          className="h-10 w-[min(28rem,calc(100vw-6rem))] max-w-full md:h-9 md:w-[260px]"
+                        />
+                        {topicRenameTagMenuOpen ? (
+                          <div
+                            id={topicRenameTagListboxId}
+                            role="listbox"
+                            aria-label="Topic tag suggestions"
+                            className="absolute left-0 top-full z-40 mt-1.5 max-h-56 w-full overflow-auto rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.35)]"
+                          >
+                            {topicRenameTagSuggestions.map((suggestion, index) => (
+                              <button
+                                id={`${topicRenameTagListboxId}-option-${index}`}
+                                key={`rename-topic-tag-${suggestion}`}
+                                type="button"
+                                role="option"
+                                aria-selected={index === topicRenameActiveSuggestionIndex}
+                                className={cn(
+                                  "flex min-h-11 w-full items-center rounded-[var(--radius-xs)] px-3 py-2 text-left text-sm text-[rgb(var(--claw-text))] transition md:min-h-9 md:px-2 md:py-1.5 md:text-xs",
+                                  index === topicRenameActiveSuggestionIndex
+                                    ? "bg-[rgb(var(--claw-panel-2))] text-[rgb(var(--claw-text))]"
+                                    : "hover:bg-[rgb(var(--claw-panel-2))]"
+                                )}
+                                onMouseEnter={() => setTopicRenameActiveSuggestionIndex(index)}
+                                onPointerDown={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  applyTopicRenameTagSuggestion(suggestion);
+                                }}
+                              >
+                                <span className="truncate">{suggestion}</span>
+                                <span className="ml-auto pl-3 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))] md:text-[9px]">
+                                  Match
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <>
+                        {(visibleTopicTags.length > 0 ? visibleTopicTags : [""]).map((tag, tagIndex) => (
+                          <span
+                            key={`topic-tag-${topic.id}-${tag || "empty"}-${tagIndex}`}
+                            className={cn(
+                              "inline-flex min-h-6 items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-[0.08em] transition",
+                              tag
+                                ? "border-[rgba(148,163,184,0.22)] bg-[rgba(148,163,184,0.07)] text-[rgb(var(--claw-muted))]"
+                                : "border-[rgba(148,163,184,0.14)] bg-[rgba(148,163,184,0.03)] text-[rgba(148,163,184,0.55)]"
+                            )}
+                            title={tag ? "Double click to edit tags" : "Double click to add tags"}
+                            {...topicTagsEditHandlers}
+                          >
+                            {tag || "\u00A0"}
+                          </span>
+                        ))}
+                      </>
+                    )}
+                    <div className="relative">
+                      <button
+                        type="button"
+                        aria-label={`Change color for ${topic.name}`}
+                        title="Double click or long press to change color"
+                        className="h-4 w-4 rounded-[4px] border border-[rgba(255,255,255,0.18)] shadow-[0_0_0_1px_rgba(0,0,0,0.18)]"
+                        style={{ backgroundColor: editingTopicId === topic.id ? topicColorDraft : topicColor }}
+                        onClick={(event) => event.stopPropagation()}
+                        {...topicColorEditHandlers}
+                      />
+                      {editingTopicId === topic.id && topicEditMode === "color" ? (
+                        <div
+                          className="absolute right-0 top-full z-40 mt-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(12,14,18,0.96)] p-2 shadow-[0_12px_28px_rgba(0,0,0,0.35)]"
+                          onClick={(event) => event.stopPropagation()}
+                          onKeyDownCapture={(event) => {
+                            if (event.key !== "Escape") return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            cancelTopicEdit(topic, topicColor);
+                          }}
+                        >
+                          <div className="mb-2 grid grid-cols-5 gap-1.5">
+                            {TOPIC_FALLBACK_COLORS.map((candidate) => {
+                              const normalizedCandidate = normalizeHexColor(candidate) ?? candidate;
+                              const selected = normalizeHexColor(topicColorDraft) === normalizedCandidate;
+                              return (
+                                <button
+                                  key={`topic-color-swatch-${topic.id}-${normalizedCandidate}`}
+                                  type="button"
+                                  aria-label={`Use color ${normalizedCandidate}`}
+                                  title={normalizedCandidate}
+                                  className={cn(
+                                    "h-7 w-7 rounded-[6px] border transition",
+                                    selected
+                                      ? "border-white/70 shadow-[0_0_0_2px_rgba(255,255,255,0.18)]"
+                                      : "border-[rgba(255,255,255,0.14)] hover:border-[rgba(255,255,255,0.32)]"
+                                  )}
+                                  style={{ backgroundColor: normalizedCandidate }}
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    setTopicColorDraft(normalizedCandidate);
+                                    void patchTopic(topic.id, { color: normalizedCandidate });
+                                    setEditingTopicId(null);
+                                    setTopicEditMode("name");
+                                    setActiveTopicTagField(null);
+                                  }}
+                                />
+                              );
+                            })}
+                          </div>
+                          <input
+                            data-testid={`rename-topic-color-${topic.id}`}
+                            ref={topicColorInputRef}
+                            type="color"
+                            value={topicColorDraft}
+                            disabled={readOnly}
+                            onChange={(event) => {
+                              const next = normalizeHexColor(event.target.value);
+                              if (!next) return;
+                              setTopicColorDraft(next);
+                              void patchTopic(topic.id, { color: next });
+                              setEditingTopicId(null);
+                              setTopicEditMode("name");
+                              setActiveTopicTagField(null);
+                            }}
+                            className="sr-only"
+                          />
+                          <button
+                            type="button"
+                            className="inline-flex h-8 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))] transition hover:text-[rgb(var(--claw-text))]"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              topicColorInputRef.current?.click();
+                            }}
+                          >
+                            Custom
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                    <span>{topicChatMetricsLabel}</span>
 	                    {hasUnsnoozedBadge ? (
 	                      <button
 	                        type="button"
@@ -7405,7 +7393,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       topicSwipeOpen ? "opacity-0 pointer-events-none" : ""
                     )}
                   >
-                    {!editingTopicId && topicChatBlurb ? (
+                    {!(editingTopicId === topic.id && topicEditMode === "name") && topicChatBlurb ? (
                       <div className="flex min-w-0 flex-1 items-center gap-2 text-xs text-[rgba(var(--claw-muted),0.9)]">
                         <span className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
                           Topic chat
@@ -7633,7 +7621,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                 const node = event.currentTarget;
                                 const showTop = node.scrollTop > 2;
                                 if (topicChatTruncated && node.scrollTop <= 24) {
-                                  loadOlderChat(topicChatKey, TASK_TIMELINE_LIMIT, topicChatAllLogs.length, TASK_TIMELINE_LIMIT);
+                                  loadOlderChat(topicChatKey, 1, topicChatAllLogs, TASK_TIMELINE_LIMIT);
                                 }
                                 const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
                                 const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
@@ -8690,7 +8678,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                                 size="sm"
                                                 variant="secondary"
                                                 onClick={() =>
-                                                  loadOlderChat(taskChatKey, TASK_TIMELINE_LIMIT, taskChatAllLogs.length, TASK_TIMELINE_LIMIT)
+                                                  loadOlderChat(taskChatKey, 1, taskChatAllLogs, TASK_TIMELINE_LIMIT)
                                                 }
                                                 className="order-last shrink-0 whitespace-nowrap"
                                               >

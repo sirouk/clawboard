@@ -1,16 +1,21 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { startTransition, useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/cn";
 import { useOpenClawWorkspaces } from "@/components/providers";
+import { setLocalStorageItem } from "@/lib/local-storage";
 import { WORKSPACE_NAV_SYNC_EVENT, orderOpenClawWorkspaces, workspaceLabel, workspaceRoute } from "@/lib/openclaw-workspaces";
+
+const WORKSPACE_LAST_URL_KEY = "clawboard.workspaces.lastUrl";
 
 function normalizeAgentId(value: string | null | undefined) {
   return String(value || "").trim().toLowerCase();
 }
 
 export function WorkspacesLive({ selectedAgentId }: { selectedAgentId?: string | null }) {
+  const pathname = usePathname();
   const { error, configured, workspaces } = useOpenClawWorkspaces();
   const [ideSessionStatus, setIdeSessionStatus] = useState<"idle" | "authorizing" | "ready" | "error">("idle");
   const [ideSessionError, setIdeSessionError] = useState<string | null>(null);
@@ -64,12 +69,21 @@ export function WorkspacesLive({ selectedAgentId }: { selectedAgentId?: string |
     setMountedWorkspaceKeys((current) => (current.includes(normalized) ? current : [...current, normalized]));
     if (typeof window !== "undefined") {
       const nextUrl = workspaceRoute(normalized);
+      setLocalStorageItem(WORKSPACE_LAST_URL_KEY, nextUrl);
       if (window.location.pathname !== nextUrl) {
         window.history.replaceState(window.history.state, "", nextUrl);
       }
       window.dispatchEvent(new Event(WORKSPACE_NAV_SYNC_EVENT));
     }
   };
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const nextUrl = `${window.location.pathname}${window.location.search}`;
+    if (!pathname.startsWith("/workspaces/")) return;
+    if (!nextUrl.startsWith("/workspaces/")) return;
+    setLocalStorageItem(WORKSPACE_LAST_URL_KEY, nextUrl);
+  }, [pathname]);
 
   useEffect(() => {
     let cancelled = false;

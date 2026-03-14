@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SearchInput, Select } from "@/components/ui";
 import { useAppConfig, useOpenClawWorkspaces } from "@/components/providers";
+import { BoardWorkspaceHub } from "@/components/board-workspace-hub";
 import { cn } from "@/lib/cn";
 import { CommandPalette } from "@/components/command-palette";
 import { ConnectionStatusBanner } from "@/components/connection-status-banner";
@@ -227,9 +228,32 @@ const BOARD_SPACES_EXPANDED_KEY = "clawboard.board.spaces.navExpanded";
 const WORKSPACES_EXPANDED_KEY = "clawboard.workspaces.navExpanded";
 const BOARD_TOPICS_SEARCH_KEY = "clawboard.board.topics.search";
 const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
+const WORKSPACE_LAST_URL_KEY = "clawboard.workspaces.lastUrl";
 const HEADER_COMPACT_KEY = "clawboard.header.compact";
 const ACTIVE_SPACE_KEY = "clawboard.space.active";
 const NAV_SEARCH_TOPICS_LIMIT = 5;
+
+function isUnifiedRoutePath(value: string | null | undefined) {
+  const cleanPath = String(value || "").split(/[?#]/, 1)[0] ?? "";
+  return cleanPath === "/u" || cleanPath.startsWith("/u/");
+}
+
+function isWorkspaceRoutePath(value: string | null | undefined) {
+  const cleanPath = String(value || "").split(/[?#]/, 1)[0] ?? "";
+  return cleanPath === "/workspaces" || cleanPath.startsWith("/workspaces/");
+}
+
+function workspaceAgentIdFromPath(value: string | null | undefined) {
+  const cleanPath = String(value || "").split(/[?#]/, 1)[0] ?? "";
+  if (!isWorkspaceRoutePath(cleanPath)) return "";
+  const segments = cleanPath.split("/").filter(Boolean);
+  if (segments[0] !== "workspaces") return "";
+  try {
+    return decodeURIComponent(segments[1] ?? "");
+  } catch {
+    return segments[1] ?? "";
+  }
+}
 
 function parseBoardPathIds(value: string | null | undefined) {
   const cleanPath = String(value || "").split(/[?#]/, 1)[0] ?? "";
@@ -344,6 +368,55 @@ function WorkspaceNavRow({
   );
 }
 
+function HeaderRouteTabs({
+  activeView,
+  boardHref,
+  workspaceHref,
+  compact,
+}: {
+  activeView: "board" | "workspaces";
+  boardHref: string;
+  workspaceHref: string;
+  compact?: boolean;
+}) {
+  const items = [
+    { href: boardHref, label: "Unified View", id: "board" as const },
+    { href: workspaceHref, label: "Code Workspaces", id: "workspaces" as const },
+  ];
+
+  return (
+    <nav aria-label="Primary views" className="flex justify-center">
+      <div
+        className={cn(
+          "inline-flex items-center rounded-full border border-[rgba(255,255,255,0.12)] bg-[rgba(10,12,16,0.58)] p-1 shadow-[0_14px_32px_rgba(0,0,0,0.22)]",
+          compact ? "gap-1" : "gap-1.5"
+        )}
+      >
+        {items.map((item) => {
+          const active = item.id === activeView;
+          return (
+            <Link
+              key={item.id}
+              href={item.href}
+              scroll={false}
+              aria-current={active ? "page" : undefined}
+              className={cn(
+                "rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] transition",
+                compact ? "min-w-[132px]" : "min-w-[156px]",
+                active
+                  ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.28),rgba(255,90,45,0.12))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.3)]"
+                  : "text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
+              )}
+            >
+              {item.label}
+            </Link>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
 function TopicNavRow({
   topic,
   selected,
@@ -449,6 +522,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const workspacesExpanded = useLocalStorageItem(WORKSPACES_EXPANDED_KEY) !== "false";
   const topicPanelSearch = useLocalStorageItem(BOARD_TOPICS_SEARCH_KEY) ?? "";
   const lastBoardUrlStored = useLocalStorageItem(BOARD_LAST_URL_KEY) ?? "";
+  const lastWorkspaceUrlStored = useLocalStorageItem(WORKSPACE_LAST_URL_KEY) ?? "";
   const compactHeader = useLocalStorageItem(HEADER_COMPACT_KEY) === "true";
   const activeSpaceIdStored = (useLocalStorageItem(ACTIVE_SPACE_KEY) ?? "").trim();
   useLocalStorageItem("clawboard.apiBase");
@@ -545,12 +619,35 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     return normalizeWorkspaceAgentId(orderedWorkspaces[0]?.agentId);
   }, [browserPathname, orderedWorkspaces]);
   const showWorkspaceNav = !collapsed && workspacesExpanded && orderedWorkspaces.length > 0;
+  const boardSurfaceActive = useMemo(() => isUnifiedRoutePath(browserPathname), [browserPathname]);
+  const workspaceSurfaceActive = useMemo(() => isWorkspaceRoutePath(browserPathname), [browserPathname]);
+  const showBoardWorkspaceTabs = boardSurfaceActive || workspaceSurfaceActive;
   const boardNavHref = useMemo(() => {
     const candidate = String(lastBoardUrlStored || "").trim();
     if (!candidate) return "/u";
     if (!candidate.startsWith("/u")) return "/u";
     return candidate;
   }, [lastBoardUrlStored]);
+  const workspaceNavHref = useMemo(() => {
+    const current = String(browserPathname || "").trim();
+    const candidate = String(lastWorkspaceUrlStored || "").trim();
+    if (current.startsWith("/workspaces/")) return current;
+    if (current === "/workspaces" && candidate.startsWith("/workspaces/")) return candidate;
+    if (candidate && isWorkspaceRoutePath(candidate)) return candidate;
+    const preferredAgentId = String(orderedWorkspaces[0]?.agentId || "").trim();
+    return preferredAgentId ? workspaceRoute(preferredAgentId) : "/workspaces";
+  }, [browserPathname, lastWorkspaceUrlStored, orderedWorkspaces]);
+  const boardWorkspaceActiveView = useMemo(() => {
+    if (workspaceSurfaceActive) return "workspaces" as const;
+    if (boardSurfaceActive) return "board" as const;
+    return null;
+  }, [boardSurfaceActive, workspaceSurfaceActive]);
+  const boardWorkspaceHubAgentId = useMemo(() => {
+    if (workspaceSurfaceActive) {
+      return workspaceAgentIdFromPath(browserPathname) || null;
+    }
+    return workspaceAgentIdFromPath(workspaceNavHref) || String(orderedWorkspaces[0]?.agentId || "").trim() || null;
+  }, [browserPathname, orderedWorkspaces, workspaceNavHref, workspaceSurfaceActive]);
   const activeBoardPath = useMemo(() => (pathname.startsWith("/u") ? pathname : boardNavHref), [boardNavHref, pathname]);
 
   const hasToken = token.trim().length > 0;
@@ -1040,8 +1137,18 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                               </span>
                             ) : null}
                           </span>
-			                </div>
+					                </div>
 			              </div>
+              {showBoardWorkspaceTabs && boardWorkspaceActiveView ? (
+                <div className="mt-2 flex justify-center lg:hidden">
+                  <HeaderRouteTabs
+                    activeView={boardWorkspaceActiveView}
+                    boardHref={boardNavHref}
+                    workspaceHref={workspaceNavHref}
+                    compact
+                  />
+                </div>
+              ) : null}
 	              <nav className="mt-1.5 grid grid-cols-5 gap-1 lg:hidden">
 	                {mobilePrimaryItems.map((item) => {
 	                  const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
@@ -1418,12 +1525,25 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                   </div>
                 </Link>
                 <div className="min-w-0 px-2 text-center">
-                  <h1 className={cn("truncate font-semibold text-[rgb(var(--claw-text))]", compactHeader ? "text-sm" : "text-lg")}>
-                    {pageHeader.title}
-                  </h1>
-                  {!compactHeader && pageHeader.subtitle ? (
-                    <div className="mt-1 truncate text-xs text-[rgb(var(--claw-muted))]">{pageHeader.subtitle}</div>
-                  ) : null}
+                  {showBoardWorkspaceTabs && boardWorkspaceActiveView ? (
+                    <div className="flex min-w-0 justify-center">
+                      <HeaderRouteTabs
+                        activeView={boardWorkspaceActiveView}
+                        boardHref={boardNavHref}
+                        workspaceHref={workspaceNavHref}
+                        compact={compactHeader}
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <h1 className={cn("truncate font-semibold text-[rgb(var(--claw-text))]", compactHeader ? "text-sm" : "text-lg")}>
+                        {pageHeader.title}
+                      </h1>
+                      {!compactHeader && pageHeader.subtitle ? (
+                        <div className="mt-1 truncate text-xs text-[rgb(var(--claw-muted))]">{pageHeader.subtitle}</div>
+                      ) : null}
+                    </>
+                  )}
                 </div>
                 <div className="flex items-center gap-3">
                   <button
@@ -1487,7 +1607,13 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	              </div>
             </header>
                 <ConnectionStatusBanner />
-	            <main className="mr-auto w-full max-w-[1280px] px-3 py-3 sm:px-4 sm:py-4 lg:pl-5 lg:pr-6 lg:py-8">{children}</main>
+	            <main className="mr-auto w-full max-w-[1280px] px-3 py-3 sm:px-4 sm:py-4 lg:pl-5 lg:pr-6 lg:py-8">
+                {boardWorkspaceActiveView ? (
+                  <BoardWorkspaceHub activeView={boardWorkspaceActiveView} selectedWorkspaceAgentId={boardWorkspaceHubAgentId} />
+                ) : (
+                  children
+                )}
+              </main>
 	          </div>
 	        </div>
 	        <CommandPalette />
