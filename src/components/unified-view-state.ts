@@ -28,16 +28,39 @@ function resolveSetState<T>(next: SetStateAction<T>, previous: T): T {
   return next;
 }
 
+function setsEqual(a: Set<string>, b: Set<string>) {
+  if (a === b) return true;
+  if (a.size !== b.size) return false;
+  for (const value of a) {
+    if (!b.has(value)) return false;
+  }
+  return true;
+}
+
+function mobileTargetsEqual(a: UnifiedMobileChatTarget, b: UnifiedMobileChatTarget) {
+  if (a === b) return true;
+  if (!a || !b) return !a && !b;
+  return a.topicId === b.topicId && a.taskId === b.taskId;
+}
+
 function unifiedExpansionReducer(state: UnifiedExpansionState, action: UnifiedExpansionAction): UnifiedExpansionState {
   switch (action.type) {
-    case "setExpandedTopics":
-      return { ...state, expandedTopics: resolveSetState(action.next, state.expandedTopics) };
-    case "setExpandedTasks":
-      return { ...state, expandedTasks: resolveSetState(action.next, state.expandedTasks) };
-    case "setMobileLayer":
-      return { ...state, mobileLayer: resolveSetState(action.next, state.mobileLayer) };
-    case "setMobileChatTarget":
-      return { ...state, mobileChatTarget: resolveSetState(action.next, state.mobileChatTarget) };
+    case "setExpandedTopics": {
+      const next = resolveSetState(action.next, state.expandedTopics);
+      return setsEqual(next, state.expandedTopics) ? state : { ...state, expandedTopics: next };
+    }
+    case "setExpandedTasks": {
+      const next = resolveSetState(action.next, state.expandedTasks);
+      return setsEqual(next, state.expandedTasks) ? state : { ...state, expandedTasks: next };
+    }
+    case "setMobileLayer": {
+      const next = resolveSetState(action.next, state.mobileLayer);
+      return next === state.mobileLayer ? state : { ...state, mobileLayer: next };
+    }
+    case "setMobileChatTarget": {
+      const next = resolveSetState(action.next, state.mobileChatTarget);
+      return mobileTargetsEqual(next, state.mobileChatTarget) ? state : { ...state, mobileChatTarget: next };
+    }
     default:
       return state;
   }

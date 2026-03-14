@@ -27,8 +27,8 @@ import { buildTopicUrl, withFocusParam, withRevealParam, withSpaceParam } from "
 import { getApiBase } from "@/lib/api";
 import { queueableApiMutation } from "@/lib/write-queue";
 import type { OpenClawWorkspace, Space, Topic } from "@/lib/types";
+import { buildLatestTopicTouchById, deriveAttentionTopicIds, topicAttentionActivityAt } from "@/lib/topic-attention";
 import { compareByBoardOrder } from "@/lib/topic-order";
-import { chatKeyForTopic } from "@/lib/attention-state";
 
 const ICONS: Record<string, React.ReactElement> = {
   home: (
@@ -420,7 +420,7 @@ function HeaderRouteTabs({
 function TopicNavRow({
   topic,
   selected,
-  unread,
+  attentionCount,
   onGo,
   onDoubleClick,
   reorderEnabled,
@@ -429,7 +429,7 @@ function TopicNavRow({
 }: {
   topic: Topic;
   selected: boolean;
-  unread: boolean;
+  attentionCount: number;
   onGo: () => void;
   onDoubleClick?: () => void;
   reorderEnabled: boolean;
@@ -456,7 +456,17 @@ function TopicNavRow({
             : "text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
         )}
       >
-        {reorderEnabled ? (
+        {attentionCount > 0 ? (
+          <span
+            title={`${attentionCount} topic needs a look`}
+            aria-label={`${attentionCount} topic needs a look`}
+            className="flex w-7 shrink-0 items-center justify-center"
+          >
+            <span className="inline-flex min-w-[1.4rem] items-center justify-center rounded-full border border-[rgba(255,90,45,0.42)] bg-[rgba(255,90,45,0.16)] px-1.5 py-0.5 text-[10px] font-semibold text-[rgb(var(--claw-text))]">
+              {attentionCount}
+            </span>
+          </span>
+        ) : reorderEnabled ? (
           <span
             role="button"
             tabIndex={-1}
@@ -481,7 +491,6 @@ function TopicNavRow({
           <div className="flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
               <div className="truncate font-semibold">{topic.name}</div>
-              {unread ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[rgba(77,171,158,0.92)]" /> : null}
             </div>
           </div>
           <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-[rgba(148,163,184,0.9)]">
@@ -510,6 +519,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     topics: storeTopics,
     logs,
     chatSeenByKey,
+    unsnoozedTopicBadges,
     setTopics,
     hydrated,
     sseConnected,
@@ -606,6 +616,17 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     if (!selectedSpaceId) return storeTopics;
     return storeTopics.filter((topic) => topicMatchesSelectedSpace(topic, selectedSpaceId));
   }, [selectedSpaceId, storeTopics]);
+  const latestTopicTouchById = useMemo(() => buildLatestTopicTouchById(logs), [logs]);
+  const attentionTopicIds = useMemo(
+    () =>
+      deriveAttentionTopicIds({
+        topics,
+        latestTopicTouchById,
+        topicSeenByKey: chatSeenByKey,
+        unsnoozedTopicBadges,
+      }),
+    [chatSeenByKey, latestTopicTouchById, topics, unsnoozedTopicBadges]
+  );
 
   const apiBase = getApiBase();
   const showBoardTopics = boardTopicsExpanded && !collapsed;
@@ -865,6 +886,18 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     return topicSemanticSearch.data;
   }, [normalizedTopicSearch, topicSemanticSearch.data]);
 
+  const topicLastActivityById = useMemo(() => {
+    const out = new Map<string, string>();
+    for (const topic of topics) {
+      out.set(
+        topic.id,
+        topicAttentionActivityAt(topic, latestTopicTouchById[topic.id], unsnoozedTopicBadges[topic.id]) ||
+          String(topic.updatedAt ?? topic.createdAt ?? "").trim()
+      );
+    }
+    return out;
+  }, [latestTopicTouchById, topics, unsnoozedTopicBadges]);
+
   const filteredTopics = useMemo((): Topic[] => {
     const query = normalizedTopicSearch;
 
@@ -876,6 +909,9 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	      const as = (a.status ?? "active") === "archived" ? 1 : 0;
 	      const bs = (b.status ?? "active") === "archived" ? 1 : 0;
 	      if (as !== bs) return as - bs;
+	      const aLastActivity = topicLastActivityById.get(a.id) ?? "";
+	      const bLastActivity = topicLastActivityById.get(b.id) ?? "";
+	      if (aLastActivity !== bLastActivity) return bLastActivity.localeCompare(aLastActivity);
 	      return compareByBoardOrder(a, b);
 	    });
       if (!query) {
@@ -902,30 +938,23 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
         const tags = (topic.tags ?? []).join(" ").toLowerCase();
         return name.includes(q) || id.includes(q) || description.includes(q) || tags.includes(q);
       });
-	  }, [normalizedTopicSearch, selectedSpaceId, topicSemanticForQuery, topics, topicsById]);
+	  }, [normalizedTopicSearch, selectedSpaceId, topicLastActivityById, topicSemanticForQuery, topics, topicsById]);
 
   const boardTopicReorderEnabled = showBoardTopics && !readOnly && normalizedTopicSearch.length === 0;
-  const unreadTopicIds = useMemo(() => {
-    const out = new Set<string>();
-    for (const topic of topics) {
-      const key = chatKeyForTopic(topic.id);
-      if (!key) continue;
-      const seenAtMs = Date.parse(chatSeenByKey[key] ?? "");
-      const updatedAtMs = Date.parse(String(topic.updatedAt ?? topic.createdAt ?? ""));
-      if (!Number.isFinite(updatedAtMs)) continue;
-      if (!Number.isFinite(seenAtMs) || updatedAtMs > seenAtMs) {
-        const hasVisibleActivity = logs.some((entry) => String(entry.topicId ?? "").trim() === topic.id);
-        if (hasVisibleActivity || !Number.isFinite(seenAtMs)) out.add(topic.id);
-      }
-    }
-    return out;
-  }, [chatSeenByKey, logs, topics]);
-
   const boardTopicsForNav = useMemo(() => {
     if (boardTopicReorderEnabled) return filteredTopics;
     if (normalizedTopicSearch.length > 0) return filteredTopics.slice(0, NAV_SEARCH_TOPICS_LIMIT);
     return filteredTopics.slice(0, 70);
   }, [boardTopicReorderEnabled, filteredTopics, normalizedTopicSearch.length]);
+  const hiddenBoardAttentionCount = useMemo(() => {
+    const visible = showBoardTopics ? new Set(boardTopicsForNav.map((topic) => topic.id)) : new Set<string>();
+    let count = 0;
+    for (const topicId of attentionTopicIds) {
+      if (visible.has(topicId)) continue;
+      count += 1;
+    }
+    return count;
+  }, [attentionTopicIds, boardTopicsForNav, showBoardTopics]);
 
   const [draggingBoardTopicId, setDraggingBoardTopicId] = useState<string | null>(null);
   const [boardTopicDropTargetId, setBoardTopicDropTargetId] = useState<string | null>(null);
@@ -1153,6 +1182,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                {mobilePrimaryItems.map((item) => {
 	                  const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
 	                  const active = isItemActive(item.href);
+                    const showBoardAttentionCount = item.href === "/u" && hiddenBoardAttentionCount > 0;
 	                  return (
                     <Link
                       key={item.href}
@@ -1167,7 +1197,15 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                       aria-label={item.label}
                       aria-current={active ? "page" : undefined}
                     >
-                      <span className="h-3.5 w-3.5 text-current">{ICONS[item.id]}</span>
+                      <span className="flex h-3.5 w-3.5 items-center justify-center text-current">
+                        {showBoardAttentionCount ? (
+                          <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full border border-[rgba(255,90,45,0.42)] bg-[rgba(255,90,45,0.16)] px-1 text-[9px] font-semibold text-[rgb(var(--claw-text))]">
+                            {hiddenBoardAttentionCount}
+                          </span>
+                        ) : (
+                          ICONS[item.id]
+                        )}
+                      </span>
                       <span className="leading-none">{item.label}</span>
                     </Link>
                   );
@@ -1198,6 +1236,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                        {mobileOverflowItems.map((item) => {
                             const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
 	                          const active = isItemActive(item.href);
+                            const showBoardAttentionCount = item.href === "/u" && hiddenBoardAttentionCount > 0;
 	                          return (
                             <Link
                               key={item.href}
@@ -1210,7 +1249,15 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                                   : "text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
                               )}
                             >
-                              <span className="h-4 w-4 text-current">{ICONS[item.id]}</span>
+                              <span className="flex h-4 w-4 items-center justify-center text-current">
+                                {showBoardAttentionCount ? (
+                                  <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full border border-[rgba(255,90,45,0.42)] bg-[rgba(255,90,45,0.16)] px-1 text-[9px] font-semibold text-[rgb(var(--claw-text))]">
+                                    {hiddenBoardAttentionCount}
+                                  </span>
+                                ) : (
+                                  ICONS[item.id]
+                                )}
+                              </span>
                               <span>{item.label}</span>
                             </Link>
                           );
@@ -1331,6 +1378,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 		                  const isBoardItem = item.href === "/u";
                       const isWorkspaceItem = item.href === "/workspaces";
 		                  const expanded = isBoardItem ? showBoardTopics : isWorkspaceItem ? showWorkspaceNav : false;
+                      const showBoardAttentionCount = isBoardItem && hiddenBoardAttentionCount > 0;
 	
 	                  const navLink = (
 	                    <Link
@@ -1361,7 +1409,15 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 		                      aria-expanded={isBoardItem || isWorkspaceItem ? expanded : undefined}
 		                    >
                       <span className="flex items-center gap-2">
-                        <span className="h-4 w-4 text-current">{ICONS[item.id]}</span>
+                        <span className="flex h-4 w-4 items-center justify-center text-current">
+                          {showBoardAttentionCount ? (
+                            <span className="inline-flex min-w-[1.15rem] items-center justify-center rounded-full border border-[rgba(255,90,45,0.42)] bg-[rgba(255,90,45,0.16)] px-1 text-[9px] font-semibold text-[rgb(var(--claw-text))]">
+                              {hiddenBoardAttentionCount}
+                            </span>
+                          ) : (
+                            ICONS[item.id]
+                          )}
+                        </span>
                         {!collapsed && <span>{item.label}</span>}
                       </span>
 		                      {!collapsed && (isBoardItem || isWorkspaceItem) ? (
@@ -1446,7 +1502,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                                    key={topic.id}
 			                                    topic={topic}
 			                                    selected={selected}
-			                                    unread={unreadTopicIds.has(topic.id)}
+			                                    attentionCount={attentionTopicIds.has(topic.id) ? 1 : 0}
 			                                    onGo={go}
 			                                    reorderEnabled={boardTopicReorderEnabled}
 			                                    dropActive={dropActive}

@@ -9,15 +9,17 @@ import { drainQueuedMutations } from "@/lib/write-queue";
 import { LiveEvent, mergeById, mergeLogs, maxTimestamp, removeById, upsertById } from "@/lib/live-utils";
 import { normalizeBoardSessionKey } from "@/lib/board-session";
 import { CLAWBOARD_CONFIG_UPDATED_EVENT } from "@/lib/config-events";
+import { isChatNoiseLog } from "@/lib/chat-log-visibility";
 import {
   CHAT_SEEN_AT_KEY,
   UNSNOOZED_TOPICS_KEY,
+  chatKeyForTopic,
   chatKeyFromLogEntry,
   parseNumberMap,
   parseStringMap,
-  isUnreadConversationCandidate,
 } from "@/lib/attention-state";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
+import { buildLatestTopicTouchById, deriveAttentionTopicIds } from "@/lib/topic-attention";
 import {
   CLAWBOARD_NOTIFICATION_CLICK_EVENT,
   CLAWBOARD_NOTIFICATION_CLICK_MESSAGE_TYPE,
@@ -41,7 +43,7 @@ type DataContextValue = {
   unsnoozedTopicBadges: Record<string, number>;
   unsnoozedTaskBadges: Record<string, number>;
   chatSeenByKey: Record<string, string>;
-  unreadMessageCount: number;
+  attentionTopicCount: number;
   drafts: Record<string, Draft>;
   openclawTyping: Record<string, { typing: boolean; requestId?: string; updatedAt: string }>;
   openclawThreadWork: Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }>;
@@ -376,40 +378,21 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const chatSeenByKey = useMemo(() => parseStringMap(chatSeenRaw), [chatSeenRaw]);
   const notificationsEnabled = useMemo(() => notificationsEnabledRaw !== "false", [notificationsEnabledRaw]);
   const safeTopics = useMemo(() => topics.filter(isValidTopicRow), [topics]);
-  const activeUnsnoozedTopicCount = useMemo(() => {
-    const validTopicIds = new Set(safeTopics.map((topic) => topic.id));
-    let count = 0;
-    for (const topicId of Object.keys(unsnoozedTopicBadges)) {
-      if (validTopicIds.has(topicId)) count += 1;
-    }
-    return count;
-  }, [safeTopics, unsnoozedTopicBadges]);
-  const unreadMessageCount = useMemo(() => {
-    const seenAtMs = new Map<string, number>();
-    for (const [chatKey, seenAt] of Object.entries(chatSeenByKey)) {
-      const stamp = Date.parse(seenAt);
-      if (!Number.isFinite(stamp)) continue;
-      seenAtMs.set(chatKey, stamp);
-    }
-
-    let count = 0;
-    for (const entry of logs) {
-      if (!isUnreadConversationCandidate(entry)) continue;
-      const chatKey = chatKeyFromLogEntry(entry);
-      if (!chatKey) continue;
-      const createdAtMs = Date.parse(entry.createdAt);
-      if (!Number.isFinite(createdAtMs)) continue;
-      const seenAt = seenAtMs.get(chatKey) ?? Number.NEGATIVE_INFINITY;
-      if (createdAtMs > seenAt) count += 1;
-    }
-    return count;
-  }, [chatSeenByKey, logs]);
-
-  // Keep PWA badge scope strict: unread topic chat replies and unsnoozed topics only.
-  const pwaAttentionCount = useMemo(
-    () => activeUnsnoozedTopicCount + unreadMessageCount,
-    [activeUnsnoozedTopicCount, unreadMessageCount]
+  const latestTopicTouchById = useMemo(() => buildLatestTopicTouchById(logs), [logs]);
+  const attentionTopicIds = useMemo(
+    () =>
+      deriveAttentionTopicIds({
+        topics: safeTopics,
+        latestTopicTouchById,
+        topicSeenByKey: chatSeenByKey,
+        unsnoozedTopicBadges,
+      }),
+    [chatSeenByKey, latestTopicTouchById, safeTopics, unsnoozedTopicBadges]
   );
+  const attentionTopicCount = useMemo(() => attentionTopicIds.size, [attentionTopicIds]);
+
+  // Keep PWA badge scope strict: count topics that currently need a look.
+  const pwaAttentionCount = useMemo(() => attentionTopicCount, [attentionTopicCount]);
 
   const upsertSpace = useCallback((space: Space) => {
     setSpaces((prev) => upsertById(prev, space));
@@ -827,8 +810,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!hydrated) return;
     if (seededSeenMapRef.current) return;
-    seededSeenMapRef.current = true;
-    if (Object.keys(chatSeenByKey).length > 0) return;
+    if (Object.keys(chatSeenByKey).length > 0) {
+      seededSeenMapRef.current = true;
+      return;
+    }
+    if (logs.length === 0) return;
 
     const seeded: Record<string, string> = {};
     for (const entry of logs) {
@@ -840,6 +826,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       if (!previous || createdAt > previous) seeded[chatKey] = createdAt;
     }
     if (Object.keys(seeded).length === 0) return;
+    seededSeenMapRef.current = true;
     setLocalStorageItem(CHAT_SEEN_AT_KEY, JSON.stringify(seeded));
   }, [chatSeenByKey, hydrated, logs]);
 
@@ -868,9 +855,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   }, [unsnoozedTopicBadges]);
 
   useEffect(() => {
-    if (unreadMessageCount > 0) return;
+    if (attentionTopicCount > 0) return;
     void closePwaNotificationsByTag([CHAT_SUMMARY_TAG]);
-  }, [unreadMessageCount]);
+  }, [attentionTopicCount]);
 
   useEffect(() => {
     const previous = prevTopicStatusRef.current;
@@ -981,49 +968,51 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     if (!notificationsEnabled) return;
 
     const unseenAdditions = additions.filter((entry) => {
-      if (!isUnreadConversationCandidate(entry)) return false;
-      const chatKey = chatKeyFromLogEntry(entry);
-      if (!chatKey) return false;
+      const topicId = String(entry.topicId ?? "").trim();
+      if (!topicId) return false;
+      if (isChatNoiseLog(entry)) return false;
       const createdAtMs = Date.parse(entry.createdAt);
       if (!Number.isFinite(createdAtMs)) return false;
-      const seenAtMs = Date.parse(chatSeenByKey[chatKey] ?? "");
+      const seenAtMs = Date.parse(chatSeenByKey[chatKeyForTopic(topicId)] ?? "");
       return !Number.isFinite(seenAtMs) || createdAtMs > seenAtMs;
     });
     if (unseenAdditions.length === 0) return;
 
-    if (unseenAdditions.length === 1) {
-      const entry = unseenAdditions[0];
-      const chatKey = chatKeyFromLogEntry(entry);
-      const body = clipNotificationText(entry.content ?? entry.summary ?? "");
-      if (chatKey.startsWith("topic:")) {
-        const topicId = chatKey.slice("topic:".length).trim();
-        const topic = topicById.get(topicId);
-        if (topic) {
-          const url = `${buildTopicUrl(topic, safeTopics)}?focus=1`;
-          void showPwaNotification(
-            {
-              title: `Topic Chat: ${topic.name}`,
-              body,
-              tag: chatTag(chatKey),
-              url,
-              data: { chatKey, topicId: topic.id },
-            },
-            notificationsEnabled
-          );
-          return;
-        }
+    const topicIds = new Set<string>();
+    for (const entry of unseenAdditions) {
+      const topicId = String(entry.topicId ?? "").trim();
+      if (topicId) topicIds.add(topicId);
+    }
+    if (topicIds.size === 0) return;
+
+    if (topicIds.size === 1) {
+      const topicId = Array.from(topicIds)[0];
+      const topic = topicById.get(topicId);
+      if (topic) {
+        const entry = [...unseenAdditions]
+          .reverse()
+          .find((candidate) => String(candidate.topicId ?? "").trim() === topicId);
+        const body = clipNotificationText(entry?.content ?? entry?.summary ?? "Recent activity needs a look.");
+        const chatKey = topicId ? `topic:${topicId}` : "";
+        const url = `${buildTopicUrl(topic, safeTopics)}?focus=1`;
+        void showPwaNotification(
+          {
+            title: `Topic Activity: ${topic.name}`,
+            body,
+            tag: chatKey ? chatTag(chatKey) : CHAT_SUMMARY_TAG,
+            url,
+            data: { chatKey, topicId: topic.id },
+          },
+          notificationsEnabled
+        );
+        return;
       }
     }
 
-    const chatKeys = new Set<string>();
-    for (const entry of unseenAdditions) {
-      const key = chatKeyFromLogEntry(entry);
-      if (key) chatKeys.add(key);
-    }
     void showPwaNotification(
       {
         title: "Clawboard",
-        body: `${unseenAdditions.length} unread messages in ${chatKeys.size} chats.`,
+        body: `${topicIds.size} topics need a look.`,
         tag: CHAT_SUMMARY_TAG,
         url: "/u",
       },
@@ -1056,7 +1045,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       unsnoozedTopicBadges,
       unsnoozedTaskBadges,
       chatSeenByKey,
-      unreadMessageCount,
+      attentionTopicCount,
       drafts,
       openclawTyping,
       openclawThreadWork,
@@ -1087,7 +1076,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       unsnoozedTopicBadges,
       unsnoozedTaskBadges,
       chatSeenByKey,
-      unreadMessageCount,
+      attentionTopicCount,
       drafts,
       openclawTyping,
       openclawThreadWork,

@@ -49,6 +49,7 @@ import {
 } from "@/lib/board-session";
 import {
   chatKeyForTask,
+  parseStringMap,
 } from "@/lib/attention-state";
 import { Markdown } from "@/components/markdown";
 import { AttachmentStrip, type AttachmentLike } from "@/components/attachments";
@@ -60,6 +61,7 @@ import { SnoozeModal } from "@/components/snooze-modal";
 import { useUnifiedExpansionState } from "@/components/unified-view-state";
 import { getInitialUnifiedUrlState, parseUnifiedUrlState } from "@/components/unified-view-url-state";
 import { workspaceDirDisplay, workspaceRoute } from "@/lib/openclaw-workspaces";
+import { buildLatestTopicTouchById, deriveAttentionTopicIds, topicLastTouchedAt } from "@/lib/topic-attention";
 import { compareByBoardOrder, optimisticTopSortIndex } from "@/lib/topic-order";
 
 const STATUS_TONE: Record<string, "muted" | "accent" | "accent2" | "warning" | "success"> = {
@@ -91,6 +93,7 @@ const FILTERS_DRAWER_OPEN_KEY = "clawboard.unified.filtersDrawerOpen";
 const FILTERS_DRAWER_OPEN_DEFAULT = false;
 const ACTIVE_SPACE_KEY = "clawboard.space.active";
 const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
+const WORKSPACE_ATTENTION_SEEN_KEY = "clawboard.unified.workspaceAttentionSeenAt";
 
 const TOPIC_VIEWS = ["active", "snoozed", "archived", "all"] as const;
 type TopicView = (typeof TOPIC_VIEWS)[number];
@@ -1216,6 +1219,23 @@ function normalizeAgentToken(value: string | undefined | null) {
   return String(value ?? "").trim().toLowerCase();
 }
 
+function stringArraysEqual(a: string[], b: string[]) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function stringSetMatchesArray(set: Set<string>, values: string[]) {
+  if (set.size !== values.length) return false;
+  for (const value of values) {
+    if (!set.has(value)) return false;
+  }
+  return true;
+}
+
 function hasActiveTextSelectionWithin(root: HTMLElement | null) {
   if (!root || typeof window === "undefined") return false;
   const selection = window.getSelection?.();
@@ -1230,10 +1250,15 @@ function hasActiveTextSelectionWithin(root: HTMLElement | null) {
 
 function deriveTaskWorkspaceAttention(
   entries: LogEntry[],
-  workspaceByAgentId: Map<string, OpenClawWorkspace>
+  workspaceByAgentId: Map<string, OpenClawWorkspace>,
+  sessionKey: string,
+  seenByKey: Record<string, string>
 ) {
-  let latestAny: { workspace: OpenClawWorkspace; agentId: string } | null = null;
-  let latestCoding: { workspace: OpenClawWorkspace; agentId: string } | null = null;
+  const normalizedSessionKey = normalizeBoardSessionKey(sessionKey);
+  if (!normalizedSessionKey) return null;
+
+  let latestAny: { workspace: OpenClawWorkspace; agentId: string; activityAt: string; sessionKey: string } | null = null;
+  let latestCoding: { workspace: OpenClawWorkspace; agentId: string; activityAt: string; sessionKey: string } | null = null;
 
   for (let i = entries.length - 1; i >= 0; i -= 1) {
     const entry = entries[i];
@@ -1241,16 +1266,38 @@ function deriveTaskWorkspaceAttention(
     if (!agentId || agentId === "user" || agentId === "assistant" || agentId === "system" || agentId === "toolresult") {
       continue;
     }
+    if (isChatNoiseLog(entry)) continue;
+    const entryType = String(entry.type ?? "").trim().toLowerCase();
+    const authenticActivity = isMeaningfulToolingOrSystemChatLog(entry) || entryType === "conversation";
+    if (!authenticActivity) continue;
     const workspace = workspaceByAgentId.get(agentId);
     if (!workspace?.ideUrl) continue;
-    if (!latestAny) latestAny = { workspace, agentId };
+    const activityAt = String(entry.createdAt ?? "").trim();
+    if (!activityAt) continue;
+    const candidate = { workspace, agentId, activityAt, sessionKey: normalizedSessionKey };
+    if (!latestAny) latestAny = candidate;
     if (agentId === "coding") {
-      latestCoding = { workspace, agentId };
+      latestCoding = candidate;
+    }
+    if (latestAny && latestCoding) {
       break;
     }
   }
 
-  const target = latestCoding ?? latestAny;
+  const candidates = [latestCoding, latestAny].filter(
+    (candidate, index, list): candidate is NonNullable<typeof candidate> =>
+      Boolean(candidate) &&
+      list.findIndex(
+        (other) =>
+          other?.agentId === candidate?.agentId &&
+          other?.activityAt === candidate?.activityAt &&
+          other?.sessionKey === candidate?.sessionKey
+      ) === index
+  );
+  const target = candidates.find((candidate) => {
+    const seenKey = `${candidate.sessionKey}::${candidate.agentId}`;
+    return seenByKey[seenKey] !== candidate.activityAt;
+  });
   if (!target) return null;
   const agentName = String(target.workspace.agentName || "").trim() || target.agentId;
   const label = target.agentId === "coding" ? "Open coding workspace" : `Open ${agentName} workspace`;
@@ -1964,6 +2011,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setLogs,
     unsnoozedTopicBadges,
     unsnoozedTaskBadges,
+    chatSeenByKey,
     markChatSeen: markChatSeenInStore,
     dismissUnsnoozedTopicBadge,
     dismissUnsnoozedTaskBadge,
@@ -1976,6 +2024,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   );
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const searchParamsKey = searchParams.toString();
   const scrollMemory = useRef<Record<string, number>>({});
   const restoreScrollOnNextSyncRef = useRef(false);
   const skipNextUrlSyncUrlRef = useRef<string | null>(null);
@@ -1984,10 +2033,15 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const filtersDrawerOpenStored = useLocalStorageItem(FILTERS_DRAWER_OPEN_KEY);
   const filtersDrawerOpen =
     filtersDrawerOpenStored === null ? FILTERS_DRAWER_OPEN_DEFAULT : filtersDrawerOpenStored === "true";
+  const workspaceAttentionSeenRaw = useLocalStorageItem(WORKSPACE_ATTENTION_SEEN_KEY) ?? "{}";
   const storedTopicView = (useLocalStorageItem(TOPIC_VIEW_KEY) ?? "").trim().toLowerCase();
   const topicView: TopicView = isTopicView(storedTopicView) ? storedTopicView : "active";
   const showSnoozedTasks = useLocalStorageItem(SHOW_SNOOZED_TASKS_KEY) === "true";
   const activeSpaceIdStored = (useLocalStorageItem(ACTIVE_SPACE_KEY) ?? "").trim();
+  const workspaceAttentionSeenByKey = useMemo(
+    () => parseStringMap(workspaceAttentionSeenRaw),
+    [workspaceAttentionSeenRaw]
+  );
   // Must start false to match SSR output. useEffect syncs the real value post-hydration,
   // preventing the server/client HTML mismatch that causes a hydration error.
   const [mdUp, setMdUp] = useState(false);
@@ -2018,6 +2072,33 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const toggleTwoColumn = () => {
     setLocalStorageItem("clawboard.unified.twoColumn", twoColumn ? "false" : "true");
   };
+  const markWorkspaceAttentionSeen = useCallback(
+    (
+      attention:
+        | {
+            agentId: string;
+            activityAt: string;
+            sessionKey: string;
+          }
+        | null
+        | undefined
+    ) => {
+      const normalizedSessionKey = normalizeBoardSessionKey(attention?.sessionKey);
+      const agentId = normalizeAgentToken(attention?.agentId);
+      const activityAt = String(attention?.activityAt ?? "").trim();
+      if (!normalizedSessionKey || !agentId || !activityAt) return;
+      const seenKey = `${normalizedSessionKey}::${agentId}`;
+      if (workspaceAttentionSeenByKey[seenKey] === activityAt) return;
+      setLocalStorageItem(
+        WORKSPACE_ATTENTION_SEEN_KEY,
+        JSON.stringify({
+          ...workspaceAttentionSeenByKey,
+          [seenKey]: activityAt,
+        })
+      );
+    },
+    [workspaceAttentionSeenByKey]
+  );
   useEffect(() => {
     if (filtersDrawerOpenStored !== null) return;
     setLocalStorageItem(FILTERS_DRAWER_OPEN_KEY, FILTERS_DRAWER_OPEN_DEFAULT ? "true" : "false");
@@ -2058,7 +2139,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return out;
   }, [storeSpaces, storeTopics]);
 
-  const spaceFromUrl = useMemo(() => (searchParams.get("space") ?? "").trim(), [searchParams]);
+  const spaceFromUrl = useMemo(() => (new URLSearchParams(searchParamsKey).get("space") ?? "").trim(), [searchParamsKey]);
   const spaceQueryInitializedRef = useRef(false);
   const selectedSpaceId = useMemo(() => {
     if (!activeSpaceIdStored) return "";
@@ -2181,7 +2262,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const next = `${window.location.pathname}${window.location.search}`;
     if (!next.startsWith("/u")) return;
     setLocalStorageItem(BOARD_LAST_URL_KEY, next);
-  }, [basePath, pathname, searchParams]);
+  }, [basePath, pathname, searchParamsKey]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2311,6 +2392,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   const [statusMenuTopicId, setStatusMenuTopicId] = useState<string | null>(null);
   const [statusMenuTaskId, setStatusMenuTaskId] = useState<string | null>(null);
   const [topicStatusMenuPosition, setTopicStatusMenuPosition] = useState<{
+    top: number;
+    left: number;
+    openUp: boolean;
+  } | null>(null);
+  const [topicColorMenuPosition, setTopicColorMenuPosition] = useState<{
     top: number;
     left: number;
     openUp: boolean;
@@ -2646,6 +2732,27 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     [positionTopicStatusMenu]
   );
 
+  const positionTopicColorMenu = useCallback((topicId: string) => {
+    if (typeof window === "undefined") return;
+    const trigger = document.querySelector<HTMLElement>(`[data-testid='topic-color-trigger-${topicId}']`);
+    if (!trigger) {
+      setTopicColorMenuPosition(null);
+      return;
+    }
+
+    const rect = trigger.getBoundingClientRect();
+    const menuWidth = 212;
+    const menuHeight = 132;
+    const gap = 8;
+    const viewportPadding = 8;
+
+    const openUp = window.innerHeight - rect.bottom < menuHeight + gap + viewportPadding && rect.top > menuHeight + gap;
+    const top = openUp ? rect.top - gap : rect.bottom + gap;
+    const left = clamp(rect.right - menuWidth, viewportPadding, window.innerWidth - menuWidth - viewportPadding);
+
+    setTopicColorMenuPosition({ top, left, openUp });
+  }, []);
+
   useEffect(() => {
     if (!statusMenuTaskId) return;
 
@@ -2713,6 +2820,62 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       window.removeEventListener("scroll", onReposition, true);
     };
   }, [positionTopicStatusMenu, statusMenuTopicId]);
+
+  useEffect(() => {
+    if (!(editingTopicId && topicEditMode === "color")) {
+      setTopicColorMenuPosition(null);
+      return;
+    }
+
+    const closeTopicColorMenu = () => {
+      const topic = topics.find((entry) => entry.id === editingTopicId);
+      if (!topic) return;
+      const currentColor =
+        normalizeHexColor(topic.color) ??
+        colorFromSeed(`topic:${topic.id}:${topic.name}`, TOPIC_FALLBACK_COLORS);
+      setEditingTopicId(null);
+      setTopicEditMode("name");
+      setTopicNameDraft("");
+      setTopicColorDraft(currentColor);
+      setTopicTagsDraft("");
+      setTopicTagsPendingEntry(false);
+      setActiveTopicTagField(null);
+      setDeleteArmedKey(null);
+      setRenameErrors((prev) => {
+        const next = { ...prev };
+        delete next[`topic:${topic.id}`];
+        return next;
+      });
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-topic-color-menu]")) return;
+      closeTopicColorMenu();
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      closeTopicColorMenu();
+    };
+
+    const onReposition = () => {
+      if (!editingTopicId) return;
+      positionTopicColorMenu(editingTopicId);
+    };
+
+    positionTopicColorMenu(editingTopicId);
+    document.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", onReposition);
+    window.addEventListener("scroll", onReposition, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", onReposition);
+      window.removeEventListener("scroll", onReposition, true);
+    };
+  }, [editingTopicId, positionTopicColorMenu, topicEditMode, topics]);
   const recentBoardSendAtRef = useRef<Map<string, number>>(new Map());
   const chatHistoryLoadedOlderRef = useRef<Set<string>>(new Set());
 
@@ -3437,6 +3600,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     return map;
   }, [tasks]);
+  const topicById = useMemo(() => new Map(topics.map((topic) => [topic.id, topic])), [topics]);
 
   const chatEntityIdFromKey = useCallback((chatKey: string) => {
     const key = String(chatKey ?? "").trim();
@@ -3553,15 +3717,42 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
       const entityId = chatEntityIdFromKey(key);
       const rows = entityId ? logsByTaskAll.get(entityId) ?? topicChatLogsByTopicAll.get(entityId) ?? [] : [];
-      const seenAt = rows.length > 0 ? String(rows[rows.length - 1]?.createdAt ?? "").trim() : "";
+      const topic = entityId ? topicById.get(entityId) : undefined;
+      const seenAt = topic
+        ? topicLastTouchedAt(topic, rows.length > 0 ? String(rows[rows.length - 1]?.createdAt ?? "").trim() : "")
+        : rows.length > 0
+          ? String(rows[rows.length - 1]?.createdAt ?? "").trim()
+          : "";
 
       markChatSeenInStore(key, seenAt || undefined);
+      if (!entityId) return;
+
+      // When a topic/task chat is visibly open, clear its attention badge too so
+      // the board reflects that the user has actually looked at it.
+      if (taskTopicById.has(entityId)) {
+        dismissUnsnoozedTaskBadge(entityId);
+        return;
+      }
+      dismissUnsnoozedTopicBadge(entityId);
     },
-    [chatEntityIdFromKey, logsByTaskAll, markChatSeenInStore, topicChatLogsByTopicAll]
+    [
+      chatEntityIdFromKey,
+      dismissUnsnoozedTaskBadge,
+      dismissUnsnoozedTopicBadge,
+      logsByTaskAll,
+      markChatSeenInStore,
+      taskTopicById,
+      topicById,
+      topicChatLogsByTopicAll,
+    ]
   );
 
   useEffect(() => {
     const visibleChatKeys = new Set<string>();
+    for (const topicId of expandedTopicsSafe) {
+      const key = chatKeyForTask(topicId);
+      if (key) visibleChatKeys.add(key);
+    }
     for (const taskId of expandedTasksSafe) {
       const key = chatKeyForTask(taskId);
       if (key) visibleChatKeys.add(key);
@@ -3577,7 +3768,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     for (const key of visibleChatKeys) {
       markVisibleChatSeen(key);
     }
-  }, [expandedTasksSafe, markVisibleChatSeen, mdUp, mobileChatTarget, mobileLayer]);
+  }, [expandedTasksSafe, expandedTopicsSafe, markVisibleChatSeen, mdUp, mobileChatTarget, mobileLayer]);
 
   const hydrateTaskLogs = useCallback(
     async (taskId: string) => {
@@ -4368,6 +4559,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     return map;
   }, [logsByTask, normalizedSearch, taskSearchScores, tasksByTopic]);
 
+  const latestTopicTouchById = useMemo(() => buildLatestTopicTouchById(logs), [logs]);
+  const topicAttentionIds = deriveAttentionTopicIds({
+    topics,
+    latestTopicTouchById,
+    topicSeenByKey: chatSeenByKey,
+    unsnoozedTopicBadges,
+  });
+
   const orderedTopics = useMemo(() => {
     const now = Date.now();
     const scopedTopics =
@@ -4377,7 +4576,10 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const base = [...scopedTopics]
       .map((topic) => ({
         ...topic,
-        lastActivity: logsByTopic.get(topic.id)?.[0]?.createdAt ?? topic.updatedAt,
+        lastTouchedAt: topicLastTouchedAt(
+          topic,
+          latestTopicTouchById[topic.id] ?? logsByTopic.get(topic.id)?.[0]?.createdAt
+        ),
       }))
       .sort((a, b) => {
         if (normalizedSearch) {
@@ -4385,8 +4587,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const bScore = topicSearchScores.get(b.id) ?? 0;
           if (aScore !== bScore) return bScore - aScore;
           return compareByBoardOrder(
-            { id: a.id, sortIndex: a.sortIndex, updatedAt: a.lastActivity },
-            { id: b.id, sortIndex: b.sortIndex, updatedAt: b.lastActivity }
+            { id: a.id, sortIndex: a.sortIndex, updatedAt: a.lastTouchedAt },
+            { id: b.id, sortIndex: b.sortIndex, updatedAt: b.lastTouchedAt }
           );
         }
 
@@ -4397,6 +4599,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         if (aBoosted !== bBoosted) return aBoosted ? -1 : 1;
         if (aBoosted && bBoosted && aBump !== bBump) return bBump - aBump;
 
+        if (a.lastTouchedAt !== b.lastTouchedAt) {
+          return String(b.lastTouchedAt ?? "").localeCompare(String(a.lastTouchedAt ?? ""));
+        }
         return compareByBoardOrder(a, b);
       });
 
@@ -4450,7 +4655,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         id: "unassigned",
         name: "Unassigned",
         description: "Recycle bin for topics from deleted parents.",
-        lastActivity: new Date().toISOString(),
+        lastTouchedAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         status: "active",
@@ -4474,6 +4679,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     topics,
     topicBumpAt,
     logsByTopic,
+    latestTopicTouchById,
     matchesLogText,
     matchesLogSearch,
     matchesStatusFilter,
@@ -5772,17 +5978,20 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const nextTasks = parsedState.tasks;
     const nextRevealSelection = parsedState.reveal;
 
-    setShowRaw(parsedState.raw);
-    setMessageDensity(parsedState.density);
-    setShowToolCalls(parsedState.showToolCalls);
-    setStatusFilter(nextStatus);
-    setShowDone(parsedState.done || nextStatus === "done");
-    setRevealSelection(nextRevealSelection);
-    setRevealedTopicIds(nextTopics);
-    setRevealedTaskIds(nextTasks);
-    setPage(parsedState.page);
-    setExpandedTopics(new Set(nextTopics));
-    setExpandedTasks(new Set(nextTasks));
+    setShowRaw((prev) => (prev === parsedState.raw ? prev : parsedState.raw));
+    setMessageDensity((prev) => (prev === parsedState.density ? prev : parsedState.density));
+    setShowToolCalls((prev) => (prev === parsedState.showToolCalls ? prev : parsedState.showToolCalls));
+    setStatusFilter((prev) => (prev === nextStatus ? prev : nextStatus));
+    setShowDone((prev) => {
+      const nextShowDone = parsedState.done || nextStatus === "done";
+      return prev === nextShowDone ? prev : nextShowDone;
+    });
+    setRevealSelection((prev) => (prev === nextRevealSelection ? prev : nextRevealSelection));
+    setRevealedTopicIds((prev) => (stringArraysEqual(prev, nextTopics) ? prev : nextTopics));
+    setRevealedTaskIds((prev) => (stringArraysEqual(prev, nextTasks) ? prev : nextTasks));
+    setPage((prev) => (prev === parsedState.page ? prev : parsedState.page));
+    setExpandedTopics((prev) => (stringSetMatchesArray(prev, nextTopics) ? prev : new Set(nextTopics)));
+    setExpandedTasks((prev) => (stringSetMatchesArray(prev, nextTasks) ? prev : new Set(nextTasks)));
     if (parsedState.focus) {
       const focusTopicId = nextTopics[0] ?? "";
       if (focusTopicId) {
@@ -5853,7 +6062,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     skipNextUrlSyncUrlRef.current = null;
     syncFromUrl();
-  }, [currentUrlKey, pathname, searchParams, syncFromUrl]);
+  }, [currentUrlKey, pathname, searchParamsKey, syncFromUrl]);
 
   useEffect(() => {
     if (!autoFocusTask) return;
@@ -6802,8 +7011,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const taskList = orderedTasksByTopic.get(topicId) ?? [];
           const topicSelectedForSend = selectedComposerTarget?.kind === "topic" && selectedComposerTarget.topic.id === topicId;
           const selectedTaskIdForSend = selectedComposerTarget?.kind === "task" ? selectedComposerTarget.task.id : "";
-          const lastActivity = logsByTopic.get(topicId)?.[0]?.createdAt ?? topic.updatedAt;
-          const hasUnsnoozedBadge = Object.prototype.hasOwnProperty.call(unsnoozedTopicBadges, topicId);
+          const lastTouchedAt =
+            topicLastTouchedAt(
+              topic,
+              latestTopicTouchById[topicId] ?? logsByTopic.get(topicId)?.[0]?.createdAt
+            ) ||
+            topic.updatedAt ||
+            topic.createdAt;
+          const topicNeedsAttention = topicAttentionIds.has(topicId);
           const topicChatAllLogs = topicChatLogsByTopic.get(topicId) ?? [];
           const topicChatVisibleCount = countVisibleChatLogEntries(topicChatAllLogs, showToolCalls);
           const topicKnownChatCount = taskChatCountById[topicId] ?? 0;
@@ -6816,9 +7031,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
           const topicToolingOrSystemCallCountLabel = formatToolingOrSystemCallCountLabel(topicToolingOrSystemCallCount);
           const topicChatMetricsLabel = `${topicChatEntryCountLabel} · ${topicToolingOrSystemCallCountLabel}`;
           const topicChatBlurb = deriveChatHeaderBlurb(topicChatAllLogs);
-          const topicWorkspaceAttention = deriveTaskWorkspaceAttention(topicChatAllLogs, workspaceByAgentId);
           const topicChatKey = chatKeyForTask(topicId);
           const topicChatSessionKey = topicSessionKey(topicId);
+          const topicWorkspaceAttention = deriveTaskWorkspaceAttention(
+            topicChatAllLogs,
+            workspaceByAgentId,
+            topicChatSessionKey,
+            workspaceAttentionSeenByKey
+          );
           const topicHiddenToolCallCount = hiddenToolCallCountForSession(topicChatSessionKey);
           const topicResponding = isSessionResponding(topicChatSessionKey);
           const normalizedTopicStatus = String(topic.status ?? "active").trim().toLowerCase();
@@ -7047,9 +7267,9 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                 aria-expanded={isExpanded}
               >
                 <div className="min-w-0">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <button
-                      type="button"
+	                  <div className="flex min-w-0 items-center gap-2">
+	                    <button
+	                      type="button"
                       data-testid={`reorder-topic-${topic.id}`}
                       aria-label="Reorder topic"
                         data-no-swipe="true"
@@ -7093,8 +7313,103 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 		                      >
 		                        <GripIcon />
 		                      </button>
-		                    {editingTopicId === topic.id && topicEditMode === "name" ? (
-                          <Input
+                      <div className="relative shrink-0">
+                        <button
+                          type="button"
+                          data-testid={`topic-color-trigger-${topic.id}`}
+                          aria-label={`Change color for ${topic.name}`}
+                          title="Double click or long press to change color"
+                          className="h-3.5 w-3.5 rounded-full border border-[rgba(255,255,255,0.18)] shadow-[0_0_0_1px_rgba(0,0,0,0.18)]"
+                          style={{ backgroundColor: editingTopicId === topic.id ? topicColorDraft : topicColor }}
+                          onClick={(event) => event.stopPropagation()}
+                          {...topicColorEditHandlers}
+                        />
+                        {editingTopicId === topic.id &&
+                        topicEditMode === "color" &&
+                        topicColorMenuPosition &&
+                        typeof document !== "undefined"
+                          ? createPortal(
+                              <div
+                                data-topic-color-menu
+                                className="fixed z-[1200] rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(12,14,18,0.96)] p-2 shadow-[0_12px_28px_rgba(0,0,0,0.35)]"
+                                style={{
+                                  top: topicColorMenuPosition.top,
+                                  left: topicColorMenuPosition.left,
+                                  transform: topicColorMenuPosition.openUp ? "translateY(-100%)" : undefined,
+                                }}
+                                onClick={(event) => event.stopPropagation()}
+                                onKeyDownCapture={(event) => {
+                                  if (event.key !== "Escape") return;
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  cancelTopicEdit(topic, topicColor);
+                                }}
+                              >
+                                <div className="mb-2 grid grid-cols-5 gap-1.5">
+                                  {TOPIC_FALLBACK_COLORS.map((candidate) => {
+                                    const normalizedCandidate = normalizeHexColor(candidate) ?? candidate;
+                                    const selected = normalizeHexColor(topicColorDraft) === normalizedCandidate;
+                                    return (
+                                      <button
+                                        key={`topic-color-swatch-${topic.id}-${normalizedCandidate}`}
+                                        type="button"
+                                        aria-label={`Use color ${normalizedCandidate}`}
+                                        title={normalizedCandidate}
+                                        className={cn(
+                                          "h-7 w-7 rounded-[6px] border transition",
+                                          selected
+                                            ? "border-white/70 shadow-[0_0_0_2px_rgba(255,255,255,0.18)]"
+                                            : "border-[rgba(255,255,255,0.14)] hover:border-[rgba(255,255,255,0.32)]"
+                                        )}
+                                        style={{ backgroundColor: normalizedCandidate }}
+                                        onClick={(event) => {
+                                          event.preventDefault();
+                                          event.stopPropagation();
+                                          setTopicColorDraft(normalizedCandidate);
+                                          void patchTopic(topic.id, { color: normalizedCandidate });
+                                          setEditingTopicId(null);
+                                          setTopicEditMode("name");
+                                          setActiveTopicTagField(null);
+                                        }}
+                                      />
+                                    );
+                                  })}
+                                </div>
+                                <input
+                                  data-testid={`rename-topic-color-${topic.id}`}
+                                  ref={topicColorInputRef}
+                                  type="color"
+                                  value={topicColorDraft}
+                                  disabled={readOnly}
+                                  onChange={(event) => {
+                                    const next = normalizeHexColor(event.target.value);
+                                    if (!next) return;
+                                    setTopicColorDraft(next);
+                                    void patchTopic(topic.id, { color: next });
+                                    setEditingTopicId(null);
+                                    setTopicEditMode("name");
+                                    setActiveTopicTagField(null);
+                                  }}
+                                  className="sr-only"
+                                />
+                                <button
+                                  type="button"
+                                  className="inline-flex h-8 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))] transition hover:text-[rgb(var(--claw-text))]"
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    topicColorInputRef.current?.click();
+                                  }}
+                                >
+                                  Custom
+                                </button>
+                              </div>,
+                              document.body
+                            )
+                          : null}
+                      </div>
+			                    {editingTopicId === topic.id && topicEditMode === "name" ? (
+	                          <Input
                             data-testid={`rename-topic-input-${topic.id}`}
                             ref={topicNameInputRef}
                             value={topicNameDraft}
@@ -7288,105 +7603,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                         ))}
                       </>
                     )}
-                    <div className="relative">
-                      <button
-                        type="button"
-                        aria-label={`Change color for ${topic.name}`}
-                        title="Double click or long press to change color"
-                        className="h-4 w-4 rounded-[4px] border border-[rgba(255,255,255,0.18)] shadow-[0_0_0_1px_rgba(0,0,0,0.18)]"
-                        style={{ backgroundColor: editingTopicId === topic.id ? topicColorDraft : topicColor }}
-                        onClick={(event) => event.stopPropagation()}
-                        {...topicColorEditHandlers}
-                      />
-                      {editingTopicId === topic.id && topicEditMode === "color" ? (
-                        <div
-                          className="absolute right-0 top-full z-40 mt-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(12,14,18,0.96)] p-2 shadow-[0_12px_28px_rgba(0,0,0,0.35)]"
-                          onClick={(event) => event.stopPropagation()}
-                          onKeyDownCapture={(event) => {
-                            if (event.key !== "Escape") return;
-                            event.preventDefault();
-                            event.stopPropagation();
-                            cancelTopicEdit(topic, topicColor);
-                          }}
+	                    <span>{topicChatMetricsLabel}</span>
+                    {lastTouchedAt ? <span>Last touch {formatRelativeTime(lastTouchedAt)}</span> : null}
+		                    {topicNeedsAttention ? (
+		                      <span
+                          title="Topic needs a look"
+                          className="inline-flex min-w-[1.45rem] items-center justify-center rounded-full border border-[rgba(255,90,45,0.42)] bg-[rgba(255,90,45,0.16)] px-1.5 py-0.5 text-[10px] font-semibold text-[rgb(var(--claw-text))]"
                         >
-                          <div className="mb-2 grid grid-cols-5 gap-1.5">
-                            {TOPIC_FALLBACK_COLORS.map((candidate) => {
-                              const normalizedCandidate = normalizeHexColor(candidate) ?? candidate;
-                              const selected = normalizeHexColor(topicColorDraft) === normalizedCandidate;
-                              return (
-                                <button
-                                  key={`topic-color-swatch-${topic.id}-${normalizedCandidate}`}
-                                  type="button"
-                                  aria-label={`Use color ${normalizedCandidate}`}
-                                  title={normalizedCandidate}
-                                  className={cn(
-                                    "h-7 w-7 rounded-[6px] border transition",
-                                    selected
-                                      ? "border-white/70 shadow-[0_0_0_2px_rgba(255,255,255,0.18)]"
-                                      : "border-[rgba(255,255,255,0.14)] hover:border-[rgba(255,255,255,0.32)]"
-                                  )}
-                                  style={{ backgroundColor: normalizedCandidate }}
-                                  onClick={(event) => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    setTopicColorDraft(normalizedCandidate);
-                                    void patchTopic(topic.id, { color: normalizedCandidate });
-                                    setEditingTopicId(null);
-                                    setTopicEditMode("name");
-                                    setActiveTopicTagField(null);
-                                  }}
-                                />
-                              );
-                            })}
-                          </div>
-                          <input
-                            data-testid={`rename-topic-color-${topic.id}`}
-                            ref={topicColorInputRef}
-                            type="color"
-                            value={topicColorDraft}
-                            disabled={readOnly}
-                            onChange={(event) => {
-                              const next = normalizeHexColor(event.target.value);
-                              if (!next) return;
-                              setTopicColorDraft(next);
-                              void patchTopic(topic.id, { color: next });
-                              setEditingTopicId(null);
-                              setTopicEditMode("name");
-                              setActiveTopicTagField(null);
-                            }}
-                            className="sr-only"
-                          />
-                          <button
-                            type="button"
-                            className="inline-flex h-8 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))] transition hover:text-[rgb(var(--claw-text))]"
-                            onClick={(event) => {
-                              event.preventDefault();
-                              event.stopPropagation();
-                              topicColorInputRef.current?.click();
-                            }}
-                          >
-                            Custom
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
-                    <span>{topicChatMetricsLabel}</span>
-	                    {hasUnsnoozedBadge ? (
-	                      <button
-	                        type="button"
-	                        onClick={(event) => {
-	                          event.stopPropagation();
-	                          dismissUnsnoozedTopicBadge(topicId);
-	                        }}
-	                        title="Dismiss UNSNOOZED"
-	                        className="inline-flex items-center gap-2 rounded-full border border-[rgba(77,171,158,0.55)] bg-[rgba(77,171,158,0.12)] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[rgb(var(--claw-accent-2))] transition hover:bg-[rgba(77,171,158,0.18)]"
-	                      >
-	                        UNSNOOZED
-	                      </button>
-	                    ) : (
-	                      <span>Last activity {formatRelativeTime(lastActivity)}</span>
-	                    )}
-	                  </div>
+                          1
+                        </span>
+		                    ) : null}
+		                  </div>
                   <div
                     className={cn(
                       "mt-2 flex flex-wrap items-center justify-between gap-2",
@@ -7579,6 +7806,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                               <Link
                                 href={workspaceRoute(topicWorkspaceAttention.agentId)}
                                 data-testid={`topic-chat-workspace-link-${topic.id}`}
+                                onClick={() => markWorkspaceAttentionSeen(topicWorkspaceAttention)}
                                 className="inline-flex h-8 shrink-0 items-center justify-center rounded-full border border-[rgba(77,171,158,0.35)] bg-[rgba(77,171,158,0.14)] px-3 text-[11px] font-semibold text-[rgb(var(--claw-text))] transition hover:border-[rgba(255,90,45,0.35)] hover:text-[rgb(var(--claw-text))]"
                               >
                                 {topicWorkspaceAttention.label}
@@ -7883,9 +8111,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                       const taskToolingOrSystemCallCountLabel = formatToolingOrSystemCallCountLabel(taskToolingOrSystemCallCount);
                       const taskChatMetricsLabel = `${taskChatEntryCountLabel} · ${taskToolingOrSystemCallCountLabel}`;
                       const taskChatBlurb = deriveChatHeaderBlurb(taskChatAllLogs);
-                      const taskWorkspaceAttention = deriveTaskWorkspaceAttention(taskChatAllLogs, workspaceByAgentId);
-	                      const taskChatKey = chatKeyForTask(task.id);
                       const taskChatSessionKey = taskSessionKey(topicId, task.id);
+                      const taskWorkspaceAttention = deriveTaskWorkspaceAttention(
+                        taskChatAllLogs,
+                        workspaceByAgentId,
+                        taskChatSessionKey,
+                        workspaceAttentionSeenByKey
+                      );
+                      const taskWorkspacePathLabel = taskWorkspaceAttention
+                        ? workspaceDirDisplay(taskWorkspaceAttention.workspace.workspaceDir)
+                        : "";
+	                      const taskChatKey = chatKeyForTask(task.id);
                       const taskHiddenToolCallCount = hiddenToolCallCountForSession(taskChatSessionKey);
                       const taskSelectedForSend = selectedTaskIdForSend === task.id;
                       const start = normalizedSearch
@@ -8699,13 +8935,17 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
                                     <div className="text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-accent-2))]">
                                       {taskWorkspaceAttention.hint}
                                     </div>
-                                    <div className="overflow-x-auto whitespace-nowrap text-[rgb(var(--claw-muted))]">
-                                      {taskWorkspaceAttention.workspace.workspaceDir}
+                                    <div
+                                      className="overflow-x-auto whitespace-nowrap text-[rgb(var(--claw-muted))]"
+                                      title={taskWorkspaceAttention.workspace.workspaceDir}
+                                    >
+                                      {taskWorkspacePathLabel}
                                     </div>
                                   </div>
                                   <Link
                                     href={workspaceRoute(taskWorkspaceAttention.agentId)}
                                     data-testid={`task-chat-workspace-link-${task.id}`}
+                                    onClick={() => markWorkspaceAttentionSeen(taskWorkspaceAttention)}
                                     className="inline-flex h-8 shrink-0 items-center justify-center rounded-full border border-[rgba(77,171,158,0.35)] bg-[rgba(77,171,158,0.14)] px-3 text-[11px] font-semibold text-[rgb(var(--claw-text))] transition hover:border-[rgba(255,90,45,0.35)] hover:text-[rgb(var(--claw-text))]"
                                   >
                                     {taskWorkspaceAttention.label}

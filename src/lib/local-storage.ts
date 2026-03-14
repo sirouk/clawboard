@@ -31,13 +31,14 @@ export function useLocalStorageItem(key: string) {
 
 export function setLocalStorageItem(key: string, value: string) {
   if (typeof window === "undefined") return;
+  if (window.localStorage.getItem(key) === value) return;
   window.localStorage.setItem(key, value);
   emitLocalStorageChange();
 }
 
 export function removeLocalStorageItem(key: string) {
   if (typeof window === "undefined") return;
+  if (window.localStorage.getItem(key) === null) return;
   window.localStorage.removeItem(key);
   emitLocalStorageChange();
 }
-
