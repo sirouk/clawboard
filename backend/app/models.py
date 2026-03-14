@@ -200,6 +200,22 @@ class DeletedTopic(SQLModel, table=True):
     deletedAt: str = Field(description="ISO timestamp when the topic was deleted.")
 
 
+class ChangeEvent(SQLModel, table=True):
+    """Durable change feed used for SSE replay and incremental reconcile."""
+
+    id: Optional[int] = Field(default=None, primary_key=True, description="Monotonic change sequence.")
+    eventType: str = Field(description="Event type (topic.upserted, log.appended, etc.).")
+    entityKind: Optional[str] = Field(default=None, description="Best-effort entity kind (space|topic|log|draft|signal).")
+    entityId: Optional[str] = Field(default=None, description="Best-effort entity identifier for targeted reconcile.")
+    payload: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON),
+        description="Original live event payload.",
+    )
+    eventTs: str = Field(description="ISO timestamp associated with the event payload.")
+    createdAt: str = Field(description="ISO timestamp when the durable change row was written.")
+
+
 class SessionRoutingMemory(SQLModel, table=True):
     """Small per-session memory to improve routing under low-signal follow-ups.
 

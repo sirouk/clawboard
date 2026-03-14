@@ -5,10 +5,13 @@ import os from "os";
 import { upsertEvent, updateImportJob } from "./db";
 import { Event } from "./types";
 
-const MEMORY_ROOT = process.env.CLAWD_ROOT?.trim() || path.join(os.homedir(), "clawd");
+const OPENCLAW_HOME = process.env.OPENCLAW_HOME?.trim() || path.join(os.homedir(), ".openclaw");
+const MAIN_WORKSPACE_ROOT =
+  process.env.OPENCLAW_WORKSPACE_DIR?.trim() || path.join(OPENCLAW_HOME, "workspace");
+const MEMORY_ROOT = process.env.OPENCLAW_MEMORY_ROOT?.trim() || MAIN_WORKSPACE_ROOT;
 const MEMORY_DIR = path.join(MEMORY_ROOT, "memory");
 const MEMORY_FILE = path.join(MEMORY_ROOT, "MEMORY.md");
-const AGENTS_ROOT = path.join(os.homedir(), ".openclaw", "agents");
+const AGENTS_ROOT = path.join(OPENCLAW_HOME, "agents");
 
 const hashId = (value: string) =>
   crypto.createHash("sha1").update(value).digest("hex");

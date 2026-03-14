@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 import type { Topic } from "@/lib/types";
 import { Button, Input, Select } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
-import { apiFetch } from "@/lib/api";
 import { useLocalStorageItem } from "@/lib/local-storage";
+import { queueableApiMutation } from "@/lib/write-queue";
 
 export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; defaultTopicId?: string | null }) {
   const router = useRouter();
@@ -33,7 +33,8 @@ export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; de
 
     setSaving(true);
     try {
-      const res = await apiFetch(
+      const queuedUpdatedAt = new Date().toISOString();
+      const res = await queueableApiMutation(
         "/api/topics",
         {
           method: "POST",
@@ -47,7 +48,21 @@ export function TaskCreateForm({ topics, defaultTopicId }: { topics: Topic[]; de
             tags: parentTopic?.tags ?? undefined,
           }),
         },
-        token
+        {
+          token,
+          queuedResponse: {
+            id: `topic-${queuedUpdatedAt}`,
+            spaceId: resolvedSpaceId || "space-default",
+            name: title.trim(),
+            status: "todo",
+            tags: parentTopic?.tags ?? [],
+            createdBy: "user",
+            sortIndex: 0,
+            createdAt: queuedUpdatedAt,
+            updatedAt: queuedUpdatedAt,
+            queued: true,
+          },
+        }
       );
 
       if (!res.ok) {

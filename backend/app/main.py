@@ -40,6 +40,7 @@ from .models import (
     InstanceConfig,
     Topic,
     LogEntry,
+    ChangeEvent,
     DeletedLog,
     DeletedTopic,
     SessionRoutingMemory,
@@ -95,6 +96,7 @@ from .schemas import (
 )
 from .schemas_openclaw_skills import OpenClawSkillsResponse, OpenClawWorkspacesResponse
 from .openclaw_gateway import gateway_rpc
+from .change_feed import latest_live_event_id, oldest_live_event_id, publish_live_event, replay_live_events_after
 from .events import event_hub
 from .clawgraph import build_clawgraph
 from .vector_search import dense_candidate_ids, semantic_search
@@ -1183,7 +1185,7 @@ def on_shutdown() -> None:
     _BACKGROUND_STOP_EVENT.set()
     _OPENCLAW_CHAT_DISPATCH_WAKEUP.set()
     try:
-        event_hub.publish({"type": "clawboard.shutdown"})
+        publish_live_event({"type": "clawboard.shutdown"}, durable=False)
     except Exception:
         pass
     try:
@@ -1262,7 +1264,7 @@ def _snooze_worker() -> None:
                     session.commit()
 
                     for topic in due_topics:
-                        event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
+                        publish_live_event({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
         except Exception:
             _log_background_worker_exception("clawboard-snooze-worker")
         if _background_sleep(poll_interval):
@@ -2780,7 +2782,7 @@ def _maybe_upgrade_existing_duplicate_log(
     session.add(existing)
     session.commit()
     session.refresh(existing)
-    event_hub.publish({"type": "log.patched", "data": existing.model_dump(exclude={"raw"}), "eventTs": existing.updatedAt})
+    publish_live_event({"type": "log.patched", "data": existing.model_dump(exclude={"raw"}), "eventTs": existing.updatedAt})
     _enqueue_log_reindex(existing)
     return _sync_existing()
 
@@ -3971,15 +3973,15 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
         retro_scoped_rows.extend(board_route_retro_scoped_rows)
 
     if touched_topic:
-        event_hub.publish({"type": "topic.upserted", "data": touched_topic.model_dump(), "eventTs": touched_topic.updatedAt})
+        publish_live_event({"type": "topic.upserted", "data": touched_topic.model_dump(), "eventTs": touched_topic.updatedAt})
 
     # raw payloads can be large; keep log events lightweight for SSE + in-memory buffer safety.
-    event_hub.publish({"type": "log.appended", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
+    publish_live_event({"type": "log.appended", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
     # If this is an assistant log entry, publish a stop typing event to clear the typing indicator
     if entry.agentId and entry.agentId.lower() == "assistant" and entry.source:
         session_key = entry.source.get("sessionKey") if isinstance(entry.source, dict) else None
         if session_key:
-            event_hub.publish({
+            publish_live_event({
                 "type": "openclaw.typing",
                 "data": {
                     "sessionKey": session_key,
@@ -3988,7 +3990,7 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
                 },
                 "eventTs": entry.updatedAt
             })
-            event_hub.publish({
+            publish_live_event({
                 "type": "openclaw.thread_work",
                 "data": {
                     "sessionKey": session_key,
@@ -4005,10 +4007,10 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             continue
         if scoped_id:
             scoped_seen_ids.add(scoped_id)
-        event_hub.publish({"type": "log.patched", "data": scoped.model_dump(exclude={"raw"}), "eventTs": scoped.updatedAt})
+        publish_live_event({"type": "log.patched", "data": scoped.model_dump(exclude={"raw"}), "eventTs": scoped.updatedAt})
         _enqueue_log_reindex(scoped)
     if request_route_event:
-        event_hub.publish(
+        publish_live_event(
             {
                 "type": "openclaw.request_route.updated",
                 "data": request_route_event,
@@ -4112,7 +4114,7 @@ def _publish_openclaw_thread_work_state(
             data["requestId"] = rid
         if reason_text:
             data["reason"] = reason_text
-        event_hub.publish(
+        publish_live_event(
             {
                 "type": "openclaw.thread_work",
                 "data": data,
@@ -4137,7 +4139,7 @@ def _publish_openclaw_typing_state(
         }
         if rid:
             data["requestId"] = rid
-        event_hub.publish(
+        publish_live_event(
             {
                 "type": "openclaw.typing",
                 "data": data,
@@ -11081,7 +11083,7 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
                 _publish_space_upserted(session.get(Space, _space_id_for_topic(topic)))
             except Exception:
                 pass
-            event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
+            publish_live_event({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
             enqueue_reindex_request(
                 {
                     "op": "upsert",
@@ -11107,7 +11109,7 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
             "forceNewTopic": force_new_topic,
             "spaceId": resolved_space_id,
         }
-        event_hub.publish(
+        publish_live_event(
             {
                 "type": "openclaw.resolve_board_send",
                 "data": telemetry_payload,
@@ -11152,7 +11154,11 @@ def openclaw_chat(payload: OpenClawChatRequest, _background_tasks: BackgroundTas
         raise HTTPException(status_code=400, detail="message is required")
     if len(attachment_ids) > ATTACHMENT_MAX_FILES:
         raise HTTPException(status_code=400, detail=f"Too many attachments. Max is {ATTACHMENT_MAX_FILES}.")
-    request_id = create_id("occhat")
+    request_id_candidate = _canonical_openclaw_request_id(getattr(payload, "requestId", None))
+    if request_id_candidate and request_id_candidate.lower().startswith("occhat-"):
+        request_id = request_id_candidate
+    else:
+        request_id = create_id("occhat")
 
     # Persist the user message immediately so the UI can render it without waiting for OpenClaw plugins.
     # OpenClaw is still responsible for logging assistant output + tool traces via plugins.
@@ -12116,12 +12122,18 @@ async def stream_events(request: Request):
         try:
             yield "event: ready\ndata: {}\n\n"
             if last_id is not None:
-                oldest = event_hub.oldest_id()
+                oldest = oldest_live_event_id()
+                latest = latest_live_event_id()
                 if oldest is not None and last_id < oldest:
                     reset_payload = {"type": "stream.reset"}
                     yield event_hub.encode(None, reset_payload)
                 else:
-                    for event_id, payload in event_hub.replay(last_id):
+                    replay_events, overflowed = replay_live_events_after(last_id)
+                    if overflowed:
+                        yield event_hub.encode(None, {"type": "stream.reset"})
+                    elif not replay_events and latest is not None and last_id > latest:
+                        yield event_hub.encode(None, {"type": "stream.reset"})
+                    for event_id, payload in replay_events:
                         yield event_hub.encode(event_id, payload)
             while True:
                 try:
@@ -12206,7 +12218,7 @@ def update_config(
         session.add(instance)
         session.commit()
         session.refresh(instance)
-        event_hub.publish(
+        publish_live_event(
             {
                 "type": "config.updated",
                 "data": instance.model_dump(),
@@ -12533,7 +12545,7 @@ def cleanup_space_tag(space_id: str):
                 changed_topics = session.exec(select(Topic).where(Topic.id.in_(changed_topic_ids))).all()
 
             for topic in changed_topics:
-                event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
+                publish_live_event({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
                 topic_text = " ".join(
                     [
                         str(topic.name or "").strip(),
@@ -12765,7 +12777,7 @@ def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
             session.commit()
             session.refresh(topic)
         _publish_space_upserted(session.get(Space, _space_id_for_topic(topic)))
-        event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
+        publish_live_event({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
 
         if reindex_needed:
             topic_text = " ".join(
@@ -12858,7 +12870,7 @@ def reorder_topics(payload: TopicReorderRequest):
             topic = topics_by_id.get(topic_id)
             if not topic:
                 continue
-            event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": event_ts})
+            publish_live_event({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": event_ts})
         return {"ok": True, "count": len(final_ids), "changed": len(changed)}
 
 
@@ -13038,7 +13050,7 @@ def upsert_topic(
                     session.commit()
                     session.refresh(duplicate)
                 _publish_space_upserted(session.get(Space, _space_id_for_topic(duplicate)))
-                event_hub.publish({"type": "topic.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
+                publish_live_event({"type": "topic.upserted", "data": duplicate.model_dump(), "eventTs": duplicate.updatedAt})
                 topic_text = " ".join(
                     [
                         str(duplicate.name or "").strip(),
@@ -13099,7 +13111,7 @@ def upsert_topic(
             session.commit()
             session.refresh(topic)
             _publish_space_upserted(session.get(Space, _space_id_for_topic(topic)))
-        event_hub.publish({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
+        publish_live_event({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
         topic_text = " ".join(
             [
                 str(topic.name or "").strip(),
@@ -13136,8 +13148,8 @@ def delete_topic(topic_id: str):
         enqueue_reindex_request({"op": "delete", "kind": "topic", "id": topic_id})
 
         for entry in logs:
-            event_hub.publish({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
-        event_hub.publish({"type": "topic.deleted", "data": {"id": topic_id}, "eventTs": detached_at})
+            publish_live_event({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
+        publish_live_event({"type": "topic.deleted", "data": {"id": topic_id}, "eventTs": detached_at})
 
         return {
             "ok": True,
@@ -13478,7 +13490,7 @@ def replay_classifier_bundle(payload: ClassifierReplayRequest):
                 raise last_exc
 
         for entry in scope_logs:
-            event_hub.publish({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
+            publish_live_event({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
             _enqueue_log_reindex(entry)
 
         return {
@@ -13932,15 +13944,15 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
                 )
             except Exception:
                 board_route_retro_scoped_rows = []
-        event_hub.publish({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
+        publish_live_event({"type": "log.patched", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
         for scoped in board_route_retro_scoped_rows:
-            event_hub.publish({"type": "log.patched", "data": scoped.model_dump(exclude={"raw"}), "eventTs": scoped.updatedAt})
+            publish_live_event({"type": "log.patched", "data": scoped.model_dump(exclude={"raw"}), "eventTs": scoped.updatedAt})
             _enqueue_log_reindex(scoped)
         _enqueue_log_reindex(entry)
         if touched_topic:
-            event_hub.publish({"type": "topic.upserted", "data": touched_topic.model_dump(), "eventTs": touched_topic.updatedAt})
+            publish_live_event({"type": "topic.upserted", "data": touched_topic.model_dump(), "eventTs": touched_topic.updatedAt})
         if request_route_event:
-            event_hub.publish(
+            publish_live_event(
                 {
                     "type": "openclaw.request_route.updated",
                     "data": request_route_event,
@@ -14035,7 +14047,7 @@ def delete_log(log_id: str):
 
         event_ts = stamp
         for deleted_id in deleted_ids:
-            event_hub.publish({"type": "log.deleted", "data": {"id": deleted_id, "rootId": log_id}, "eventTs": event_ts})
+            publish_live_event({"type": "log.deleted", "data": {"id": deleted_id, "rootId": log_id}, "eventTs": event_ts})
         return {"ok": True, "deleted": True, "deletedIds": deleted_ids}
 
 
@@ -14105,7 +14117,7 @@ def purge_log_forward(log_id: str):
 
         event_ts = stamp
         for deleted_id in deleted_ids:
-            event_hub.publish({"type": "log.deleted", "data": {"id": deleted_id, "rootId": anchor_id}, "eventTs": event_ts})
+            publish_live_event({"type": "log.deleted", "data": {"id": deleted_id, "rootId": anchor_id}, "eventTs": event_ts})
 
         return {"ok": True, "deleted": True, "deletedCount": len(deleted_ids), "deletedIds": deleted_ids, "anchorLogId": anchor_id}
 
@@ -14121,9 +14133,11 @@ def _serialize_changes_payload(
     openclaw_typing: list[dict[str, Any]],
     openclaw_thread_work: list[dict[str, Any]],
     cursor: str | None,
+    cursor_seq: int | None,
 ) -> dict[str, Any]:
     return {
         "cursor": str(cursor or "").strip() or None,
+        "cursorSeq": int(cursor_seq) if cursor_seq is not None else None,
         "spaces": [SpaceOut.model_validate(row).model_dump() for row in spaces],
         "topics": [TopicOut.model_validate(row).model_dump() for row in topics],
         "logs": [LogOutLite.model_validate(row).model_dump() for row in logs],
@@ -14161,14 +14175,178 @@ def _serialize_changes_payload(
     }
 
 
-def _build_changes_payload(
+def _coerce_change_seq(value: int | str | None) -> int | None:
+    try:
+        seq = int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    if seq is None or seq < 0:
+        return None
+    return seq
+
+
+def _build_changes_payload_from_seq(
     session: Any,
     *,
-    since: str | None,
+    since_seq: int,
     limit_logs: int,
     include_raw: bool,
     allowed_space_ids: set[str] | None,
 ) -> dict[str, Any]:
+    effective_limit_logs = int(limit_logs or 0)
+    change_rows = session.exec(
+        select(ChangeEvent).where(ChangeEvent.id > since_seq).order_by(ChangeEvent.id.asc())
+    ).all()
+    if not change_rows:
+        return _serialize_changes_payload(
+            spaces=[],
+            topics=[],
+            logs=[],
+            drafts=[],
+            deleted_log_ids=[],
+            deleted_topics=[],
+            openclaw_typing=[],
+            openclaw_thread_work=[],
+            cursor=None,
+            cursor_seq=since_seq,
+        )
+
+    changed_space_ids: set[str] = set()
+    changed_topic_ids: set[str] = set()
+    changed_log_ids: list[str] = []
+    changed_draft_keys: set[str] = set()
+    deleted_log_ids: set[str] = set()
+    deleted_topic_ids: set[str] = set()
+    typing_changed = False
+    thread_work_changed = False
+    cursor = ""
+    cursor_seq = since_seq
+
+    for row in change_rows:
+        cursor_seq = max(cursor_seq, int(row.id or since_seq))
+        cursor = _iso_text_max(cursor, getattr(row, "eventTs", None))
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        event_type = str(getattr(row, "eventType", "") or payload.get("type") or "").strip().lower()
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        entity_id = str(getattr(row, "entityId", "") or "").strip()
+        if event_type == "space.upserted":
+            target_id = str(data.get("id") or entity_id or "").strip()
+            if target_id:
+                changed_space_ids.add(target_id)
+            continue
+        if event_type == "topic.upserted":
+            target_id = str(data.get("id") or entity_id or "").strip()
+            if target_id:
+                changed_topic_ids.add(target_id)
+            continue
+        if event_type == "topic.deleted":
+            target_id = str(data.get("id") or entity_id or "").strip()
+            if target_id:
+                deleted_topic_ids.add(target_id)
+            continue
+        if event_type in {"log.appended", "log.patched"}:
+            target_id = str(data.get("id") or entity_id or "").strip()
+            if target_id:
+                changed_log_ids.append(target_id)
+            continue
+        if event_type == "log.deleted":
+            target_id = str(data.get("id") or entity_id or "").strip()
+            if target_id:
+                deleted_log_ids.add(target_id)
+            continue
+        if event_type == "draft.upserted":
+            target_id = str(data.get("key") or entity_id or "").strip()
+            if target_id:
+                changed_draft_keys.add(target_id)
+            continue
+        if event_type == "openclaw.typing":
+            typing_changed = True
+            continue
+        if event_type == "openclaw.thread_work":
+            thread_work_changed = True
+            continue
+
+    spaces = session.exec(select(Space).where(Space.id.in_(list(changed_space_ids)))).all() if changed_space_ids else []
+    if allowed_space_ids is not None:
+        spaces = [space for space in spaces if str(getattr(space, "id", "") or "") in allowed_space_ids]
+
+    topics = session.exec(select(Topic).where(Topic.id.in_(list(changed_topic_ids)))).all() if changed_topic_ids else []
+    if allowed_space_ids is not None:
+        topics = [topic for topic in topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
+    topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in topics if getattr(topic, "id", None)}
+
+    drafts = session.exec(select(Draft).where(Draft.key.in_(list(changed_draft_keys)))).all() if changed_draft_keys else []
+
+    logs: list[LogEntry] = []
+    if changed_log_ids:
+        deduped_log_ids = list(dict.fromkeys(changed_log_ids))
+        log_query = select(LogEntry).where(LogEntry.id.in_(deduped_log_ids))
+        if not include_raw:
+            log_query = log_query.options(defer(LogEntry.raw))
+        logs = session.exec(log_query).all()
+        if allowed_space_ids is not None:
+            topic_by_id_for_logs = _load_related_maps_for_logs(session, logs, seeded_topics=topic_by_id)
+            logs = [row for row in logs if _log_matches_allowed_spaces(row, allowed_space_ids, topic_by_id_for_logs)]
+        if effective_limit_logs > 0:
+            logs = sorted(logs, key=lambda row: (str(getattr(row, "updatedAt", "") or ""), str(getattr(row, "id", "") or "")), reverse=True)[:effective_limit_logs]
+
+    if not include_raw:
+        for row in logs:
+            row.raw = None
+
+    deleted_topics: list[dict[str, Any]] = []
+    if deleted_topic_ids:
+        deleted_rows = session.exec(select(DeletedTopic).where(DeletedTopic.id.in_(list(deleted_topic_ids)))).all()
+        deleted_topics = [
+            {"id": row.id, "deletedAt": row.deletedAt}
+            for row in deleted_rows
+            if getattr(row, "id", None) and getattr(row, "deletedAt", None)
+        ]
+
+    openclaw_typing, openclaw_thread_work = _build_openclaw_live_signal_snapshots(session)
+    if not typing_changed:
+        openclaw_typing = []
+    if not thread_work_changed:
+        openclaw_thread_work = []
+
+    spaces.sort(key=lambda s: s.updatedAt, reverse=True)
+    topics.sort(key=lambda t: t.updatedAt, reverse=True)
+    drafts.sort(key=lambda d: d.updatedAt, reverse=True)
+    logs.sort(key=lambda row: (str(getattr(row, "updatedAt", "") or getattr(row, "createdAt", "") or ""), str(getattr(row, "id", "") or "")), reverse=True)
+
+    return _serialize_changes_payload(
+        spaces=spaces,
+        topics=topics,
+        logs=logs,
+        drafts=drafts,
+        deleted_log_ids=sorted(deleted_log_ids),
+        deleted_topics=deleted_topics,
+        openclaw_typing=openclaw_typing,
+        openclaw_thread_work=openclaw_thread_work,
+        cursor=cursor or None,
+        cursor_seq=cursor_seq,
+    )
+
+
+def _build_changes_payload(
+    session: Any,
+    *,
+    since: str | None,
+    since_seq: int | None,
+    limit_logs: int,
+    include_raw: bool,
+    allowed_space_ids: set[str] | None,
+) -> dict[str, Any]:
+    normalized_since_seq = _coerce_change_seq(since_seq)
+    if normalized_since_seq is not None:
+        return _build_changes_payload_from_seq(
+            session,
+            since_seq=normalized_since_seq,
+            limit_logs=limit_logs,
+            include_raw=include_raw,
+            allowed_space_ids=allowed_space_ids,
+        )
+
     # `limit_logs <= 0` means "no cap" (return all matching logs).
     effective_limit_logs = int(limit_logs or 0)
     if not since:
@@ -14289,6 +14467,7 @@ def _build_changes_payload(
         openclaw_typing=openclaw_typing,
         openclaw_thread_work=openclaw_thread_work,
         cursor=cursor or None,
+        cursor_seq=None,
     )
 
 
@@ -14298,6 +14477,12 @@ def list_changes(
         default=None,
         description="Return items updated/created at or after this ISO timestamp.",
         example="2026-02-02T10:05:00.000Z",
+    ),
+    sinceSeq: int | None = Query(
+        default=None,
+        ge=0,
+        description="Return items changed after this durable change sequence.",
+        example=1532,
     ),
     limitLogs: int = Query(
         default=0,
@@ -14330,13 +14515,14 @@ def list_changes(
             return _build_changes_payload(
                 session,
                 since=since,
+                since_seq=sinceSeq,
                 limit_logs=limitLogs,
                 include_raw=includeRaw,
                 allowed_space_ids=allowed_space_ids,
             )
 
         # Avoid precompiling uncapped snapshots to keep memory bounded.
-        if not since and not includeRaw and limitLogs > 0:
+        if sinceSeq is None and not since and not includeRaw and limitLogs > 0:
             revision = _changes_revision_token(session)
             payload, _cached = _get_or_build_precompiled(
                 namespace="changes",
@@ -14400,7 +14586,7 @@ def upsert_draft(payload: DraftUpsert = Body(...)):
                 raise last_exc
         session.refresh(row)
 
-        event_hub.publish({"type": "draft.upserted", "data": row.model_dump(), "eventTs": row.updatedAt})
+        publish_live_event({"type": "draft.upserted", "data": row.model_dump(), "eventTs": row.updatedAt})
         return row
 
 

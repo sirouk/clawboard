@@ -1,10 +1,11 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, startTransition, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Draft, LogEntry, Space, Task, Topic } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
 import { loadBoardSnapshot, saveBoardSnapshot } from "@/lib/board-cache";
-import { useLiveUpdates, type ConnectionInfo } from "@/lib/use-live-updates";
+import { useLiveUpdates, type ConnectionInfo, type ReconcileCursor, type ReconcileResult } from "@/lib/use-live-updates";
+import { drainQueuedMutations } from "@/lib/write-queue";
 import { LiveEvent, mergeById, mergeLogs, maxTimestamp, removeById, upsertById } from "@/lib/live-utils";
 import { normalizeBoardSessionKey } from "@/lib/board-session";
 import { CLAWBOARD_CONFIG_UPDATED_EVENT } from "@/lib/config-events";
@@ -193,6 +194,7 @@ type ThreadWorkSignalSnapshot = {
 };
 type ChangesPayload = {
   cursor?: unknown;
+  cursorSeq?: unknown;
   spaces?: unknown;
   topics?: unknown;
   logs?: unknown;
@@ -362,6 +364,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [browserOnline, setBrowserOnline] = useState(() =>
     typeof navigator !== "undefined" ? navigator.onLine : true
   );
+  const liveEventQueueRef = useRef<LiveEvent[]>([]);
+  const liveEventFlushFrameRef = useRef<number | null>(null);
+  const snapshotSaveTimerRef = useRef<number | null>(null);
   const unsnoozedTopicsRaw = useLocalStorageItem(UNSNOOZED_TOPICS_KEY) ?? "{}";
   const chatSeenRaw = useLocalStorageItem(CHAT_SEEN_AT_KEY) ?? "{}";
   const notificationsEnabledRaw = useLocalStorageItem(PUSH_ENABLED_KEY);
@@ -406,20 +411,26 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     [activeUnsnoozedTopicCount, unreadMessageCount]
   );
 
-  const upsertSpace = (space: Space) => setSpaces((prev) => upsertById(prev, space));
-  const upsertTopic = (topic: Topic) => setTopics((prev) => upsertById(prev, topic));
+  const upsertSpace = useCallback((space: Space) => {
+    setSpaces((prev) => upsertById(prev, space));
+  }, []);
+  const upsertTopic = useCallback((topic: Topic) => {
+    setTopics((prev) => upsertById(prev, topic));
+  }, []);
   const upsertTask = useCallback((task: Task) => {
     upsertTopic(taskToTopic(task));
+  }, [upsertTopic]);
+  const appendLog = useCallback((log: LogEntry) => {
+    setLogs((prev) => mergeLogs(prev, [log]));
   }, []);
-  const appendLog = (log: LogEntry) => setLogs((prev) => mergeLogs(prev, [log]));
-  const upsertDraft = (draft: Draft) =>
+  const upsertDraft = useCallback((draft: Draft) =>
     setDrafts((prev) => {
       const key = (draft?.key ?? "").trim();
       if (!key) return prev;
       const current = prev[key];
       if (current && JSON.stringify(current) === JSON.stringify(draft)) return prev;
       return { ...prev, [key]: draft };
-    });
+    }), []);
 
   const markChatSeen = useCallback(
     (chatKey: string, explicitSeenAt?: string) => {
@@ -545,13 +556,15 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let active = true;
     void loadBoardSnapshot().then((snapshot) => {
-      if (!active || !snapshot) return;
-      setSpaces((prev) => (prev.length > 0 ? prev : snapshot.spaces));
-      setTopics((prev) => (prev.length > 0 ? prev : snapshot.topics));
-      setLogs((prev) => (prev.length > 0 ? prev : snapshot.logs));
-      setDrafts((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.drafts));
-      setOpenclawTyping((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.openclawTyping));
-      setOpenclawThreadWork((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.openclawThreadWork));
+      if (!active) return;
+      if (snapshot) {
+        setSpaces((prev) => (prev.length > 0 ? prev : snapshot.spaces));
+        setTopics((prev) => (prev.length > 0 ? prev : snapshot.topics));
+        setLogs((prev) => (prev.length > 0 ? prev : snapshot.logs));
+        setDrafts((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.drafts));
+        setOpenclawTyping((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.openclawTyping));
+        setOpenclawThreadWork((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.openclawThreadWork));
+      }
       setHydrated(true);
     });
     return () => {
@@ -559,10 +572,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const reconcile = useCallback(async (since?: string) => {
+  const reconcile = useCallback(async (reconcileCursor?: ReconcileCursor): Promise<ReconcileResult> => {
+    const since = String(reconcileCursor?.since ?? "").trim() || undefined;
+    const sinceSeq =
+      typeof reconcileCursor?.sinceSeq === "number" && Number.isFinite(reconcileCursor.sinceSeq)
+        ? Math.floor(reconcileCursor.sinceSeq)
+        : undefined;
     const params = new URLSearchParams();
     if (since) params.set("since", since);
-    if (!since && INITIAL_CHANGES_LIMIT_LOGS > 0) {
+    if (typeof sinceSeq === "number" && sinceSeq >= 0) params.set("sinceSeq", String(sinceSeq));
+    if (!since && typeof sinceSeq !== "number" && INITIAL_CHANGES_LIMIT_LOGS > 0) {
       params.set("limitLogs", String(INITIAL_CHANGES_LIMIT_LOGS));
     }
     const query = params.toString();
@@ -577,21 +596,24 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     if (!res.ok) return;
     const payload = (await res.json().catch(() => null)) as ChangesPayload | null;
     if (!payload) return;
-    const cursor = String(payload.cursor ?? "").trim() || undefined;
+    const responseCursor = String(payload.cursor ?? "").trim() || undefined;
+    const cursorSeqRaw = Number(payload.cursorSeq);
+    const cursorSeq = Number.isFinite(cursorSeqRaw) && cursorSeqRaw >= 0 ? Math.floor(cursorSeqRaw) : undefined;
+    const incremental = Boolean(since) || typeof sinceSeq === "number";
     const deletedTopics = Array.isArray(payload.deletedTopics) ? (payload.deletedTopics as DeletedEntityRef[]) : [];
     const typingSignals = Array.isArray(payload.openclawTyping) ? (payload.openclawTyping as TypingSignalSnapshot[]) : [];
     const threadWorkSignals = Array.isArray(payload.openclawThreadWork)
       ? (payload.openclawThreadWork as ThreadWorkSignalSnapshot[])
       : [];
     // Full snapshot: replace to avoid keeping stale items when the stream resets or base/token changes.
-    if (!since) {
+    if (!incremental) {
       if (Array.isArray(payload.spaces)) {
-        setSpaces((prev) => overlayFresherById(payload.spaces as Space[], prev, cursor, mergeById));
+        setSpaces((prev) => overlayFresherById(payload.spaces as Space[], prev, responseCursor, mergeById));
       }
       if (Array.isArray(payload.topics)) {
         setTopics((prev) =>
           applyDeletedEntityTombstones(
-            overlayFresherById(payload.topics as Topic[], prev, cursor, mergeById),
+            overlayFresherById(payload.topics as Topic[], prev, responseCursor, mergeById),
             deletedTopics
           )
         );
@@ -600,7 +622,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       }
       if (Array.isArray(payload.logs)) {
         setLogs((prev) => {
-          const next = overlayFresherById(payload.logs as LogEntry[], prev, cursor, mergeLogs);
+          const next = overlayFresherById(payload.logs as LogEntry[], prev, responseCursor, mergeLogs);
           if (!Array.isArray(payload.deletedLogIds) || payload.deletedLogIds.length === 0) return next;
           const deleted = new Set(payload.deletedLogIds.map((id: unknown) => String(id ?? "").trim()).filter(Boolean));
           if (deleted.size === 0) return next;
@@ -612,8 +634,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           setLogs((prev) => prev.filter((row) => !deleted.has(row.id)));
         }
       }
-      setOpenclawTyping((prev) => reconcileTypingSnapshot(prev, typingSignals, cursor));
-      setOpenclawThreadWork((prev) => reconcileThreadWorkSnapshot(prev, threadWorkSignals, cursor));
+      setOpenclawTyping((prev) => reconcileTypingSnapshot(prev, typingSignals, responseCursor));
+      setOpenclawThreadWork((prev) => reconcileThreadWorkSnapshot(prev, threadWorkSignals, responseCursor));
       if (Array.isArray(payload.drafts)) {
         setDrafts((prev) => {
           const next: Record<string, Draft> = {};
@@ -622,7 +644,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
             if (!key) continue;
             next[key] = item as Draft;
           }
-          return overlayFresherDrafts(next, prev, cursor);
+          return overlayFresherDrafts(next, prev, responseCursor);
         });
       }
       setHydrated(true);
@@ -638,8 +660,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         const deleted = new Set(payload.deletedLogIds.map((id: unknown) => String(id ?? "").trim()).filter(Boolean));
         if (deleted.size > 0) setLogs((prev) => prev.filter((row) => !deleted.has(row.id)));
       }
-      setOpenclawTyping((prev) => reconcileTypingSnapshot(prev, typingSignals, cursor));
-      setOpenclawThreadWork((prev) => reconcileThreadWorkSnapshot(prev, threadWorkSignals, cursor));
+      setOpenclawTyping((prev) => reconcileTypingSnapshot(prev, typingSignals, responseCursor));
+      setOpenclawThreadWork((prev) => reconcileThreadWorkSnapshot(prev, threadWorkSignals, responseCursor));
       if (Array.isArray(payload.drafts)) {
         setDrafts((prev) => {
           const next = { ...prev };
@@ -653,111 +675,124 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       }
     }
     const ts =
-      cursor ||
+      responseCursor ||
       maxTimestamp([
         ...((payload.spaces as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
         ...((payload.topics as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
         ...((payload.logs as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
         ...((payload.drafts as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
       ]);
-    return ts;
+    return { cursor: ts, cursorSeq };
   }, []);
+
+  const applyLiveEvent = useCallback((event: LiveEvent) => {
+    if (!event || !event.type) return;
+    if (event.type === "space.upserted" && event.data && typeof event.data === "object") {
+      upsertSpace(event.data as Space);
+      return;
+    }
+    if (event.type === "config.updated") {
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new Event(CLAWBOARD_CONFIG_UPDATED_EVENT));
+      }
+      return;
+    }
+    if (event.type === "topic.upserted" && event.data && typeof event.data === "object") {
+      upsertTopic(event.data as Topic);
+      return;
+    }
+    if (event.type === "topic.deleted" && event.data && typeof event.data === "object") {
+      const id = (event.data as { id?: string }).id;
+      if (id) {
+        setTopics((prev) => removeById(prev, id));
+        setLogs((prev) => prev.map((item) => (item.topicId === id ? { ...item, topicId: null } : item)));
+      }
+      return;
+    }
+    if ((event.type === "log.appended" || event.type === "log.patched") && event.data && typeof event.data === "object") {
+      const entry = event.data as LogEntry;
+      appendLog(entry);
+      if (shouldScheduleAuthoritativeReplay(entry)) {
+        void reconcile();
+      }
+      return;
+    }
+    if (event.type === "openclaw.typing" && event.data && typeof event.data === "object") {
+      const payload = event.data as { sessionKey?: unknown; typing?: unknown; requestId?: unknown };
+      const sessionKey = String(payload.sessionKey ?? "").trim();
+      const normalizedSessionKey = normalizeBoardSessionKey(sessionKey);
+      if (!normalizedSessionKey) return;
+      const typing = Boolean(payload.typing);
+      const requestId = String(payload.requestId ?? "").trim();
+      const updatedAt = resolveLiveEventTimestamp(event);
+      setOpenclawTyping((prev) => {
+        const current = prev[normalizedSessionKey];
+        if (!isIncomingSignalNewer(current?.updatedAt, updatedAt)) return prev;
+        return {
+          ...prev,
+          [normalizedSessionKey]: { typing, requestId: requestId || undefined, updatedAt },
+        };
+      });
+      return;
+    }
+    if (event.type === "openclaw.thread_work" && event.data && typeof event.data === "object") {
+      const payload = event.data as { sessionKey?: unknown; active?: unknown; requestId?: unknown; reason?: unknown };
+      const sessionKey = String(payload.sessionKey ?? "").trim();
+      const normalizedSessionKey = normalizeBoardSessionKey(sessionKey);
+      if (!normalizedSessionKey) return;
+      const active = Boolean(payload.active);
+      const requestId = String(payload.requestId ?? "").trim();
+      const reason = String(payload.reason ?? "").trim();
+      const updatedAt = resolveLiveEventTimestamp(event);
+      setOpenclawThreadWork((prev) => {
+        const current = prev[normalizedSessionKey];
+        if (!isIncomingSignalNewer(current?.updatedAt, updatedAt)) return prev;
+        return {
+          ...prev,
+          [normalizedSessionKey]: {
+            active,
+            requestId: requestId || undefined,
+            reason: reason || undefined,
+            updatedAt,
+          },
+        };
+      });
+      if (!active) {
+        void reconcile();
+      }
+      return;
+    }
+    if (event.type === "draft.upserted" && event.data && typeof event.data === "object") {
+      const draft = event.data as Draft;
+      const key = String((draft as Draft | undefined)?.key ?? "").trim();
+      if (!key) return;
+      upsertDraft(draft);
+      return;
+    }
+    if (event.type === "log.deleted" && event.data && typeof event.data === "object") {
+      const id = (event.data as { id?: string }).id;
+      if (id) setLogs((prev) => removeById(prev, id));
+    }
+  }, [appendLog, reconcile, upsertDraft, upsertSpace, upsertTopic]);
+
+  const enqueueLiveEvent = useCallback((event: LiveEvent) => {
+    liveEventQueueRef.current.push(event);
+    if (liveEventFlushFrameRef.current != null) return;
+    liveEventFlushFrameRef.current = window.requestAnimationFrame(() => {
+      liveEventFlushFrameRef.current = null;
+      const batch = liveEventQueueRef.current.splice(0);
+      if (batch.length === 0) return;
+      startTransition(() => {
+        for (const item of batch) {
+          applyLiveEvent(item);
+        }
+      });
+    });
+  }, [applyLiveEvent]);
 
   useLiveUpdates({
     onConnectionChange: handleConnectionChange,
-    onEvent: (event: LiveEvent) => {
-      if (!event || !event.type) return;
-      if (event.type === "space.upserted" && event.data && typeof event.data === "object") {
-        upsertSpace(event.data as Space);
-        return;
-      }
-      if (event.type === "config.updated") {
-        if (typeof window !== "undefined") {
-          window.dispatchEvent(new Event(CLAWBOARD_CONFIG_UPDATED_EVENT));
-        }
-        return;
-      }
-      if (event.type === "topic.upserted" && event.data && typeof event.data === "object") {
-        upsertTopic(event.data as Topic);
-        return;
-      }
-      if (event.type === "topic.deleted" && event.data && typeof event.data === "object") {
-        const id = (event.data as { id?: string }).id;
-        if (id) {
-          setTopics((prev) => removeById(prev, id));
-          setLogs((prev) => prev.map((item) => (item.topicId === id ? { ...item, topicId: null } : item)));
-        }
-        return;
-      }
-      if (
-        (event.type === "log.appended" || event.type === "log.patched") &&
-        event.data &&
-        typeof event.data === "object"
-      ) {
-        const entry = event.data as LogEntry;
-        appendLog(entry);
-        if (shouldScheduleAuthoritativeReplay(entry)) {
-          void reconcile();
-        }
-        return;
-      }
-      if (event.type === "openclaw.typing" && event.data && typeof event.data === "object") {
-        const payload = event.data as { sessionKey?: unknown; typing?: unknown; requestId?: unknown };
-        const sessionKey = String(payload.sessionKey ?? "").trim();
-        const normalizedSessionKey = normalizeBoardSessionKey(sessionKey);
-        if (!normalizedSessionKey) return;
-        const typing = Boolean(payload.typing);
-        const requestId = String(payload.requestId ?? "").trim();
-        const updatedAt = resolveLiveEventTimestamp(event);
-        setOpenclawTyping((prev) => {
-          const current = prev[normalizedSessionKey];
-          if (!isIncomingSignalNewer(current?.updatedAt, updatedAt)) return prev;
-          return {
-            ...prev,
-            [normalizedSessionKey]: { typing, requestId: requestId || undefined, updatedAt },
-          };
-        });
-        return;
-      }
-      if (event.type === "openclaw.thread_work" && event.data && typeof event.data === "object") {
-        const payload = event.data as { sessionKey?: unknown; active?: unknown; requestId?: unknown; reason?: unknown };
-        const sessionKey = String(payload.sessionKey ?? "").trim();
-        const normalizedSessionKey = normalizeBoardSessionKey(sessionKey);
-        if (!normalizedSessionKey) return;
-        const active = Boolean(payload.active);
-        const requestId = String(payload.requestId ?? "").trim();
-        const reason = String(payload.reason ?? "").trim();
-        const updatedAt = resolveLiveEventTimestamp(event);
-        setOpenclawThreadWork((prev) => {
-          const current = prev[normalizedSessionKey];
-          if (!isIncomingSignalNewer(current?.updatedAt, updatedAt)) return prev;
-          return {
-            ...prev,
-            [normalizedSessionKey]: {
-              active,
-              requestId: requestId || undefined,
-              reason: reason || undefined,
-              updatedAt,
-            },
-          };
-        });
-        if (!active) {
-          void reconcile();
-        }
-        return;
-      }
-      if (event.type === "draft.upserted" && event.data && typeof event.data === "object") {
-        const draft = event.data as Draft;
-        const key = String((draft as Draft | undefined)?.key ?? "").trim();
-        if (!key) return;
-        upsertDraft(draft);
-        return;
-      }
-      if (event.type === "log.deleted" && event.data && typeof event.data === "object") {
-        const id = (event.data as { id?: string }).id;
-        if (id) setLogs((prev) => removeById(prev, id));
-      }
-    },
+    onEvent: enqueueLiveEvent,
     reconcile,
   });
 
@@ -765,6 +800,29 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const knownLogIdsRef = useRef<Set<string> | null>(null);
   const prevTopicStatusRef = useRef<Map<string, { status: string; snoozedUntil: string | null }> | null>(null);
   const seededSeenMapRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      if (liveEventFlushFrameRef.current != null) {
+        window.cancelAnimationFrame(liveEventFlushFrameRef.current);
+      }
+      if (snapshotSaveTimerRef.current != null) {
+        window.clearTimeout(snapshotSaveTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    if (!browserOnline) return;
+    void drainQueuedMutations();
+    const timer = window.setInterval(() => {
+      void drainQueuedMutations();
+    }, 5_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [browserOnline, hydrated, sseConnected]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -879,15 +937,27 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!hydrated) return;
-    void saveBoardSnapshot({
-      spaces,
-      topics: safeTopics,
-      logs,
-      drafts,
-      openclawTyping,
-      openclawThreadWork,
-      cachedAt: new Date().toISOString(),
-    });
+    if (snapshotSaveTimerRef.current != null) {
+      window.clearTimeout(snapshotSaveTimerRef.current);
+    }
+    snapshotSaveTimerRef.current = window.setTimeout(() => {
+      void saveBoardSnapshot({
+        spaces,
+        topics: safeTopics,
+        logs,
+        drafts,
+        openclawTyping,
+        openclawThreadWork,
+        cachedAt: new Date().toISOString(),
+      });
+      snapshotSaveTimerRef.current = null;
+    }, 180);
+    return () => {
+      if (snapshotSaveTimerRef.current != null) {
+        window.clearTimeout(snapshotSaveTimerRef.current);
+        snapshotSaveTimerRef.current = null;
+      }
+    };
   }, [drafts, hydrated, logs, openclawThreadWork, openclawTyping, safeTopics, spaces]);
 
   useEffect(() => {
@@ -1025,6 +1095,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       sseConnected,
       connectionStatus,
       disconnectedSince,
+      upsertSpace,
+      upsertTopic,
+      appendLog,
+      upsertDraft,
       setTasks,
       markChatSeen,
       upsertTask,

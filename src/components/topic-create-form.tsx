@@ -4,8 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Input, Select, TextArea } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
-import { apiFetch } from "@/lib/api";
 import { useLocalStorageItem } from "@/lib/local-storage";
+import { queueableApiMutation } from "@/lib/write-queue";
 
 export function TopicCreateForm() {
   const router = useRouter();
@@ -28,7 +28,8 @@ export function TopicCreateForm() {
 
     setSaving(true);
     try {
-      const res = await apiFetch(
+      const queuedUpdatedAt = new Date().toISOString();
+      const res = await queueableApiMutation(
         "/api/topics",
         {
         method: "POST",
@@ -42,7 +43,23 @@ export function TopicCreateForm() {
           spaceId: activeSpaceId || undefined,
         }),
         },
-        token
+        {
+          token,
+          queuedResponse: {
+            id: `topic-${queuedUpdatedAt}`,
+            spaceId: activeSpaceId || "space-default",
+            name: name.trim(),
+            description: description.trim() || null,
+            priority,
+            status: "active",
+            createdBy: "user",
+            sortIndex: 0,
+            tags: [],
+            createdAt: queuedUpdatedAt,
+            updatedAt: queuedUpdatedAt,
+            queued: true,
+          },
+        }
       );
 
       if (!res.ok) {

@@ -559,6 +559,11 @@ class ChangesResponse(BaseModel):
         description="Best-effort incremental reconciliation cursor (ISO timestamp).",
         examples=["2026-02-09T18:05:00.000Z"],
     )
+    cursorSeq: Optional[int] = Field(
+        default=None,
+        description="Durable monotonic change sequence for replay-safe incremental reconciliation.",
+        examples=[1532],
+    )
     spaces: List[SpaceOut] = Field(description="Spaces updated since timestamp.")
     topics: List[TopicOut] = Field(description="Topics updated since timestamp.")
     logs: List[LogOutLite] = Field(description="Logs created since timestamp (lightweight, excludes raw).")
@@ -610,6 +615,12 @@ class OpenClawChatRequest(BaseModel):
         examples=["Hello from Clawboard."],
         min_length=1,
         max_length=20_000,
+    )
+    requestId: Optional[str] = Field(
+        default=None,
+        description="Optional client-provided request id for durable offline replay. Must be an occhat-* id when set.",
+        examples=["occhat-123e4567-e89b-12d3-a456-426614174000"],
+        max_length=128,
     )
     agentId: Optional[str] = Field(
         default="main",

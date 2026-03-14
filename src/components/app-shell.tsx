@@ -23,7 +23,8 @@ import {
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 import { buildTopicUrl, withFocusParam, withRevealParam, withSpaceParam } from "@/lib/url";
-import { apiFetch, getApiBase } from "@/lib/api";
+import { getApiBase } from "@/lib/api";
+import { queueableApiMutation } from "@/lib/write-queue";
 import type { OpenClawWorkspace, Space, Topic } from "@/lib/types";
 import { compareByBoardOrder } from "@/lib/topic-order";
 import { chatKeyForTopic } from "@/lib/attention-state";
@@ -868,14 +869,14 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
         })
       );
       try {
-        const res = await apiFetch(
+        const res = await queueableApiMutation(
           "/api/topics/reorder",
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ orderedIds }),
           },
-          token
+          { token, queuedResponse: { queued: true } }
         );
         if (!res.ok) throw new Error(`Failed to reorder topics (${res.status}).`);
       } catch (err) {

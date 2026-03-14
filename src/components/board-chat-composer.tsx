@@ -17,6 +17,7 @@ import { apiFetch } from "@/lib/api";
 import { useLocalStorageItem } from "@/lib/local-storage";
 import { cn } from "@/lib/cn";
 import { randomId } from "@/lib/id";
+import { queueableApiMutation } from "@/lib/write-queue";
 import { AttachmentStrip, type AttachmentLike } from "@/components/attachments";
 import { usePersistentDraft } from "@/lib/drafts";
 import { ChatSuggestions, type SlashCommand } from "@/components/chat/chat-suggestions";
@@ -643,6 +644,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     setPendingRequestId(null);
 
     const localId = randomId();
+    const queuedRequestId = `occhat-${randomId()}`;
     const createdAt = new Date().toISOString();
     const pendingAttachments = attachments.map((att) => ({
       id: att.id,
@@ -661,6 +663,9 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
     const attachmentsSnapshot = attachments;
     setAttachments([]);
     try {
+      if (attachmentsSnapshot.length > 0 && typeof navigator !== "undefined" && navigator.onLine === false) {
+        throw new Error("Attachments require a live connection.");
+      }
       let attachmentIds: string[] | undefined;
       if (attachmentsSnapshot.length > 0) {
         const form = new FormData();
@@ -699,7 +704,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
         attachmentIds = Array.isArray(uploaded) ? uploaded.map((row) => String(row?.id ?? "").trim()).filter(Boolean) : [];
       }
 
-      const res = await apiFetch(
+      const res = await queueableApiMutation(
         "/api/openclaw/chat",
         {
           method: "POST",
@@ -708,11 +713,15 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
             sessionKey,
             spaceId: String(spaceId ?? "").trim() || undefined,
             message,
+            requestId: queuedRequestId,
             agentId,
             attachmentIds,
           }),
         },
-        token
+        {
+          token,
+          queuedResponse: { queued: true, requestId: queuedRequestId },
+        }
       );
       if (!res.ok) {
         const detail = await res.json().catch(() => null);

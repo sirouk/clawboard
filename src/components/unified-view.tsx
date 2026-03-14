@@ -26,6 +26,7 @@ import { useAppConfig, useOpenClawWorkspaces } from "@/components/providers";
 import { decodeSlugId, encodeTopicSlug, slugify } from "@/lib/slug";
 import { cn } from "@/lib/cn";
 import { apiFetch } from "@/lib/api";
+import { queueableApiMutation } from "@/lib/write-queue";
 import { useDataStore } from "@/components/data-provider";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { mergeLogs } from "@/lib/live-utils";
@@ -4381,29 +4382,27 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const effectiveView: TopicView = normalizedSearch ? "all" : topicView;
       let topicStatus = String(topic.status ?? "active").trim().toLowerCase();
       if (topicStatus === "paused") topicStatus = "snoozed";
+      const isSnoozedTopic = topicStatus === "snoozed";
+      const isArchivedTopic = topicStatus === "archived";
+      const isDoneTopic = topicStatus === "done";
       const taskList = tasksByTopic.get(topic.id) ?? [];
       const hasMatchingTask = taskList.some((task) => matchesStatusFilter(task) && matchesTaskSearch(task));
       const topicMatchesOwnStatus = statusFilter === "all" ? showDone || topicStatus !== "done" : topicStatus === statusFilter;
 
-      if (effectiveView === "active") {
-        if (topicStatus === "snoozed") {
-          // "Show snoozed" should surface snoozed topics even when they currently have no tasks.
-          if (!showSnoozedTasks && !hasMatchingTask) return false;
-        } else if (topicStatus === "archived") {
-          const includeArchivedTopicByTask =
-            (showDone || statusFilter === "done") && (topicMatchesOwnStatus || hasMatchingTask);
-          if (!includeArchivedTopicByTask) return false;
-        }
-      } else if (effectiveView === "snoozed") {
-        if (topicStatus !== "snoozed") return false;
+      if (effectiveView === "snoozed") {
+        if (!isSnoozedTopic) return false;
       } else if (effectiveView === "archived") {
-        if (topicStatus !== "archived") return false;
+        if (!isArchivedTopic) return false;
+      } else {
+        if (isArchivedTopic && effectiveView !== "all") return false;
+        if (isSnoozedTopic && !showSnoozedTasks) return false;
+        if (isDoneTopic && !showDone) return false;
       }
 
       if (statusFilter !== "all") {
         return topicMatchesOwnStatus || hasMatchingTask;
       }
-      if (!showDone && topicStatus === "done" && !hasMatchingTask) {
+      if (!showDone && isDoneTopic) {
         return false;
       }
       if (!normalizedSearch) return true;
@@ -4715,14 +4714,25 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     const shouldPromote = shouldPromoteTopicTouch(body);
     applyOptimisticTaskPatch(taskId, updates, { promote: shouldPromote });
-    const res = await apiFetch(
+    const queuedUpdatedAt = new Date().toISOString();
+    const res = await queueableApiMutation(
       `/api/topics/${encodeURIComponent(taskId)}`,
       {
         method: "PATCH",
         headers: writeHeaders,
         body: JSON.stringify(body),
       },
-      token
+      {
+        token,
+        queuedResponse: {
+          ...current,
+          ...body,
+          id: taskId,
+          topicId: current.topicId,
+          updatedAt: queuedUpdatedAt,
+          queued: true,
+        },
+      }
     );
 
     if (!res.ok) {
@@ -4801,14 +4811,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       })
     );
     try {
-      const res = await apiFetch(
+      const res = await queueableApiMutation(
         "/api/topics/reorder",
         {
           method: "POST",
           headers: writeHeaders,
           body: JSON.stringify({ orderedIds }),
         },
-        token
+        { token, queuedResponse: { queued: true } }
       );
       if (!res.ok) {
         throw new Error(`Failed to reorder topics (${res.status}).`);
@@ -4930,7 +4940,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setRenameSavingKey(renameKey);
     setRenameError(renameKey);
     try {
-      const res = await apiFetch(
+      const queuedUpdatedAt = new Date().toISOString();
+      const res = await queueableApiMutation(
         "/api/topics",
         {
           method: "POST",
@@ -4942,7 +4953,18 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             tags: tagsChanged ? nextTags : currentTags,
           }),
         },
-        token
+        {
+          token,
+          queuedResponse: {
+            ...topic,
+            id: topic.id,
+            name: nameChanged ? nextName : topic.name,
+            color: nextColor,
+            tags: tagsChanged ? nextTags : currentTags,
+            updatedAt: queuedUpdatedAt,
+            queued: true,
+          },
+        }
       );
       if (!res.ok) {
         setRenameError(renameKey, "Failed to rename topic.");
@@ -5060,7 +5082,8 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setRenameSavingKey(renameKey);
     setRenameError(renameKey);
     try {
-      const res = await apiFetch(
+      const queuedUpdatedAt = new Date().toISOString();
+      const res = await queueableApiMutation(
         "/api/topics",
         {
           method: "POST",
@@ -5072,7 +5095,19 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
             tags: tagsChanged ? nextTags : currentTags,
           }),
         },
-        token
+        {
+          token,
+          queuedResponse: {
+            ...task,
+            id: task.id,
+            name: titleChanged ? nextTitle : task.title ?? task.name,
+            title: titleChanged ? nextTitle : task.title ?? task.name,
+            color: nextColor,
+            tags: tagsChanged ? nextTags : currentTags,
+            updatedAt: queuedUpdatedAt,
+            queued: true,
+          },
+        }
       );
       if (!res.ok) {
         setRenameError(renameKey, "Failed to rename topic.");
@@ -5330,14 +5365,24 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const shouldPromote = shouldPromoteTopicTouch(patch as Record<string, unknown>);
       applyOptimisticTopicPatch(topicId, patch, { promote: shouldPromote });
       try {
-        const res = await apiFetch(
+        const queuedUpdatedAt = new Date().toISOString();
+        const res = await queueableApiMutation(
           `/api/topics/${encodeURIComponent(topicId)}`,
           {
             method: "PATCH",
             headers: writeHeaders,
             body: JSON.stringify(patch),
           },
-          token
+          {
+            token,
+            queuedResponse: {
+              ...current,
+              ...patch,
+              id: topicId,
+              updatedAt: queuedUpdatedAt,
+              queued: true,
+            },
+          }
         );
         if (!res.ok) throw new Error(`Failed to update topic (${res.status}).`);
         const updated = parseTopicPayload(await res.json().catch(() => null));
@@ -5376,7 +5421,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     try {
       const removed = new Set<string>();
       for (const task of unassignedTasks) {
-        const res = await apiFetch(`/api/topics/${encodeURIComponent(task.id)}`, { method: "DELETE" }, token);
+        const res = await queueableApiMutation(
+          `/api/topics/${encodeURIComponent(task.id)}`,
+          { method: "DELETE" },
+          { token, queuedResponse: { deleted: true, queued: true } }
+        );
         if (!res.ok) continue;
         const payload = (await res.json().catch(() => null)) as { deleted?: boolean } | null;
         if (payload?.deleted) removed.add(task.id);
@@ -5412,7 +5461,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setDeleteInFlightKey(deleteKey);
     setRenameError(deleteKey);
     try {
-      const res = await apiFetch(`/api/topics/${encodeURIComponent(topic.id)}`, { method: "DELETE" }, token);
+      const res = await queueableApiMutation(
+        `/api/topics/${encodeURIComponent(topic.id)}`,
+        { method: "DELETE" },
+        { token, queuedResponse: { deleted: true, queued: true } }
+      );
       if (!res.ok) {
         setRenameError(deleteKey, "Failed to delete topic.");
         return;
@@ -5450,7 +5503,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     setDeleteInFlightKey(deleteKey);
     setRenameError(deleteKey);
     try {
-      const res = await apiFetch(`/api/topics/${encodeURIComponent(task.id)}`, { method: "DELETE" }, token);
+      const res = await queueableApiMutation(
+        `/api/topics/${encodeURIComponent(task.id)}`,
+        { method: "DELETE" },
+        { token, queuedResponse: { deleted: true, queued: true } }
+      );
       if (!res.ok) {
         setRenameError(deleteKey, "Failed to delete topic.");
         return;

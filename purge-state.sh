@@ -370,7 +370,7 @@ ARCHIVE_DIR="$ARCHIVE_ROOT/$TS"
 
 # Auto-sense paths (override via env vars if needed)
 OPENCLAW_DIR="${OPENCLAW_DIR:-$HOME/.openclaw}"
-CLAWD_REPO="${CLAWD_REPO:-$HOME/clawd}"
+MAIN_AGENT_WORKSPACE="${MAIN_AGENT_WORKSPACE:-${OPENCLAW_WORKSPACE_DIR:-$OPENCLAW_DIR/workspace}}"
 CLAWBOARD_DIR="$script_dir"  # this repo
 CLAWBOARD_ENV_FILE="${CLAWBOARD_ENV_FILE:-$CLAWBOARD_DIR/.env}"
 
@@ -409,12 +409,12 @@ print_plan() {
   say "  - $CLAWBOARD_DIR/Dockerfile*"
   say "  - $CLAWBOARD_DIR/src/ backend/ classifier/ scripts/ tests/ (all code)"
   say ""
-  say "Clawd repo identity/rules (kept):"
-  say "  - $CLAWD_REPO/IDENTITY.md"
-  say "  - $CLAWD_REPO/USER.md"
-  say "  - $CLAWD_REPO/SOUL.md"
-  say "  - $CLAWD_REPO/AGENTS.md"
-  say "  - $CLAWD_REPO/TOOLS.md"
+  say "Main OpenClaw workspace docs/rules (kept):"
+  say "  - $MAIN_AGENT_WORKSPACE/IDENTITY.md"
+  say "  - $MAIN_AGENT_WORKSPACE/USER.md"
+  say "  - $MAIN_AGENT_WORKSPACE/SOUL.md"
+  say "  - $MAIN_AGENT_WORKSPACE/AGENTS.md"
+  say "  - $MAIN_AGENT_WORKSPACE/TOOLS.md"
   say ""
 }
 
@@ -458,8 +458,8 @@ purge() {
   say "Clawboard (DB/vectors/indexes):"
   say "  - docker volumes (docker compose down -v)"
   say "  - $CLAWBOARD_DIR/data (qdrant storage, embeddings db, sqlite, etc.)"
-  say "Clawd repo (local archives from prior manual purges):"
-  say "  - $CLAWD_REPO/_purged and $CLAWD_REPO/_purged-db"
+  say "Main OpenClaw workspace (local archives from prior manual purges):"
+  say "  - $MAIN_AGENT_WORKSPACE/_purged and $MAIN_AGENT_WORKSPACE/_purged-db"
   say ""
 
   if [[ "$APPLY" == "1" ]]; then
@@ -518,9 +518,9 @@ purge() {
   # Clawboard data (host-mounted state)
   archive_or_delete "$CLAWBOARD_DIR/data"
 
-  # Clawd repo archives from earlier manual purges
-  archive_or_delete "$CLAWD_REPO/_purged"
-  archive_or_delete "$CLAWD_REPO/_purged-db"
+  # Main workspace archives from earlier manual purges
+  archive_or_delete "$MAIN_AGENT_WORKSPACE/_purged"
+  archive_or_delete "$MAIN_AGENT_WORKSPACE/_purged-db"
 
   say ""
   if [[ "$HARD_DELETE" == "1" ]]; then
@@ -637,9 +637,9 @@ restore_from_archive() {
   # Restore Clawboard data dir
   restore_item "$RESTORE_DIR/data" "$CLAWBOARD_DIR/data"
 
-  # Restore Clawd repo archives (optional)
-  restore_item "$RESTORE_DIR/_purged" "$CLAWD_REPO/_purged"
-  restore_item "$RESTORE_DIR/_purged-db" "$CLAWD_REPO/_purged-db"
+  # Restore main workspace archives (optional)
+  restore_item "$RESTORE_DIR/_purged" "$MAIN_AGENT_WORKSPACE/_purged"
+  restore_item "$RESTORE_DIR/_purged-db" "$MAIN_AGENT_WORKSPACE/_purged-db"
 
   say ""
   say "Restore complete."

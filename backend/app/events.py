@@ -27,9 +27,12 @@ class EventHub:
         with self._lock:
             self._subscribers.discard(q)
 
-    def publish(self, event: Dict[str, Any]) -> Dict[str, Any]:
-        event_id = self._next_id
-        self._next_id += 1
+    def publish(self, event: Dict[str, Any], event_id: int | None = None) -> Dict[str, Any]:
+        if event_id is None:
+            event_id = self._next_id
+            self._next_id += 1
+        else:
+            self._next_id = max(self._next_id, int(event_id) + 1)
         payload = {**event, "eventId": str(event_id)}
         record = (event_id, payload)
         self._buffer.append(record)

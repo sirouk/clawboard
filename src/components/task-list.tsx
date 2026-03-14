@@ -7,7 +7,7 @@ import { Button, SearchInput, Select, StatusPill } from "@/components/ui";
 import { useAppConfig } from "@/components/providers";
 import { formatRelativeTime } from "@/lib/format";
 import { buildTopicUrl } from "@/lib/url";
-import { apiFetch } from "@/lib/api";
+import { queueableApiMutation } from "@/lib/write-queue";
 
 const STATUS_OPTIONS: TaskStatus[] = ["todo", "doing", "blocked", "done"];
 
@@ -85,7 +85,8 @@ export function TaskList({
     const current = tasks.find((task) => task.id === taskId);
     if (!current) return;
     const nextTitle = String(updates.title ?? current.title ?? current.name).trim();
-    const res = await apiFetch(
+    const queuedUpdatedAt = new Date().toISOString();
+    const res = await queueableApiMutation(
       "/api/topics",
       {
         method: "POST",
@@ -98,7 +99,18 @@ export function TaskList({
           name: nextTitle || current.name,
         }),
       },
-      token
+      {
+        token,
+        queuedResponse: {
+          ...current,
+          ...updates,
+          id: taskId,
+          name: nextTitle || current.name,
+          title: nextTitle || current.title || current.name,
+          updatedAt: queuedUpdatedAt,
+          queued: true,
+        },
+      }
     );
 
     if (!res.ok) {

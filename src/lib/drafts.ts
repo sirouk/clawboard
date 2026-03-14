@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch, getApiToken } from "@/lib/api";
+import { getApiToken } from "@/lib/api";
 import type { Draft } from "@/lib/types";
 import { useDataStore } from "@/components/data-provider";
+import { queueableApiMutation } from "@/lib/write-queue";
 
 type LocalDraftSnapshot = { value: string; updatedAt: string };
 type DraftLike = Pick<Draft, "value" | "updatedAt"> | null | undefined;
@@ -81,11 +82,23 @@ export function queueDraftUpsert(key: string, value: string, debounceMs = DEFAUL
     const latest = pendingValues.get(safeKey) ?? "";
     pendingValues.delete(safeKey);
     try {
-      await apiFetch("/api/drafts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: safeKey, value: latest }),
-      });
+      await queueableApiMutation(
+        "/api/drafts",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: safeKey, value: latest }),
+        },
+        {
+          idempotencyKey: `draft:${safeKey}:${Date.now()}`,
+          queuedResponse: {
+            key: safeKey,
+            value: latest,
+            updatedAt: new Date().toISOString(),
+            queued: true,
+          },
+        }
+      );
     } catch {
       // Best-effort: drafts are convenience state.
     }

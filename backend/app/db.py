@@ -218,6 +218,10 @@ def _ensure_runtime_indexes() -> None:
         'ON openclawgatewayhistorycursor("updatedAt");',
         "CREATE INDEX IF NOT EXISTS ix_openclawgatewayhistorysyncstate_updated_at "
         'ON openclawgatewayhistorysyncstate("updatedAt");',
+        "CREATE INDEX IF NOT EXISTS ix_changeevent_event_type_id "
+        'ON changeevent("eventType", "id");',
+        "CREATE INDEX IF NOT EXISTS ix_changeevent_created_at "
+        'ON changeevent("createdAt");',
         "CREATE INDEX IF NOT EXISTS ix_ingestreceipt_updated_at "
         'ON ingestreceipt("updatedAt");',
         "CREATE INDEX IF NOT EXISTS ix_ingestreceipt_log_id "

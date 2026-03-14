@@ -9,7 +9,7 @@ from sqlalchemy import func, text
 from sqlmodel import select
 
 from .db import DATABASE_URL, get_session
-from .events import event_hub
+from .change_feed import publish_live_event
 from .models import Space, Topic, LogEntry, SessionRoutingMemory
 
 __all__ = [
@@ -444,7 +444,7 @@ def _resolve_source_space_id(
 def _publish_space_upserted(space: Space | None) -> None:
     if not space:
         return
-    event_hub.publish({"type": "space.upserted", "data": space.model_dump(), "eventTs": space.updatedAt})
+    publish_live_event({"type": "space.upserted", "data": space.model_dump(), "eventTs": space.updatedAt})
 
 
 # ---------------------------------------------------------------------------
