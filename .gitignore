@@ -34,6 +34,7 @@ clawboard-*-tests-*/
 *.sqlite3
 __pycache__/
 *.py[cod]
+*.cover
 backend/.venv/
 backend/data/
 fastembed_cache/

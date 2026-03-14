@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { computeEffectiveSessionKey, parseBoardSessionKey } from "./session-key.js";
+import {
+  boardSessionRouteToSessionKey,
+  boardSessionRouteToSessionKeys,
+  computeEffectiveSessionKey,
+  parseBoardSessionKey,
+} from "./session-key.js";
 
 test("computeEffectiveSessionKey prefers conversationId over channelId", () => {
   const meta = { messageId: "m1" };
@@ -61,6 +66,13 @@ test("parseBoardSessionKey parses task scope", () => {
   });
 });
 
+test("parseBoardSessionKey parses topic scope without inventing a task id", () => {
+  assert.deepEqual(parseBoardSessionKey("clawboard:topic:topic-123"), {
+    kind: "topic",
+    topicId: "topic-123",
+  });
+});
+
 test("parseBoardSessionKey parses wrapped task scope", () => {
   assert.deepEqual(parseBoardSessionKey("agent:main:clawboard:task:topic-123:task-456"), {
     kind: "task",
@@ -84,6 +96,17 @@ test("parseBoardSessionKey rejects malformed values", () => {
   assert.equal(parseBoardSessionKey("clawboard:task:topic-1"), null);
   assert.equal(parseBoardSessionKey("clawboard:task:topic-1:bar"), null);
   assert.equal(parseBoardSessionKey("channel:discord"), null);
+});
+
+test("board session route helpers preserve canonical keys for topic and task scopes", () => {
+  assert.equal(
+    boardSessionRouteToSessionKey({ kind: "topic", topicId: "topic-123" }),
+    "clawboard:topic:topic-123",
+  );
+  assert.deepEqual(
+    boardSessionRouteToSessionKeys({ kind: "task", topicId: "topic-123", taskId: "task-456" }),
+    ["clawboard:task:topic-123:task-456", "clawboard:topic:topic-123"],
+  );
 });
 
 // Additional tests for edge cases

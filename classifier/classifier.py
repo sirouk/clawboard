@@ -110,10 +110,31 @@ def _parse_board_session_key(session_key: str) -> tuple[str | None, str | None]:
     if not base:
         return (None, None)
 
-    topic_match = re.search(r"clawboard:topic:([^\s|]+)", base)
-    if topic_match:
-        topic_id = topic_match.group(1)
-        return (topic_id, topic_id)
+    parts = base.split(":")
+    try:
+        clawboard_index = parts.index("clawboard")
+    except ValueError:
+        return (None, None)
+
+    if clawboard_index + 2 >= len(parts):
+        return (None, None)
+
+    scope_kind = str(parts[clawboard_index + 1] or "").strip().lower()
+    topic_id = str(parts[clawboard_index + 2] or "").strip() or None
+    if not topic_id:
+        return (None, None)
+
+    if scope_kind == "topic":
+        return (topic_id, None)
+
+    if scope_kind == "task":
+        task_index = clawboard_index + 3
+        if task_index >= len(parts):
+            return (None, None)
+        task_id = str(parts[task_index] or "").strip() or None
+        if not task_id:
+            return (None, None)
+        return (topic_id, task_id)
 
     return (None, None)
 
@@ -4082,6 +4103,121 @@ def classify_session(session_key: str):
 
         return
 
+    if forced_topic_id:
+        # Topic chat is intentionally topic-only in the simplified board model. Keep every
+        # log in the visible bundle pinned to the topic and clear any stale task drift.
+        for e in scope_logs:
+            entry_status = str(e.get("classificationStatus") or "pending")
+            should_clear_stale_task = (
+                entry_status == "classified"
+                and str(e.get("topicId") or "").strip() == str(forced_topic_id or "").strip()
+                and bool(str(e.get("taskId") or "").strip())
+            )
+            if entry_status != "pending" and not should_clear_stale_task:
+                continue
+            attempts = int(e.get("classificationAttempts") or 0)
+            if _is_cron_event(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": None,
+                        "taskId": None,
+                        "classificationStatus": "failed",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_cron_event",
+                    },
+                )
+                continue
+            control_error = _control_plane_conversation_error(e)
+            if control_error:
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": None,
+                        "taskId": None,
+                        "classificationStatus": "failed",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": control_error,
+                    },
+                )
+                continue
+            if _is_memory_action(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": forced_topic_id,
+                        "taskId": None,
+                        "classificationStatus": "classified",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_memory_action",
+                    },
+                )
+                continue
+            if _is_tool_trace_action(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": forced_topic_id,
+                        "taskId": None,
+                        "classificationStatus": "classified",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_tool_activity",
+                    },
+                )
+                continue
+            if attempts >= MAX_ATTEMPTS:
+                continue
+            if _is_command_conversation(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": forced_topic_id,
+                        "taskId": None,
+                        "classificationStatus": "classified",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_command",
+                    },
+                )
+                continue
+            if _is_noise_conversation(e):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": forced_topic_id,
+                        "taskId": None,
+                        "classificationStatus": "failed",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": _noise_error_code(_log_text(e)),
+                    },
+                )
+                continue
+            if str(e.get("type") or "") in ("system", "import"):
+                patch_log(
+                    e["id"],
+                    {
+                        "topicId": forced_topic_id,
+                        "taskId": None,
+                        "classificationStatus": "classified",
+                        "classificationAttempts": attempts + 1,
+                        "classificationError": "filtered_non_semantic",
+                    },
+                )
+                continue
+            patch_payload = {
+                "topicId": forced_topic_id,
+                "taskId": None,
+                "classificationStatus": "classified",
+                "classificationAttempts": attempts + 1,
+                "classificationError": None,
+            }
+            if e.get("type") == "conversation":
+                summary = _concise_summary((e.get("content") or e.get("summary") or e.get("raw") or "").strip())
+                if summary:
+                    patch_payload["summary"] = summary
+            patch_log(e["id"], patch_payload)
+
+        return
+
     def mark_window_failure(error_code: str):
         for e in scope_logs:
             if (e.get("classificationStatus") or "pending") != "pending":
@@ -4392,17 +4528,18 @@ def classify_session(session_key: str):
         except Exception:
             pass
 
-        task_cands = task_candidates(forced_topic_id, text)
-        for t in task_cands:
-            tid = t.get("id")
-            if not tid:
-                continue
-            try:
-                logs = list_logs_by_task(tid, limit=10, offset=0)
-                task_notes = build_notes_index(logs)
-                task_contexts[tid] = summarize_logs(logs, task_notes, limit=6)
-            except Exception:
-                continue
+        if forced_task_id:
+            task_cands = task_candidates(forced_topic_id, text)
+            for t in task_cands:
+                tid = t.get("id")
+                if not tid:
+                    continue
+                try:
+                    logs = list_logs_by_task(tid, limit=10, offset=0)
+                    task_notes = build_notes_index(logs)
+                    task_contexts[tid] = summarize_logs(logs, task_notes, limit=6)
+                except Exception:
+                    continue
     else:
         ensure_topic_index_seeded()
         topic_cands = topic_candidates(text)
@@ -4471,25 +4608,26 @@ def classify_session(session_key: str):
             bundle_has_assistant = any(_conversation_agent(e) == "assistant" for e in bundle)
             prefer_continuity = not bundle_has_assistant
             if forced_topic_id:
-                task_id = None
+                task_id = forced_task_id or None
                 task_title = None
-                task_title = _derive_task_title(llm_window)
-                task_intent = _window_has_task_intent(llm_window, text)
-                task_cands2 = task_candidates(forced_topic_id, text, k=8)
-                if task_intent and task_cands2 and float(task_cands2[0].get("score") or 0.0) >= 0.56:
-                    task_id = task_cands2[0]["id"]
-                elif task_intent and task_title:
-                    existing_tasks = list_tasks(forced_topic_id)
-                    match, score = _best_name_match(task_title, existing_tasks, "title")
-                    if match and score >= 0.78:
-                        task_id = match.get("id")
-                    elif _task_creation_allowed(llm_window, task_title, task_cands2):
-                        task = upsert_task(None, forced_topic_id, task_title)
-                        task_id = task["id"]
-                if task_intent and not task_id:
-                    continuity_task = _latest_classified_task_for_topic(ctx_logs, forced_topic_id)
-                    if continuity_task:
-                        task_id = continuity_task
+                if forced_task_id:
+                    task_title = _derive_task_title(llm_window)
+                    task_intent = _window_has_task_intent(llm_window, text)
+                    task_cands2 = task_candidates(forced_topic_id, text, k=8)
+                    if task_intent and task_cands2 and float(task_cands2[0].get("score") or 0.0) >= 0.56:
+                        task_id = task_cands2[0]["id"]
+                    elif task_intent and task_title:
+                        existing_tasks = list_tasks(forced_topic_id)
+                        match, score = _best_name_match(task_title, existing_tasks, "title")
+                        if match and score >= 0.78:
+                            task_id = match.get("id")
+                        elif _task_creation_allowed(llm_window, task_title, task_cands2):
+                            task = upsert_task(None, forced_topic_id, task_title)
+                            task_id = task["id"]
+                    if task_intent and not task_id:
+                        continuity_task = _latest_classified_task_for_topic(ctx_logs, forced_topic_id)
+                        if continuity_task:
+                            task_id = continuity_task
 
                 summaries = []
                 for entry in llm_window:
@@ -4731,23 +4869,27 @@ def classify_session(session_key: str):
             topic = upsert_topic(None, chosen_topic_name)
             topic_id = str(topic.get("id") or "").strip()
 
-    # Task selection/creation (within topic)
-    task_id = None
+    # Topic-scoped board chat is intentionally topic-only. Legacy task-scoped sessions still
+    # keep their explicit task lock, but a topic chat should not create or infer task scope.
+    task_id = forced_task_id if forced_topic_id and forced_task_id else None
     task_from_continuity = False
-    task_cands2 = task_candidates(topic_id, text)
+    task_cands2: list[dict] = []
     task_result = result.get("task")
-    task_intent = _window_has_task_intent(llm_window, text)
-    if forced_topic_id and isinstance(task_result, dict):
-        # For topic-pinned continuity, trust explicit LLM task picks to avoid false negatives.
-        # This prevents false negatives when heuristic intent detection is too conservative.
-        if bool(task_result.get("create")) or bool(task_result.get("id")):
-            task_intent = True
+    task_intent = False
     existing_tasks: list[dict] = []
-    try:
-        existing_tasks = list_tasks(topic_id)
-    except Exception:
-        existing_tasks = []
-    valid_task_ids: set[str] = {str(t.get("id") or "").strip() for t in existing_tasks if t.get("id")}
+    valid_task_ids: set[str] = set()
+    if not forced_topic_id or forced_task_id:
+        task_cands2 = task_candidates(topic_id, text)
+        task_intent = _window_has_task_intent(llm_window, text)
+        if forced_topic_id and isinstance(task_result, dict):
+            # Legacy task-scoped continuity can still trust explicit LLM task picks to avoid false negatives.
+            if bool(task_result.get("create")) or bool(task_result.get("id")):
+                task_intent = True
+        try:
+            existing_tasks = list_tasks(topic_id)
+        except Exception:
+            existing_tasks = []
+        valid_task_ids = {str(t.get("id") or "").strip() for t in existing_tasks if t.get("id")}
 
     # Sticky task continuity for low-signal follow-ups in the same session.
     # This keeps "ok/yes/thanks" turns attached to the active task even when intent

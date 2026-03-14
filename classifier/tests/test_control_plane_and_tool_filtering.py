@@ -115,8 +115,8 @@ class ControlPlaneAndToolFilteringTests(unittest.TestCase):
         self.assertIsNone(payload.get("topicId"))
         self.assertIsNone(payload.get("taskId"))
 
-    def test_classify_session_marks_scoped_tool_action_filtered_in_forced_task_scope(self):
-        session_key = "clawboard:topic:topic-abc"
+    def test_classify_session_marks_scoped_tool_action_filtered_in_legacy_task_scope(self):
+        session_key = "clawboard:task:topic-abc:task-xyz"
         logs = [
             {
                 "id": "log-req-1",

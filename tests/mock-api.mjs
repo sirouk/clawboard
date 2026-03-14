@@ -7,6 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const PORT = Number(process.env.MOCK_API_PORT || 3051);
+const HOST = process.env.MOCK_API_HOST || "127.0.0.1";
 const fixturePath = process.env.CLAWBOARD_FIXTURE_PATH || join(__dirname, "fixtures", "portal.json");
 
 const store = JSON.parse(readFileSync(fixturePath, "utf8"));
@@ -817,6 +818,6 @@ const server = http.createServer(async (req, res) => {
   return sendJson(res, 404, { error: "Not found" });
 });
 
-server.listen(PORT, () => {
-  console.log(`Mock API listening on http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`Mock API listening on http://${HOST}:${PORT}`);
 });

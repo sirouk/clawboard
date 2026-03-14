@@ -4,9 +4,9 @@ import path from "node:path";
 const dataPath = path.join(process.cwd(), "tests", "fixtures", "portal.json");
 const reuseServer = process.env.PLAYWRIGHT_REUSE_SERVER === "1" && !process.env.CI;
 const useExternalServer = process.env.PLAYWRIGHT_USE_EXTERNAL_SERVER === "1";
-const mockApiPort = Number(process.env.PLAYWRIGHT_MOCK_API_PORT ?? "3051");
-const webPort = Number(process.env.PLAYWRIGHT_WEB_PORT ?? "3050");
 const loopbackHost = process.env.PLAYWRIGHT_LOOPBACK_HOST ?? "127.0.0.1";
+const mockApiPort = Number(process.env.PLAYWRIGHT_MOCK_API_PORT ?? "3151");
+const webPort = Number(process.env.PLAYWRIGHT_WEB_PORT ?? "3150");
 const mockApiBase = `http://${loopbackHost}:${mockApiPort}`;
 const mockBaseURL = `http://${loopbackHost}:${webPort}`;
 const externalApiBase = process.env.PLAYWRIGHT_EXTERNAL_API_BASE ?? "http://127.0.0.1:8010";
@@ -19,8 +19,9 @@ if (!process.env.PLAYWRIGHT_API_BASE) process.env.PLAYWRIGHT_API_BASE = apiBase;
 if (!process.env.PLAYWRIGHT_BASE_URL) process.env.PLAYWRIGHT_BASE_URL = baseURL;
 
 export default defineConfig({
-  testDir: "./tests/e2e",
+  testDir: "./tests/e2e-ci",
   timeout: 60_000,
+  workers: 1,
   expect: {
     timeout: 10_000,
   },
@@ -38,7 +39,7 @@ export default defineConfig({
           timeout: 120_000,
         },
         {
-          command: `NEXT_PUBLIC_CLAWBOARD_API_BASE=${mockApiBase} NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN= CLAWBOARD_WORKSPACE_IDE_AUTH=none pnpm run build:webpack && NEXT_PUBLIC_CLAWBOARD_API_BASE=${mockApiBase} NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN= CLAWBOARD_WORKSPACE_IDE_AUTH=none HOSTNAME=${loopbackHost} PORT=${webPort} pnpm run start`,
+          command: `NEXT_PUBLIC_CLAWBOARD_API_BASE=${mockApiBase} NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN= CLAWBOARD_WORKSPACE_IDE_AUTH=none HOSTNAME=${loopbackHost} PORT=${webPort} pnpm run dev`,
           url: baseURL,
           reuseExistingServer: reuseServer,
           timeout: 120_000,

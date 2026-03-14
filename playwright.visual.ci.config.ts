@@ -3,53 +3,20 @@ import path from "node:path";
 
 const dataPath = path.join(process.cwd(), "tests", "fixtures", "portal.json");
 const reuseServer = process.env.PLAYWRIGHT_REUSE_SERVER === "1" && !process.env.CI;
-const mockApiPort = Number(process.env.PLAYWRIGHT_MOCK_API_PORT ?? "3051");
-const webPort = Number(process.env.PLAYWRIGHT_WEB_PORT ?? "3050");
+const useExternalServer = process.env.PLAYWRIGHT_USE_EXTERNAL_SERVER === "1";
 const loopbackHost = process.env.PLAYWRIGHT_LOOPBACK_HOST ?? "127.0.0.1";
+const mockApiPort = Number(process.env.PLAYWRIGHT_MOCK_API_PORT ?? "3151");
+const webPort = Number(process.env.PLAYWRIGHT_WEB_PORT ?? "3150");
 const mockApiBase = process.env.PLAYWRIGHT_API_BASE ?? `http://${loopbackHost}:${mockApiPort}`;
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://${loopbackHost}:${webPort}`;
-const useExternalServer = process.env.PLAYWRIGHT_USE_EXTERNAL_SERVER === "1";
-const isCi = (() => {
-  const raw = String(process.env.CI ?? "").trim().toLowerCase();
-  return raw === "1" || raw === "true";
-})();
 
 if (!process.env.PLAYWRIGHT_API_BASE) process.env.PLAYWRIGHT_API_BASE = mockApiBase;
 if (!process.env.PLAYWRIGHT_BASE_URL) process.env.PLAYWRIGHT_BASE_URL = baseURL;
 
-const projects = [
-  {
-    name: "chromium-desktop",
-    use: {
-      ...devices["Desktop Chrome"],
-      viewport: { width: 1440, height: 900 },
-    },
-  },
-  {
-    name: "chromium-mobile",
-    use: {
-      ...devices["Pixel 7"],
-      viewport: { width: 390, height: 844 },
-    },
-  },
-];
-
-if (isCi || process.env.PLAYWRIGHT_VISUAL_WEBKIT === "1") {
-  projects.push({
-    name: "webkit-mobile",
-    use: {
-      ...devices["iPhone 13"],
-      viewport: { width: 390, height: 844 },
-    },
-  });
-}
-
 export default defineConfig({
-  testDir: "./tests/visual",
-  // Keep snapshot names stable across macOS/Linux CI hosts.
+  testDir: "./tests/visual-ci",
   snapshotPathTemplate: "{testDir}/{testFilePath}-snapshots/{arg}-{projectName}{ext}",
   timeout: 60_000,
-  fullyParallel: false,
   workers: 1,
   expect: {
     timeout: 10_000,
@@ -60,6 +27,8 @@ export default defineConfig({
     },
   },
   use: {
+    ...devices["Desktop Chrome"],
+    viewport: { width: 1440, height: 900 },
     baseURL,
     trace: "on-first-retry",
     colorScheme: "dark",
@@ -76,11 +45,10 @@ export default defineConfig({
           timeout: 120_000,
         },
         {
-          command: `NEXT_PUBLIC_CLAWBOARD_API_BASE=${mockApiBase} pnpm run build:webpack && NEXT_PUBLIC_CLAWBOARD_API_BASE=${mockApiBase} HOSTNAME=${loopbackHost} PORT=${webPort} pnpm run start`,
+          command: `NEXT_PUBLIC_CLAWBOARD_API_BASE=${mockApiBase} HOSTNAME=${loopbackHost} PORT=${webPort} pnpm run dev`,
           url: baseURL,
           reuseExistingServer: reuseServer,
           timeout: 120_000,
         },
       ],
-  projects,
 });

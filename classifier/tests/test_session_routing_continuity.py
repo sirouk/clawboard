@@ -65,10 +65,9 @@ class SessionRoutingContinuityTests(unittest.TestCase):
         self.assertIn("log-1", by_id)
         payload = by_id["log-1"]
         self.assertEqual(payload.get("topicId"), continuity_topic_id)
-        self.assertEqual(payload.get("taskId"), continuity_task_id)
+        self.assertIsNone(payload.get("taskId"))
         self.assertEqual(payload.get("classificationStatus"), "classified")
 
 
 if __name__ == "__main__":
     unittest.main()
-

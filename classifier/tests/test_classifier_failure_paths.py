@@ -203,7 +203,7 @@ class ClassifierFailurePathTests(unittest.TestCase):
 
         self.assertTrue(patched)
         self.assertEqual(patched[0][1].get("topicId"), "topic-forced")
-        self.assertEqual(patched[0][1].get("taskId"), "task-forced")
+        self.assertIsNone(patched[0][1].get("taskId"))
         self.assertEqual(patched[0][1].get("classificationStatus"), "classified")
 
     def test_cls_025_guardrail_reuses_strong_candidate_over_new_topic(self):

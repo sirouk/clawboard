@@ -8,19 +8,31 @@ class BoardSessionKeyTests(unittest.TestCase):
     def test_parse_board_session_key_parses_topic(self):
         self.assertEqual(
             c._parse_board_session_key("clawboard:topic:topic-123"),
-            ("topic-123", "topic-123"),
+            ("topic-123", None),
         )
 
     def test_parse_board_session_key_strips_thread_suffix(self):
         self.assertEqual(
             c._parse_board_session_key("clawboard:topic:topic-123|thread:999"),
-            ("topic-123", "topic-123"),
+            ("topic-123", None),
         )
 
     def test_parse_board_session_key_accepts_promoted_legacy_ids(self):
         self.assertEqual(
             c._parse_board_session_key("clawboard:topic:task-123"),
-            ("task-123", "task-123"),
+            ("task-123", None),
+        )
+
+    def test_parse_board_session_key_parses_legacy_task_scope(self):
+        self.assertEqual(
+            c._parse_board_session_key("clawboard:task:topic-123:task-456"),
+            ("topic-123", "task-456"),
+        )
+
+    def test_parse_board_session_key_parses_wrapped_task_scope(self):
+        self.assertEqual(
+            c._parse_board_session_key("agent:main:clawboard:task:topic-123:task-456|thread:999"),
+            ("topic-123", "task-456"),
         )
 
     def test_parse_board_session_key_rejects_non_board_values(self):
@@ -31,7 +43,7 @@ class BoardSessionKeyTests(unittest.TestCase):
 
 
 class BoardSessionClassificationTests(unittest.TestCase):
-    def test_classify_session_task_scope_keeps_task_fixed(self):
+    def test_classify_session_topic_scope_keeps_topic_fixed(self):
         session_key = "clawboard:topic:topic-abc"
         logs = [
             {
@@ -100,31 +112,83 @@ class BoardSessionClassificationTests(unittest.TestCase):
         def fake_patch_log(log_id: str, patch: dict):
             patched.append((log_id, patch))
 
-        with patch.object(c, "list_logs_by_session", side_effect=fake_list_logs_by_session), patch.object(
-            c, "patch_log", side_effect=fake_patch_log
+        with (
+            patch.object(c, "list_logs_by_session", side_effect=fake_list_logs_by_session),
+            patch.object(c, "patch_log", side_effect=fake_patch_log),
+            patch.object(c, "list_topics", return_value=[{"id": "topic-abc", "name": "Auth"}]),
+            patch.object(c, "list_logs_by_topic", return_value=[]),
+            patch.object(c, "build_notes_index", return_value={}),
         ):
             c.classify_session(session_key)
 
         by_id = {lid: payload for lid, payload in patched}
         self.assertEqual(by_id["log-1"].get("topicId"), "topic-abc")
-        self.assertEqual(by_id["log-1"].get("taskId"), "topic-abc")
+        self.assertIsNone(by_id["log-1"].get("taskId"))
 
         self.assertEqual(by_id["log-2"].get("classificationError"), "filtered_command")
         self.assertEqual(by_id["log-2"].get("topicId"), "topic-abc")
-        self.assertEqual(by_id["log-2"].get("taskId"), "topic-abc")
+        self.assertIsNone(by_id["log-2"].get("taskId"))
 
         self.assertEqual(by_id["log-3"].get("classificationError"), "filtered_memory_action")
         self.assertEqual(by_id["log-3"].get("topicId"), "topic-abc")
-        self.assertEqual(by_id["log-3"].get("taskId"), "topic-abc")
+        self.assertIsNone(by_id["log-3"].get("taskId"))
 
         self.assertEqual(by_id["log-4"].get("classificationError"), "filtered_non_semantic")
         self.assertEqual(by_id["log-4"].get("topicId"), "topic-abc")
-        self.assertEqual(by_id["log-4"].get("taskId"), "topic-abc")
+        self.assertIsNone(by_id["log-4"].get("taskId"))
 
         # Backfill previously-classified action traces that drifted to the wrong task.
         self.assertEqual(by_id["log-5"].get("classificationError"), "filtered_memory_action")
         self.assertEqual(by_id["log-5"].get("topicId"), "topic-abc")
-        self.assertEqual(by_id["log-5"].get("taskId"), "topic-abc")
+        self.assertIsNone(by_id["log-5"].get("taskId"))
+
+    def test_classify_session_legacy_task_scope_keeps_task_fixed(self):
+        session_key = "clawboard:task:topic-abc:task-xyz"
+        logs = [
+            {
+                "id": "log-1",
+                "type": "conversation",
+                "agentId": "user",
+                "content": "Ship the legacy scoped task.",
+                "classificationStatus": "pending",
+                "classificationAttempts": 0,
+                "createdAt": "2026-02-09T09:10:00.000Z",
+                "source": {"sessionKey": session_key},
+            },
+            {
+                "id": "log-2",
+                "type": "action",
+                "agentId": "assistant",
+                "content": "Tool call: shell.exec",
+                "classificationStatus": "pending",
+                "classificationAttempts": 0,
+                "createdAt": "2026-02-09T09:10:01.000Z",
+                "source": {"sessionKey": session_key},
+            },
+        ]
+
+        patched: list[tuple[str, dict]] = []
+
+        def fake_list_logs_by_session(_sk: str, **kwargs):
+            self.assertEqual(_sk, session_key)
+            if kwargs.get("classificationStatus") == "pending":
+                return logs
+            return logs
+
+        def fake_patch_log(log_id: str, patch: dict):
+            patched.append((log_id, patch))
+
+        with (
+            patch.object(c, "list_logs_by_session", side_effect=fake_list_logs_by_session),
+            patch.object(c, "patch_log", side_effect=fake_patch_log),
+        ):
+            c.classify_session(session_key)
+
+        by_id = {lid: payload for lid, payload in patched}
+        self.assertEqual(by_id["log-1"].get("topicId"), "topic-abc")
+        self.assertEqual(by_id["log-1"].get("taskId"), "task-xyz")
+        self.assertEqual(by_id["log-2"].get("topicId"), "topic-abc")
+        self.assertEqual(by_id["log-2"].get("taskId"), "task-xyz")
 
     def test_subagent_session_with_existing_task_scope_stays_pinned(self):
         session_key = "agent:main:subagent:abc-123"
