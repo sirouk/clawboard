@@ -1135,6 +1135,7 @@ def semantic_search(
     logs: Iterable[dict],
     *,
     topic_limit: int = 24,
+    task_limit: int | None = None,
     log_limit: int = 360,
 ):
     q = _normalize_text(query)
@@ -1143,13 +1144,27 @@ def semantic_search(
             "query": q,
             "mode": "empty",
             "topics": [],
+            "tasks": [],
             "logs": [],
         }
+
+    effective_task_limit = task_limit if isinstance(task_limit, int) and task_limit > 0 else topic_limit
 
     topic_docs = _prepare_docs(
         "topic",
         topics,
         lambda row: f"{row.get('name') or ''}\n{row.get('description') or ''}\n{row.get('searchText') or ''}",
+        chunk=False,
+    )
+    task_docs = _prepare_docs(
+        "task",
+        tasks,
+        lambda row: (
+            f"{row.get('title') or ''}\n"
+            f"{row.get('status') or ''}\n"
+            f"{row.get('description') or ''}\n"
+            f"{row.get('searchText') or ''}"
+        ),
         chunk=False,
     )
     filtered_logs = [
@@ -1164,17 +1179,26 @@ def semantic_search(
 
     query_vec = _embed_query(q)
     topic_dense: dict[str, float] = {}
+    task_dense: dict[str, float] = {}
     log_dense: dict[str, float] = {}
     topic_backend = "none"
+    task_backend = "none"
     log_backend = "none"
     if query_vec is not None:
         topic_dense, topic_backend = _vector_topk(query_vec, kind_exact="topic", limit=max(topic_limit * 4, 80))
+        task_dense, task_backend = _vector_topk(
+            query_vec,
+            kind_prefix="task:",
+            limit=max(effective_task_limit * 4, 80),
+        )
         log_dense, log_backend = _vector_topk(query_vec, kind_exact="log", limit=max(log_limit * 2, 220))
 
     topic_ranked, topic_chunks = _hybrid_rank(q, topic_docs, topic_dense, query_vec, topic_limit)
+    task_ranked, task_chunks = _hybrid_rank(q, task_docs, task_dense, query_vec, effective_task_limit)
     log_ranked, log_chunks = _hybrid_rank(q, log_docs, log_dense, query_vec, log_limit)
 
     topic_map = {str(item.get("id") or ""): item for item in topics}
+    task_map = {str(item.get("id") or ""): item for item in tasks}
     log_map = {str(item.get("id") or ""): item for item in filtered_logs}
 
     topic_rows: list[dict] = []
@@ -1189,6 +1213,17 @@ def semantic_search(
             enriched["description"] = row.get("description")
         topic_rows.append(enriched)
 
+    task_rows: list[dict] = []
+    for item in task_ranked:
+        row = task_map.get(item["id"]) or {}
+        enriched = dict(item)
+        enriched["id"] = item["id"]
+        enriched["topicId"] = row.get("topicId")
+        enriched["title"] = row.get("title")
+        enriched["status"] = row.get("status")
+        enriched["bestChunk"] = task_chunks.get(item["id"])
+        task_rows.append(enriched)
+
     log_rows: list[dict] = []
     for item in log_ranked:
         row = log_map.get(item["id"]) or {}
@@ -1202,7 +1237,7 @@ def semantic_search(
         log_rows.append(enriched)
 
     mode_parts = ["bm25", "lexical", "rrf", "rerank"]
-    dense_backends = [backend for backend in [topic_backend, log_backend] if backend != "none"]
+    dense_backends = [backend for backend in [topic_backend, task_backend, log_backend] if backend != "none"]
     if query_vec is not None and dense_backends:
         if any(backend == "qdrant" for backend in dense_backends):
             mode_parts.insert(0, "qdrant")
@@ -1211,6 +1246,7 @@ def semantic_search(
         "query": q,
         "mode": "+".join(mode_parts),
         "topics": topic_rows,
+        "tasks": task_rows,
         "logs": log_rows,
     }
 

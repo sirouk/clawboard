@@ -115,12 +115,13 @@ class VectorMaintenanceTests(unittest.TestCase):
     def test_build_cleanup_plan_detects_stale_and_missing(self):
         plan = vm.build_cleanup_plan(self.clawboard_db, self.embeddings_db)
 
-        self.assertEqual(plan["desiredCount"], 4)
+        self.assertEqual(plan["desiredCount"], 2)
         self.assertEqual(plan["managedExistingCount"], 11)
-        self.assertEqual(len(plan["deletePairs"]), 8)
-        self.assertEqual(len(plan["missingPairs"]), 1)
+        self.assertEqual(len(plan["deletePairs"]), 9)
+        self.assertEqual(len(plan["missingPairs"]), 0)
 
-        self.assertIn(("task:topic-1", "task-1"), set(plan["missingPairs"]))
+        self.assertIn(("task:topic-legacy", "task-1"), set(plan["deletePairs"]))
+        self.assertIn(("task:unassigned", "task-2"), set(plan["deletePairs"]))
         self.assertIn(("topic", "topic-orphan"), set(plan["deletePairs"]))
         self.assertIn(("log", "log-command"), set(plan["deletePairs"]))
         self.assertIn(("log", "log-tool"), set(plan["deletePairs"]))
@@ -134,7 +135,7 @@ class VectorMaintenanceTests(unittest.TestCase):
             dry_run=False,
         )
 
-        self.assertEqual(report["sqliteDeleted"], 8)
+        self.assertEqual(report["sqliteDeleted"], 9)
         self.assertEqual(report["queueEnqueued"], 9)
         self.assertEqual(report["qdrantDeleteAttempted"], 0)
 
@@ -143,7 +144,6 @@ class VectorMaintenanceTests(unittest.TestCase):
             remaining,
             {
                 ("topic", "topic-1"),
-                ("task:unassigned", "task-2"),
                 ("log", "log-good"),
             },
         )
@@ -154,13 +154,8 @@ class VectorMaintenanceTests(unittest.TestCase):
 
         deletes = [item for item in payloads if item.get("op") == "delete"]
         upserts = [item for item in payloads if item.get("op") == "upsert"]
-        self.assertEqual(len(deletes), 8)
-        self.assertEqual(len(upserts), 1)
-
-        upsert = upserts[0]
-        self.assertEqual(upsert.get("kind"), "task")
-        self.assertEqual(upsert.get("id"), "task-1")
-        self.assertEqual(upsert.get("topicId"), "topic-1")
+        self.assertEqual(len(deletes), 9)
+        self.assertEqual(len(upserts), 0)
 
     def test_run_one_time_cleanup_dry_run_keeps_data_unchanged(self):
         report = vm.run_one_time_vector_cleanup(
@@ -185,7 +180,7 @@ class VectorMaintenanceTests(unittest.TestCase):
         finally:
             vm.SEARCH_INCLUDE_TOOL_CALL_LOGS = original
 
-        self.assertEqual(plan["desiredCount"], 5)
+        self.assertEqual(plan["desiredCount"], 3)
         self.assertNotIn(("log", "log-tool"), set(plan["deletePairs"]))
 
 

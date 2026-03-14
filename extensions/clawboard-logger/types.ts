@@ -79,13 +79,22 @@ export type PluginHookMessageContext = PluginHookContextBase;
 export type PluginHookToolContext = PluginHookContextBase;
 export type PluginHookAgentContext = PluginHookContextBase;
 
-export type BoardScope = {
-  topicId: string;
-  kind: "topic";
-  sessionKey: string;
-  inherited: boolean;
-  updatedAt: number;
-};
+export type BoardScope =
+  | {
+      topicId: string;
+      kind: "topic";
+      sessionKey: string;
+      inherited: boolean;
+      updatedAt: number;
+    }
+  | {
+      topicId: string;
+      taskId: string;
+      kind: "task";
+      sessionKey: string;
+      inherited: boolean;
+      updatedAt: number;
+    };
 
 export type RoutingScope = {
   topicId?: string;

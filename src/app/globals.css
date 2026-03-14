@@ -16,6 +16,9 @@
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
+  --claw-font-sans: "Avenir Next", "Segoe UI", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --claw-font-display: "Trebuchet MS", "Avenir Next", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --claw-font-mono: "SFMono-Regular", "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Monaco, Consolas, monospace;
 }
 
 @theme inline {
@@ -33,9 +36,9 @@
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);
   --radius-lg: var(--radius-lg);
-  --font-sans: var(--font-sora);
-  --font-display: var(--font-space-grotesk);
-  --font-mono: var(--font-jetbrains-mono);
+  --font-sans: var(--claw-font-sans);
+  --font-display: var(--claw-font-display);
+  --font-mono: var(--claw-font-mono);
 }
 
 * {
@@ -75,7 +78,7 @@ body {
     radial-gradient(880px circle at 88% 92%, rgba(77, 171, 158, 0.08), transparent 44%),
     rgb(var(--claw-bg));
   color: rgb(var(--claw-text));
-  font-family: var(--font-sora), system-ui, sans-serif;
+  font-family: var(--claw-font-sans);
   min-height: 100vh;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;

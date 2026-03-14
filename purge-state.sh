@@ -370,7 +370,28 @@ ARCHIVE_DIR="$ARCHIVE_ROOT/$TS"
 
 # Auto-sense paths (override via env vars if needed)
 OPENCLAW_DIR="${OPENCLAW_DIR:-$HOME/.openclaw}"
-MAIN_AGENT_WORKSPACE="${MAIN_AGENT_WORKSPACE:-${OPENCLAW_WORKSPACE_DIR:-$OPENCLAW_DIR/workspace}}"
+
+detect_main_agent_workspace() {
+  if [[ -n "${MAIN_AGENT_WORKSPACE:-}" ]]; then
+    printf "%s" "$MAIN_AGENT_WORKSPACE"
+    return 0
+  fi
+  if [[ -n "${OPENCLAW_WORKSPACE_DIR:-}" ]]; then
+    printf "%s" "$OPENCLAW_WORKSPACE_DIR"
+    return 0
+  fi
+  if [[ -d "$OPENCLAW_DIR/workspace" ]]; then
+    printf "%s" "$OPENCLAW_DIR/workspace"
+    return 0
+  fi
+  if [[ -d "$HOME/clawd" ]]; then
+    printf "%s" "$HOME/clawd"
+    return 0
+  fi
+  printf "%s" "$OPENCLAW_DIR/workspace"
+}
+
+MAIN_AGENT_WORKSPACE="$(detect_main_agent_workspace)"
 CLAWBOARD_DIR="$script_dir"  # this repo
 CLAWBOARD_ENV_FILE="${CLAWBOARD_ENV_FILE:-$CLAWBOARD_DIR/.env}"
 

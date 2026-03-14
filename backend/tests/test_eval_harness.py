@@ -53,13 +53,13 @@ class EvalHarnessTests(unittest.TestCase):
 
         self.assertEqual(report.get("queryCount"), 2)
         self.assertGreaterEqual(float(metrics.get("topic_recall@1", 0.0)), 1.0)
-        self.assertGreaterEqual(float(metrics.get("task_mrr", 0.0)), 1.0)
+        self.assertGreaterEqual(float(metrics.get("topic_mrr", 0.0)), 1.0)
         self.assertGreaterEqual(float(metrics.get("log_ndcg@3", 0.0)), 1.0)
 
         self.assertAlmostEqual(float(metrics.get("topic_dedupe_precision", 0.0)), 0.5, places=5)
         self.assertAlmostEqual(float(metrics.get("topic_dedupe_recall", 0.0)), 1.0, places=5)
-        self.assertAlmostEqual(float(metrics.get("task_dedupe_precision", 0.0)), 1.0, places=5)
-        self.assertAlmostEqual(float(metrics.get("task_dedupe_recall", 0.0)), 1.0, places=5)
+        self.assertNotIn("task_dedupe_precision", metrics)
+        self.assertNotIn("task_dedupe_recall", metrics)
 
 
 if __name__ == "__main__":

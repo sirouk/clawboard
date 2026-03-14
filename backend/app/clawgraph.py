@@ -390,14 +390,16 @@ def _build_node(node: NodeBuild) -> Dict[str, Any]:
 
 def build_clawgraph(
     topics: Iterable[Any],
-    logs: Iterable[Any],
+    tasks_or_logs: Iterable[Any],
+    logs: Iterable[Any] | None = None,
     *,
     max_entities: int = 120,
     max_nodes: int = 260,
     min_edge_weight: float = 0.16,
 ) -> Dict[str, Any]:
     topic_rows = list(topics)
-    log_rows = list(logs)
+    task_rows = list(tasks_or_logs) if logs is not None else []
+    log_rows = list(logs if logs is not None else tasks_or_logs)
 
     nodes: Dict[str, NodeBuild] = {}
     edge_weights: Dict[Tuple[str, str, str], float] = defaultdict(float)
@@ -433,6 +435,28 @@ def build_clawgraph(
                 "description": getattr(topic, "description", None),
             },
         )
+
+    for task in task_rows:
+        task_id = str(getattr(task, "id", "") or "")
+        topic_id = str(getattr(task, "topicId", "") or "")
+        if not task_id:
+            continue
+        node_id = f"task:{task_id}"
+        nodes[node_id] = NodeBuild(
+            id=node_id,
+            label=str(getattr(task, "title", "") or task_id),
+            kind="task",
+            score=1.18,
+            meta={
+                "taskId": task_id,
+                "topicId": topic_id or None,
+                "status": getattr(task, "status", None),
+            },
+        )
+        if topic_id and f"topic:{topic_id}" in nodes:
+            key = _edge_key(f"topic:{topic_id}", node_id, "has_task")
+            edge_weights[key] += 1.0
+            edge_evidence[key] += 1
 
     entity_score: Dict[str, float] = defaultdict(float)
     entity_label: Dict[str, str] = {}
@@ -595,7 +619,7 @@ def build_clawgraph(
             edge_weights[key] += score
             edge_evidence[key] += 1
 
-    structural_nodes = {node_id for node_id, node in nodes.items() if node.kind in {"topic", "agent"}}
+    structural_nodes = {node_id for node_id, node in nodes.items() if node.kind in {"topic", "task", "agent"}}
     ranked_entity_nodes = [
         node_id
         for node_id, node in sorted(

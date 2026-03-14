@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
 import {
+  boardSessionRouteToSessionKeys,
   computeEffectiveSessionKey,
   isBoardSessionKey,
   parseBoardSessionKey,
@@ -85,6 +86,26 @@ import {
   summarize,
   truncateRaw,
 } from "./strings.js";
+
+export function resolveBoardTaskPatchId(taskId: unknown, sessionKey?: string): string | undefined {
+  const candidate = typeof taskId === "string" ? taskId.trim() : "";
+  const route = parseBoardSessionKey(sessionKey);
+  if (!route || route.kind !== "task") {
+    return candidate || undefined;
+  }
+  if (!candidate) {
+    return route.taskId;
+  }
+  if (candidate === route.taskId) {
+    return route.taskId;
+  }
+  if (!candidate.toLowerCase().startsWith("task-")) {
+    return route.taskId;
+  }
+  const routeSuffix = route.taskId.slice("task-".length);
+  const candidateSuffix = candidate.slice("task-".length);
+  return candidateSuffix === routeSuffix ? route.taskId : candidate;
+}
 
 export default function register(api: OpenClawPluginApi) {
   const registrationState = api as OpenClawPluginApi & {
@@ -330,7 +351,7 @@ export default function register(api: OpenClawPluginApi) {
       this.scopeInsertStmt.run(
         agentId,
         scope.topicId,
-        null,
+        scope.kind === "task" ? scope.taskId : null,
         scope.kind,
         scope.sessionKey ?? null,
         scope.updatedAt,
@@ -355,6 +376,16 @@ export default function register(api: OpenClawPluginApi) {
       }>;
       const row = rows?.[0];
       if (!row) return undefined;
+      if (row.kind === "task" && row.taskId) {
+        return {
+          topicId: row.topicId,
+          taskId: row.taskId,
+          kind: "task",
+          sessionKey: row.sessionKey ?? "",
+          inherited: true,
+          updatedAt: row.updatedAt,
+        };
+      }
       return {
         topicId: row.topicId,
         kind: "topic",
@@ -564,8 +595,9 @@ export default function register(api: OpenClawPluginApi) {
     if (base) keys.add(base);
     const boardRoute = parseBoardSessionKey(normalized);
     if (boardRoute) {
-      const canonical = `clawboard:topic:${boardRoute.topicId}`;
-      keys.add(canonical);
+      for (const canonical of boardSessionRouteToSessionKeys(boardRoute)) {
+        keys.add(canonical);
+      }
     }
     return Array.from(keys);
   }
@@ -601,8 +633,7 @@ export default function register(api: OpenClawPluginApi) {
     const route = parseBoardSessionKey(key);
     if (!route) return undefined;
     return {
-      topicId: route.topicId,
-      kind: "topic",
+      ...route,
       sessionKey: key,
       inherited: false,
       updatedAt: nowMs(),
@@ -872,6 +903,9 @@ export default function register(api: OpenClawPluginApi) {
     if (boardScope?.topicId) {
       source.boardScopeTopicId = boardScope.topicId;
       source.boardScopeKind = boardScope.kind;
+      if (boardScope.kind === "task") {
+        source.boardScopeTaskId = boardScope.taskId;
+      }
       source.boardScopeSessionKey = boardScope.sessionKey;
       source.boardScopeInherited = Boolean(boardScope.inherited);
       source.boardScopeLock = true;
@@ -886,6 +920,13 @@ export default function register(api: OpenClawPluginApi) {
     }
     mergeSourceExtras(source, params.extra);
     return source;
+  }
+
+  function routingTarget(routing: RoutingScope) {
+    const target: Record<string, unknown> = {};
+    if (routing.topicId) target.topicId = routing.topicId;
+    if (routing.boardScope?.kind === "task") target.taskId = routing.boardScope.taskId;
+    return target;
   }
 
   function hasSpecificSessionAnchor(
@@ -2144,9 +2185,9 @@ export default function register(api: OpenClawPluginApi) {
     return recentOpenclawRequestId(params.sessionKey);
   };
 
-  const canonicalBoardScopeSessionKey = (scope: BoardScope | undefined) => {
-    if (!scope?.topicId) return undefined;
-    return `clawboard:topic:${scope.topicId}`;
+  const canonicalBoardScopeSessionKeys = (scope: BoardScope | undefined) => {
+    if (!scope?.topicId) return [];
+    return boardSessionRouteToSessionKeys(scope);
   };
 
   const resolveOpenclawRequestIdForBoardScope = async (params: {
@@ -2167,8 +2208,10 @@ export default function register(api: OpenClawPluginApi) {
     if (scopeSessionKey) {
       for (const key of requestSessionKeys(scopeSessionKey)) candidates.add(key);
     }
-    const canonicalScopeSessionKey = canonicalBoardScopeSessionKey(params.boardScope ?? boardScopeFromSessionKey(sessionKey));
-    if (canonicalScopeSessionKey) {
+    const canonicalScopeSessionKeys = canonicalBoardScopeSessionKeys(
+      params.boardScope ?? boardScopeFromSessionKey(sessionKey),
+    );
+    for (const canonicalScopeSessionKey of canonicalScopeSessionKeys) {
       for (const key of requestSessionKeys(canonicalScopeSessionKey)) candidates.add(key);
     }
     for (const candidate of candidates) {
@@ -2178,11 +2221,15 @@ export default function register(api: OpenClawPluginApi) {
       return candidateRequestId;
     }
     const lookupSessionKeys = new Set<string>();
-    if (canonicalScopeSessionKey) lookupSessionKeys.add(canonicalScopeSessionKey);
+    for (const canonicalScopeSessionKey of canonicalScopeSessionKeys) {
+      lookupSessionKeys.add(canonicalScopeSessionKey);
+    }
     for (const candidate of candidates) {
       const route = parseBoardSessionKey(candidate);
       if (!route) continue;
-      lookupSessionKeys.add(`clawboard:topic:${route.topicId}`);
+      for (const lookupSessionKey of boardSessionRouteToSessionKeys(route)) {
+        lookupSessionKeys.add(lookupSessionKey);
+      }
     }
     if (lookupSessionKeys.size === 0) return explicitRequestId ?? params.requestId;
     for (const lookupSessionKey of lookupSessionKeys) {
@@ -2571,8 +2618,6 @@ export default function register(api: OpenClawPluginApi) {
       sessionKey: effectiveSessionKey ?? ctx.sessionKey,
       boardScope: routing.boardScope,
     });
-    const topicId = routing.topicId;
-
     const metaSummary = meta?.summary;
     const summary =
       typeof metaSummary === "string" && metaSummary.trim().length > 0 ? summarize(metaSummary) : summarize(cleanRaw);
@@ -2592,7 +2637,7 @@ export default function register(api: OpenClawPluginApi) {
       ? resolveAgentLabel(inboundSubagent.ownerAgentId, `agent:${inboundSubagent.ownerAgentId}`)
       : "User";
     sendAsync({
-      topicId,
+      ...routingTarget(routing),
       type: "conversation",
       content: cleanRaw,
       summary,
@@ -2785,8 +2830,6 @@ export default function register(api: OpenClawPluginApi) {
       sessionKey: effectiveSessionKey ?? ctx.sessionKey,
       boardScope: routing.boardScope,
     });
-    const topicId = routing.topicId;
-
     // Outbound message content is always assistant-side.
     const agentId = "assistant";
     const agentLabel = resolveAgentLabel(ctx.agentId, meta?.sessionKey ?? (ctx as unknown as { sessionKey?: string })?.sessionKey);
@@ -2805,7 +2848,7 @@ export default function register(api: OpenClawPluginApi) {
     rememberOutgoingSession(effectiveSessionKey ?? ctx.sessionKey, cleanRaw);
 
     sendAsync({
-      topicId,
+      ...routingTarget(routing),
       type: "conversation",
       content: cleanRaw,
       summary,
@@ -2904,7 +2947,7 @@ export default function register(api: OpenClawPluginApi) {
     const raw = truncateRaw(contentText || JSON.stringify(redact(messageRecord), null, 2));
 
     sendAsync({
-      topicId: routing.topicId,
+      ...routingTarget(routing),
       type: "action",
       content,
       summary: content,
@@ -2989,7 +3032,7 @@ export default function register(api: OpenClawPluginApi) {
     };
 
     sendAsync({
-      topicId: routing.topicId,
+      ...routingTarget(routing),
       type: "action",
       content,
       summary: content,
@@ -3050,10 +3093,8 @@ export default function register(api: OpenClawPluginApi) {
       requestId,
       routing,
     });
-    const topicId = routing.topicId;
-
     sendAsync({
-      topicId,
+      ...routingTarget(routing),
       type: "action",
       content: `Tool call: ${event.toolName}`,
       summary: `Tool call: ${event.toolName}`,
@@ -3127,10 +3168,8 @@ export default function register(api: OpenClawPluginApi) {
         }
       }
     }
-    const topicId = routing.topicId;
-
     sendAsync({
-      topicId,
+      ...routingTarget(routing),
       type: "action",
       content: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
       summary: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
@@ -3232,8 +3271,6 @@ export default function register(api: OpenClawPluginApi) {
       sessionKey: inferredSessionKey ?? ctx.sessionKey,
       boardScope: routing.boardScope,
     });
-    const topicId = routing.topicId;
-
     // agent_end is always this agent's run: treat assistant-role messages as assistant output.
     const agentId = "assistant";
     const agentLabel = resolveAgentLabel(ctx.agentId, inferredSessionKey);
@@ -3247,7 +3284,7 @@ export default function register(api: OpenClawPluginApi) {
           keys: m && typeof m === "object" ? Object.keys(m).slice(0, 12) : [],
         }));
         sendAsync({
-          topicId,
+          ...routingTarget(routing),
           type: "action",
           content: "clawboard-logger: agent_end message shape",
           summary: "clawboard-logger: agent_end message shape",
@@ -3351,7 +3388,7 @@ export default function register(api: OpenClawPluginApi) {
           const messageCreatedAt = new Date(createdAtBaseMs + agentEndSeq).toISOString();
           agentEndSeq += 1;
           sendAsync({
-            topicId,
+            ...routingTarget(routing),
             type: "conversation",
             content: cleanedContent,
             summary,
@@ -3385,7 +3422,7 @@ export default function register(api: OpenClawPluginApi) {
           const messageCreatedAt = new Date(createdAtBaseMs + agentEndSeq).toISOString();
           agentEndSeq += 1;
           sendAsync({
-            topicId,
+            ...routingTarget(routing),
             type: "conversation",
             content: cleanedContent,
             summary,
@@ -3417,7 +3454,7 @@ export default function register(api: OpenClawPluginApi) {
 
     if (!event.success || debug) {
       sendAsync({
-        topicId,
+        ...routingTarget(routing),
         type: "action",
         content: event.success ? "Agent run complete" : "Agent run failed",
         summary: event.success ? "Agent run complete" : "Agent run failed",
@@ -3498,7 +3535,7 @@ export default function register(api: OpenClawPluginApi) {
 
         const content = `Hook event: ${hookName}`;
         sendAsync({
-          topicId: routing.topicId,
+          ...routingTarget(routing),
           type: "action",
           content,
           summary: content,

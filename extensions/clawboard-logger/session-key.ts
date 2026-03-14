@@ -5,28 +5,58 @@ type MessageHookContext = {
 };
 
 export type BoardSessionRoute =
-  | { kind: "topic"; topicId: string };
+  | { kind: "topic"; topicId: string }
+  | { kind: "task"; topicId: string; taskId: string };
 
-/**
- * Returns true if the session key is an explicit Clawboard Topic Chat session.
- * Handles wrapped keys (e.g. agent:main:clawboard:topic:...).
- */
-export function isBoardSessionKey(sessionKey: string | undefined | null): boolean {
-  if (typeof sessionKey !== "string") return false;
-  return /clawboard:topic:topic-[a-zA-Z0-9-]+/.test(sessionKey);
-}
+const TOPIC_ID_RE = /^topic-[a-zA-Z0-9-]+$/;
+const TASK_ID_RE = /^task-[a-zA-Z0-9-]+$/;
 
-export function parseBoardSessionKey(sessionKey: string | undefined | null): BoardSessionRoute | null {
+function normalizeBoardKey(sessionKey: string | undefined | null): string | null {
   if (typeof sessionKey !== "string") return null;
   const trimmed = sessionKey.trim();
   if (!trimmed) return null;
+  return trimmed.split("|", 1)[0] ?? trimmed;
+}
 
-  // Strip OpenClaw's optional thread suffix (`|thread:...`) if present.
-  const base = trimmed.split("|", 1)[0] ?? trimmed;
+export function boardSessionRouteToSessionKey(route: BoardSessionRoute): string {
+  return route.kind === "task"
+    ? `clawboard:task:${route.topicId}:${route.taskId}`
+    : `clawboard:topic:${route.topicId}`;
+}
 
-  const topicMatch = base.match(/clawboard:topic:(topic-[a-zA-Z0-9-]+)/);
-  if (topicMatch && topicMatch[1]) {
-    return { kind: "topic", topicId: topicMatch[1] };
+export function boardSessionRouteToSessionKeys(route: BoardSessionRoute): string[] {
+  const canonical = boardSessionRouteToSessionKey(route);
+  return route.kind === "task" ? [canonical, `clawboard:topic:${route.topicId}`] : [canonical];
+}
+
+/**
+ * Returns true if the session key is an explicit Clawboard board session.
+ * Handles wrapped keys (e.g. agent:main:clawboard:topic:...).
+ */
+export function isBoardSessionKey(sessionKey: string | undefined | null): boolean {
+  return parseBoardSessionKey(sessionKey) !== null;
+}
+
+export function parseBoardSessionKey(sessionKey: string | undefined | null): BoardSessionRoute | null {
+  const base = normalizeBoardKey(sessionKey);
+  if (!base) return null;
+
+  const parts = base.split(":");
+  const clawboardIndex = parts.indexOf("clawboard");
+  if (clawboardIndex < 0 || clawboardIndex + 2 >= parts.length) return null;
+
+  const scopeKind = parts[clawboardIndex + 1];
+  const topicId = parts[clawboardIndex + 2];
+  if (!TOPIC_ID_RE.test(topicId)) return null;
+
+  if (scopeKind === "topic") {
+    return { kind: "topic", topicId };
+  }
+
+  if (scopeKind === "task") {
+    const taskId = parts[clawboardIndex + 3];
+    if (!taskId || !TASK_ID_RE.test(taskId)) return null;
+    return { kind: "task", topicId, taskId };
   }
 
   return null;

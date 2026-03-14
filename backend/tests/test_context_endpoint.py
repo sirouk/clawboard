@@ -42,27 +42,13 @@ class ContextEndpointTests(unittest.TestCase):
         headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
         session_key = "channel:testcontext"
 
-        # Create topic + task.
         topic = self.client.post("/api/topics", json={"name": "ContextTest Topic", "pinned": True}, headers=headers).json()
-        task = self.client.post(
-            "/api/tasks",
-            json={
-                "topicId": topic["id"],
-                "title": "ContextTest Task",
-                "status": "doing",
-                "pinned": True,
-                "priority": "high",
-                "dueDate": now_iso(),
-            },
-            headers=headers,
-        ).json()
 
         # Create one conversation log in this session.
         log = self.client.post(
             "/api/log",
             json={
                 "topicId": topic["id"],
-                "taskId": task["id"],
                 "type": "conversation",
                 "content": "ContextTest: ship /api/context and agent tools.",
                 "summary": "ContextTest: ship /api/context + tools.",
@@ -79,7 +65,6 @@ class ContextEndpointTests(unittest.TestCase):
             "/api/log",
             json={
                 "topicId": topic["id"],
-                "taskId": task["id"],
                 "type": "note",
                 "relatedLogId": log["id"],
                 "content": "High-signal: /api/context should return working set + routing memory for short turns.",
@@ -99,8 +84,6 @@ class ContextEndpointTests(unittest.TestCase):
                 "sessionKey": session_key,
                 "topicId": topic["id"],
                 "topicName": topic["name"],
-                "taskId": task["id"],
-                "taskTitle": task["title"],
                 "anchor": "Ship /api/context and agent tools.",
                 "ts": now_iso(),
             },
@@ -117,45 +100,22 @@ class ContextEndpointTests(unittest.TestCase):
         self.assertTrue(payload.get("ok"), payload)
         self.assertIn("A:working_set", payload.get("layers", []))
         self.assertIn("A:routing_memory", payload.get("layers", []))
-        self.assertIn("Working set tasks:", payload.get("block", ""))
+        self.assertIn("Working set topics:", payload.get("block", ""))
         self.assertIn("Session routing memory", payload.get("block", ""))
 
-    def test_context_board_session_surfaces_active_task(self):
+    def test_context_board_session_surfaces_active_topic(self):
         headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
 
-        topic = self.client.post("/api/topics", json={"name": "BoardContext Topic", "pinned": True}, headers=headers).json()
-        other = self.client.post(
-            "/api/tasks",
-            json={
-                "topicId": topic["id"],
-                "title": "Other Task (pinned)",
-                "status": "doing",
-                "pinned": True,
-                "priority": "high",
-            },
-            headers=headers,
-        ).json()
-        board_task = self.client.post(
-            "/api/tasks",
-            json={
-                "topicId": topic["id"],
-                "title": "Board Task Context",
-                "status": "todo",
-                "pinned": False,
-                "priority": "low",
-            },
-            headers=headers,
-        ).json()
+        other_topic = self.client.post("/api/topics", json={"name": "Other Topic (pinned)", "pinned": True}, headers=headers).json()
+        board_topic = self.client.post("/api/topics", json={"name": "Board Topic Context"}, headers=headers).json()
 
-        # Create one conversation log in this board task session so timeline has continuity.
-        board_session_key = f"clawboard:task:{topic['id']}:{board_task['id']}"
+        board_session_key = f"clawboard:topic:{board_topic['id']}"
         self.client.post(
             "/api/log",
             json={
-                "topicId": topic["id"],
-                "taskId": board_task["id"],
+                "topicId": board_topic["id"],
                 "type": "conversation",
-                "content": "BoardContext: prior message in this task chat.",
+                "content": "BoardContext: prior message in this topic chat.",
                 "summary": "BoardContext: prior message.",
                 "createdAt": now_iso(),
                 "agentId": "user",
@@ -180,33 +140,21 @@ class ContextEndpointTests(unittest.TestCase):
         payload = res.json()
         self.assertTrue(payload.get("ok"), payload)
         block = payload.get("block") or ""
-        # Board location should be explicit so the agent knows "where" the user is speaking from.
         self.assertIn("Active board location:", block)
-        self.assertIn("Task Chat:", block)
-        # With workingSetLimit=1, the active board task should still be surfaced (promoted above other ranks).
-        self.assertIn("Board Task Context", block)
-        self.assertNotIn("Other Task (pinned)", block)
+        self.assertIn("Topic Chat:", block)
+        self.assertIn(board_topic["name"], block)
+        self.assertNotIn(other_topic["name"], block)
 
-    def test_context_board_task_thread_includes_cross_session_specialist_output(self):
+    def test_context_board_topic_thread_includes_cross_session_specialist_output(self):
         headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
         topic = self.client.post("/api/topics", json={"name": "Board Thread Topic"}, headers=headers).json()
-        board_task = self.client.post(
-            "/api/tasks",
-            json={"topicId": topic["id"], "title": "Board Thread Task", "status": "doing"},
-            headers=headers,
-        ).json()
-        other_task = self.client.post(
-            "/api/tasks",
-            json={"topicId": topic["id"], "title": "Sibling Task", "status": "doing"},
-            headers=headers,
-        ).json()
+        sibling_topic = self.client.post("/api/topics", json={"name": "Sibling Topic"}, headers=headers).json()
 
-        board_session_key = f"clawboard:task:{topic['id']}:{board_task['id']}"
+        board_session_key = f"clawboard:topic:{topic['id']}"
         self.client.post(
             "/api/log",
             json={
                 "topicId": topic["id"],
-                "taskId": board_task["id"],
                 "type": "conversation",
                 "content": "BoardThread: user asked for a curated follow-up.",
                 "summary": "BoardThread: user asked for follow-up.",
@@ -221,7 +169,6 @@ class ContextEndpointTests(unittest.TestCase):
             "/api/log",
             json={
                 "topicId": topic["id"],
-                "taskId": board_task["id"],
                 "type": "conversation",
                 "content": "Child already surfaced the detailed answer in this task.",
                 "summary": "Child already surfaced the detailed answer.",
@@ -235,11 +182,10 @@ class ContextEndpointTests(unittest.TestCase):
         self.client.post(
             "/api/log",
             json={
-                "topicId": topic["id"],
-                "taskId": other_task["id"],
+                "topicId": sibling_topic["id"],
                 "type": "conversation",
-                "content": "Sibling task noise should stay out of this thread.",
-                "summary": "Sibling task noise.",
+                "content": "Sibling topic noise should stay out of this thread.",
+                "summary": "Sibling topic noise.",
                 "createdAt": now_iso(),
                 "agentId": "assistant",
                 "agentLabel": "Docs",
@@ -255,28 +201,22 @@ class ContextEndpointTests(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 200, res.text)
         payload = res.json()
-        self.assertEqual((payload.get("data") or {}).get("timelineScope"), "task_thread")
+        self.assertEqual((payload.get("data") or {}).get("timelineScope"), "topic_thread")
         block = payload.get("block") or ""
-        self.assertIn("Recent current task thread:", block)
+        self.assertIn("Recent current topic thread:", block)
         self.assertIn("User: BoardThread: user asked for follow-up.", block)
         self.assertIn("Coding: Child already surfaced the detailed answer.", block)
-        self.assertNotIn("Sibling task noise", block)
+        self.assertNotIn("Sibling topic noise", block)
 
     def test_context_internal_completion_turn_hints_curation_and_skips_semantic_auto(self):
         headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
         topic = self.client.post("/api/topics", json={"name": "Completion Hint Topic"}, headers=headers).json()
-        task = self.client.post(
-            "/api/tasks",
-            json={"topicId": topic["id"], "title": "Completion Hint Task", "status": "doing"},
-            headers=headers,
-        ).json()
-        board_session_key = f"clawboard:task:{topic['id']}:{task['id']}"
+        board_session_key = f"clawboard:topic:{topic['id']}"
 
         self.client.post(
             "/api/log",
             json={
                 "topicId": topic["id"],
-                "taskId": task["id"],
                 "type": "conversation",
                 "content": "Specialist result already visible to the user.",
                 "summary": "Specialist result already visible.",
@@ -321,7 +261,7 @@ If they are part of the same workflow, wait for the remaining results before sen
         block = payload.get("block") or ""
         self.assertIn("Current user intent: follow up on delegated task completion | weather wrap-up | completed successfully", block)
         self.assertIn("Turn hint:", block)
-        self.assertIn("Read the current task thread before replying.", block)
+        self.assertIn("Read the current topic thread before replying.", block)
         self.assertIn("do not repeat or paraphrase the full body", block)
         self.assertIn("2 sibling delegated run(s) are still active", block)
         self.assertIn("Keep this completion internal", block)
@@ -371,13 +311,7 @@ If they are part of the same workflow, wait for the remaining results before sen
         headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
 
         topic = self.client.post("/api/topics", json={"name": "Board Auto Semantic Topic"}, headers=headers).json()
-        task = self.client.post(
-            "/api/tasks",
-            json={"topicId": topic["id"], "title": "Board Auto Semantic Task", "status": "doing"},
-            headers=headers,
-        ).json()
-
-        board_session_key = f"clawboard:task:{topic['id']}:{task['id']}"
+        board_session_key = f"clawboard:topic:{topic['id']}"
         mocked_semantic = {
             "query": "resume",
             "mode": "mock",
@@ -430,25 +364,12 @@ If they are part of the same workflow, wait for the remaining results before sen
             headers=headers,
         ).json()
 
-        allowed_task = self.client.post(
-            "/api/tasks",
-            json={"topicId": allowed_topic["id"], "title": "Routing Allowed Task", "status": "doing"},
-            headers=headers,
-        ).json()
-        blocked_task = self.client.post(
-            "/api/tasks",
-            json={"topicId": blocked_topic["id"], "title": "Routing Blocked Task", "status": "doing"},
-            headers=headers,
-        ).json()
-
         self.client.post(
             "/api/classifier/session-routing",
             json={
                 "sessionKey": session_key,
                 "topicId": allowed_topic["id"],
                 "topicName": allowed_topic["name"],
-                "taskId": allowed_task["id"],
-                "taskTitle": allowed_task["title"],
                 "anchor": "allowed anchor",
                 "ts": now_iso(),
             },
@@ -460,8 +381,6 @@ If they are part of the same workflow, wait for the remaining results before sen
                 "sessionKey": session_key,
                 "topicId": blocked_topic["id"],
                 "topicName": blocked_topic["name"],
-                "taskId": blocked_task["id"],
-                "taskTitle": blocked_task["title"],
                 "anchor": "blocked anchor",
                 "ts": now_iso(),
             },
@@ -484,23 +403,18 @@ If they are part of the same workflow, wait for the remaining results before sen
 
         item = items[0]
         self.assertEqual(str(item.get("topicId") or ""), allowed_topic["id"])
-        self.assertEqual(str(item.get("taskId") or ""), allowed_task["id"])
+        self.assertEqual(str(item.get("taskId") or ""), "")
 
         block = str(payload.get("block") or "")
         self.assertIn("Routing Allowed Topic", block)
         self.assertNotIn("Routing Blocked Topic", block)
 
-    def test_patch_task_without_title(self):
+    def test_patch_topic_without_name(self):
         headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
         topic = self.client.post("/api/topics", json={"name": "ContextPatch Topic"}, headers=headers).json()
-        task = self.client.post(
-            "/api/tasks",
-            json={"topicId": topic["id"], "title": "ContextPatch Task", "status": "todo"},
-            headers=headers,
-        ).json()
 
         res = self.client.patch(
-            f"/api/tasks/{task['id']}",
+            f"/api/topics/{topic['id']}",
             json={"status": "done"},
             headers=headers,
         )
@@ -508,7 +422,7 @@ If they are part of the same workflow, wait for the remaining results before sen
         patched = res.json()
         self.assertEqual(patched.get("status"), "done")
 
-    def test_patch_topic_digest_does_not_bump_updated_at(self):
+    def test_patch_topic_digest_bumps_updated_at(self):
         headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
         topic = self.client.post("/api/topics", json={"name": "Digest Topic"}, headers=headers).json()
 
@@ -523,7 +437,7 @@ If they are part of the same workflow, wait for the remaining results before sen
         self.assertEqual(res.status_code, 200, res.text)
         after = res.json()
         self.assertEqual(after.get("digest"), "Digest: hello")
-        self.assertEqual(after.get("updatedAt"), before_updated)
+        self.assertNotEqual(after.get("updatedAt"), before_updated)
 
 
 if __name__ == "__main__":

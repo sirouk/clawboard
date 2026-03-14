@@ -1,23 +1,49 @@
-/**
- * Returns true if the session key is an explicit Clawboard Topic Chat session.
- * Handles wrapped keys (e.g. agent:main:clawboard:topic:...).
- */
-export function isBoardSessionKey(sessionKey) {
-    if (typeof sessionKey !== "string")
-        return false;
-    return /clawboard:topic:topic-[a-zA-Z0-9-]+/.test(sessionKey);
-}
-export function parseBoardSessionKey(sessionKey) {
+const TOPIC_ID_RE = /^topic-[a-zA-Z0-9-]+$/;
+const TASK_ID_RE = /^task-[a-zA-Z0-9-]+$/;
+function normalizeBoardKey(sessionKey) {
     if (typeof sessionKey !== "string")
         return null;
     const trimmed = sessionKey.trim();
     if (!trimmed)
         return null;
-    // Strip OpenClaw's optional thread suffix (`|thread:...`) if present.
-    const base = trimmed.split("|", 1)[0] ?? trimmed;
-    const topicMatch = base.match(/clawboard:topic:(topic-[a-zA-Z0-9-]+)/);
-    if (topicMatch && topicMatch[1]) {
-        return { kind: "topic", topicId: topicMatch[1] };
+    return trimmed.split("|", 1)[0] ?? trimmed;
+}
+export function boardSessionRouteToSessionKey(route) {
+    return route.kind === "task"
+        ? `clawboard:task:${route.topicId}:${route.taskId}`
+        : `clawboard:topic:${route.topicId}`;
+}
+export function boardSessionRouteToSessionKeys(route) {
+    const canonical = boardSessionRouteToSessionKey(route);
+    return route.kind === "task" ? [canonical, `clawboard:topic:${route.topicId}`] : [canonical];
+}
+/**
+ * Returns true if the session key is an explicit Clawboard board session.
+ * Handles wrapped keys (e.g. agent:main:clawboard:topic:...).
+ */
+export function isBoardSessionKey(sessionKey) {
+    return parseBoardSessionKey(sessionKey) !== null;
+}
+export function parseBoardSessionKey(sessionKey) {
+    const base = normalizeBoardKey(sessionKey);
+    if (!base)
+        return null;
+    const parts = base.split(":");
+    const clawboardIndex = parts.indexOf("clawboard");
+    if (clawboardIndex < 0 || clawboardIndex + 2 >= parts.length)
+        return null;
+    const scopeKind = parts[clawboardIndex + 1];
+    const topicId = parts[clawboardIndex + 2];
+    if (!TOPIC_ID_RE.test(topicId))
+        return null;
+    if (scopeKind === "topic") {
+        return { kind: "topic", topicId };
+    }
+    if (scopeKind === "task") {
+        const taskId = parts[clawboardIndex + 3];
+        if (!taskId || !TASK_ID_RE.test(taskId))
+            return null;
+        return { kind: "task", topicId, taskId };
     }
     return null;
 }

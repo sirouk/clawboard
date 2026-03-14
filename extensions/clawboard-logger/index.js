@@ -1,434 +1,27 @@
-import fs from "node:fs/promises";
 import crypto from "node:crypto";
-import path from "node:path";
-import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
-import { computeEffectiveSessionKey, isBoardSessionKey, parseBoardSessionKey, } from "./session-key.js";
-import { getIgnoreSessionPrefixesFromEnv, shouldIgnoreSessionKey } from "./ignore-session.js";
-const DEFAULT_QUEUE = path.join(os.homedir(), ".openclaw", "clawboard-queue.sqlite");
-const SUMMARY_MAX = 72;
-const RAW_MAX = 5000;
-const DEFAULT_CONTEXT_MAX_CHARS = 2200;
-const DEFAULT_CONTEXT_TOPIC_LIMIT = 3;
-const DEFAULT_CONTEXT_LOG_LIMIT = 6;
-const DEFAULT_CONTEXT_FETCH_TIMEOUT_MS = 3000;
-const DEFAULT_CONTEXT_FETCH_RETRIES = 1;
-const DEFAULT_CONTEXT_CACHE_TTL_MS = 45_000;
-const DEFAULT_CONTEXT_CACHE_MAX_ENTRIES = 120;
-const DEFAULT_CONTEXT_CACHE_FRESH_MS = 2500;
-const DEFAULT_POST_TIMEOUT_MS = 8000;
-const DEFAULT_BOARD_SCOPE_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
-const DEFAULT_BOARD_SCOPE_CACHE_MAX_ENTRIES = 4096;
-const CLAWBOARD_CONTEXT_BEGIN = "[CLAWBOARD_CONTEXT_BEGIN]";
-const CLAWBOARD_CONTEXT_END = "[CLAWBOARD_CONTEXT_END]";
-const IGNORE_SESSION_PREFIXES = getIgnoreSessionPrefixesFromEnv(process.env);
-/** Longer TTL when resolving subagent scope from DB so long-running subagents stay aligned. Configurable via CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS (default 48). */
-const BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS = envInt("CLAWBOARD_BOARD_SCOPE_SUBAGENT_TTL_HOURS", 48, 1, 168) * 60 * 60 * 1000;
-const OPENCLAW_REQUEST_ID_PREFIX = "occhat-";
-const OPENCLAW_DAY_SECONDS = 24 * 60 * 60;
-const CLAWBOARD_LOGGER_REGISTERED_SYMBOL = Symbol.for("clawboard.logger.registered");
-const REPLY_DIRECTIVE_TAG_RE = /(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*/gi;
-function envInt(name, fallback, min, max) {
-    const raw = (process.env[name] ?? "").trim();
-    const parsed = Number.parseInt(raw, 10);
-    const value = Number.isFinite(parsed) ? parsed : fallback;
-    return Math.max(min, Math.min(max, value));
-}
-function envBool(name, fallback) {
-    const raw = (process.env[name] ?? "").trim().toLowerCase();
-    if (!raw)
-        return fallback;
-    if (["1", "true", "yes", "on"].includes(raw))
-        return true;
-    if (["0", "false", "no", "off"].includes(raw))
-        return false;
-    return fallback;
-}
-function isContextMode(value) {
-    return value === "auto" || value === "cheap" || value === "full" || value === "patient";
-}
-function parseContextModes(value, fallback = []) {
-    const input = typeof value === "string" ? value : "";
-    if (!input.trim())
-        return [...fallback];
-    const items = input
-        .split(",")
-        .map((item) => item.trim().toLowerCase())
-        .filter((item) => Boolean(item) && isContextMode(item));
-    if (items.length === 0)
-        return [...fallback];
-    const seen = new Set();
-    const deduped = [];
-    for (const mode of items) {
-        if (seen.has(mode))
-            continue;
-        seen.add(mode);
-        deduped.push(mode);
+import { boardSessionRouteToSessionKeys, computeEffectiveSessionKey, isBoardSessionKey, parseBoardSessionKey, } from "./session-key.js";
+import { shouldIgnoreSessionKey } from "./ignore-session.js";
+import { BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS, CLAWBOARD_CONTEXT_BEGIN, CLAWBOARD_CONTEXT_END, CLAWBOARD_LOGGER_REGISTERED_SYMBOL, DEFAULT_BOARD_SCOPE_CACHE_MAX_ENTRIES, DEFAULT_BOARD_SCOPE_CACHE_TTL_MS, DEFAULT_CONTEXT_CACHE_FRESH_MS, DEFAULT_CONTEXT_CACHE_MAX_ENTRIES, DEFAULT_CONTEXT_CACHE_TTL_MS, DEFAULT_CONTEXT_FETCH_RETRIES, DEFAULT_CONTEXT_FETCH_TIMEOUT_MS, DEFAULT_CONTEXT_LOG_LIMIT, DEFAULT_CONTEXT_MAX_CHARS, DEFAULT_CONTEXT_TOPIC_LIMIT, DEFAULT_POST_TIMEOUT_MS, DEFAULT_QUEUE, IGNORE_SESSION_PREFIXES, OPENCLAW_REQUEST_ID_MAX_ENTRIES, OPENCLAW_REQUEST_ID_PREFIX, OPENCLAW_REQUEST_ID_TTL_MS, } from "./constants.js";
+import { buildBaseUrlCandidates, clip, dedupeFingerprint, ensureDir, envBool, envInt, isClassifierPayloadText, isContextMode, isRetryableFetchError, latestUserInput, lexicalSimilarity, normalizeBaseUrl, normalizeBaseUrlCandidate, normalizeWhitespace, parseBaseUrlList, parseContextModes, parseHookNameList, redact, sanitizeMessageContent, sanitizeRetrievedContextBlock, isHeartbeatControlPlaneText, isSubagentScaffoldText, shouldSuppressNonSemanticConversation, shouldSuppressReplyDirectivesForSession, summarize, truncateRaw, } from "./strings.js";
+export function resolveBoardTaskPatchId(taskId, sessionKey) {
+    const candidate = typeof taskId === "string" ? taskId.trim() : "";
+    const route = parseBoardSessionKey(sessionKey);
+    if (!route || route.kind !== "task") {
+        return candidate || undefined;
     }
-    return deduped;
-}
-function parseHookNameList(value) {
-    const input = typeof value === "string" ? value : "";
-    if (!input.trim())
-        return [];
-    const seen = new Set();
-    const hooks = [];
-    for (const item of input.split(",")) {
-        const name = item.trim();
-        if (!name)
-            continue;
-        if (!/^[a-z0-9_]+$/i.test(name))
-            continue;
-        const lowered = name.toLowerCase();
-        if (seen.has(lowered))
-            continue;
-        seen.add(lowered);
-        hooks.push(lowered);
+    if (!candidate) {
+        return route.taskId;
     }
-    return hooks;
-}
-const OPENCLAW_REQUEST_ID_TTL_MS = envInt("OPENCLAW_REQUEST_ID_TTL_SECONDS", 7 * OPENCLAW_DAY_SECONDS, 5 * 60, 90 * OPENCLAW_DAY_SECONDS) * 1000;
-const OPENCLAW_REQUEST_ID_MAX_ENTRIES = envInt("OPENCLAW_REQUEST_ID_MAX_ENTRIES", 5000, 200, 50000);
-function normalizeBaseUrl(url) {
-    return url.replace(/\/$/, "");
-}
-function normalizeBaseUrlCandidate(value) {
-    const raw = String(value ?? "").trim();
-    if (!raw)
-        return "";
-    try {
-        const parsed = new URL(raw);
-        if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
-            return "";
-        parsed.search = "";
-        parsed.hash = "";
-        return normalizeBaseUrl(parsed.toString());
+    if (candidate === route.taskId) {
+        return route.taskId;
     }
-    catch {
-        return "";
+    if (!candidate.toLowerCase().startsWith("task-")) {
+        return route.taskId;
     }
-}
-function parseBaseUrlList(value) {
-    const raw = String(value ?? "").trim();
-    if (!raw)
-        return [];
-    const parts = raw.split(",").map((item) => normalizeBaseUrlCandidate(item)).filter(Boolean);
-    const seen = new Set();
-    const deduped = [];
-    for (const part of parts) {
-        if (seen.has(part))
-            continue;
-        seen.add(part);
-        deduped.push(part);
-    }
-    return deduped;
-}
-function isLoopbackHost(hostname) {
-    const host = String(hostname ?? "").trim().toLowerCase();
-    return host === "localhost" || host === "127.0.0.1" || host === "::1";
-}
-function defaultLoopbackFallbacks(baseUrl) {
-    try {
-        const parsed = new URL(baseUrl);
-        if (isLoopbackHost(parsed.hostname))
-            return [];
-        const protocol = parsed.protocol;
-        const port = parsed.port ? `:${parsed.port}` : "";
-        const pathname = parsed.pathname && parsed.pathname !== "/" ? parsed.pathname.replace(/\/$/, "") : "";
-        return [
-            `${protocol}//127.0.0.1${port}${pathname}`,
-            `${protocol}//localhost${port}${pathname}`,
-        ].map((item) => normalizeBaseUrlCandidate(item)).filter(Boolean);
-    }
-    catch {
-        return [];
-    }
-}
-function buildBaseUrlCandidates(primaryBaseUrl, explicitFallbacks) {
-    const primary = normalizeBaseUrlCandidate(primaryBaseUrl);
-    if (!primary)
-        return [];
-    const candidates = [primary, ...explicitFallbacks, ...defaultLoopbackFallbacks(primary)];
-    const seen = new Set();
-    const deduped = [];
-    for (const candidate of candidates) {
-        const normalized = normalizeBaseUrlCandidate(candidate);
-        if (!normalized || seen.has(normalized))
-            continue;
-        seen.add(normalized);
-        deduped.push(normalized);
-    }
-    return deduped;
-}
-function isRetryableFetchError(err) {
-    if (!(err instanceof Error))
-        return false;
-    const message = String(err.message || "").toLowerCase();
-    const cause = err.cause;
-    let code = "";
-    if (cause && typeof cause === "object") {
-        const maybe = cause.code;
-        if (typeof maybe === "string")
-            code = maybe.toUpperCase();
-    }
-    if (code === "ECONNREFUSED" ||
-        code === "ECONNRESET" ||
-        code === "ETIMEDOUT" ||
-        code === "ENOTFOUND" ||
-        code === "EHOSTUNREACH" ||
-        code === "UND_ERR_CONNECT_TIMEOUT" ||
-        code === "UND_ERR_SOCKET") {
-        return true;
-    }
-    return (message.includes("fetch failed") ||
-        message.includes("econnrefused") ||
-        message.includes("econnreset") ||
-        message.includes("etimedout") ||
-        message.includes("enotfound"));
-}
-function stripClawboardWrapperArtifacts(content) {
-    let text = content ?? "";
-    text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\]\s*/gi, "");
-    text = text.replace(/\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
-    text = text.replace(/^\s*Conversation info \(untrusted metadata\)\s*:\s*```(?:json)?\s*[\s\S]*?```\s*/gim, "");
-    text = text.replace(/^\s*Conversation info \(untrusted metadata\)\s*:\s*\{[\s\S]*?\}\s*/gim, "");
-    text = text.replace(REPLY_DIRECTIVE_TAG_RE, " ");
-    return text;
-}
-function sanitizeRetrievedContextBlock(content) {
-    let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
-    text = stripClawboardWrapperArtifacts(text);
-    text = text.replace(/[ \t]{2,}/g, " ");
-    text = text.replace(/\n{3,}/g, "\n\n");
-    return text.trim();
-}
-function sanitizeMessageContent(content) {
-    let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
-    text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\][\s\S]*?\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
-    text = stripClawboardWrapperArtifacts(text);
-    text = text.replace(/Clawboard continuity hook is active for this turn\.[\s\S]*?Prioritize curated user notes when present\.\s*/gi, "");
-    text = text.replace(/^\s*summary\s*[:\-]\s*/gim, "");
-    text = text.replace(/^\[Discord [^\]]+\]\s*/gim, "");
-    // OpenClaw/CLI transcripts sometimes include a local-time prefix like:
-    // "[Sun 2026-02-08 09:01 EST] ..." which pollutes classifier/search signals.
-    text = text.replace(/^\[[A-Za-z]{3}\s+\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?\s+[A-Za-z]{2,5}\]\s*/gim, "");
-    text = text.replace(/\[message[_\s-]?id:[^\]]+\]/gi, "");
-    text = text.replace(/[ \t]{2,}/g, " ");
-    text = text.replace(/\n{3,}/g, "\n\n");
-    return text.trim();
-}
-function shouldSuppressReplyDirectivesForSession(sessionKey) {
-    return Boolean(sessionKey && isBoardSessionKey(sessionKey));
-}
-function summarize(content) {
-    const trimmed = sanitizeMessageContent(content).replace(/\s+/g, " ");
-    if (!trimmed)
-        return "";
-    if (trimmed.length <= SUMMARY_MAX)
-        return trimmed;
-    return `${trimmed.slice(0, SUMMARY_MAX - 1).trim()}…`;
-}
-function dedupeFingerprint(content) {
-    const normalized = sanitizeMessageContent(content).replace(/\s+/g, " ").trim().toLowerCase();
-    if (!normalized)
-        return "empty";
-    return `${normalized.slice(0, 220)}|${normalized.length}`;
-}
-function truncateRaw(content) {
-    if (content.length <= RAW_MAX)
-        return content;
-    return `${content.slice(0, RAW_MAX - 1)}…`;
-}
-function clip(text, limit) {
-    const value = (text ?? "").trim();
-    if (value.length <= limit)
-        return value;
-    return `${value.slice(0, limit - 1).trim()}…`;
-}
-function normalizeWhitespace(value) {
-    return (value ?? "").replace(/\s+/g, " ").trim();
-}
-function tokenSet(value) {
-    const normalized = normalizeWhitespace(value)
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]+/g, " ");
-    const stop = new Set([
-        "the",
-        "and",
-        "for",
-        "with",
-        "that",
-        "this",
-        "from",
-        "into",
-        "about",
-        "where",
-        "what",
-        "when",
-        "have",
-        "has",
-        "been",
-        "were",
-        "is",
-        "are",
-        "to",
-        "of",
-        "on",
-        "in",
-        "a",
-        "an",
-    ]);
-    return new Set(normalized
-        .split(" ")
-        .map((item) => item.trim())
-        .filter((item) => item.length > 2 && !stop.has(item)));
-}
-function lexicalSimilarity(a, b) {
-    const sa = tokenSet(a);
-    const sb = tokenSet(b);
-    if (sa.size === 0 || sb.size === 0)
-        return 0;
-    let inter = 0;
-    for (const token of sa) {
-        if (sb.has(token))
-            inter += 1;
-    }
-    const union = sa.size + sb.size - inter;
-    if (union <= 0)
-        return 0;
-    return inter / union;
-}
-function extractTextLoose(value, depth = 0) {
-    if (!value || depth > 4)
-        return undefined;
-    if (typeof value === "string")
-        return value;
-    if (Array.isArray(value)) {
-        const parts = value
-            .map((entry) => extractTextLoose(entry, depth + 1))
-            .filter((entry) => Boolean(entry));
-        return parts.length ? parts.join("\n") : undefined;
-    }
-    if (typeof value === "object") {
-        const obj = value;
-        const keys = ["text", "content", "value", "message", "output_text", "input_text"];
-        const parts = [];
-        for (const key of keys) {
-            const extracted = extractTextLoose(obj[key], depth + 1);
-            if (extracted)
-                parts.push(extracted);
-        }
-        return parts.length ? parts.join("\n") : undefined;
-    }
-    return undefined;
-}
-function latestUserInput(prompt, messages) {
-    if (Array.isArray(messages)) {
-        for (let i = messages.length - 1; i >= 0; i -= 1) {
-            const message = messages[i];
-            if (typeof message?.role !== "string" || message.role !== "user")
-                continue;
-            const text = extractTextLoose(message.content);
-            const clean = sanitizeMessageContent(text ?? "");
-            if (clean)
-                return clean;
-        }
-    }
-    const fallback = sanitizeMessageContent(prompt ?? "");
-    return clip(fallback, 1000);
-}
-function isClassifierPayloadText(content) {
-    const text = content.trim();
-    if (!text)
-        return false;
-    if (!text.startsWith("{") && !text.startsWith("```"))
-        return false;
-    const markers = ["\"window\"", "\"candidateTopics\"", "\"candidateTasks\"", "\"instructions\"", "\"summaries\""];
-    if (markers.some((marker) => text.includes(marker)))
-        return true;
-    // Some classifier/control payloads are smaller and don't include the "window" schema,
-    // but still shouldn't be logged as chat content.
-    const controlMarkers = ["\"createTopic\"", "\"createTask\"", "\"topicId\"", "\"taskId\""];
-    let hits = 0;
-    for (const marker of controlMarkers) {
-        if (text.includes(marker))
-            hits += 1;
-    }
-    return hits >= 2;
-}
-function normalizeChannelId(value) {
-    return String(value ?? "").trim().toLowerCase();
-}
-function isMainAgentSessionKey(value) {
-    const key = String(value ?? "").trim();
-    if (!key)
-        return false;
-    const base = key.split("|", 1)[0] ?? key;
-    return base.trim().toLowerCase() === "agent:main:main";
-}
-function isHeartbeatControlPlaneText(content, params) {
-    const clean = sanitizeMessageContent(content).trim();
-    if (!clean)
-        return false;
-    const channel = normalizeChannelId(params?.channelId);
-    const mainAgentSession = isMainAgentSessionKey(params?.sessionKey);
-    if (channel === "heartbeat" || channel === "cron-event")
-        return true;
-    if (/^\[cron:[^\]]+\]/i.test(clean))
-        return true;
-    if (/^\s*heartbeat\s*:/i.test(clean))
-        return mainAgentSession || channel === "heartbeat";
-    if (/^\s*heartbeat_ok\s*$/i.test(clean))
-        return mainAgentSession || channel === "heartbeat";
-    if (mainAgentSession && /heartbeat and watchdog recovery check/i.test(clean))
-        return true;
-    return false;
-}
-function isSubagentScaffoldText(content, sessionKey) {
-    const clean = sanitizeMessageContent(content).trim();
-    if (!clean)
-        return false;
-    if (!/^\s*\[subagent context\]/i.test(clean))
-        return false;
-    const key = String(sessionKey ?? "").trim().toLowerCase();
-    return key.includes(":subagent:");
-}
-function shouldSuppressNonSemanticConversation(content, params) {
-    const sessionKey = params?.sessionKey ?? undefined;
-    if (isSubagentScaffoldText(content, sessionKey))
-        return true;
-    if (isHeartbeatControlPlaneText(content, params))
-        return true;
-    return false;
-}
-function redact(value, depth = 0) {
-    if (depth > 4)
-        return "[redacted-depth]";
-    if (value === null || value === undefined)
-        return value;
-    if (typeof value === "string")
-        return truncateRaw(value);
-    if (typeof value === "number" || typeof value === "boolean")
-        return value;
-    if (Array.isArray(value))
-        return value.map((entry) => redact(entry, depth + 1));
-    if (typeof value === "object") {
-        const obj = value;
-        const output = {};
-        for (const [key, val] of Object.entries(obj)) {
-            if (/token|secret|password|key|auth/i.test(key)) {
-                output[key] = "[redacted]";
-            }
-            else {
-                output[key] = redact(val, depth + 1);
-            }
-        }
-        return output;
-    }
-    return "[unserializable]";
-}
-async function ensureDir(filePath) {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    const routeSuffix = route.taskId.slice("task-".length);
+    const candidateSuffix = candidate.slice("task-".length);
+    return candidateSuffix === routeSuffix ? route.taskId : candidate;
 }
 export default function register(api) {
     const registrationState = api;
@@ -622,7 +215,7 @@ export default function register(api) {
             this.failStmt.run(id, attempts, nextAttemptAtMs, error.slice(0, 1200));
         }
         saveBoardScope(agentId, scope) {
-            this.scopeInsertStmt.run(agentId, scope.topicId, null, scope.kind, scope.sessionKey ?? null, scope.updatedAt);
+            this.scopeInsertStmt.run(agentId, scope.topicId, scope.kind === "task" ? scope.taskId : null, scope.kind, scope.sessionKey ?? null, scope.updatedAt);
         }
         saveBoardScopeForSession(sessionKey, scope) {
             const key = normalizeId(sessionKey);
@@ -638,14 +231,23 @@ export default function register(api) {
             const row = rows?.[0];
             if (!row)
                 return undefined;
-            const scope = {
+            if (row.kind === "task" && row.taskId) {
+                return {
+                    topicId: row.topicId,
+                    taskId: row.taskId,
+                    kind: "task",
+                    sessionKey: row.sessionKey ?? "",
+                    inherited: true,
+                    updatedAt: row.updatedAt,
+                };
+            }
+            return {
                 topicId: row.topicId,
                 kind: "topic",
                 sessionKey: row.sessionKey ?? "",
                 inherited: true,
                 updatedAt: row.updatedAt,
             };
-            return scope;
         }
         getFreshBoardScopeForSession(sessionKey, cutoffMs) {
             const key = normalizeId(sessionKey);
@@ -836,8 +438,9 @@ export default function register(api) {
             keys.add(base);
         const boardRoute = parseBoardSessionKey(normalized);
         if (boardRoute) {
-            const canonical = `clawboard:topic:${boardRoute.topicId}`;
-            keys.add(canonical);
+            for (const canonical of boardSessionRouteToSessionKeys(boardRoute)) {
+                keys.add(canonical);
+            }
         }
         return Array.from(keys);
     }
@@ -876,8 +479,7 @@ export default function register(api) {
         if (!route)
             return undefined;
         return {
-            topicId: route.topicId,
-            kind: "topic",
+            ...route,
             sessionKey: key,
             inherited: false,
             updatedAt: nowMs(),
@@ -1139,6 +741,9 @@ export default function register(api) {
         if (boardScope?.topicId) {
             source.boardScopeTopicId = boardScope.topicId;
             source.boardScopeKind = boardScope.kind;
+            if (boardScope.kind === "task") {
+                source.boardScopeTaskId = boardScope.taskId;
+            }
             source.boardScopeSessionKey = boardScope.sessionKey;
             source.boardScopeInherited = Boolean(boardScope.inherited);
             source.boardScopeLock = true;
@@ -1156,6 +761,14 @@ export default function register(api) {
         }
         mergeSourceExtras(source, params.extra);
         return source;
+    }
+    function routingTarget(routing) {
+        const target = {};
+        if (routing.topicId)
+            target.topicId = routing.topicId;
+        if (routing.boardScope?.kind === "task")
+            target.taskId = routing.boardScope.taskId;
+        return target;
     }
     function hasSpecificSessionAnchor(effectiveSessionKey, ctx2) {
         const candidates = [
@@ -1717,7 +1330,7 @@ export default function register(api) {
             tools.push({
                 name: "clawboard_search",
                 label: "Clawboard Search",
-                description: "Search Clawboard topics, tasks, logs, and curated notes (hybrid semantic + lexical).",
+                description: "Search Clawboard topics, logs, and curated notes (hybrid semantic + lexical).",
                 parameters: {
                     type: "object",
                     additionalProperties: false,
@@ -1752,7 +1365,6 @@ export default function register(api) {
                             pathname: "/api/topics",
                             query: {
                                 sessionKey: sk,
-                                topicId: topicId || undefined,
                             },
                             timeoutMs: 12000,
                         });
@@ -1768,12 +1380,9 @@ export default function register(api) {
                                 return tags.some((tag) => String(tag ?? "").trim().toLowerCase() === "delegating");
                             })
                                 .slice(0, Math.max(1, limitTopics));
-                            const matchedTopicIds = new Set();
-                            for (const topic of topics) {
-                                const topicIdValue = String(topic.id ?? "").trim();
-                                if (topicIdValue)
-                                    matchedTopicIds.add(topicIdValue);
-                            }
+                            const matchedTopicIds = topics
+                                .map((topic) => String(topic.id ?? "").trim())
+                                .filter(Boolean);
                             return toolJsonResult({
                                 ok: true,
                                 status: 200,
@@ -1783,7 +1392,7 @@ export default function register(api) {
                                     topics,
                                     logs: [],
                                     notes: [],
-                                    matchedTopicIds: Array.from(matchedTopicIds),
+                                    matchedTopicIds,
                                     matchedLogIds: [],
                                     degraded: true,
                                     searchMeta: {
@@ -1874,7 +1483,7 @@ export default function register(api) {
                     const res = await toolFetchJson({
                         pathname: "/api/context",
                         query: {
-                            q: q || "current conversation continuity, active topics and curated notes",
+                            q: q || "current conversation continuity, active topics, and curated notes",
                             sessionKey: sk,
                             mode,
                             maxChars,
@@ -1991,8 +1600,8 @@ export default function register(api) {
                     required: ["id"],
                 },
                 async execute(_toolCallId, params) {
-                    const requestedId = typeof params.id === "string" ? params.id.trim() : "";
-                    if (!requestedId)
+                    const id = typeof params.id === "string" ? params.id.trim() : "";
+                    if (!id)
                         return toolJsonResult({ ok: false, error: "id required" });
                     const patch = {};
                     if (typeof params.status === "string" && params.status.trim())
@@ -2009,9 +1618,6 @@ export default function register(api) {
                         patch.tags = params.tags.filter((t) => typeof t === "string").map((t) => t.trim()).filter(Boolean);
                     if (Object.keys(patch).length === 0)
                         return toolJsonResult({ ok: false, error: "no patch fields provided" });
-                    const id = requestedId;
-                    if (!id)
-                        return toolJsonResult({ ok: false, error: "topic id unavailable for current board session" });
                     const res = await toolFetchJson({
                         pathname: `/api/topics/${encodeURIComponent(id)}`,
                         method: "PATCH",
@@ -2258,7 +1864,7 @@ export default function register(api) {
         }
         const retrievalQuery = cleanInput && cleanInput.trim().length > 0 && !isSubagentScaffoldPrompt
             ? clip(cleanInput, 320)
-            : "current conversation continuity, active topics and curated notes";
+            : "current conversation continuity, active topics, active tasks, and curated notes";
         const primaryMode = effectiveContextMode;
         const context = await retrieveContextViaContextApi(retrievalQuery, sessionKeyForContext, primaryMode);
         if (!context)
@@ -2352,10 +1958,10 @@ export default function register(api) {
         }
         return recentOpenclawRequestId(params.sessionKey);
     };
-    const canonicalBoardScopeSessionKey = (scope) => {
+    const canonicalBoardScopeSessionKeys = (scope) => {
         if (!scope?.topicId)
-            return undefined;
-        return `clawboard:topic:${scope.topicId}`;
+            return [];
+        return boardSessionRouteToSessionKeys(scope);
     };
     const resolveOpenclawRequestIdForBoardScope = async (params) => {
         const explicitRequestId = normalizeRequestId(params.requestId);
@@ -2373,8 +1979,8 @@ export default function register(api) {
             for (const key of requestSessionKeys(scopeSessionKey))
                 candidates.add(key);
         }
-        const canonicalScopeSessionKey = canonicalBoardScopeSessionKey(params.boardScope ?? boardScopeFromSessionKey(sessionKey));
-        if (canonicalScopeSessionKey) {
+        const canonicalScopeSessionKeys = canonicalBoardScopeSessionKeys(params.boardScope ?? boardScopeFromSessionKey(sessionKey));
+        for (const canonicalScopeSessionKey of canonicalScopeSessionKeys) {
             for (const key of requestSessionKeys(canonicalScopeSessionKey))
                 candidates.add(key);
         }
@@ -2386,13 +1992,16 @@ export default function register(api) {
             return candidateRequestId;
         }
         const lookupSessionKeys = new Set();
-        if (canonicalScopeSessionKey)
+        for (const canonicalScopeSessionKey of canonicalScopeSessionKeys) {
             lookupSessionKeys.add(canonicalScopeSessionKey);
+        }
         for (const candidate of candidates) {
             const route = parseBoardSessionKey(candidate);
             if (!route)
                 continue;
-            lookupSessionKeys.add(`clawboard:topic:${route.topicId}`);
+            for (const lookupSessionKey of boardSessionRouteToSessionKeys(route)) {
+                lookupSessionKeys.add(lookupSessionKey);
+            }
         }
         if (lookupSessionKeys.size === 0)
             return explicitRequestId ?? params.requestId;
@@ -2767,7 +2376,6 @@ export default function register(api) {
             sessionKey: effectiveSessionKey ?? ctx.sessionKey,
             boardScope: routing.boardScope,
         });
-        const topicId = routing.topicId;
         const metaSummary = meta?.summary;
         const summary = typeof metaSummary === "string" && metaSummary.trim().length > 0 ? summarize(metaSummary) : summarize(cleanRaw);
         const incomingKey = messageId
@@ -2789,7 +2397,7 @@ export default function register(api) {
             ? resolveAgentLabel(inboundSubagent.ownerAgentId, `agent:${inboundSubagent.ownerAgentId}`)
             : "User";
         sendAsync({
-            topicId,
+            ...routingTarget(routing),
             type: "conversation",
             content: cleanRaw,
             summary,
@@ -2967,7 +2575,6 @@ export default function register(api) {
             sessionKey: effectiveSessionKey ?? ctx.sessionKey,
             boardScope: routing.boardScope,
         });
-        const topicId = routing.topicId;
         // Outbound message content is always assistant-side.
         const agentId = "assistant";
         const agentLabel = resolveAgentLabel(ctx.agentId, meta?.sessionKey ?? ctx?.sessionKey);
@@ -2984,7 +2591,7 @@ export default function register(api) {
             rememberOutgoing(key);
         rememberOutgoingSession(effectiveSessionKey ?? ctx.sessionKey, cleanRaw);
         sendAsync({
-            topicId,
+            ...routingTarget(routing),
             type: "conversation",
             content: cleanRaw,
             summary,
@@ -3076,7 +2683,7 @@ export default function register(api) {
                 : `Transcript write${messageRole ? `: ${messageRole}` : ""}`;
         const raw = truncateRaw(contentText || JSON.stringify(redact(messageRecord), null, 2));
         sendAsync({
-            topicId: routing.topicId,
+            ...routingTarget(routing),
             type: "action",
             content,
             summary: content,
@@ -3155,7 +2762,7 @@ export default function register(api) {
             message: redact(messageRecord),
         };
         sendAsync({
-            topicId: routing.topicId,
+            ...routingTarget(routing),
             type: "action",
             content,
             summary: content,
@@ -3212,9 +2819,8 @@ export default function register(api) {
             requestId,
             routing,
         });
-        const topicId = routing.topicId;
         sendAsync({
-            topicId,
+            ...routingTarget(routing),
             type: "action",
             content: `Tool call: ${event.toolName}`,
             summary: `Tool call: ${event.toolName}`,
@@ -3279,9 +2885,8 @@ export default function register(api) {
                 }
             }
         }
-        const topicId = routing.topicId;
         sendAsync({
-            topicId,
+            ...routingTarget(routing),
             type: "action",
             content: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
             summary: event.error ? `Tool error: ${event.toolName}` : `Tool result: ${event.toolName}`,
@@ -3373,7 +2978,6 @@ export default function register(api) {
             sessionKey: inferredSessionKey ?? ctx.sessionKey,
             boardScope: routing.boardScope,
         });
-        const topicId = routing.topicId;
         // agent_end is always this agent's run: treat assistant-role messages as assistant output.
         const agentId = "assistant";
         const agentLabel = resolveAgentLabel(ctx.agentId, inferredSessionKey);
@@ -3386,7 +2990,7 @@ export default function register(api) {
                     keys: m && typeof m === "object" ? Object.keys(m).slice(0, 12) : [],
                 }));
                 sendAsync({
-                    topicId,
+                    ...routingTarget(routing),
                     type: "action",
                     content: "clawboard-logger: agent_end message shape",
                     summary: "clawboard-logger: agent_end message shape",
@@ -3498,7 +3102,7 @@ export default function register(api) {
                     const messageCreatedAt = new Date(createdAtBaseMs + agentEndSeq).toISOString();
                     agentEndSeq += 1;
                     sendAsync({
-                        topicId,
+                        ...routingTarget(routing),
                         type: "conversation",
                         content: cleanedContent,
                         summary,
@@ -3534,7 +3138,7 @@ export default function register(api) {
                     const messageCreatedAt = new Date(createdAtBaseMs + agentEndSeq).toISOString();
                     agentEndSeq += 1;
                     sendAsync({
-                        topicId,
+                        ...routingTarget(routing),
                         type: "conversation",
                         content: cleanedContent,
                         summary,
@@ -3564,7 +3168,7 @@ export default function register(api) {
         }
         if (!event.success || debug) {
             sendAsync({
-                topicId,
+                ...routingTarget(routing),
                 type: "action",
                 content: event.success ? "Agent run complete" : "Agent run failed",
                 summary: event.success ? "Agent run complete" : "Agent run failed",
@@ -3639,7 +3243,7 @@ export default function register(api) {
                 rememberTranscriptWrite(dedupeKey, 30_000);
                 const content = `Hook event: ${hookName}`;
                 sendAsync({
-                    topicId: routing.topicId,
+                    ...routingTarget(routing),
                     type: "action",
                     content,
                     summary: content,
@@ -3660,5 +3264,5 @@ export default function register(api) {
         }
     }
 }
-// Export utility functions for testing
-export { normalizeBaseUrl, sanitizeRetrievedContextBlock, sanitizeMessageContent, summarize, dedupeFingerprint, truncateRaw, clip, normalizeWhitespace, tokenSet, lexicalSimilarity, };
+// Re-export utility functions for testing
+export { normalizeBaseUrl, sanitizeRetrievedContextBlock, sanitizeMessageContent, summarize, dedupeFingerprint, truncateRaw, clip, normalizeWhitespace, tokenSet, lexicalSimilarity, } from "./strings.js";

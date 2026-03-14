@@ -232,22 +232,22 @@ test("clawboard_search uses delegating fast path without calling /api/search", a
     globalThis.fetch = async (url) => {
       const target = String(url);
       calls.push(target);
-      if (target.includes("/api/tasks")) {
+      if (target.includes("/api/topics")) {
         return {
           ok: true,
           status: 200,
           async json() {
             return [
-              { id: "task-a", topicId: "topic-a", status: "doing", tags: ["delegating", "agent:coding"] },
-              { id: "task-b", topicId: "topic-a", status: "done", tags: ["delegating"] },
-              { id: "task-c", topicId: "topic-b", status: "doing", tags: ["other"] },
+              { id: "topic-a", status: "doing", tags: ["delegating", "agent:coding"] },
+              { id: "topic-b", status: "done", tags: ["delegating"] },
+              { id: "topic-c", status: "doing", tags: ["other"] },
             ];
           },
           async text() {
             return JSON.stringify([
-              { id: "task-a", topicId: "topic-a", status: "doing", tags: ["delegating", "agent:coding"] },
-              { id: "task-b", topicId: "topic-a", status: "done", tags: ["delegating"] },
-              { id: "task-c", topicId: "topic-b", status: "doing", tags: ["other"] },
+              { id: "topic-a", status: "doing", tags: ["delegating", "agent:coding"] },
+              { id: "topic-b", status: "done", tags: ["delegating"] },
+              { id: "topic-c", status: "doing", tags: ["other"] },
             ]);
           },
         };
@@ -278,10 +278,10 @@ test("clawboard_search uses delegating fast path without calling /api/search", a
     assert.equal(details?.ok, true);
     assert.equal(details?.status, 200);
     assert.equal(details?.data?.mode, "delegating-fast-path");
-    assert.equal(Array.isArray(details?.data?.tasks), true);
-    assert.equal(details.data.tasks.length, 1);
-    assert.equal(details.data.tasks[0].id, "task-a");
-    assert.equal(calls.some((value) => value.includes("/api/tasks")), true);
+    assert.equal(Array.isArray(details?.data?.topics), true);
+    assert.equal(details.data.topics.length, 1);
+    assert.equal(details.data.topics[0].id, "topic-a");
+    assert.equal(calls.some((value) => value.includes("/api/topics")), true);
     assert.equal(calls.some((value) => value.includes("/api/search")), false);
   } finally {
     globalThis.fetch = originalFetch;
@@ -357,7 +357,6 @@ test("clawboard_search retries transient /api/search failures with degraded limi
     const result = await tool.execute("tool-call-2", {
       q: "status review",
       limitTopics: 60,
-      limitTasks: 120,
       limitLogs: 320,
     });
     const details = result?.details;
@@ -367,10 +366,8 @@ test("clawboard_search retries transient /api/search failures with degraded limi
     const first = new URL(searchUrls[0]);
     const second = new URL(searchUrls[1]);
     assert.equal(first.searchParams.get("limitTopics"), "60");
-    assert.equal(first.searchParams.get("limitTasks"), "120");
     assert.equal(first.searchParams.get("limitLogs"), "320");
     assert.equal(second.searchParams.get("limitTopics"), "12");
-    assert.equal(second.searchParams.get("limitTasks"), "24");
     assert.equal(second.searchParams.get("limitLogs"), "120");
     assert.equal(details?.ok, true);
     assert.equal(details?.data?.degraded, true);
