@@ -4806,13 +4806,16 @@ PY
       fi
 
       log_info "Configuring logger plugin..."
+      ensure_clawboard_logger_in_allow
       _LOGGER_CFG_BASEURL="$(openclaw_cfg_get_scalar_normalized plugins.entries.clawboard-logger.config.baseUrl || true)"
+      if [ -z "$_LOGGER_CFG_BASEURL" ] || [ "$_LOGGER_CFG_BASEURL" = "null" ]; then
+        _LOGGER_CFG_BASEURL="$(openclaw_cfg_get_scalar_from_file plugins.entries.clawboard-logger.config.baseUrl || true)"
+      fi
       if [ -z "$_LOGGER_CFG_BASEURL" ] || [ "$_LOGGER_CFG_BASEURL" = "null" ]; then
         log_error "Logger plugin config missing required baseUrl after configuration write."
       fi
       OPENCLAW_GATEWAY_RESTART_NEEDED=true
       log_success "Logger plugin installed and enabled."
-      ensure_clawboard_logger_in_allow
     fi
 
     maybe_deploy_agent_templates
