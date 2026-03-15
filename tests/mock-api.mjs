@@ -438,6 +438,16 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/health") return sendJson(res, 200, { status: "ok" });
 
+  if (url.pathname === "/api/test/live-event" && req.method === "POST") {
+    const payload = await parseBody(req);
+    const type = String(payload.type || "").trim();
+    if (!type) return sendJson(res, 400, { error: "type required" });
+    const data = payload.data && typeof payload.data === "object" ? payload.data : {};
+    const eventTs = String(payload.eventTs || data.updatedAt || data.createdAt || nowIso()).trim() || nowIso();
+    pushEvent(type, data, eventTs);
+    return sendJson(res, 200, { ok: true, type, eventTs });
+  }
+
   if (url.pathname === "/api/stream") {
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -716,6 +726,37 @@ const server = http.createServer(async (req, res) => {
     }
     pushEvent("topic.deleted", { id: topicId, updatedAt: now });
     return sendJson(res, 200, { ok: true, deleted: true });
+  }
+
+  if (url.pathname.startsWith("/api/topics/") && req.method === "PATCH") {
+    const topicId = url.pathname.split("/").pop();
+    if (!topicId) return sendJson(res, 400, { error: "topicId required" });
+    const topic = store.topics.find((entry) => entry.id === topicId);
+    if (!topic) return sendJson(res, 404, { error: "Not found" });
+
+    const payload = await parseBody(req);
+    const fields = new Set(Object.keys(payload || {}));
+    const now = nowIso();
+
+    Object.assign(topic, payload);
+
+    if (fields.has("snoozedUntil")) {
+      topic.snoozedUntil = payload.snoozedUntil ?? null;
+    }
+    if (fields.has("status")) {
+      topic.status = payload.status ?? "active";
+    }
+
+    const normalizedStatus = String(topic.status || "active").trim().toLowerCase();
+    if (topic.snoozedUntil && normalizedStatus !== "archived" && normalizedStatus !== "snoozed") {
+      topic.status = "snoozed";
+    } else if (fields.has("snoozedUntil") && topic.snoozedUntil == null && !fields.has("status") && normalizedStatus === "snoozed") {
+      topic.status = "active";
+    }
+
+    topic.updatedAt = now;
+    pushEvent("topic.upserted", topic);
+    return sendJson(res, 200, topic);
   }
 
   if (url.pathname === "/api/topics/reorder" && req.method === "POST") {

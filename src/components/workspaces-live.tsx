@@ -1,12 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { startTransition, useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/cn";
 import { useOpenClawWorkspaces } from "@/components/providers";
 import { setLocalStorageItem } from "@/lib/local-storage";
-import { WORKSPACE_NAV_SYNC_EVENT, orderOpenClawWorkspaces, workspaceLabel, workspaceRoute } from "@/lib/openclaw-workspaces";
+import { orderOpenClawWorkspaces, workspaceLabel, workspaceRoute } from "@/lib/openclaw-workspaces";
 
 const WORKSPACE_LAST_URL_KEY = "clawboard.workspaces.lastUrl";
 
@@ -31,6 +31,7 @@ export function WorkspacesLive({
   active?: boolean;
 }) {
   const pathname = usePathname();
+  const router = useRouter();
   const { error, configured, workspaces } = useOpenClawWorkspaces();
   const [ideSessionStatus, setIdeSessionStatus] = useState<"idle" | "authorizing" | "ready" | "error">("idle");
   const [ideSessionError, setIdeSessionError] = useState<string | null>(null);
@@ -84,16 +85,11 @@ export function WorkspacesLive({
   const selectWorkspace = (agentId: string) => {
     const normalized = normalizeAgentId(agentId);
     if (!normalized) return;
+    const nextUrl = workspaceRoute(normalized);
     setSelectedWorkspaceKey(normalized);
     setMountedWorkspaceKeys((current) => (current.includes(normalized) ? current : [...current, normalized]));
-    if (typeof window !== "undefined") {
-      const nextUrl = workspaceRoute(normalized);
-      setLocalStorageItem(WORKSPACE_LAST_URL_KEY, nextUrl);
-      if (window.location.pathname !== nextUrl) {
-        window.history.replaceState(window.history.state, "", nextUrl);
-      }
-      window.dispatchEvent(new Event(WORKSPACE_NAV_SYNC_EVENT));
-    }
+    setLocalStorageItem(WORKSPACE_LAST_URL_KEY, nextUrl);
+    router.replace(nextUrl, { scroll: false });
   };
 
   useEffect(() => {

@@ -41,7 +41,7 @@ export function topicAttentionActivityAt(
   latestLogAt?: string | null,
   badgeAt?: number | null | undefined
 ) {
-  let activityAt = topicLastTouchedAt(topic, latestLogAt);
+  let activityAt = normalizeStamp(latestLogAt);
   if (typeof badgeAt === "number" && Number.isFinite(badgeAt) && badgeAt > 0) {
     activityAt = newerStamp(activityAt, new Date(badgeAt).toISOString());
   }

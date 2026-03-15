@@ -12,7 +12,7 @@ test("topic swipe actions (snooze/archive/delete) and reorder work in unified vi
   expect(create2.ok()).toBeTruthy();
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("link", { name: "Unified View" }).waitFor();
 
   const cardA = page.locator(`[data-topic-card-id="${t1.id}"]`).first();
   const cardB = page.locator(`[data-topic-card-id="${t2.id}"]`).first();
@@ -87,12 +87,12 @@ test("topic swipe actions (snooze/archive/delete) and reorder work in unified vi
   // Swipe left on Topic A to reveal actions.
   await swipeLeft(`[data-topic-card-id="${t1.id}"]`);
 
-  // Snooze should open a modal and then POST /api/topics with status snoozed and snoozedUntil.
+  // Snooze should open a modal and then PATCH the topic with status snoozed and snoozedUntil.
   const snoozeReq = page.waitForRequest((req) => {
-    if (!req.url().includes("/api/topics") || req.method() !== "POST") return false;
+    if (!req.url().includes(`/api/topics/${encodeURIComponent(t1.id)}`) || req.method() !== "PATCH") return false;
     try {
       const body = req.postDataJSON() as Record<string, unknown>;
-      return body.id === t1.id && body.status === "snoozed" && typeof body.snoozedUntil === "string";
+      return body.status === "snoozed" && typeof body.snoozedUntil === "string";
     } catch {
       return false;
     }
@@ -114,10 +114,10 @@ test("topic swipe actions (snooze/archive/delete) and reorder work in unified vi
   await swipeLeft(`[data-topic-card-id="${t1.id}"]`);
 
   const archiveReq = page.waitForRequest((req) => {
-    if (!req.url().includes("/api/topics") || req.method() !== "POST") return false;
+    if (!req.url().includes(`/api/topics/${encodeURIComponent(t1.id)}`) || req.method() !== "PATCH") return false;
     try {
       const body = req.postDataJSON() as Record<string, unknown>;
-      return body.id === t1.id && body.status === "archived";
+      return body.status === "archived";
     } catch {
       return false;
     }

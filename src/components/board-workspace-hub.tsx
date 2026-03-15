@@ -20,7 +20,7 @@ export function BoardWorkspaceHub({
     <>
       <section hidden={!boardActive} aria-hidden={!boardActive} data-testid="board-hub-panel">
         <Suspense fallback={<div className="text-sm text-[rgb(var(--claw-muted))]">Loading unified view...</div>}>
-          <UnifiedView basePath="/u" />
+          <UnifiedView basePath="/u" active={boardActive} />
         </Suspense>
       </section>
       <section hidden={!workspacesActive} aria-hidden={!workspacesActive} data-testid="workspace-hub-panel">

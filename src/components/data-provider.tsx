@@ -19,7 +19,7 @@ import {
   parseStringMap,
 } from "@/lib/attention-state";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
-import { buildLatestTopicTouchById, deriveAttentionTopicIds } from "@/lib/topic-attention";
+import { buildLatestTopicTouchById, deriveAttentionTopicIds, topicLastTouchedAt } from "@/lib/topic-attention";
 import {
   CLAWBOARD_NOTIFICATION_CLICK_EVENT,
   CLAWBOARD_NOTIFICATION_CLICK_MESSAGE_TYPE,
@@ -96,6 +96,7 @@ const UNSNOOZE_TOPIC_TAG_PREFIX = "clawboard-unsnooze-topic-";
 const UNSNOOZE_TOPICS_SUMMARY_TAG = "clawboard-unsnooze-topics";
 const CHAT_TAG_PREFIX = "clawboard-chat-";
 const CHAT_SUMMARY_TAG = "clawboard-chat-summary";
+const DELETED_TOPICS_STORAGE_KEY = "clawboard.deletedTopics";
 const STREAM_EVENT_TS_STORAGE_KEY = "clawboard.stream.eventTs";
 const STREAM_EVENT_SEQ_STORAGE_KEY = "clawboard.stream.lastSeq";
 const DEFAULT_INITIAL_CHANGES_LIMIT_LOGS = 500;
@@ -283,6 +284,42 @@ function applyDeletedEntityTombstones<T extends { id: string; updatedAt?: string
   });
 }
 
+function applyDeletedTopicTimestampRecord<T extends { id: string; updatedAt?: string; createdAt?: string }>(
+  items: T[],
+  deletedById: Record<string, string>
+) {
+  if (!items.length) return items;
+  const entries = Object.entries(deletedById).filter(([id, deletedAt]) => String(id).trim() && String(deletedAt).trim());
+  if (entries.length === 0) return items;
+  const deletedMap = new Map(entries);
+  const filtered = items.filter((item) => {
+    const deletedAt = deletedMap.get(item.id);
+    if (!deletedAt) return true;
+    const itemStamp = item.updatedAt ?? item.createdAt;
+    return isTimestampAfterCursor(itemStamp, deletedAt);
+  });
+  if (filtered.length === items.length && filtered.every((item, index) => item === items[index])) {
+    return items;
+  }
+  return filtered;
+}
+
+function mergeDeletedTopicTimestamps(previous: Record<string, string>, tombstones: DeletedEntityRef[]) {
+  if (tombstones.length === 0) return previous;
+  const next: Record<string, string> = { ...previous };
+  let changed = false;
+  for (const row of tombstones) {
+    const id = String(row.id ?? "").trim();
+    const deletedAt = String(row.deletedAt ?? "").trim();
+    if (!id || !deletedAt) continue;
+    const current = String(next[id] ?? "").trim();
+    if (current && !isTimestampAfterCursor(deletedAt, current)) continue;
+    next[id] = deletedAt;
+    changed = true;
+  }
+  return changed ? next : previous;
+}
+
 function reconcileTypingSnapshot(
   previous: Record<string, { typing: boolean; requestId?: string; updatedAt: string }>,
   incoming: TypingSignalSnapshot[],
@@ -397,13 +434,39 @@ function isValidTopicRow(topic: Topic | null | undefined): topic is Topic {
 export function DataProvider({ children }: { children: React.ReactNode }) {
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [topics, setTopics] = useState<Topic[]>([]);
+  const deletedTopicsRaw = useLocalStorageItem(DELETED_TOPICS_STORAGE_KEY) ?? "{}";
+  const deletedTopicTimestamps = useMemo(() => parseStringMap(deletedTopicsRaw), [deletedTopicsRaw]);
+  const deletedTopicTimestampsRef = useRef<Record<string, string>>(deletedTopicTimestamps);
+  useEffect(() => {
+    deletedTopicTimestampsRef.current = deletedTopicTimestamps;
+  }, [deletedTopicTimestamps]);
+  const persistDeletedTopicTimestamps = useCallback((next: Record<string, string>) => {
+    const cleaned = Object.fromEntries(
+      Object.entries(next)
+        .map(([id, deletedAt]) => [String(id).trim(), String(deletedAt).trim()] as const)
+        .filter(([id, deletedAt]) => id && deletedAt)
+    );
+    deletedTopicTimestampsRef.current = cleaned;
+    setLocalStorageItem(DELETED_TOPICS_STORAGE_KEY, JSON.stringify(cleaned));
+  }, []);
+  const recordDeletedTopics = useCallback(
+    (tombstones: DeletedEntityRef[]) => {
+      const next = mergeDeletedTopicTimestamps(deletedTopicTimestampsRef.current, tombstones);
+      if (next === deletedTopicTimestampsRef.current) return;
+      persistDeletedTopicTimestamps(next);
+    },
+    [persistDeletedTopicTimestamps]
+  );
   const tasks: Task[] = useMemo(() => [], []);
   const setTasks: React.Dispatch<React.SetStateAction<Task[]>> = useCallback((next) => {
     setTopics((previousTopics) => {
       const previousTasks: Task[] = [];
       const resolvedTasks = typeof next === "function" ? next(previousTasks) : next;
       const previousById = new Map(previousTopics.map((topic) => [topic.id, topic]));
-      return mergeById(previousTopics, resolvedTasks.map((task) => taskToTopic(task, previousById.get(task.id))));
+      return applyDeletedTopicTimestampRecord(
+        mergeById(previousTopics, resolvedTasks.map((task) => taskToTopic(task, previousById.get(task.id)))),
+        deletedTopicTimestampsRef.current
+      );
     });
   }, []);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -432,7 +495,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const unsnoozedTaskBadges = useMemo(() => ({}), []);
   const chatSeenByKey = useMemo(() => parseStringMap(chatSeenRaw), [chatSeenRaw]);
   const notificationsEnabled = useMemo(() => notificationsEnabledRaw !== "false", [notificationsEnabledRaw]);
-  const safeTopics = useMemo(() => topics.filter(isValidTopicRow), [topics]);
+  const safeTopics = useMemo(
+    () => applyDeletedTopicTimestampRecord(topics.filter(isValidTopicRow), deletedTopicTimestamps),
+    [deletedTopicTimestamps, topics]
+  );
   const latestTopicTouchById = useMemo(() => buildLatestTopicTouchById(logs), [logs]);
   const attentionTopicIds = useMemo(
     () =>
@@ -453,8 +519,20 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     setSpaces((prev) => upsertById(prev, space));
   }, []);
   const upsertTopic = useCallback((topic: Topic) => {
-    setTopics((prev) => upsertById(prev, topic));
-  }, []);
+    const topicId = String(topic.id ?? "").trim();
+    if (!topicId) return;
+    const deletedAt = String(deletedTopicTimestampsRef.current[topicId] ?? "").trim();
+    const topicStamp = String(topic.updatedAt ?? topic.createdAt ?? "").trim();
+    if (deletedAt) {
+      if (!isTimestampAfterCursor(topicStamp, deletedAt)) {
+        return;
+      }
+      const nextDeleted = { ...deletedTopicTimestampsRef.current };
+      delete nextDeleted[topicId];
+      persistDeletedTopicTimestamps(nextDeleted);
+    }
+    setTopics((prev) => applyDeletedTopicTimestampRecord(upsertById(prev, topic), deletedTopicTimestampsRef.current));
+  }, [persistDeletedTopicTimestamps]);
   const upsertTask = useCallback((task: Task) => {
     upsertTopic(taskToTopic(task));
   }, [upsertTopic]);
@@ -597,7 +675,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       if (!active) return;
       if (snapshot) {
         setSpaces((prev) => (prev.length > 0 ? prev : snapshot.spaces));
-        setTopics((prev) => (prev.length > 0 ? prev : snapshot.topics));
+        setTopics((prev) =>
+          prev.length > 0
+            ? applyDeletedTopicTimestampRecord(prev, deletedTopicTimestampsRef.current)
+            : applyDeletedTopicTimestampRecord(snapshot.topics, deletedTopicTimestampsRef.current)
+        );
         setLogs((prev) => (prev.length > 0 ? prev : snapshot.logs));
         setDrafts((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.drafts));
         setOpenclawTyping((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.openclawTyping));
@@ -669,6 +751,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     const cursorSeqRaw = Number(payload.cursorSeq);
     const cursorSeq = Number.isFinite(cursorSeqRaw) && cursorSeqRaw >= 0 ? Math.floor(cursorSeqRaw) : undefined;
     const deletedTopics = Array.isArray(payload.deletedTopics) ? (payload.deletedTopics as DeletedEntityRef[]) : [];
+    recordDeletedTopics(deletedTopics);
     const typingSignals = Array.isArray(payload.openclawTyping) ? (payload.openclawTyping as TypingSignalSnapshot[]) : [];
     const threadWorkSignals = Array.isArray(payload.openclawThreadWork)
       ? (payload.openclawThreadWork as ThreadWorkSignalSnapshot[])
@@ -680,13 +763,18 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       }
       if (Array.isArray(payload.topics)) {
         setTopics((prev) =>
-          applyDeletedEntityTombstones(
-            overlayFresherById(payload.topics as Topic[], prev, responseCursor, mergeById),
-            deletedTopics
+          applyDeletedTopicTimestampRecord(
+            applyDeletedEntityTombstones(
+              overlayFresherById(payload.topics as Topic[], prev, responseCursor, mergeById),
+              deletedTopics
+            ),
+            deletedTopicTimestampsRef.current
           )
         );
       } else if (deletedTopics.length > 0) {
-        setTopics((prev) => applyDeletedEntityTombstones(prev, deletedTopics));
+        setTopics((prev) =>
+          applyDeletedTopicTimestampRecord(applyDeletedEntityTombstones(prev, deletedTopics), deletedTopicTimestampsRef.current)
+        );
       }
       if (Array.isArray(payload.logs)) {
         setLogs((prev) => {
@@ -719,9 +807,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     } else {
       if (Array.isArray(payload.spaces)) setSpaces((prev) => mergeById(prev, payload.spaces as Space[]));
       if (Array.isArray(payload.topics)) {
-        setTopics((prev) => applyDeletedEntityTombstones(mergeById(prev, payload.topics as Topic[]), deletedTopics));
+        setTopics((prev) =>
+          applyDeletedTopicTimestampRecord(
+            applyDeletedEntityTombstones(mergeById(prev, payload.topics as Topic[]), deletedTopics),
+            deletedTopicTimestampsRef.current
+          )
+        );
       } else if (deletedTopics.length > 0) {
-        setTopics((prev) => applyDeletedEntityTombstones(prev, deletedTopics));
+        setTopics((prev) =>
+          applyDeletedTopicTimestampRecord(applyDeletedEntityTombstones(prev, deletedTopics), deletedTopicTimestampsRef.current)
+        );
       }
       if (Array.isArray(payload.logs)) setLogs((prev) => mergeLogs(prev, payload.logs as LogEntry[]));
       if (Array.isArray(payload.deletedLogIds) && payload.deletedLogIds.length > 0) {
@@ -751,7 +846,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         ...((payload.drafts as Array<{ updatedAt?: string; createdAt?: string }> | undefined) ?? []),
       ]);
     return { cursor: ts, cursorSeq };
-  }, []);
+  }, [recordDeletedTopics]);
 
   const applyLiveEvent = useCallback((event: LiveEvent) => {
     if (!event || !event.type) return;
@@ -772,7 +867,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     if (event.type === "topic.deleted" && event.data && typeof event.data === "object") {
       const id = (event.data as { id?: string }).id;
       if (id) {
-        setTopics((prev) => removeById(prev, id));
+        recordDeletedTopics([{ id, deletedAt: resolveLiveEventTimestamp(event) }]);
+        setTopics((prev) => applyDeletedTopicTimestampRecord(removeById(prev, id), deletedTopicTimestampsRef.current));
         setLogs((prev) => prev.map((item) => (item.topicId === id ? { ...item, topicId: null } : item)));
       }
       return;
@@ -841,7 +937,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       const id = (event.data as { id?: string }).id;
       if (id) setLogs((prev) => removeById(prev, id));
     }
-  }, [appendLog, reconcile, upsertDraft, upsertSpace, upsertTopic]);
+  }, [appendLog, reconcile, recordDeletedTopics, upsertDraft, upsertSpace, upsertTopic]);
 
   const enqueueLiveEvent = useCallback((event: LiveEvent) => {
     liveEventQueueRef.current.push(event);
@@ -867,7 +963,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const topicById = useMemo(() => new Map(safeTopics.map((topic) => [topic.id, topic])), [safeTopics]);
   const knownLogIdsRef = useRef<Set<string> | null>(null);
   const prevTopicStatusRef = useRef<Map<string, { status: string; snoozedUntil: string | null }> | null>(null);
-  const seededSeenMapRef = useRef(false);
+  const seenSeedCutoffRef = useRef<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -894,26 +990,38 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!hydrated) return;
-    if (seededSeenMapRef.current) return;
-    if (Object.keys(chatSeenByKey).length > 0) {
-      seededSeenMapRef.current = true;
-      return;
+    if (!seenSeedCutoffRef.current) {
+      seenSeedCutoffRef.current = new Date().toISOString();
     }
-    if (logs.length === 0) return;
+    const cutoff = seenSeedCutoffRef.current;
+    if (!cutoff) return;
+    if (logs.length === 0 && safeTopics.length === 0) return;
 
     const seeded: Record<string, string> = {};
     for (const entry of logs) {
       const chatKey = chatKeyFromLogEntry(entry);
       if (!chatKey) continue;
+      if (chatSeenByKey[chatKey]) continue;
       const createdAt = String(entry.createdAt ?? "").trim();
       if (!createdAt) continue;
+      if (createdAt > cutoff) continue;
       const previous = seeded[chatKey] ?? "";
       if (!previous || createdAt > previous) seeded[chatKey] = createdAt;
     }
+    for (const topic of safeTopics) {
+      const topicId = String(topic.id ?? "").trim();
+      if (!topicId) continue;
+      const chatKey = chatKeyForTopic(topicId);
+      if (chatSeenByKey[chatKey]) continue;
+      const seenAt = topicLastTouchedAt(topic, latestTopicTouchById[topicId]);
+      if (!seenAt) continue;
+      if (seenAt > cutoff) continue;
+      const previous = seeded[chatKey] ?? "";
+      if (!previous || seenAt > previous) seeded[chatKey] = seenAt;
+    }
     if (Object.keys(seeded).length === 0) return;
-    seededSeenMapRef.current = true;
-    setLocalStorageItem(CHAT_SEEN_AT_KEY, JSON.stringify(seeded));
-  }, [chatSeenByKey, hydrated, logs]);
+    setLocalStorageItem(CHAT_SEEN_AT_KEY, JSON.stringify({ ...chatSeenByKey, ...seeded }));
+  }, [chatSeenByKey, hydrated, latestTopicTouchById, logs, safeTopics]);
 
   useEffect(() => {
     void setPwaBadge(pwaAttentionCount);

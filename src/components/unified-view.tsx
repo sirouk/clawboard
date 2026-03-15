@@ -1995,7 +1995,7 @@ export function ColorShuffleTrigger({
   );
 }
 
-export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
+export function UnifiedView({ basePath = "/u", active = true }: { basePath?: string; active?: boolean } = {}) {
   const { token, tokenRequired } = useAppConfig();
   const { workspaces } = useOpenClawWorkspaces();
   const {
@@ -2259,14 +2259,16 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    if (!active) return;
     if (!(pathname === basePath || pathname.startsWith(`${basePath}/`))) return;
     const next = `${window.location.pathname}${window.location.search}`;
     if (!next.startsWith("/u")) return;
     setLocalStorageItem(BOARD_LAST_URL_KEY, next);
-  }, [basePath, pathname, searchParamsKey]);
+  }, [active, basePath, pathname, searchParamsKey]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    if (!active) return;
     if (!(pathname === "/u" || pathname.startsWith("/u"))) return;
     if (spaceFromUrl && !activeSpaceIdStored && !selectedSpaceId) return;
     const url = new URL(window.location.href);
@@ -2281,7 +2283,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const query = url.searchParams.toString();
     const nextUrl = `${url.pathname}${query ? `?${query}` : ""}${url.hash || ""}`;
     window.history.replaceState(window.history.state, "", nextUrl);
-  }, [activeSpaceIdStored, pathname, selectedSpaceId, spaceFromUrl]);
+  }, [active, activeSpaceIdStored, pathname, selectedSpaceId, spaceFromUrl]);
 
   useEffect(() => {
     const mql = window.matchMedia("(min-width: 768px)");
@@ -4625,14 +4627,14 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
         if (!isArchivedTopic) return false;
       } else {
         if (isArchivedTopic && effectiveView !== "all") return false;
-        if (isSnoozedTopic && !showSnoozedTasks) return false;
-        if (isDoneTopic && !showDone) return false;
+        if (isSnoozedTopic && !showSnoozedTasks && !normalizedSearch) return false;
+        if (isDoneTopic && !showDone && !normalizedSearch) return false;
       }
 
       if (statusFilter !== "all") {
         return topicMatchesOwnStatus || hasMatchingTask;
       }
-      if (!showDone && isDoneTopic) {
+      if (!showDone && isDoneTopic && !normalizedSearch) {
         return false;
       }
       if (!normalizedSearch) return true;
@@ -6038,6 +6040,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
   ]);
 
   useEffect(() => {
+    if (!active) return;
     const handlePop = () => {
       // Mobile UX: if we're in the fullscreen chat layer, browser back should behave like tapping ✕.
       // This prevents iOS back-swipe / Android back gestures from navigating the browser history
@@ -6052,11 +6055,13 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     };
     window.addEventListener("popstate", handlePop);
     return () => window.removeEventListener("popstate", handlePop);
-  }, [closeMobileChatLayer, mdUp, mobileLayer, syncFromUrl]);
+  }, [active, closeMobileChatLayer, mdUp, mobileLayer, syncFromUrl]);
 
   // Next router navigation (router.push / Link) does not trigger popstate.
   // Sync our internal expanded state when pathname/search params change.
   useEffect(() => {
+    if (!active) return;
+    if (!(pathname === basePath || pathname.startsWith(`${basePath}/`))) return;
     const currentKey = currentUrlKey();
     if (skipNextUrlSyncUrlRef.current === currentKey) {
       skipNextUrlSyncUrlRef.current = null;
@@ -6064,7 +6069,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     }
     skipNextUrlSyncUrlRef.current = null;
     syncFromUrl();
-  }, [currentUrlKey, pathname, searchParamsKey, syncFromUrl]);
+  }, [active, basePath, currentUrlKey, pathname, searchParamsKey, syncFromUrl]);
 
   useEffect(() => {
     if (!autoFocusTask) return;
@@ -6156,6 +6161,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       const query = params.toString();
       const nextUrl = query ? `${nextPath}?${query}` : nextPath;
       if (typeof window === "undefined") return;
+      if (!active) return;
       const currentKey = currentUrlKey();
       scrollMemory.current[currentKey] = window.scrollY;
       scrollMemory.current[nextUrl] = window.scrollY;
@@ -6181,6 +6187,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
       showRaw,
       statusFilter,
       basePath,
+      active,
       selectedSpaceId,
     ]
   );

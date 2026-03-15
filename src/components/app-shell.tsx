@@ -3,7 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SearchInput, Select } from "@/components/ui";
 import { useAppConfig, useOpenClawWorkspaces } from "@/components/providers";
 import { BoardWorkspaceHub } from "@/components/board-workspace-hub";
@@ -383,6 +383,27 @@ function HeaderRouteTabs({
     { href: boardHref, label: "Unified View", id: "board" as const },
     { href: workspaceHref, label: "Code Workspaces", id: "workspaces" as const },
   ];
+  const router = useRouter();
+
+  useEffect(() => {
+    router.prefetch(boardHref);
+    router.prefetch(workspaceHref);
+  }, [boardHref, router, workspaceHref]);
+
+  const handleSelect = useCallback(
+    (href: string) => (event: React.MouseEvent<HTMLAnchorElement>) => {
+      event.preventDefault();
+      if (href.startsWith("/workspaces")) {
+        setLocalStorageItem(WORKSPACE_LAST_URL_KEY, href);
+      } else if (href.startsWith("/u")) {
+        setLocalStorageItem(BOARD_LAST_URL_KEY, href);
+      }
+      startTransition(() => {
+        router.push(href, { scroll: false });
+      });
+    },
+    [router]
+  );
 
   return (
     <nav aria-label="Primary views" className="flex justify-center">
@@ -398,7 +419,9 @@ function HeaderRouteTabs({
             <Link
               key={item.id}
               href={item.href}
+              prefetch
               scroll={false}
+              onClick={handleSelect(item.href)}
               aria-current={active ? "page" : undefined}
               className={cn(
                 "rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] transition",

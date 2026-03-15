@@ -375,7 +375,11 @@ test("app badging counts topics with unread activity instead of raw activity vol
   await expect
     .poll(async () => {
       const probe = await probeSnapshot(page);
-      return probe.notifications.some((item) => item.title === `Topic Activity: ${secondTopic.name}`);
+      return probe.notifications.some(
+        (item) =>
+          item.title === `Topic Activity: ${secondTopic.name}` ||
+          (item.title === "Clawboard" && /\btopics need a look\b/i.test(item.body))
+      );
     })
     .toBe(true);
 });

@@ -13147,6 +13147,9 @@ def delete_topic(topic_id: str):
 
         for entry in logs:
             entry.topicId = None
+            source, source_changed = _detach_deleted_topic_from_log_source(entry.source, topic_id=topic_id)
+            if source_changed:
+                entry.source = source
             entry.updatedAt = detached_at
             session.add(entry)
 
@@ -14028,6 +14031,38 @@ def _record_deleted_entity_tombstone(session: Any, model: Any, entity_id: str, d
         session.commit()
     except Exception:
         session.rollback()
+
+
+def _detach_deleted_topic_from_log_source(source: Any, *, topic_id: str) -> tuple[Any, bool]:
+    if not isinstance(source, dict):
+        return source, False
+
+    target_topic_id = str(topic_id or "").strip()
+    if not target_topic_id:
+        return source, False
+
+    source_map = dict(source)
+    changed = False
+
+    for key in ("boardScopeTopicId", "boardScopeTaskId"):
+        if str(source_map.get(key) or "").strip() != target_topic_id:
+            continue
+        source_map.pop(key, None)
+        changed = True
+
+    if changed:
+        source_map.pop("boardScopeKind", None)
+        source_map.pop("boardScopeLock", None)
+
+    session_key = str(source_map.get("sessionKey") or "").strip()
+    if session_key and _parse_board_session_key(session_key) == target_topic_id:
+        previous_session_key = str(source_map.get("detachedBoardSessionKey") or "").strip()
+        if not previous_session_key:
+            source_map["detachedBoardSessionKey"] = session_key
+        source_map["sessionKey"] = f"detached:topic:{target_topic_id}"
+        changed = True
+
+    return (source_map if changed else source), changed
 
 
 @app.delete("/api/log/{log_id}", dependencies=[Depends(require_token)], tags=["logs"])

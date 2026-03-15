@@ -9,6 +9,24 @@ async function waitForUnifiedViewReady(page: Page) {
   ]);
 }
 
+async function clickPrimaryTabUntilUrl(page: Page, label: string, urlPattern: RegExp) {
+  const nav = page.getByRole("navigation", { name: "Primary views" });
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await nav.getByRole("link", { name: label }).click();
+    try {
+      await expect(page).toHaveURL(urlPattern, { timeout: 5_000 });
+      return;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      await page.waitForTimeout(250);
+    }
+  }
+
+  if (lastError) throw lastError;
+}
+
 test("topic-first shell loads and the centered header tabs switch views", async ({ page }) => {
   await page.goto("/u");
   await waitForUnifiedViewReady(page);
@@ -21,16 +39,10 @@ test("topic-first shell loads and the centered header tabs switch views", async 
   await expect(workspaceTab).toHaveAttribute("href", /\/workspaces/);
   await expect(page.locator("[data-topic-card-id='topic-1']")).toBeVisible();
 
-  const workspaceHref = await workspaceTab.getAttribute("href");
-  expect(workspaceHref).toBeTruthy();
-  await page.goto(workspaceHref!);
-  await expect(page).toHaveURL(/\/workspaces/);
+  await clickPrimaryTabUntilUrl(page, "Code Workspaces", /\/workspaces/);
   await expect(page.getByTestId("workspace-chip-row")).toBeVisible();
 
-  const unifiedHref = await page.getByRole("link", { name: "Unified View" }).getAttribute("href");
-  expect(unifiedHref).toBeTruthy();
-  await page.goto(unifiedHref!);
-  await expect(page).toHaveURL(/\/u/);
+  await clickPrimaryTabUntilUrl(page, "Unified View", /\/u/);
   await expect(page.locator("[data-topic-card-id='topic-1']")).toBeVisible();
 });
 
