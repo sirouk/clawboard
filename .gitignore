@@ -56,6 +56,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+.pnpm-store
+.pnpm-store/
 
 # env files (keep secrets out of git)
 .env

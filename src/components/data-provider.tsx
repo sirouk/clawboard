@@ -522,7 +522,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     (rawData: unknown) => {
       const data = parsePwaNotificationClickData(rawData);
       if (data.topicId) dismissUnsnoozedTopicBadge(data.topicId);
-      if (data.chatKey) markChatSeen(data.chatKey);
+      if (data.chatKey) markChatSeen(data.chatKey, new Date().toISOString());
     },
     [dismissUnsnoozedTopicBadge, markChatSeen]
   );
