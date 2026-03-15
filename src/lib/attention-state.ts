@@ -1,6 +1,6 @@
 import {
-  BOARD_TOPIC_SESSION_PREFIX,
-  normalizeBoardSessionKey,
+  boardSessionTopicIdFromSessionKey,
+  effectiveLogTopicId,
 } from "@/lib/board-session";
 import type { LogEntry } from "@/lib/types";
 
@@ -13,22 +13,12 @@ export function chatKeyForTopic(topicId: string) {
 }
 
 export function chatKeyFromSessionKey(sessionKey: string) {
-  const key = normalizeBoardSessionKey(sessionKey);
-  if (!key) return "";
-  if (key.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
-    const rest = key.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim();
-    const topicId = rest.split(":", 1)[0]?.trim() ?? "";
-    return chatKeyForTopic(topicId);
-  }
-  return "";
+  const topicId = boardSessionTopicIdFromSessionKey(sessionKey);
+  return chatKeyForTopic(topicId);
 }
 
 export function chatKeyFromLogEntry(entry: Pick<LogEntry, "topicId" | "source">) {
-  const fromSession = chatKeyFromSessionKey(String(entry.source?.sessionKey ?? ""));
-  if (fromSession) return fromSession;
-  const topicId = String(entry.topicId ?? "").trim();
-  if (topicId) return chatKeyForTopic(topicId);
-  return "";
+  return chatKeyForTopic(effectiveLogTopicId(entry));
 }
 
 export function parseNumberMap(rawValue: string | null | undefined): Record<string, number> {

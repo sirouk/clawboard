@@ -1,4 +1,5 @@
 import { chatKeyForTopic } from "@/lib/attention-state";
+import { effectiveLogTopicId } from "@/lib/board-session";
 import { isChatNoiseLog } from "@/lib/chat-log-visibility";
 import type { LogEntry, Topic } from "@/lib/types";
 
@@ -19,7 +20,7 @@ function newerStamp(current: string, candidate: string) {
 export function buildLatestTopicTouchById(logs: LogEntry[]) {
   const out: Record<string, string> = {};
   for (const entry of logs) {
-    const topicId = String(entry.topicId ?? "").trim();
+    const topicId = effectiveLogTopicId(entry);
     if (!topicId) continue;
     if (isChatNoiseLog(entry)) continue;
     const stamp = normalizeStamp(entry.createdAt ?? entry.updatedAt);

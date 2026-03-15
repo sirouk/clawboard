@@ -24,7 +24,7 @@ export function BoardWorkspaceHub({
         </Suspense>
       </section>
       <section hidden={!workspacesActive} aria-hidden={!workspacesActive} data-testid="workspace-hub-panel">
-        <WorkspacesLive selectedAgentId={selectedWorkspaceAgentId} />
+        <WorkspacesLive selectedAgentId={selectedWorkspaceAgentId} active={workspacesActive} />
       </section>
     </>
   );

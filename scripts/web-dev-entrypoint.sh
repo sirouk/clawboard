@@ -74,23 +74,63 @@ NODE
 }
 
 LOCK_HASH_FILE="node_modules/.clawboard-lockfile-sha256"
-LOCK_HASH="$(sha256sum package-lock.json 2>/dev/null | awk '{print $1}' || true)"
+LOCK_SOURCE_FILE=""
+
+if [ -f pnpm-lock.yaml ]; then
+  LOCK_SOURCE_FILE="pnpm-lock.yaml"
+elif [ -f package-lock.json ]; then
+  LOCK_SOURCE_FILE="package-lock.json"
+fi
+
+LOCK_HASH="$(sha256sum "$LOCK_SOURCE_FILE" 2>/dev/null | awk '{print $1}' || true)"
 INSTALLED_HASH="$(cat "$LOCK_HASH_FILE" 2>/dev/null || true)"
 
-if [ ! -d node_modules/.bin ] || [ -z "$LOCK_HASH" ] || [ "$LOCK_HASH" != "$INSTALLED_HASH" ]; then
-  log "Installing dependencies (npm ci)..."
+run_install() {
+  if [ -f pnpm-lock.yaml ]; then
+    corepack enable >/dev/null 2>&1 || true
+    corepack pnpm install --frozen-lockfile
+    return
+  fi
   npm ci
+}
+
+run_prisma_generate() {
+  if [ -f pnpm-lock.yaml ]; then
+    corepack enable >/dev/null 2>&1 || true
+    corepack pnpm exec prisma generate
+    return
+  fi
+  ./node_modules/.bin/prisma generate
+}
+
+start_dev_server() {
+  if [ -f pnpm-lock.yaml ]; then
+    corepack enable >/dev/null 2>&1 || true
+    corepack pnpm exec next dev --webpack -H 0.0.0.0 -p 3000 &
+    NEXT_PID=$!
+    return
+  fi
+  ./node_modules/.bin/next dev --webpack -H 0.0.0.0 -p 3000 &
+  NEXT_PID=$!
+}
+
+if [ ! -d node_modules/.bin ] || [ -z "$LOCK_HASH" ] || [ "$LOCK_HASH" != "$INSTALLED_HASH" ]; then
+  if [ -f pnpm-lock.yaml ]; then
+    log "Installing dependencies (pnpm install --frozen-lockfile)..."
+  else
+    log "Installing dependencies (npm ci)..."
+  fi
+  run_install
   if [ -n "$LOCK_HASH" ]; then
     echo "$LOCK_HASH" > "$LOCK_HASH_FILE"
   fi
 fi
 
 log "Generating Prisma client..."
-./node_modules/.bin/prisma generate
+run_prisma_generate
 
 log "Starting Next.js dev server..."
-npm run dev -- -H 0.0.0.0 -p 3000 &
-NEXT_PID=$!
+start_dev_server
 
 stop_server() {
   if kill -0 "$NEXT_PID" 2>/dev/null; then

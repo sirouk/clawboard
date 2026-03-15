@@ -9,6 +9,7 @@ import { buildTopicUrl, UNIFIED_BASE, withRevealParam, withSpaceParam } from "@/
 import { useAppConfig } from "@/components/providers";
 import { useDataStore } from "@/components/data-provider";
 import { apiFetch } from "@/lib/api";
+import { effectiveLogTopicId as effectiveBoardTopicId } from "@/lib/board-session";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { compareLogsDesc } from "@/lib/live-utils";
 import {
@@ -45,8 +46,8 @@ type ToolEventKind = "call" | "result" | "error";
 type ToolEvent = { kind: ToolEventKind; toolName: string };
 type SourceMetaItem = { key: string; label: string; value: string; abbreviate?: boolean };
 
-function effectiveLogTopicId(entry: Pick<LogEntry, "topicId">) {
-  return String(entry.topicId ?? "").trim();
+function effectiveLogTopicId(entry: Pick<LogEntry, "topicId" | "source">) {
+  return effectiveBoardTopicId(entry);
 }
 
 function effectiveLogParentTopicId(

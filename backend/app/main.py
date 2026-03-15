@@ -520,6 +520,10 @@ SEARCH_EFFECTIVE_LIMIT_LOGS = max(10, min(320, _env_int_with_default("CLAWBOARD_
 SEARCH_WINDOW_MULTIPLIER = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MULTIPLIER", "2") or "2")
 SEARCH_WINDOW_MIN_LOGS = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MIN_LOGS", "320") or "320")
 SEARCH_WINDOW_MAX_LOGS = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MAX_LOGS", "2000") or "2000")
+CHANGES_PRECOMPILE_LIMIT_LOGS = max(
+    100,
+    min(20000, _env_int_with_default("CLAWBOARD_CHANGES_PRECOMPILE_LIMIT_LOGS", 500)),
+)
 SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS = int(os.getenv("CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS", "360") or "360")
 SEARCH_WINDOW_MULTIPLIER_CAP = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MULTIPLIER_CAP", "2") or "2")
 SEARCH_WINDOW_MIN_LOGS_CAP = int(os.getenv("CLAWBOARD_SEARCH_WINDOW_MIN_LOGS_CAP", "480") or "480")
@@ -1083,12 +1087,17 @@ def _warm_precompiled_defaults() -> None:
             changes_revision = _changes_revision_token(session)
             _get_or_build_precompiled(
                 namespace="changes",
-                key_parts=_changes_cache_key_parts(limit_logs=2000, include_raw=False, allowed_space_ids=None),
+                key_parts=_changes_cache_key_parts(
+                    limit_logs=CHANGES_PRECOMPILE_LIMIT_LOGS,
+                    include_raw=False,
+                    allowed_space_ids=None,
+                ),
                 revision=changes_revision,
                 build_fn=lambda: _build_changes_payload(
                     session,
                     since=None,
-                    limit_logs=2000,
+                    since_seq=None,
+                    limit_logs=CHANGES_PRECOMPILE_LIMIT_LOGS,
                     include_raw=False,
                     allowed_space_ids=None,
                 ),

@@ -42,6 +42,7 @@ import {
   type BoardChatComposerSendEvent,
 } from "@/components/board-chat-composer";
 import {
+  effectiveLogTopicId as effectiveBoardTopicId,
   BOARD_TOPIC_SESSION_PREFIX,
   normalizeBoardSessionKey,
   topicSessionKey,
@@ -3672,10 +3673,11 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const sorted = [...visibleLogs].sort(compareLogCreatedAtDesc);
     const map = new Map<string, LogEntry[]>();
     for (const entry of sorted) {
-      if (!entry.topicId) continue;
-      const list = map.get(entry.topicId) ?? [];
+      const topicId = effectiveBoardTopicId(entry);
+      if (!topicId) continue;
+      const list = map.get(topicId) ?? [];
       list.push(entry);
-      map.set(entry.topicId, list);
+      map.set(topicId, list);
     }
     return map;
   }, [visibleLogs]);
@@ -3701,7 +3703,7 @@ export function UnifiedView({ basePath = "/u" }: { basePath?: string } = {}) {
     const sorted = [...eligible].sort(compareLogCreatedAtAsc);
     const map = new Map<string, LogEntry[]>();
     for (const entry of sorted) {
-      const topicId = String(entry.topicId ?? "").trim();
+      const topicId = effectiveBoardTopicId(entry);
       if (!topicId) continue;
       const list = map.get(topicId) ?? [];
       list.push(entry);

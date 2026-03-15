@@ -14,7 +14,22 @@ function normalizeAgentId(value: string | null | undefined) {
   return String(value || "").trim().toLowerCase();
 }
 
-export function WorkspacesLive({ selectedAgentId }: { selectedAgentId?: string | null }) {
+function stringArraysEqual(a: string[], b: string[]) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) return false;
+  }
+  return true;
+}
+
+export function WorkspacesLive({
+  selectedAgentId,
+  active = false,
+}: {
+  selectedAgentId?: string | null;
+  active?: boolean;
+}) {
   const pathname = usePathname();
   const { error, configured, workspaces } = useOpenClawWorkspaces();
   const [ideSessionStatus, setIdeSessionStatus] = useState<"idle" | "authorizing" | "ready" | "error">("idle");
@@ -31,15 +46,19 @@ export function WorkspacesLive({ selectedAgentId }: { selectedAgentId?: string |
     const availableKeys = ordered.map((workspace) => normalizeAgentId(workspace.agentId)).filter(Boolean);
     const availableKeySet = new Set(availableKeys);
     startTransition(() => {
-      setMountedWorkspaceKeys((current) => current.filter((key) => availableKeySet.has(key)));
+      setMountedWorkspaceKeys((current) => {
+        const next = current.filter((key) => availableKeySet.has(key));
+        return stringArraysEqual(current, next) ? current : next;
+      });
       setSelectedWorkspaceKey((current) => {
         if (selectedWorkspaceKeyFromRoute && availableKeySet.has(selectedWorkspaceKeyFromRoute)) {
-          return selectedWorkspaceKeyFromRoute;
+          return current === selectedWorkspaceKeyFromRoute ? current : selectedWorkspaceKeyFromRoute;
         }
         if (current && availableKeySet.has(current)) {
           return current;
         }
-        return availableKeys[0] ?? "";
+        const fallback = availableKeys[0] ?? "";
+        return current === fallback ? current : fallback;
       });
     });
   }, [ordered, selectedWorkspaceKeyFromRoute]);
@@ -51,11 +70,11 @@ export function WorkspacesLive({ selectedAgentId }: { selectedAgentId?: string |
 
   const mountedWorkspaces = useMemo(() => {
     const mountedKeySet = new Set(mountedWorkspaceKeys);
-    if (selectedWorkspace?.ideUrl) {
+    if (active && selectedWorkspace?.ideUrl) {
       mountedKeySet.add(normalizeAgentId(selectedWorkspace.agentId));
     }
     return ordered.filter((workspace) => mountedKeySet.has(normalizeAgentId(workspace.agentId)) && workspace.ideUrl);
-  }, [mountedWorkspaceKeys, ordered, selectedWorkspace]);
+  }, [active, mountedWorkspaceKeys, ordered, selectedWorkspace]);
 
   const selectedWorkspaceMounted = useMemo(
     () => mountedWorkspaceKeys.includes(normalizeAgentId(selectedWorkspace?.agentId)),
@@ -89,6 +108,11 @@ export function WorkspacesLive({ selectedAgentId }: { selectedAgentId?: string |
     let cancelled = false;
     async function authorizeEmbeddedWorkspace() {
       if (!configured || !selectedWorkspace?.ideUrl) {
+        setIdeSessionStatus("idle");
+        setIdeSessionError(null);
+        return;
+      }
+      if (!active && !selectedWorkspaceMounted) {
         setIdeSessionStatus("idle");
         setIdeSessionError(null);
         return;
@@ -143,7 +167,7 @@ export function WorkspacesLive({ selectedAgentId }: { selectedAgentId?: string |
     return () => {
       cancelled = true;
     };
-  }, [configured, mountedWorkspaceKeys, selectedWorkspace?.agentId, selectedWorkspace?.ideUrl]);
+  }, [active, configured, mountedWorkspaceKeys, selectedWorkspace?.agentId, selectedWorkspace?.ideUrl, selectedWorkspaceMounted]);
 
   return (
     <div className="space-y-4">

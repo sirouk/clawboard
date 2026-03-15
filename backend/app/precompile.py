@@ -50,6 +50,10 @@ PRECOMPILE_WARM_MIN_INTERVAL_SECONDS = max(
     0.25,
     float(os.getenv("CLAWBOARD_PRECOMPILE_WARM_MIN_INTERVAL_SECONDS", "1.5") or "1.5"),
 )
+CHANGES_PRECOMPILE_LIMIT_LOGS = max(
+    100,
+    min(20000, int(os.getenv("CLAWBOARD_CHANGES_PRECOMPILE_LIMIT_LOGS", "500") or "500")),
+)
 _PRECOMPILE_WARM_TRIGGER_EVENTS = {
     "space.upserted",
     "topic.upserted",
@@ -208,12 +212,17 @@ def _warm_precompiled_defaults() -> None:
             changes_revision = _changes_revision_token(session)
             _get_or_build_precompiled(
                 namespace="changes",
-                key_parts=_changes_cache_key_parts(limit_logs=2000, include_raw=False, allowed_space_ids=None),
+                key_parts=_changes_cache_key_parts(
+                    limit_logs=CHANGES_PRECOMPILE_LIMIT_LOGS,
+                    include_raw=False,
+                    allowed_space_ids=None,
+                ),
                 revision=changes_revision,
                 build_fn=lambda: _build_changes_payload(
                     session,
                     since=None,
-                    limit_logs=2000,
+                    since_seq=None,
+                    limit_logs=CHANGES_PRECOMPILE_LIMIT_LOGS,
                     include_raw=False,
                     allowed_space_ids=None,
                 ),

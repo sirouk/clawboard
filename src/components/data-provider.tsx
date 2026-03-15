@@ -3,11 +3,11 @@
 import { createContext, startTransition, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Draft, LogEntry, Space, Task, Topic } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
-import { loadBoardSnapshot, saveBoardSnapshot } from "@/lib/board-cache";
+import { loadBoardSnapshot, saveBoardSnapshot, type BoardSnapshot } from "@/lib/board-cache";
 import { useLiveUpdates, type ConnectionInfo, type ReconcileCursor, type ReconcileResult } from "@/lib/use-live-updates";
 import { drainQueuedMutations } from "@/lib/write-queue";
 import { LiveEvent, mergeById, mergeLogs, maxTimestamp, removeById, upsertById } from "@/lib/live-utils";
-import { normalizeBoardSessionKey } from "@/lib/board-session";
+import { effectiveLogTopicId, normalizeBoardSessionKey } from "@/lib/board-session";
 import { CLAWBOARD_CONFIG_UPDATED_EVENT } from "@/lib/config-events";
 import { isChatNoiseLog } from "@/lib/chat-log-visibility";
 import {
@@ -96,7 +96,11 @@ const UNSNOOZE_TOPIC_TAG_PREFIX = "clawboard-unsnooze-topic-";
 const UNSNOOZE_TOPICS_SUMMARY_TAG = "clawboard-unsnooze-topics";
 const CHAT_TAG_PREFIX = "clawboard-chat-";
 const CHAT_SUMMARY_TAG = "clawboard-chat-summary";
-const DEFAULT_INITIAL_CHANGES_LIMIT_LOGS = 2000;
+const STREAM_EVENT_TS_STORAGE_KEY = "clawboard.stream.eventTs";
+const STREAM_EVENT_SEQ_STORAGE_KEY = "clawboard.stream.lastSeq";
+const DEFAULT_INITIAL_CHANGES_LIMIT_LOGS = 500;
+const INITIAL_CHANGES_FETCH_TIMEOUT_MS = 12_000;
+const INITIAL_CHANGES_FALLBACK_LIMIT_LOGS = 200;
 
 function parseIntegerEnv(
   raw: string | undefined,
@@ -116,6 +120,56 @@ const INITIAL_CHANGES_LIMIT_LOGS = parseIntegerEnv(
   0,
   20000
 );
+
+function buildInitialChangesLimitCandidates(limit: number) {
+  if (!Number.isFinite(limit) || limit <= 0) return [];
+  const normalized = Math.floor(limit);
+  const candidates = [normalized];
+  if (normalized > 400) candidates.push(Math.max(INITIAL_CHANGES_FALLBACK_LIMIT_LOGS, Math.floor(normalized / 2)));
+  if (normalized > INITIAL_CHANGES_FALLBACK_LIMIT_LOGS) candidates.push(INITIAL_CHANGES_FALLBACK_LIMIT_LOGS);
+  return [...new Set(candidates.filter((value) => value > 0))];
+}
+
+function hasBoardSnapshotData(snapshot: BoardSnapshot) {
+  return (
+    snapshot.spaces.length > 0 ||
+    snapshot.topics.length > 0 ||
+    snapshot.logs.length > 0 ||
+    Object.keys(snapshot.drafts).length > 0 ||
+    Object.keys(snapshot.openclawTyping).length > 0 ||
+    Object.keys(snapshot.openclawThreadWork).length > 0
+  );
+}
+
+function snapshotCursorFromBoardSnapshot(snapshot: BoardSnapshot): ReconcileCursor | null {
+  const cursorSeq =
+    typeof snapshot.cursorSeq === "number" && Number.isFinite(snapshot.cursorSeq)
+      ? Math.floor(snapshot.cursorSeq)
+      : undefined;
+  const cursor = String(snapshot.cursor ?? snapshot.cachedAt ?? "").trim() || undefined;
+  if (typeof cursorSeq !== "number" && !cursor) return null;
+  return {
+    since: typeof cursorSeq === "number" ? undefined : cursor,
+    sinceSeq: cursorSeq,
+  };
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+async function fetchChangesResponse(url: string, timeoutMs?: number) {
+  if (!timeoutMs || timeoutMs <= 0 || typeof AbortController === "undefined") {
+    return apiFetch(url, { cache: "no-store" });
+  }
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await apiFetch(url, { cache: "no-store", signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
 
 function parseIsoMs(value: unknown) {
   const text = String(value ?? "").trim();
@@ -369,6 +423,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const liveEventQueueRef = useRef<LiveEvent[]>([]);
   const liveEventFlushFrameRef = useRef<number | null>(null);
   const snapshotSaveTimerRef = useRef<number | null>(null);
+  const snapshotCursorRef = useRef<ReconcileCursor | null>(null);
   const unsnoozedTopicsRaw = useLocalStorageItem(UNSNOOZED_TOPICS_KEY) ?? "{}";
   const chatSeenRaw = useLocalStorageItem(CHAT_SEEN_AT_KEY) ?? "{}";
   const notificationsEnabledRaw = useLocalStorageItem(PUSH_ENABLED_KEY);
@@ -547,6 +602,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         setDrafts((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.drafts));
         setOpenclawTyping((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.openclawTyping));
         setOpenclawThreadWork((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.openclawThreadWork));
+        snapshotCursorRef.current = hasBoardSnapshotData(snapshot) ? snapshotCursorFromBoardSnapshot(snapshot) : null;
+      } else {
+        snapshotCursorRef.current = null;
       }
       setHydrated(true);
     });
@@ -561,28 +619,55 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       typeof reconcileCursor?.sinceSeq === "number" && Number.isFinite(reconcileCursor.sinceSeq)
         ? Math.floor(reconcileCursor.sinceSeq)
         : undefined;
+    const fallbackCursor = !since && typeof sinceSeq !== "number" ? snapshotCursorRef.current : null;
+    const effectiveSinceSeq =
+      typeof sinceSeq === "number"
+        ? sinceSeq
+        : typeof fallbackCursor?.sinceSeq === "number" && Number.isFinite(fallbackCursor.sinceSeq)
+          ? Math.floor(fallbackCursor.sinceSeq)
+          : undefined;
+    const effectiveSince =
+      since || (typeof effectiveSinceSeq === "number" ? undefined : String(fallbackCursor?.since ?? "").trim() || undefined);
+    const incremental = Boolean(effectiveSince) || typeof effectiveSinceSeq === "number";
     const params = new URLSearchParams();
-    if (since) params.set("since", since);
-    if (typeof sinceSeq === "number" && sinceSeq >= 0) params.set("sinceSeq", String(sinceSeq));
-    if (!since && typeof sinceSeq !== "number" && INITIAL_CHANGES_LIMIT_LOGS > 0) {
-      params.set("limitLogs", String(INITIAL_CHANGES_LIMIT_LOGS));
+    if (effectiveSince) params.set("since", effectiveSince);
+    if (typeof effectiveSinceSeq === "number" && effectiveSinceSeq >= 0) {
+      params.set("sinceSeq", String(effectiveSinceSeq));
     }
-    const query = params.toString();
-    const url = query ? `/api/changes?${query}` : "/api/changes";
-    let res: Response;
-    try {
-      res = await apiFetch(url, { cache: "no-store" });
-    } catch {
-      // Network unavailable or API temporarily unreachable — will retry on next poll/watchdog tick.
-      return;
+    let res: Response | null = null;
+    const initialLimitCandidates = incremental ? [] : buildInitialChangesLimitCandidates(INITIAL_CHANGES_LIMIT_LOGS);
+    if (initialLimitCandidates.length > 0) {
+      for (const limit of initialLimitCandidates) {
+        const attemptParams = new URLSearchParams(params);
+        attemptParams.set("limitLogs", String(limit));
+        const attemptQuery = attemptParams.toString();
+        const attemptUrl = attemptQuery ? `/api/changes?${attemptQuery}` : "/api/changes";
+        try {
+          res = await fetchChangesResponse(attemptUrl, INITIAL_CHANGES_FETCH_TIMEOUT_MS);
+        } catch (error) {
+          if (isAbortError(error)) continue;
+          return;
+        }
+        if (res.ok) break;
+        if (res.status < 500) break;
+      }
+    } else {
+      const query = params.toString();
+      const url = query ? `/api/changes?${query}` : "/api/changes";
+      try {
+        res = await fetchChangesResponse(url);
+      } catch {
+        // Network unavailable or API temporarily unreachable — will retry on next poll/watchdog tick.
+        return;
+      }
     }
+    if (!res) return;
     if (!res.ok) return;
     const payload = (await res.json().catch(() => null)) as ChangesPayload | null;
     if (!payload) return;
     const responseCursor = String(payload.cursor ?? "").trim() || undefined;
     const cursorSeqRaw = Number(payload.cursorSeq);
     const cursorSeq = Number.isFinite(cursorSeqRaw) && cursorSeqRaw >= 0 ? Math.floor(cursorSeqRaw) : undefined;
-    const incremental = Boolean(since) || typeof sinceSeq === "number";
     const deletedTopics = Array.isArray(payload.deletedTopics) ? (payload.deletedTopics as DeletedEntityRef[]) : [];
     const typingSignals = Array.isArray(payload.openclawTyping) ? (payload.openclawTyping as TypingSignalSnapshot[]) : [];
     const threadWorkSignals = Array.isArray(payload.openclawThreadWork)
@@ -928,6 +1013,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       window.clearTimeout(snapshotSaveTimerRef.current);
     }
     snapshotSaveTimerRef.current = window.setTimeout(() => {
+      const cursor = window.localStorage.getItem(STREAM_EVENT_TS_STORAGE_KEY) ?? "";
+      const cursorSeqRaw = Number.parseInt(window.localStorage.getItem(STREAM_EVENT_SEQ_STORAGE_KEY) ?? "", 10);
       void saveBoardSnapshot({
         spaces,
         topics: safeTopics,
@@ -935,6 +1022,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         drafts,
         openclawTyping,
         openclawThreadWork,
+        cursor: String(cursor).trim() || undefined,
+        cursorSeq: Number.isFinite(cursorSeqRaw) && cursorSeqRaw >= 0 ? cursorSeqRaw : undefined,
         cachedAt: new Date().toISOString(),
       });
       snapshotSaveTimerRef.current = null;
@@ -968,7 +1057,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     if (!notificationsEnabled) return;
 
     const unseenAdditions = additions.filter((entry) => {
-      const topicId = String(entry.topicId ?? "").trim();
+      const topicId = effectiveLogTopicId(entry);
       if (!topicId) return false;
       if (isChatNoiseLog(entry)) return false;
       const createdAtMs = Date.parse(entry.createdAt);
@@ -980,7 +1069,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     const topicIds = new Set<string>();
     for (const entry of unseenAdditions) {
-      const topicId = String(entry.topicId ?? "").trim();
+      const topicId = effectiveLogTopicId(entry);
       if (topicId) topicIds.add(topicId);
     }
     if (topicIds.size === 0) return;
@@ -991,7 +1080,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       if (topic) {
         const entry = [...unseenAdditions]
           .reverse()
-          .find((candidate) => String(candidate.topicId ?? "").trim() === topicId);
+          .find((candidate) => effectiveLogTopicId(candidate) === topicId);
         const body = clipNotificationText(entry?.content ?? entry?.summary ?? "Recent activity needs a look.");
         const chatKey = topicId ? `topic:${topicId}` : "";
         const url = `${buildTopicUrl(topic, safeTopics)}?focus=1`;

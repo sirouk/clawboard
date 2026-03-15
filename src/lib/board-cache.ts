@@ -14,8 +14,21 @@ export type BoardSnapshot = {
   drafts: Record<string, Draft>;
   openclawTyping: Record<string, { typing: boolean; requestId?: string; updatedAt: string }>;
   openclawThreadWork: Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }>;
+  cursor?: string;
+  cursorSeq?: number;
   cachedAt: string;
 };
+
+function sanitizeSnapshotCursor(value: unknown) {
+  const text = String(value ?? "").trim();
+  return text || undefined;
+}
+
+function sanitizeSnapshotCursorSeq(value: unknown) {
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+  return parsed;
+}
 
 function isValidSpace(value: Space | null | undefined): value is Space {
   return Boolean(value && String(value.id ?? "").trim() && String(value.name ?? "").trim());
@@ -55,6 +68,8 @@ function sanitizeSnapshot(snapshot: BoardSnapshot | null | undefined): BoardSnap
     drafts,
     openclawTyping: snapshot.openclawTyping ?? {},
     openclawThreadWork: snapshot.openclawThreadWork ?? {},
+    cursor: sanitizeSnapshotCursor(snapshot.cursor),
+    cursorSeq: sanitizeSnapshotCursorSeq(snapshot.cursorSeq),
     cachedAt: String(snapshot.cachedAt ?? "").trim() || new Date(0).toISOString(),
   };
 }

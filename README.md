@@ -6,6 +6,9 @@ It captures activity, organizes it into useful structure, and feeds the right co
 OpenClaw stays the agent runtime.
 Clawboard adds durable memory, classification, retrieval, and operator-facing UI.
 
+Current board model: `Space -> Topic + Chat`.
+Legacy task rows and task-scoped session keys are still supported for compatibility and replay, but the primary operator workflow is topic-first.
+
 ## Documentation Contract
 
 - `README.md` is the short orchestration map: what Clawboard is, how it fits beside OpenClaw, and the main runtime flow.
@@ -84,8 +87,14 @@ Statuses are how the system tracks state:
 
 ## Runtime Guarantees (Current)
 
+- Board continuity is topic-first:
+  - the operator surface is `Space -> Topic + Chat`.
+  - legacy task/task-session traffic is still ingested and replayed so older data does not strand history.
 - Board-session scope is deterministic:
   - `clawboard:task:<topicId>:<taskId>` is hard-pinned to that topic/task.
+- Browser recovery is replay-safe:
+  - SSE persists durable `eventTs` / `sinceSeq` cursors in local storage.
+  - cached board snapshots persist their replay cursor too, so reloads can resume incrementally instead of forcing a full cold snapshot.
 - Task chat routing is main-mediated:
   - messages sent in topic/task chat sessions go through main orchestration, which may delegate to specialists/subagents.
   - task session ownership is not direct subagent dispatch by default.
@@ -202,6 +211,8 @@ Important envs:
 - `CLAWBOARD_TOKEN`
 - `CLAWBOARD_PUBLIC_API_BASE`
 - `CLAWBOARD_PUBLIC_WEB_URL` (optional)
+- `NEXT_PUBLIC_CLAWBOARD_INITIAL_CHANGES_LIMIT_LOGS`
+- `CLAWBOARD_CHANGES_PRECOMPILE_LIMIT_LOGS`
 - `OPENCLAW_BASE_URL`
 - `OPENCLAW_WS_URL` (optional explicit websocket endpoint; use `wss://` only with valid TLS certs)
 - `OPENCLAW_GATEWAY_HOST_HEADER` (optional host override for websocket connects)
