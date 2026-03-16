@@ -297,6 +297,33 @@ class LogChatCountsResponse(BaseModel):
     )
 
 
+class TopicThreadResponse(BaseModel):
+    topicId: str = Field(description="Resolved topic id.", examples=["topic-123"])
+    sessionKey: str = Field(
+        description="Canonical topic board session key for operator sends and cancels.",
+        examples=["clawboard:topic:topic-123"],
+    )
+    timelineScope: Literal["topic_thread"] = Field(
+        default="topic_thread",
+        description="Authoritative board timeline scope for this payload.",
+    )
+    cursor: Optional[str] = Field(
+        default=None,
+        description="Best-effort replay cursor (ISO timestamp) covering the returned topic thread snapshot.",
+        examples=["2026-02-09T18:05:00.000Z"],
+    )
+    cursorSeq: Optional[int] = Field(
+        default=None,
+        description="Durable change-feed sequence at snapshot time for replay-safe incremental updates.",
+        examples=[1532],
+    )
+    topic: TopicOut = Field(description="Topic metadata for the authoritative thread snapshot.")
+    logs: List[LogOutLite] = Field(
+        default_factory=list,
+        description="Authoritative operator-visible topic thread entries (newest first).",
+    )
+
+
 class TopicUpsert(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -584,6 +611,11 @@ class ChangesResponse(BaseModel):
     openclawThreadWork: List[OpenClawThreadWorkSignalOut] = Field(
         default_factory=list,
         description="Authoritative snapshot of sessions with active background OpenClaw work.",
+    )
+    resetAt: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp of the most recent data reset. Clients use this to invalidate stale cached snapshots.",
+        examples=["2026-03-16T15:30:00.000Z"],
     )
 
 

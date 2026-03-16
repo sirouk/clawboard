@@ -10,11 +10,11 @@ async function clearActiveBoardRuns(request: APIRequestContext, apiBase: string)
   const sessionKeys = new Set<string>();
   for (const item of payload.openclawTyping || []) {
     const sessionKey = String(item?.sessionKey ?? "").trim();
-    if (sessionKey.startsWith("clawboard:task:") && item?.typing) sessionKeys.add(sessionKey);
+    if (sessionKey.startsWith("clawboard:") && item?.typing) sessionKeys.add(sessionKey);
   }
   for (const item of payload.openclawThreadWork || []) {
     const sessionKey = String(item?.sessionKey ?? "").trim();
-    if (sessionKey.startsWith("clawboard:task:") && item?.active) sessionKeys.add(sessionKey);
+    if (sessionKey.startsWith("clawboard:") && item?.active) sessionKeys.add(sessionKey);
   }
   for (const sessionKey of sessionKeys) {
     const cancel = await request.delete(`${apiBase}/api/openclaw/chat`, {
@@ -33,7 +33,6 @@ test("unified composer auto-grows and routes continuation to explicit selected t
   const taskTitle = `Target Task ${suffix}`;
   const logNeedle = `needle-${suffix}`;
   const resolvedTopicId = `topic-resolved-${suffix}`;
-  const resolvedTaskId = `task-resolved-${suffix}`;
 
   const createTopic = await request.post(`${apiBase}/api/topics`, {
     data: { id: topicId, name: topicName, pinned: false },
@@ -71,10 +70,7 @@ test("unified composer auto-grows and routes continuation to explicit selected t
         topicId: resolvedTopicId,
         topicName: `Resolved Topic ${suffix}`,
         topicCreated: true,
-        taskId: resolvedTaskId,
-        taskTitle: `Resolved Task ${suffix}`,
-        taskCreated: true,
-        sessionKey: `clawboard:task:${resolvedTopicId}:${resolvedTaskId}`,
+        sessionKey: `clawboard:topic:${resolvedTopicId}`,
         decisionSource: "test",
       }),
     });
@@ -108,20 +104,21 @@ test("unified composer auto-grows and routes continuation to explicit selected t
 
   await textarea.press("Enter");
   await expect.poll(() => sentPayloads.length).toBe(1);
-  expect(String(sentPayloads[0]?.sessionKey ?? "")).toBe(`clawboard:task:${resolvedTopicId}:${resolvedTaskId}`);
+  expect(String(sentPayloads[0]?.sessionKey ?? "")).toBe(`clawboard:topic:${resolvedTopicId}`);
   expect(Object.prototype.hasOwnProperty.call(sentPayloads[0] ?? {}, "topicOnly")).toBe(false);
   await expect.poll(() => resolvePayloads.length).toBe(1);
-  expect(resolvePayloads[0]).toMatchObject({ forceNewTopic: true, forceNewTask: true });
+  expect(resolvePayloads[0]).toMatchObject({ forceNewTopic: true });
 
   await textarea.fill(taskTitle);
   await expect(page.getByTestId(`select-task-target-${taskId}`)).toBeVisible();
   await page.getByTestId(`select-task-target-${taskId}`).click();
-  await expect(page.getByTestId("unified-composer-target-chip")).toContainText(taskTitle);
+  await expect(page.getByTestId("unified-composer-target-chip")).toContainText(topicName);
 
   await textarea.fill("continue in explicit task target");
   await page.getByTestId("unified-composer-send").click();
   await expect.poll(() => sentPayloads.length).toBe(2);
-  expect(sentPayloads[1]?.sessionKey).toBe(`clawboard:task:${topicId}:${taskId}`);
+  expect(sentPayloads[1]?.sessionKey).toBe(`clawboard:topic:${topicId}`);
+  expect(resolvePayloads).toHaveLength(1);
 });
 
 test("keyboard send in unified composer uses new topic when no target and selected session when target exists", async ({ page, request }) => {
@@ -130,7 +127,6 @@ test("keyboard send in unified composer uses new topic when no target and select
   const topicId = `topic-keyboard-${suffix}`;
   const topicName = `Keyboard Topic ${suffix}`;
   const existingTaskId = `task-keyboard-existing-${suffix}`;
-  const resolvedTopicTaskId = `task-keyboard-topic-${suffix}`;
   const sentPayloads: Array<Record<string, unknown>> = [];
   const resolvePayloads: Array<Record<string, unknown>> = [];
 
@@ -149,10 +145,7 @@ test("keyboard send in unified composer uses new topic when no target and select
     resolvePayloads.push(payload);
     const selectedTopicId = String(payload?.selectedTopicId ?? "");
     const forceNewTopic = Boolean(payload?.forceNewTopic);
-    const forceNewTask = Boolean(payload?.forceNewTask);
-    const sessionKey = selectedTopicId
-      ? `clawboard:task:${selectedTopicId}:${resolvedTopicTaskId}`
-      : `clawboard:task:topic-auto-${suffix}:task-auto-${suffix}`;
+    const sessionKey = selectedTopicId ? `clawboard:topic:${selectedTopicId}` : `clawboard:topic:topic-auto-${suffix}`;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -160,9 +153,6 @@ test("keyboard send in unified composer uses new topic when no target and select
         topicId: selectedTopicId || `topic-auto-${suffix}`,
         topicName: selectedTopicId ? topicName : `Auto Topic ${suffix}`,
         topicCreated: forceNewTopic,
-        taskId: selectedTopicId ? resolvedTopicTaskId : `task-auto-${suffix}`,
-        taskTitle: selectedTopicId ? `New Task In ${topicName}` : `Auto Task ${suffix}`,
-        taskCreated: forceNewTask,
         sessionKey,
         decisionSource: "test",
       }),
@@ -188,9 +178,9 @@ test("keyboard send in unified composer uses new topic when no target and select
   await textarea.fill(`keyboard-new-topic-${suffix}`);
   await textarea.press("Enter");
   await expect.poll(() => sentPayloads.length).toBe(1);
-  expect(String(sentPayloads[0]?.sessionKey ?? "")).toBe(`clawboard:task:topic-auto-${suffix}:task-auto-${suffix}`);
+  expect(String(sentPayloads[0]?.sessionKey ?? "")).toBe(`clawboard:topic:topic-auto-${suffix}`);
   await expect.poll(() => resolvePayloads.length).toBe(1);
-  expect(resolvePayloads[0]).toMatchObject({ forceNewTopic: true, forceNewTask: true });
+  expect(resolvePayloads[0]).toMatchObject({ forceNewTopic: true });
 
   await textarea.fill(topicName);
   await expect(page.getByTestId(`select-topic-target-${topicId}`)).toBeVisible();
@@ -200,13 +190,8 @@ test("keyboard send in unified composer uses new topic when no target and select
   await textarea.fill(`keyboard-selected-target-${suffix}`);
   await textarea.press("Enter");
   await expect.poll(() => sentPayloads.length).toBe(2);
-  expect(sentPayloads[1]?.sessionKey).toBe(`clawboard:task:${topicId}:${resolvedTopicTaskId}`);
-  await expect.poll(() => resolvePayloads.length).toBe(2);
-  expect(resolvePayloads[1]).toMatchObject({
-    selectedTopicId: topicId,
-    forceNewTopic: false,
-    forceNewTask: true,
-  });
+  expect(sentPayloads[1]?.sessionKey).toBe(`clawboard:topic:${topicId}`);
+  expect(resolvePayloads).toHaveLength(1);
 });
 
 test("persisted unified draft does not activate board search until the user engages the composer", async ({ page, request }) => {

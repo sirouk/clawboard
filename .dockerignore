@@ -2,15 +2,22 @@
 
 .git
 .next
+.next.stale-*
 node_modules
+.pnpm-store
 test-results
 playwright-report
 coverage
 *.tsbuildinfo
 
 data
+.venv
 .venv*
+.pytest_cache
 _purge-archive
+clawboard-openclaw-workspaces-*
+fastembed_cache
+test-screenshots
 
 .DS_Store
 *.log

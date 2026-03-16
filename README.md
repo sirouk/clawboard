@@ -20,7 +20,7 @@ Read `ANATOMY.md` when you need the full, checked system picture.
 ## Why It Exists
 
 - Keep long-running agent work coherent across sessions.
-- Turn raw conversation/tool logs into Topics, Tasks, and searchable memory.
+- Turn raw conversation/tool logs into Topics, optional task compatibility rows, and searchable memory.
 - Give operators a fast board + logs + graph interface for steering and review.
 - Improve response-time context quality without replacing OpenClaw's native memory.
 
@@ -32,7 +32,7 @@ Clawboard runs as a multi-stage pipeline:
 - `clawboard-logger` plugin records user/assistant/subagent/tool events as durable logs.
 
 2. Stage 2: Classify
-- Async classifier groups logs into Topics and optional Tasks.
+- Async classifier groups logs into Topics and optional compatibility Tasks.
 - Embeddings + lexical ranking + reranking are used for better assignment and retrieval.
 
 3. Stage 3: Retrieve + Visualize
@@ -44,13 +44,14 @@ Clawboard runs as a multi-stage pipeline:
 Think of Clawboard like a smart school binder for your AI:
 
 - `Topic` = a class folder (example: "Website Launch")
-- `Task` = an assignment inside that folder (example: "Fix login redirect bug")
+- `Task` = a legacy assignment row that can still hang off a topic when older flows or specialized views need it
 - `Conversation log` = every message/action that happened
 - `Note` = important highlight you want remembered
 
 Statuses are how the system tracks state:
 
-- Tasks: `todo`, `doing`, `blocked`, `done` (plus due dates, priority, snooze, etc.)
+- Topics: `active`, `doing`, `blocked`, `done`, `snoozed` (plus tags, sort order, visibility)
+- Tasks: compatibility surface for older flows; still supported where present
 - Logs: `pending` (not sorted yet), `classified` (sorted into topic/task), `failed` (filtered/noise)
 
 ### The self-improving loop
@@ -59,13 +60,13 @@ Statuses are how the system tracks state:
 2. The logger plugin saves messages/tool activity into Clawboard.
 3. The classifier reviews new `pending` logs and decides:
    - which Topic they belong to
-   - which Task (if any) they belong to
+   - which compatibility Task (if any) they belong to
    - a short summary chip
 4. It stores routing memory so short follow-ups like "ok continue" can still stay in the right place.
 5. Search/indexes update so relevant older work can be found quickly.
 6. Before the next model turn, Clawboard builds a compact context block via `/api/context`:
    - active board location (where you are speaking from)
-   - active working set (important topics/tasks)
+   - active working set (important topics plus compatibility task hints when relevant)
    - recent timeline
    - routing memory
    - semantic recall from past related logs/notes
@@ -74,7 +75,7 @@ Statuses are how the system tracks state:
 ### Why this matters
 
 - You repeat yourself less.
-- The AI stays aligned to the right project/task.
+- The AI stays aligned to the right topic and current line of work.
 - Retrieval is scoped by Space visibility rules when a source space is known.
 
 ## Architecture
@@ -91,13 +92,14 @@ Statuses are how the system tracks state:
   - the operator surface is `Space -> Topic + Chat`.
   - legacy task/task-session traffic is still ingested and replayed so older data does not strand history.
 - Board-session scope is deterministic:
-  - `clawboard:task:<topicId>:<taskId>` is hard-pinned to that topic/task.
+  - `clawboard:topic:<topicId>` is the primary operator session key.
+  - legacy `clawboard:task:<topicId>:<taskId>` sessions are still hard-pinned, then normalized back into the owning topic timeline for continuity.
 - Browser recovery is replay-safe:
   - SSE persists durable `eventTs` / `sinceSeq` cursors in local storage.
   - cached board snapshots persist their replay cursor too, so reloads can resume incrementally instead of forcing a full cold snapshot.
-- Task chat routing is main-mediated:
-  - messages sent in topic/task chat sessions go through main orchestration, which may delegate to specialists/subagents.
-  - task session ownership is not direct subagent dispatch by default.
+- Board chat routing is main-mediated:
+  - messages sent in board topic sessions go through main orchestration, which may delegate to specialists/subagents.
+  - compatibility task sessions still route through the same main-agent orchestration lane rather than directly pinning ownership to a subagent.
 - `agentId` on `POST /api/openclaw/chat` is advisory metadata for Clawboard dispatch bookkeeping (queue/orchestration context), not an authoritative direct-route override.
 - Only direct user-request lineage is allocatable into Topic/Task continuity.
 - Control-plane/background noise is filtered from conversational continuity:
@@ -110,13 +112,13 @@ Statuses are how the system tracks state:
   - durable dispatch queue + watchdog/history-sync recovery guard long-running requests.
 - Thread activity + stop controls are thread-scoped:
   - board responding state is driven by `openclaw.typing`, `openclaw.thread_work`, and orchestration run activity.
-  - topic/task composers expose Stop and `/stop`/`/abort`; unified top-composer Stop targets the selected thread.
+  - topic/task composers expose Stop and `/stop`/`/abort`; unified top-composer Stop targets the selected topic thread.
   - cancel requests call `DELETE /api/openclaw/chat` with `sessionKey` (+ `requestId` when available), and backend fans out linked child/subagent sessions when lineage is known.
 - Unified Board uses a single specialized composer:
   - typing a draft message also surfaces potential topic/task matches.
-  - no selection means `new topic -> new task`.
-  - selecting a topic means `topic -> new task`.
-  - selecting a task means `topic -> existing task`.
+  - no selection means `start topic`.
+  - selecting a topic means `continue topic`.
+  - selecting a task match resolves to its parent topic instead of creating fresh task-scoped send state.
   - `Enter` sends, `Shift+Enter` inserts a newline, and the send label mirrors the action.
 - Browser API traffic is same-origin by default:
   - when no explicit browser API base is configured, the web app uses the Next `/api/*` proxy.
@@ -134,7 +136,7 @@ Clawboard is additive to OpenClaw, not a replacement.
 
 - OpenClaw handles runtime orchestration and core memory behavior.
 - Clawboard contributes extra structured continuity through logger hooks + `/api/context`.
-- At response time, Clawboard can provide focused recall (topic/task continuity, weighted notes, timeline snippets) to improve precision over long horizons.
+- At response time, Clawboard can provide focused recall (topic continuity, weighted notes, timeline snippets, and compatibility task hints) to improve precision over long horizons.
 
 ## Quick Start (Docker)
 

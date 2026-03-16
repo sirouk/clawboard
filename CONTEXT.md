@@ -30,16 +30,17 @@ Net effect: the agent can "remember" what happened across Topics/Tasks/logs/note
 
 ---
 
-### Task chat routing contract (UI -> OpenClaw)
+### Board chat routing contract (UI -> OpenClaw)
 - The Unified Board top composer first resolves send intent through `/api/openclaw/resolve-board-send`:
-  - no selection -> `new topic -> new task`
-  - selected topic -> `topic -> new task`
-  - selected task -> `topic -> existing task`
-- Task chat sends from Clawboard go through `POST /api/openclaw/chat` with a task board session key (`clawboard:task:*:*`).
-- Task sessions are still main-mediated orchestration lanes: main receives the turn, then delegates as needed.
-- `agentId` on task chat requests is advisory metadata for dispatch bookkeeping; it does not force direct subagent ownership of a task chat.
+  - no selection -> `start topic`
+  - selected topic -> `continue topic`
+  - selected task match -> resolve to its parent topic and `continue topic`
+- Unified top-composer sends from Clawboard go through `POST /api/openclaw/chat` with a topic board session key (`clawboard:topic:*`).
+- Lower task-chat surfaces and legacy routes may still use `clawboard:task:*:*` as compatibility session keys.
+- Board sessions are still main-mediated orchestration lanes: main receives the turn, then delegates as needed.
+- `agentId` on board chat requests is advisory metadata for dispatch bookkeeping; it does not force direct subagent ownership of a topic or task thread.
 - Thread-scoped cancel uses `DELETE /api/openclaw/chat` (`sessionKey`, optional `requestId`) and can fan out to linked child sessions when lineage is resolvable.
-- UI responding state is driven by `openclaw.typing` + `openclaw.thread_work` events (plus orchestration activity fallbacks) per task board session.
+- UI responding state is driven by `openclaw.typing` + `openclaw.thread_work` events (plus orchestration activity fallbacks) per board session.
 
 ---
 
@@ -57,13 +58,14 @@ Without these, delegated child-session follow-up can fail with visibility-forbid
 Aligned with `CLASSIFICATION.md` section 4.1 and `ANATOMY.md` section 4.1.
 
 - Only logs in direct user-request lineage are eligible for Topic/Task allocation and downstream continuity recall.
-- `clawboard:task:<topicId>:<taskId>` sessions are hard-locked to that topic+task.
+- `clawboard:topic:<topicId>` is the primary board continuity key.
+- Legacy `clawboard:task:<topicId>:<taskId>` sessions are still hard-locked to that topic+task, then normalized back into the owning topic timeline.
 - Canonical OpenClaw request routing is persisted in `OpenClawRequestRoute` (keyed by canonical `occhat-*` id); same-request follow-ups must obey that route after promotion.
 - Subagent logs inherit board scope only when lineage is explicit:
   - explicit `source.boardScope*` on the row, or
   - explicit `sessions_spawn` child-session linkage captured by the logger.
 - Cross-agent/global "latest scope" fallback is forbidden.
-- Background/control-plane activity (cron, backup, maintenance, unanchored tool churn) must not be surfaced as user-request continuity in Topic/Task chats.
+- Background/control-plane activity (cron, backup, maintenance, unanchored tool churn) must not be surfaced as user-request continuity in board chats.
 - Delegated-run supervision uses deterministic follow-up cadence (`1m -> 3m -> 10m -> 15m -> 30m -> 1h`, cap `1h`); running work older than 5 minutes must generate explicit user progress updates.
 
 ### What the agent sees (the injected context block)
@@ -101,7 +103,7 @@ Important constraints:
 - Very short user input should not stampede expensive recall:
   - `/api/context?mode=auto` keeps this cheap server-side (Layer A continuity; no heavy recall by default except scoped board-session continuity turns).
 - Context retrieval modes (passed to `GET /api/context?mode=...` and controlled by the OpenClaw plugin `clawboard-logger`):
-  - `auto` (default): Layer A always; semantic recall when query has signal, plus low-signal board-session turns (for "resume/continue" in `clawboard:task` chats)
+  - `auto` (default): Layer A always; semantic recall when query has signal, plus low-signal board-session turns (for "resume/continue" in `clawboard:topic` chats and legacy `clawboard:task` compatibility chats)
   - `cheap`: Layer A only (fastest)
   - `full`: Layer A + semantic recall
   - `patient`: like `full`, but the server may use larger bounded recall limits (slower; best for planning)
@@ -149,7 +151,7 @@ Source-space resolution (server-side):
 - explicit `spaceId` query param wins
 - otherwise, endpoints such as `/api/context`, `/api/search`, `/api/topics`, and `/api/tasks` try to infer source space from `sessionKey` using:
   - recent logs (`source.boardScopeSpaceId`, then `log.spaceId`)
-  - board session keys (`clawboard:task:<topicId>:<taskId>`)
+  - board session keys (`clawboard:topic:<topicId>` plus legacy `clawboard:task:<topicId>:<taskId>`)
   - session routing memory (`SessionRoutingMemory`)
 - if neither explicit nor inferable, retrieval remains unscoped (back-compat behavior)
 

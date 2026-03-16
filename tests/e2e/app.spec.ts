@@ -156,7 +156,7 @@ test("unified board uses freeform composer and hides top-level new topic button"
   await expect(page.getByRole("button", { name: /^\+ New topic$/i })).toHaveCount(0);
 
   await composer.fill("Message stays in composer");
-  await expect(page.getByTestId("unified-composer-send")).toContainText("Start new topic");
+  await expect(page.getByTestId("unified-composer-send")).toContainText("Start topic");
   await expect(page.getByRole("button", { name: "Attach files" }).first()).toBeVisible();
   await expect(composer).toHaveValue("Message stays in composer");
 
@@ -165,8 +165,8 @@ test("unified board uses freeform composer and hides top-level new topic button"
   const topicCard = page.locator("[data-topic-card-id='topic-1']").first();
   await expect(topicCard).toBeVisible();
   await expect(page.locator("[data-topic-card-id='topic-1'] > div[role='button']").first()).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByTestId("unified-composer-target-chip")).toContainText("New topic -> new task");
-  await expect(page.getByTestId("unified-composer-send")).toContainText("Start new topic");
+  await expect(page.getByTestId("unified-composer-target-chip")).toContainText("Clawboard");
+  await expect(page.getByTestId("unified-composer-send")).toContainText("Continue");
 });
 
 test("topic tag editor preserves typed labels and supports repeated enter commits", async ({ page }) => {

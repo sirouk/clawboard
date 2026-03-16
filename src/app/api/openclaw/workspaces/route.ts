@@ -1,12 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireToken } from "../../../../lib/auth";
+import { normalizeApiBase, resolveServerApiBase } from "../../../../lib/server-api-base";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-
-function normalizeBase(raw: string) {
-  return String(raw || "").trim().replace(/\/+$/, "");
-}
 
 function isLoopbackHost(hostname: string) {
   const value = String(hostname || "").trim().toLowerCase();
@@ -29,15 +26,6 @@ function isPrivateIpv4Host(hostname: string) {
 function isLocalishHost(hostname: string) {
   const value = String(hostname || "").trim().toLowerCase();
   return isLoopbackHost(value) || isPrivateIpv4Host(value) || value.endsWith(".local");
-}
-
-function resolveUpstreamBase() {
-  return normalizeBase(
-    process.env.CLAWBOARD_SERVER_API_BASE ||
-      process.env.CLAWBOARD_PUBLIC_API_BASE ||
-      process.env.NEXT_PUBLIC_CLAWBOARD_API_BASE ||
-      "http://localhost:8010",
-  );
 }
 
 function buildForwardHeaders(request: NextRequest) {
@@ -64,7 +52,7 @@ function resolveBrowserOrigin(request: NextRequest) {
 }
 
 function rewriteIdeUrlForBrowser(rawUrl: string | null | undefined, request: NextRequest) {
-  const text = normalizeBase(String(rawUrl || ""));
+  const text = normalizeApiBase(String(rawUrl || ""));
   if (!text) return text || null;
   let target: URL;
   try {
@@ -106,7 +94,7 @@ export async function GET(req: NextRequest) {
   const authError = requireToken(req, { allowLoopback: true });
   if (authError) return authError;
 
-  const base = resolveUpstreamBase();
+  const base = resolveServerApiBase();
   if (!base) {
     return NextResponse.json({ detail: "Missing CLAWBOARD_SERVER_API_BASE" }, { status: 500 });
   }

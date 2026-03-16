@@ -14,6 +14,7 @@ export type ReconcileResult =
   | {
       cursor?: string;
       cursorSeq?: number;
+      reset?: boolean;
     }
   | string
   | void;
@@ -161,6 +162,20 @@ export function useLiveUpdates(options: {
           lastEventTs.current = next;
           writeStoredCursor(STREAM_EVENT_TS_KEY, next);
         } else if (next && typeof next === "object") {
+          if (next.reset) {
+            // Backend detected a data reset newer than the client's cached snapshot.
+            // Clear all cursor state so the next reconcile does a full (non-incremental) load.
+            lastEventTs.current = undefined;
+            lastSseId.current = undefined;
+            lastSeq.current = undefined;
+            writeStoredCursor(STREAM_EVENT_TS_KEY, undefined);
+            writeStoredCursor(STREAM_EVENT_ID_KEY, undefined);
+            writeStoredSeq(STREAM_EVENT_SEQ_KEY, undefined);
+            lastReconcileAt.current = 0; // bypass throttle for immediate re-reconcile
+            reconciling = false;
+            void runReconcile();
+            return;
+          }
           const cursor = typeof next.cursor === "string" ? next.cursor.trim() || undefined : undefined;
           const cursorSeq =
             typeof next.cursorSeq === "number" && Number.isFinite(next.cursorSeq) ? Math.floor(next.cursorSeq) : undefined;

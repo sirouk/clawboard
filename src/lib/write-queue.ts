@@ -193,8 +193,10 @@ export async function drainQueuedMutations() {
   drainPromise = (async () => {
     if (!hasIndexedDb()) return;
     if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+    // token may be empty in open (no-auth) deployments — still attempt the drain
+    // and let the server decide. In token-required mode, the UI enforces read-only
+    // when no token is set, so the queue will be empty.
     const token = getApiToken().trim();
-    if (!token) return;
 
     const due = await listDueMutations(nowIso());
     for (const mutation of due) {

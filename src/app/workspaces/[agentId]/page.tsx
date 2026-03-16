@@ -6,5 +6,5 @@ export default async function WorkspaceAgentPage({
   params: Promise<{ agentId: string }>;
 }) {
   const { agentId } = await params;
-  return <WorkspacesLive selectedAgentId={agentId} />;
+  return <WorkspacesLive selectedAgentId={agentId} active />;
 }

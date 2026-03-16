@@ -1082,9 +1082,9 @@ PY
   # Explicit allow: delegation + memory + Clawboard ledger + image inspection for staged attachments.
   # cron allows durable one-shot follow-up jobs per delegation.
   # image lets main inspect screenshot-style attachments directly inside its own workspace.
-  # clawboard_* tools allow reading/writing the external task ledger for restart-resilient state recovery.
+  # clawboard_* tools allow reading/writing the external topic ledger for restart-resilient state recovery.
   run_cfg_set "${base}.tools.allow" \
-    '["sessions_spawn","sessions_list","sessions_send","session_status","memory_search","memory_get","cron","image","clawboard_search","clawboard_update_task","clawboard_context","clawboard_get_task"]' \
+    '["sessions_spawn","sessions_list","sessions_send","session_status","memory_search","memory_get","cron","image","clawboard_search","clawboard_update_topic","clawboard_get_topic","clawboard_update_task","clawboard_context","clawboard_get_task"]' \
     json true
 
   # Deny filesystem, runtime, web, UI, gateway, nodes, messaging.
@@ -1158,15 +1158,15 @@ jobs[:] = [j for j in jobs if "watchdog" not in j.get("name", "").lower()]
 now_ms = int(time.time() * 1000)
 watchdog_text = (
     "WATCHDOG RECOVERY:\n"
-    "1. Call clawboard_search(\"delegating\") to find all tasks tagged \"delegating\" in Clawboard.\n"
-    "2. For each Clawboard task with status \"doing\": extract childSessionKey from tag starting with \"session:\", "
+    "1. Call clawboard_search(\"delegating\") to find all topics tagged \"delegating\" in Clawboard.\n"
+    "2. For each Clawboard topic with status \"doing\": extract childSessionKey from tag starting with \"session:\", "
     "extract agentId from tag starting with \"agent:\". Call session_status(childSessionKey). "
-    "COMPLETE (queued sub-agent result already arrived): treat this as an internal supervision wake-up, not a fresh user request; read the current task thread before any extra tool call or task write; if the result is already visible there, do not restate or paraphrase the full body or re-dispatch the same specialists; validate the work, add only the key delta/caveats, clawboard_update_task(taskId, { status: \"done\", tags: [] }), and close the loop with the user. "
+    "COMPLETE (queued sub-agent result already arrived): treat this as an internal supervision wake-up, not a fresh user request; read the current topic thread before any extra tool call or ledger write; if the result is already visible there, do not restate or paraphrase the full body or re-dispatch the same specialists; validate the work, add only the key delta/caveats, clawboard_update_topic(topicId, { status: \"done\", tags: [] }), and close the loop with the user. "
     "STILL RUNNING: send brief status if >5 minutes and include next check ETA from ladder [1,3,10,15,30,60] minutes. "
     "LOST (session missing or terminal without relayed output): sessions_spawn(agentId, originalTask), "
-    "clawboard_update_task(taskId, { tags: [\"delegating\",\"agent:<agentId>\",\"session:<newKey>\"] }), "
+    "clawboard_update_topic(topicId, { tags: [\"delegating\",\"agent:<agentId>\",\"session:<newKey>\"] }), "
     "cron.add new follow-up at +1 minute and continue ladder progression.\n"
-    "3. If a queued sub-agent completion message is present at wake-up, treat it as internal supervision rather than a fresh user request; read the current task thread first; if the result is already visible there, do not parrot it back or re-dispatch the same specialists; if sibling specialists from the same workflow are still active, keep partial results internal unless they change the user's next decision or the user has gone >5m without a visible update; do not send a user-facing message that only says you are checking or waiting on the rest; add only the supervisor delta, clear delegation tags, and close the loop.\n"
+    "3. If a queued sub-agent completion message is present at wake-up, treat it as internal supervision rather than a fresh user request; read the current topic thread first; if the result is already visible there, do not parrot it back or re-dispatch the same specialists; if sibling specialists from the same workflow are still active, keep partial results internal unless they change the user's next decision or the user has gone >5m without a visible update; do not send a user-facing message that only says you are checking or waiting on the rest; add only the supervisor delta, clear delegation tags, and close the loop.\n"
     "If nothing needs attention, reply HEARTBEAT_OK."
   )
 jobs.append({
@@ -1238,7 +1238,7 @@ main() {
   echo "Main allowAgents: $MAIN_ALLOW_AGENTS_JSON"
   echo ""
   echo "Delegation tools: sessions_spawn, session_status, sessions_list, sessions_send, cron"
-  echo "Clawboard ledger tools: clawboard_search, clawboard_update_task, clawboard_context, clawboard_get_task"
+  echo "Clawboard ledger tools: clawboard_search, clawboard_update_topic, clawboard_get_topic, clawboard_update_task, clawboard_context, clawboard_get_task"
   echo "Delegation check-in cadence: 1m -> 3m -> 10m -> 15m -> 30m -> 1h (cap 1h; >5m user updates)"
   echo "Follow-up guarantee: heartbeat watchdog + session-start clawboard_search + delegation cron ladder"
 }

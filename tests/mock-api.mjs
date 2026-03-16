@@ -53,6 +53,7 @@ const eventBuffer = [];
 const MAX_EVENTS = 200;
 let nextEventId = 0;
 const BOARD_TOPIC_SESSION_PREFIX = "clawboard:topic:";
+const BOARD_TASK_SESSION_PREFIX = "clawboard:task:";
 const deletedLogs = [];
 const deletedTopics = [];
 const liveTyping = new Map();
@@ -235,10 +236,19 @@ function buildChangesCursor(payload) {
 }
 
 function parseBoardSessionKey(sessionKey) {
-  const key = String(sessionKey || "").trim();
+  let key = String(sessionKey || "").trim();
   if (!key) return { topicId: null };
+  const nestedBoardIndex = key.indexOf("clawboard:");
+  if (nestedBoardIndex > 0) {
+    key = key.slice(nestedBoardIndex);
+  }
   if (key.startsWith(BOARD_TOPIC_SESSION_PREFIX)) {
     const topicId = key.slice(BOARD_TOPIC_SESSION_PREFIX.length).trim().split(":", 1)[0]?.trim() ?? "";
+    return { topicId: topicId || null };
+  }
+  if (key.startsWith(BOARD_TASK_SESSION_PREFIX)) {
+    const parts = key.slice(BOARD_TASK_SESSION_PREFIX.length).trim().split(":");
+    const topicId = String(parts[0] || "").trim();
     return { topicId: topicId || null };
   }
   return { topicId: null };
@@ -321,6 +331,19 @@ function isChatNoiseLog(entry) {
     return true;
   }
   return false;
+}
+
+function topicThreadLogs(topicId) {
+  return store.logs
+    .map(normalizeLog)
+    .filter((entry) => String(entry.topicId || "").trim() === String(topicId || "").trim())
+    .filter((entry) => !isChatNoiseLog(entry))
+    .sort((a, b) => {
+      const aStamp = Date.parse(a.updatedAt || a.createdAt || "") || 0;
+      const bStamp = Date.parse(b.updatedAt || b.createdAt || "") || 0;
+      if (aStamp !== bStamp) return bStamp - aStamp;
+      return String(a.id || "").localeCompare(String(b.id || ""));
+    });
 }
 
 function scoreText(query, text) {
@@ -566,6 +589,49 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { ok: true, queued: true });
   }
 
+  if (url.pathname === "/api/openclaw/resolve-board-send" && req.method === "POST") {
+    const payload = await parseBody(req);
+    const selectedTopicId = String(payload.selectedTopicId || "").trim();
+    const forceNewTopic = payload.forceNewTopic === true;
+    const message = String(payload.message || "").trim();
+    const spaceId = String(payload.spaceId || "").trim() || null;
+
+    let topic = !forceNewTopic && selectedTopicId
+      ? store.topics.find((entry) => String(entry.id || "").trim() === selectedTopicId) || null
+      : null;
+
+    let topicCreated = false;
+    let decisionSource = topic ? "selected_topic" : "new_topic";
+    if (!topic) {
+      const now = nowIso();
+      topic = {
+        id: nextId("topic", store.topics),
+        name: message ? message.slice(0, 120) : "New topic",
+        description: "",
+        priority: "medium",
+        status: "active",
+        snoozedUntil: null,
+        tags: [],
+        parentId: null,
+        spaceId,
+        sortIndex: -1,
+        createdAt: now,
+        updatedAt: now,
+      };
+      store.topics.push(topic);
+      topicCreated = true;
+      pushEvent("topic.upserted", topic);
+    }
+
+    return sendJson(res, 200, {
+      topicId: topic.id,
+      topicName: topic.name || topic.id,
+      topicCreated,
+      sessionKey: `${BOARD_TOPIC_SESSION_PREFIX}${topic.id}`,
+      decisionSource,
+    });
+  }
+
   if (url.pathname === "/api/openclaw/chat" && req.method === "POST") {
     const payload = await parseBody(req);
     const sessionKey = String(payload.sessionKey || "").trim();
@@ -709,6 +775,34 @@ const server = http.createServer(async (req, res) => {
       pushEvent("topic.upserted", topic);
       return sendJson(res, 200, topic);
     }
+  }
+
+  if (/^\/api\/topics\/[^/]+\/thread$/.test(url.pathname) && req.method === "GET") {
+    const parts = url.pathname.split("/");
+    const topicId = String(parts[3] || "").trim();
+    if (!topicId) return sendJson(res, 400, { error: "topicId required" });
+    const topic = store.topics.find((entry) => String(entry.id || "").trim() === topicId);
+    if (!topic) return sendJson(res, 404, { error: "Not found" });
+    const limit = Number(url.searchParams.get("limit") || 200);
+    const offset = Number(url.searchParams.get("offset") || 0);
+    const logs = topicThreadLogs(topicId);
+    return sendJson(res, 200, {
+      topicId,
+      sessionKey: `${BOARD_TOPIC_SESSION_PREFIX}${topicId}`,
+      timelineScope: "topic_thread",
+      cursor: buildChangesCursor({
+        spaces: [],
+        topics: [topic],
+        logs,
+        drafts: [],
+        deletedTopics: [],
+        deletedLogs: [],
+        openclawTyping: Array.from(liveTyping.values()).filter((entry) => parseBoardSessionKey(entry.sessionKey).topicId === topicId),
+        openclawThreadWork: Array.from(liveThreadWork.values()).filter((entry) => parseBoardSessionKey(entry.sessionKey).topicId === topicId),
+      }),
+      topic,
+      logs: logs.slice(offset, offset + limit),
+    });
   }
 
   if (url.pathname.startsWith("/api/topics/") && req.method === "DELETE") {

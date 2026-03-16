@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { resolveServerApiBase } from "../../../lib/server-api-base";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -13,19 +14,6 @@ const HOP_BY_HOP_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
-
-function normalizeBase(raw: string) {
-  return String(raw || "").trim().replace(/\/+$/, "");
-}
-
-function resolveUpstreamBase() {
-  return normalizeBase(
-    process.env.CLAWBOARD_SERVER_API_BASE ||
-      process.env.CLAWBOARD_PUBLIC_API_BASE ||
-      process.env.NEXT_PUBLIC_CLAWBOARD_API_BASE ||
-      "http://localhost:8010",
-  );
-}
 
 function forwardRequestHeaders(request: NextRequest) {
   const headers = new Headers(request.headers);
@@ -45,7 +33,7 @@ function forwardResponseHeaders(upstream: Response) {
 }
 
 async function proxyRequest(request: NextRequest, path: string[]) {
-  const base = resolveUpstreamBase();
+  const base = resolveServerApiBase();
   if (!base) {
     return NextResponse.json({ detail: "Missing CLAWBOARD_SERVER_API_BASE" }, { status: 500 });
   }

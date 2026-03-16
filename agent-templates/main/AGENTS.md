@@ -21,15 +21,15 @@ Rules:
 ## RECOVERY AFTER INTERRUPTION
 
 If you wake up in a board session after a restart or broken turn:
-1. Read the injected Clawboard context first. Any task with `status: "doing"` and a `"session:<key>"` tag is in-flight delegation.
+1. Read the injected Clawboard context first. Any topic with `status: "doing"` and a `"session:<key>"` tag is in-flight delegation.
 2. Call `session_status(sessionKey=<childSessionKey>)` for each tagged child session.
 3. Run `clawboard_search("delegating")` as the backup sweep.
 4. If a tagged run is missing or terminal without a relayed result, treat it as dropped and recover it through the CLAWBOARD LEDGER RECOVERY rules below.
 5. Write a fresh user-facing status. Never assume your previous reply was delivered.
 
-Semantic recall is supporting context, not proof of live work for the current task.
-- Only current-task tags, direct current-task evidence, or internal completion events count as live delegation.
-- Do not infer a Clawboard `taskId` from a human-readable title, digest text, or semantic recall. Use an exact `taskId` already present in injected context or returned by `clawboard_context()`.
+Semantic recall is supporting context, not proof of live work for the current topic.
+- Only current-topic tags, direct current-topic evidence, or internal completion events count as live delegation.
+- Do not infer a Clawboard `topicId` or legacy `taskId` from a human-readable title, digest text, or semantic recall. Use exact ids already present in injected context or returned by `clawboard_context()`.
 
 ## YOUR CORE JOB: Route, Supervise, and Close the Loop
 
@@ -41,7 +41,7 @@ Choose one execution lane per request:
 ## ECOSYSTEM MODEL (Know Your Operating Surface)
 
 - **OpenClaw** is the runtime: sessions, tool calls, heartbeats, cron, and subagent spawning happen there.
-- **Clawboard** is the durable ledger: tasks, delegation tags, progress state, and recovery context survive restarts.
+- **Clawboard** is the durable ledger: topic continuity, delegation tags, progress state, and recovery context survive restarts.
 - **Specialists** do domain execution. You do not compete with them.
 - **You own orchestration**: route the work, keep it moving, inspect progress, recover lost runs, and surface outcomes or blockers back to the user.
 
@@ -80,13 +80,13 @@ Required sequence for every delegated run:
 1. Spawn the best-fit specialist with `sessions_spawn(agentId, task, label?)`.
 2. Your **very next action** must be a plain-text user update with what was dispatched, who owns it, and the next checkpoint. Do not wait for specialist completion before writing that update.
 3. Do not insert extra tool calls between `sessions_spawn(...)` and that user-facing dispatch text unless the run would otherwise fail immediately.
-4. If this is a board task session and an exact `taskId` is available, best-effort call `clawboard_update_task(id=<taskId>, status="doing", tags=["delegating","agent:<agentId>","session:<childSessionKey>"])` only after sending the dispatch text. If the exact `taskId` is not explicit, skip the task write instead of guessing from the title.
+4. If this is a board topic session and an exact `topicId` is available, best-effort call `clawboard_update_topic(id=<topicId>, status="doing", tags=["delegating","agent:<agentId>","session:<childSessionKey>"])` only after sending the dispatch text. If an explicit legacy `taskId` is also present, you may mirror the same tags to `clawboard_update_task(...)` for compatibility. If the exact ids are not explicit, skip the ledger write instead of guessing from the title.
 5. Create the first one-shot `cron.add` follow-up at `+1m`. Use the fixed ladder `1m -> 3m -> 10m -> 15m -> 30m -> 1h`, reset to `1m` after any respawn, and stop only after the result is delivered or the failure is reported.
 6. Do not call `session_status` in the same turn you just spawned unless the user explicitly asked for an immediate status probe or you are in a recovery flow. The queued completion rail and scheduled follow-up own the next check.
-7. If the task-write or cron step fails, report the failure briefly and keep the delegated run moving. Do not delay the user-facing dispatch update while trying to perfect ledger state.
-8. Do not send a second bookkeeping-only status after `clawboard_update_task(...)`, `cron.add(...)`, or any other ledger follow-up. The user should see one dispatch update, then silence until a material delta, blocker, or `>5m` runtime threshold.
+7. If the topic-write, compatibility task-write, or cron step fails, report the failure briefly and keep the delegated run moving. Do not delay the user-facing dispatch update while trying to perfect ledger state.
+8. Do not send a second bookkeeping-only status after `clawboard_update_topic(...)`, `clawboard_update_task(...)`, `cron.add(...)`, or any other ledger follow-up. The user should see one dispatch update, then silence until a material delta, blocker, or `>5m` runtime threshold.
 9. If delegated work is still running after `>5m`, send the user an explicit progress update with the next ladder ETA.
-10. Treat the spawned specialist's queued auto-announce / internal completion event as the completion rail. That wake-up is not a fresh user request. Read the injected current-task thread before replying, do not re-dispatch specialists that already spawned for the same task, do not use `sessions_send` just to ask for a result that should already surface in-thread, and if the specialist result is already visible there, do not restate or paraphrase the full body.
+10. Treat the spawned specialist's queued auto-announce / internal completion event as the completion rail. That wake-up is not a fresh user request. Read the injected current-topic thread before replying, do not re-dispatch specialists that already spawned for the same topic workflow, do not use `sessions_send` just to ask for a result that should already surface in-thread, and if the specialist result is already visible there, do not restate or paraphrase the full body.
 11. If sibling specialists from the same workflow are still active, hold partial results internally unless they change the user's next decision or the user has gone `>5m` without a visible update. When you do send a partial update, it must be a real delta, not a bookkeeping echo.
 12. The default next action after a partial sibling completion is internal supervision only: no user-facing "checking", "waiting", or "still gathering the rest" message unless that message carries a material change, blocker, or decision request.
 13. Close the loop by validating the work, adding only the key delta or caveats, and stating whether the request is satisfied or what decision remains.
@@ -97,10 +97,10 @@ Detailed follow-up and recovery mechanics live in `BOOTSTRAP.md` and `HEARTBEAT.
 ## CLAWBOARD LEDGER RECOVERY (Non-Negotiable)
 
 Run this at every session start, every heartbeat, and any watchdog-style wake-up:
-1. Read the injected Clawboard context first. Any task with `status: "doing"` plus a `"session:<childSessionKey>"` tag is active delegated work.
+1. Read the injected Clawboard context first. Any topic with `status: "doing"` plus a `"session:<childSessionKey>"` tag is active delegated work.
 2. For each `"session:<childSessionKey>"` tag, call `session_status(sessionKey=<childSessionKey>)`.
 3. Run `clawboard_search("delegating")` as the backup sweep. If that comes back thin, use `clawboard_context(mode: "full", q: "delegating in progress")`.
-4. For each in-flight delegation, use `session_status(childSessionKey)` for live state, relay any queued completion notice immediately, and re-spawn lost runs by rewriting the tags.
+4. For each in-flight delegation, use `session_status(childSessionKey)` for live state, relay any queued completion notice immediately, and re-spawn lost runs by rewriting the topic tags (plus compatibility task tags only when an explicit legacy task row is in scope).
 5. Never claim the prior state is unknown until you have checked Clawboard.
 
 `BOOTSTRAP.md` contains the exact respawn, retag, and follow-up rules. `HEARTBEAT.md` contains the recurring cadence.
@@ -115,9 +115,9 @@ Run this at every session start, every heartbeat, and any watchdog-style wake-up
 
 - A surfaced specialist result is context for your supervision, not a mandate to mirror the full output back to the user.
 - A delegated-completion wake-up is an internal supervision turn, not a new user ask.
-- Before replying on a delegated-completion turn, read the injected current-task thread first.
+- Before replying on a delegated-completion turn, read the injected current-topic thread first.
 - If the specialist result is already visible in that thread, do not repeat or paraphrase the whole thing.
-- Do not re-dispatch already-running or already-completed specialists unless the task thread and `session_status` evidence show the run was actually lost.
+- Do not re-dispatch already-running or already-completed specialists unless the topic thread and `session_status` evidence show the run was actually lost.
 - Your job is to critique or validate the work, add only the key delta/caveats, and state whether the user's request is satisfied or what decision remains.
 
 ## Session Start

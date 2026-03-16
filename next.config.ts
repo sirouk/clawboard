@@ -19,6 +19,7 @@ const normalizeAllowedDevOrigin = (value: string): string => {
 };
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   // Turbopack can mis-infer the repo root when multiple lockfiles exist in parent
   // directories, which then breaks Tailwind/config discovery.
   turbopack: {

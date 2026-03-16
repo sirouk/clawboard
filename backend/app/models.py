@@ -20,6 +20,10 @@ class InstanceConfig(SQLModel, table=True):
     updatedAt: str = Field(
         description="ISO timestamp of the last config update.",
     )
+    resetAt: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp of the most recent factory reset. Clients compare this against their cached snapshot age to detect stale data.",
+    )
 
 
 class Space(SQLModel, table=True):

@@ -1,5 +1,6 @@
 "use client";
 
+import { usePathname } from "next/navigation";
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { IntegrationLevel, OpenClawWorkspace } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
@@ -34,12 +35,18 @@ type OpenClawWorkspaceContextValue = {
 
 const AppConfigContext = createContext<AppConfigContextValue | null>(null);
 const OpenClawWorkspaceContext = createContext<OpenClawWorkspaceContextValue | null>(null);
+const DEFERRED_WORKSPACE_BOOTSTRAP_MS = 1_250;
 
 function isIntegrationLevel(value: string): value is IntegrationLevel {
   return value === "manual" || value === "write" || value === "full";
 }
 
+function shouldPrioritizeWorkspaceBootstrap(pathname: string) {
+  return pathname === "/workspaces" || pathname.startsWith("/workspaces/");
+}
+
 export function AppConfigProvider({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
   const defaultToken = normalizeTokenInput(process.env.NEXT_PUBLIC_CLAWBOARD_DEFAULT_TOKEN ?? "");
   const storedTitle = useLocalStorageItem("clawboard.instanceTitle");
   const storedTokenRaw = useLocalStorageItem("clawboard.token");
@@ -129,9 +136,13 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let alive = true;
-    apiFetch("/api/openclaw/workspaces", { cache: "no-store" }, token)
-      .then(async (res) => {
-        if (!alive) return null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let idleHandle: number | null = null;
+
+    const loadWorkspaces = async () => {
+      try {
+        const res = await apiFetch("/api/openclaw/workspaces", { cache: "no-store" }, token);
+        if (!alive) return;
         if (!res.ok) {
           const detail = await res.json().catch(() => null);
           const message =
@@ -139,30 +150,50 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
           throw new Error(message);
         }
         const data = await res.json().catch(() => null);
-        if (!alive) return null;
+        if (!alive) return;
         setWorkspaceConfigured(Boolean(data?.configured));
         setWorkspaceProvider(typeof data?.provider === "string" ? data.provider : null);
         setWorkspaceBaseUrl(typeof data?.baseUrl === "string" ? data.baseUrl : null);
         setWorkspaces(Array.isArray(data?.workspaces) ? data.workspaces : []);
         setWorkspaceError(null);
         setWorkspaceLoadedRequestKey(workspaceRequestKey);
-        return null;
-      })
-      .catch((error) => {
-        if (!alive) return null;
-        setWorkspaceConfigured(false);
-        setWorkspaceProvider(null);
-        setWorkspaceBaseUrl(null);
-        setWorkspaces([]);
+      } catch (error) {
+        if (!alive) return;
+        // Preserve previously loaded data on transient errors so the UI doesn't flash
+        // empty when a route-change triggers a refetch and the API has a brief hiccup.
+        // Only update the error message so callers can surface a non-destructive notice.
         setWorkspaceError(error instanceof Error ? error.message : "Failed to load workspaces.");
         setWorkspaceLoadedRequestKey(workspaceRequestKey);
-        return null;
-      });
+      }
+    };
+
+    if (shouldPrioritizeWorkspaceBootstrap(pathname)) {
+      void loadWorkspaces();
+    } else if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+      idleHandle = window.requestIdleCallback(
+        () => {
+          idleHandle = null;
+          void loadWorkspaces();
+        },
+        { timeout: DEFERRED_WORKSPACE_BOOTSTRAP_MS }
+      );
+    } else if (typeof globalThis !== "undefined") {
+      timer = setTimeout(() => {
+        timer = null;
+        void loadWorkspaces();
+      }, DEFERRED_WORKSPACE_BOOTSTRAP_MS);
+    } else {
+      void loadWorkspaces();
+    }
 
     return () => {
       alive = false;
+      if (timer) clearTimeout(timer);
+      if (idleHandle != null && typeof window !== "undefined" && "cancelIdleCallback" in window) {
+        window.cancelIdleCallback(idleHandle);
+      }
     };
-  }, [token, workspaceRequestKey]);
+  }, [pathname, token, workspaceRequestKey]);
 
   const setToken = (value: string) => {
     const normalized = normalizeTokenInput(value);

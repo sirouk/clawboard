@@ -99,7 +99,8 @@ const CHAT_SUMMARY_TAG = "clawboard-chat-summary";
 const DELETED_TOPICS_STORAGE_KEY = "clawboard.deletedTopics";
 const STREAM_EVENT_TS_STORAGE_KEY = "clawboard.stream.eventTs";
 const STREAM_EVENT_SEQ_STORAGE_KEY = "clawboard.stream.lastSeq";
-const DEFAULT_INITIAL_CHANGES_LIMIT_LOGS = 500;
+const RESET_AT_STORAGE_KEY = "clawboard.instance.resetAt";
+const DEFAULT_INITIAL_CHANGES_LIMIT_LOGS = 200;
 const INITIAL_CHANGES_FETCH_TIMEOUT_MS = 12_000;
 const INITIAL_CHANGES_FALLBACK_LIMIT_LOGS = 200;
 
@@ -260,6 +261,7 @@ type ChangesPayload = {
   deletedTopics?: unknown;
   openclawTyping?: unknown;
   openclawThreadWork?: unknown;
+  resetAt?: unknown;
 };
 
 function applyDeletedEntityTombstones<T extends { id: string; updatedAt?: string; createdAt?: string }>(
@@ -747,6 +749,21 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     if (!res.ok) return;
     const payload = (await res.json().catch(() => null)) as ChangesPayload | null;
     if (!payload) return;
+    const resetAt = String(payload.resetAt ?? "").trim() || undefined;
+    if (typeof window !== "undefined") {
+      const prevStoredResetAt = window.localStorage.getItem(RESET_AT_STORAGE_KEY) || undefined;
+      const prevStoredMs = prevStoredResetAt ? parseIsoMs(prevStoredResetAt) : 0;
+      if (resetAt) {
+        window.localStorage.setItem(RESET_AT_STORAGE_KEY, resetAt);
+      }
+      if (resetAt && incremental) {
+        const resetMs = parseIsoMs(resetAt);
+        if (Number.isFinite(resetMs) && resetMs > prevStoredMs) {
+          snapshotCursorRef.current = null;
+          return { reset: true };
+        }
+      }
+    }
     const responseCursor = String(payload.cursor ?? "").trim() || undefined;
     const cursorSeqRaw = Number(payload.cursorSeq);
     const cursorSeq = Number.isFinite(cursorSeqRaw) && cursorSeqRaw >= 0 ? Math.floor(cursorSeqRaw) : undefined;

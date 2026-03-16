@@ -1,8 +1,10 @@
-FROM node:20-alpine
+# ---- Build stage ----
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
 RUN apk add --no-cache openssl libc6-compat
+RUN corepack enable
 
 ARG NEXT_PUBLIC_CLAWBOARD_API_BASE=http://localhost:8000
 ENV NEXT_PUBLIC_CLAWBOARD_API_BASE=$NEXT_PUBLIC_CLAWBOARD_API_BASE
@@ -14,14 +16,34 @@ ARG NEXT_PUBLIC_CLAWBOARD_INITIAL_CHANGES_LIMIT_LOGS=500
 ENV NEXT_PUBLIC_CLAWBOARD_INITIAL_CHANGES_LIMIT_LOGS=$NEXT_PUBLIC_CLAWBOARD_INITIAL_CHANGES_LIMIT_LOGS
 ENV NEXT_TELEMETRY_DISABLED=1
 
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
 COPY . .
 
-RUN ./node_modules/.bin/prisma generate
-RUN npm run build
+RUN pnpm exec prisma generate
+RUN pnpm run build
+
+# ---- Runtime stage ----
+FROM node:20-alpine AS runner
+
+WORKDIR /app
+
+RUN apk add --no-cache openssl libc6-compat
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nextjs
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
 
 EXPOSE 3000
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
 
-CMD ["npm", "run", "start", "--", "-p", "3000"]
+CMD ["node", "server.js"]

@@ -157,6 +157,9 @@ Commands:
   reset-data [--yes]                   Stop services and wipe local Clawboard data/* (OpenClaw untouched)
   reset-openclaw-sessions [--yes]      Wipe OpenClaw agent session history; keeps memories + credentials
   reset-all-fresh [--yes]              Wipe OpenClaw memories/sessions + Clawboard data; remove Clawboard OpenClaw cron jobs (preserves qmd indexes + workspace templates/rules)
+  factory-reset [--yes]                Full wipe to idle state: board data, vectors, gateway queue, sessions,
+                                       memories, vault docs, QMD indexes, cron jobs. Preserves instanceconfig,
+                                       credentials, contracts, QMD collection config, and Docker services.
   start-fresh-replay [--yes]           One-time: clear topics/tasks, reset classifier, wipe vectors, restart
   status                               Show container status
   logs [service]                       Tail logs
@@ -968,6 +971,208 @@ reset_all_fresh() {
   echo "Done."
 }
 
+# ===========================================================================
+# factory_reset helpers — targeted wipe that preserves instanceconfig,
+# workspace contracts, agent credentials, QMD collection config, and services.
+# ===========================================================================
+
+# TRUNCATE all board data tables; instanceconfig is explicitly excluded.
+# Caller must stop api/classifier first to avoid deadlock.
+_factory_reset_postgres() {
+  if compose exec -T db psql -U clawboard -d clawboard >/dev/null 2>&1 <<'SQL'
+DO $$
+DECLARE
+  t text;
+  tables text[] := ARRAY[
+    'topic','logentry','space','draft','changeevent',
+    'orchestrationrun','orchestrationitem','attachment',
+    'deletedlog','deletedtopic','ingestqueue','ingestreceipt',
+    'sessionroutingmemory','openclawchatdispatchqueue',
+    'openclawgatewayhistorycursor','openclawgatewayhistorysyncstate',
+    'openclawrequestroute'
+  ];
+BEGIN
+  FOREACH t IN ARRAY tables LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_tables WHERE schemaname='public' AND tablename=t
+    ) THEN
+      EXECUTE format('TRUNCATE TABLE %I CASCADE', t);
+    END IF;
+  END LOOP;
+  -- Ensure resetAt column exists and stamp the reset time so clients detect stale caches.
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema='public' AND table_name='instanceconfig' AND column_name='resetAt'
+  ) THEN
+    ALTER TABLE instanceconfig ADD COLUMN "resetAt" TEXT;
+  END IF;
+  UPDATE instanceconfig
+    SET "resetAt" = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    WHERE id = 1;
+END $$;
+SQL
+  then
+    echo "  Board data cleared (instanceconfig preserved)."
+  else
+    echo "  Warning: DB TRUNCATE failed — db container may not be running."
+  fi
+}
+
+# Stop Qdrant, wipe its data directory, restart it clean.
+_factory_reset_qdrant() {
+  if [ ! -d "$DATA_DIR/qdrant" ]; then
+    echo "  No Qdrant data directory found — skipping."
+    return
+  fi
+  compose stop qdrant >/dev/null 2>&1 || true
+  rm -rf "${DATA_DIR:?}/qdrant"
+  mkdir -p "$DATA_DIR/qdrant"
+  compose start qdrant >/dev/null 2>&1 || compose up -d qdrant >/dev/null 2>&1 || true
+  echo "  Qdrant data directory wiped and service restarted."
+}
+
+# Clear gateway queue SQLite (clawboard-queue.sqlite).
+_factory_reset_gateway_sqlite() {
+  local oc_home db_path
+  oc_home="$(_oc_home)"
+  db_path="$oc_home/clawboard-queue.sqlite"
+  if [ ! -f "$db_path" ]; then
+    echo "  No gateway SQLite found at $db_path — skipping."
+    return
+  fi
+  if command -v sqlite3 >/dev/null 2>&1; then
+    if sqlite3 "$db_path" \
+        "DELETE FROM clawboard_queue; DELETE FROM board_scope_cache; VACUUM;" \
+        2>/dev/null; then
+      echo "  Gateway SQLite cleared."
+    else
+      # Tables may have different names; fall back to removing the file.
+      rm -f "$db_path"
+      echo "  Gateway SQLite removed (table clear failed; file deleted)."
+    fi
+  else
+    rm -f "$db_path"
+    echo "  Gateway SQLite removed (sqlite3 not available)."
+  fi
+}
+
+# Delete all .md files from every obsidian vault directory found under
+# configured agent workspaces.  Directory structure is preserved.
+_factory_reset_obsidian_vaults() {
+  local workspace obsidian_dir count total=0
+  while IFS=$'\t' read -r _kind workspace; do
+    workspace="${workspace//$'\r'/}"
+    [ -n "$workspace" ] || continue
+    obsidian_dir="$workspace/obsidian"
+    [ -d "$obsidian_dir" ] || continue
+    count=$(find "$obsidian_dir" -name "*.md" -not -path "*/\.*" 2>/dev/null | wc -l | tr -d ' ')
+    find "$obsidian_dir" -name "*.md" -not -path "*/\.*" -delete 2>/dev/null || true
+    total=$((total + count))
+    echo "  Vault cleared: $obsidian_dir ($count file(s))"
+  done < <(_oc_agent_workspaces)
+  [ "$total" -gt 0 ] || echo "  No obsidian vault documents found."
+}
+
+# Delete QMD vector index SQLite files so they are rebuilt empty on next run.
+# The collection config (index.yml) is preserved.
+_factory_reset_qmd_indexes() {
+  local oc_home agents_dir count=0 aid idx
+  oc_home="$(_oc_home)"
+  agents_dir="$oc_home/agents"
+  [ -d "$agents_dir" ] || return 0
+  for agent_dir in "$agents_dir"/*/; do
+    [ -d "$agent_dir" ] || continue
+    aid="$(basename "$agent_dir")"
+    idx="$agent_dir/qmd/xdg-cache/qmd/index.sqlite"
+    if [ -f "$idx" ]; then
+      rm -f "$idx"
+      count=$((count + 1))
+      echo "  [$aid] QMD index removed"
+    fi
+  done
+  [ "$count" -gt 0 ] || echo "  No QMD index files found."
+}
+
+# ===========================================================================
+# factory_reset — full wipe to a clean idle state.
+#
+# Wiped:       board data (topics/logs/spaces/etc.), Qdrant vectors, gateway
+#              queue, agent sessions, workspace memories, obsidian vault docs,
+#              QMD vector indexes, and Clawboard-related cron jobs.
+#
+# Preserved:   instanceconfig (token, title, integration level),
+#              workspace contract files (AGENTS.md, ANATOMY.md, etc.),
+#              agent credentials and model config (agents/*/agent/),
+#              QMD collection configuration (index.yml),
+#              Docker services and compose configuration.
+# ===========================================================================
+factory_reset() {
+  local force=false
+  if [ "${1:-}" = "--yes" ]; then
+    force=true
+  fi
+
+  local oc_home
+  oc_home="$(_oc_home)"
+
+  echo "Factory reset"
+  echo "  Clawboard dir : $ROOT_DIR"
+  echo "  OpenClaw home : $oc_home"
+  echo ""
+  echo "Will WIPE:"
+  echo "  - Postgres board data (topics, logs, spaces, drafts, events, …)"
+  echo "  - Qdrant vector collections ($DATA_DIR/qdrant)"
+  echo "  - Gateway queue ($oc_home/clawboard-queue.sqlite)"
+  echo "  - Agent sessions ($oc_home/agents/*/sessions)"
+  echo "  - Workspace memory directories (<workspace>/memory)"
+  echo "  - Obsidian vault documents (<workspace>/obsidian/*.md)"
+  echo "  - QMD vector indexes ($oc_home/agents/*/qmd/xdg-cache/qmd/index.sqlite)"
+  echo "  - Clawboard-related OpenClaw cron jobs"
+  echo ""
+  echo "Will PRESERVE:"
+  echo "  - instanceconfig row (token, title, integration level)"
+  echo "  - Workspace contract files (AGENTS.md, ANATOMY.md, SOUL.md, etc.)"
+  echo "  - Agent credentials and model config (agents/*/agent/)"
+  echo "  - QMD collection config (agents/*/qmd/xdg-config/qmd/index.yml)"
+  echo "  - Docker services and compose configuration"
+  echo ""
+
+  confirm_or_abort "Proceed with factory reset? All board data and accumulated agent memory will be permanently wiped." "$force"
+
+  echo ""
+  echo "[1/8] Stopping API and classifier (prevents DB deadlocks)..."
+  compose stop api classifier >/dev/null 2>&1 || true
+
+  echo "[2/8] Clearing Postgres board data..."
+  _factory_reset_postgres
+
+  echo "[3/8] Clearing Qdrant vector store..."
+  _factory_reset_qdrant
+
+  echo "[4/8] Clearing gateway queue..."
+  _factory_reset_gateway_sqlite
+
+  echo "[5/8] Clearing agent sessions and workspace memories..."
+  _wipe_openclaw_agent_data
+
+  echo "[6/8] Clearing obsidian vault documents..."
+  _factory_reset_obsidian_vaults
+
+  echo "[7/8] Clearing QMD vector indexes..."
+  _factory_reset_qmd_indexes
+
+  echo "[8/8] Cleaning Clawboard cron jobs..."
+  _cleanup_openclaw_cron_jobs
+
+  echo ""
+  echo "Restarting services..."
+  compose start api classifier >/dev/null 2>&1 || up >/dev/null 2>&1 || true
+
+  echo ""
+  echo "Factory reset complete."
+  echo "The board is clean and idle — contracts, credentials, and configuration are untouched."
+}
+
 cleanup_orphan_tools() {
   local apply=true
   local force=false
@@ -1666,6 +1871,8 @@ else:
         "sessions_send",
         "cron",
         "clawboard_search",
+        "clawboard_update_topic",
+        "clawboard_get_topic",
         "clawboard_update_task",
         "clawboard_context",
         "clawboard_get_task",
@@ -2182,10 +2389,11 @@ run_interactive() {
   echo "11) Ensure skill installed"
   echo "12) Reset OpenClaw sessions (clears agent session history, keeps memories)"
   echo "13) Reset all fresh (Clawboard data + OpenClaw sessions/memories/crons; keeps qmd indexes)"
-  echo "14) Cleanup orphaned tool logs (control-plane noise)"
-  echo "15) Reconcile allocation guardrails (control-plane + tool traces)"
-  echo "16) Verify production readiness"
-  echo "17) Quit"
+  echo "14) Factory reset — full wipe to idle (instanceconfig + credentials + contracts preserved)"
+  echo "15) Cleanup orphaned tool logs (control-plane noise)"
+  echo "16) Reconcile allocation guardrails (control-plane + tool traces)"
+  echo "17) Verify production readiness"
+  echo "18) Quit"
   read -r -p "Select an option: " choice
 
   case "$choice" in
@@ -2202,10 +2410,11 @@ run_interactive() {
     11) ensure_skill ;;
     12) reset_openclaw_sessions ;;
     13) reset_all_fresh ;;
-    14) cleanup_orphan_tools ;;
-    15) reconcile_allocation_guardrails ;;
-    16) verify_production_ready ;;
-    17) exit 0 ;;
+    14) factory_reset ;;
+    15) cleanup_orphan_tools ;;
+    16) reconcile_allocation_guardrails ;;
+    17) verify_production_ready ;;
+    18) exit 0 ;;
     *) echo "Invalid choice"; exit 1 ;;
   esac
 }
@@ -2221,6 +2430,7 @@ case "$cmd" in
   reset-data) shift; reset_data "$@" ;;
   reset-openclaw-sessions|reset_openclaw_sessions) shift; reset_openclaw_sessions "$@" ;;
   reset-all-fresh|reset_all_fresh) shift; reset_all_fresh "$@" ;;
+  factory-reset|factory_reset) shift; factory_reset "$@" ;;
   start-fresh-replay|start_fresh_replay) shift; start_fresh_replay "$@" ;;
   status) status ;;
   logs) shift; logs "$@" ;;

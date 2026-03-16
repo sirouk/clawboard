@@ -111,3 +111,28 @@ export async function openTask(page: Page, taskName: string) {
   if (await taskCollapse.isVisible().catch(() => false)) return;
   await taskExpand.click();
 }
+
+/**
+ * Injects a PerformanceObserver that accumulates Cumulative Layout Shift (CLS)
+ * into window.__cls. Must be called before page.goto(). Returns a function that
+ * reads the current CLS value from the page.
+ */
+export async function injectClsObserver(page: Page): Promise<() => Promise<number>> {
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__cls = 0;
+    try {
+      new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          const shift = entry as PerformanceEntry & { hadRecentInput?: boolean; value?: number };
+          if (!shift.hadRecentInput) {
+            (window as unknown as Record<string, unknown>).__cls =
+              ((window as unknown as Record<string, unknown>).__cls as number) + (shift.value ?? 0);
+          }
+        }
+      }).observe({ type: "layout-shift", buffered: true });
+    } catch {
+      // Browser doesn't support layout-shift entries — CLS stays 0.
+    }
+  });
+  return () => page.evaluate(() => (window as unknown as Record<string, unknown>).__cls as number);
+}

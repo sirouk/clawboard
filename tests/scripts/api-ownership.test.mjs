@@ -38,7 +38,10 @@ test("canonical overlapping routes are explicit FastAPI proxy shims", async () =
   const expectedProxyRoutes = [
     "src/app/api/topics/route.ts",
     "src/app/api/topics/[id]/route.ts",
+    "src/app/api/topics/[id]/thread/route.ts",
     "src/app/api/log/route.ts",
+    "src/app/api/openclaw/chat/route.ts",
+    "src/app/api/openclaw/resolve-board-send/route.ts",
   ];
 
   for (const rel of expectedProxyRoutes) {

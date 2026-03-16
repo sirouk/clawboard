@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import {
+  startTransition,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -95,6 +96,8 @@ const FILTERS_DRAWER_OPEN_DEFAULT = false;
 const ACTIVE_SPACE_KEY = "clawboard.space.active";
 const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
 const WORKSPACE_ATTENTION_SEEN_KEY = "clawboard.unified.workspaceAttentionSeenAt";
+const DEFERRED_CHAT_COUNTS_REFRESH_MS = 1_200;
+const DEFERRED_THREAD_HYDRATION_MS = 900;
 
 const TOPIC_VIEWS = ["active", "snoozed", "archived", "all"] as const;
 type TopicView = (typeof TOPIC_VIEWS)[number];
@@ -306,8 +309,7 @@ const DEFAULT_UNIFIED_TOPICS_PAGE_SIZE = 50;
 const UNIFIED_COMPOSER_MAX_HEIGHT_PX = 560;
 
 type UnifiedComposerTarget =
-  | { kind: "topic"; topicId: string }
-  | { kind: "task"; topicId: string; taskId: string };
+  | { kind: "topic"; topicId: string };
 type UnifiedComposerAttachment = AttachmentLike & { file: File };
 const UNIFIED_TOPICS_PAGE_SIZE = (() => {
   const raw = String(process.env.NEXT_PUBLIC_CLAWBOARD_UNIFIED_TOPICS_PAGE_SIZE ?? "").trim();
@@ -2043,9 +2045,9 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     () => parseStringMap(workspaceAttentionSeenRaw),
     [workspaceAttentionSeenRaw]
   );
-  // Must start false to match SSR output. useEffect syncs the real value post-hydration,
-  // preventing the server/client HTML mismatch that causes a hydration error.
-  const [mdUp, setMdUp] = useState(false);
+  // Component is ssr:false (dynamic import), so we can read the real viewport synchronously
+  // on first render and avoid the false→true layout shift that re-renders the two-column layout.
+  const [mdUp, setMdUp] = useState(() => typeof window !== "undefined" && window.matchMedia("(min-width: 768px)").matches);
   const {
     state: expansionState,
     setExpandedTopics,
@@ -2100,10 +2102,6 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     },
     [workspaceAttentionSeenByKey]
   );
-  useEffect(() => {
-    if (filtersDrawerOpenStored !== null) return;
-    setLocalStorageItem(FILTERS_DRAWER_OPEN_KEY, FILTERS_DRAWER_OPEN_DEFAULT ? "true" : "false");
-  }, [filtersDrawerOpenStored]);
   const toggleFiltersDrawer = () => {
     setLocalStorageItem(FILTERS_DRAWER_OPEN_KEY, filtersDrawerOpen ? "false" : "true");
   };
@@ -2226,22 +2224,29 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
   }, [selectedSpaceId, token]);
 
   useEffect(() => {
-    setChatCountsHydrated(false);
-    setTaskChatCountById({});
+    // Mark as non-urgent so the board doesn't flash empty while the new counts load.
+    startTransition(() => {
+      setChatCountsHydrated(false);
+      setTaskChatCountById({});
+    });
   }, [selectedSpaceId]);
-
-  useEffect(() => {
-    if (!hydrated) return;
-    void refreshChatCounts();
-  }, [hydrated, refreshChatCounts]);
 
   useEffect(() => {
     if (!hydrated) return;
     const timer = window.setTimeout(() => {
       void refreshChatCounts();
-    }, 650);
+    }, DEFERRED_CHAT_COUNTS_REFRESH_MS);
     return () => window.clearTimeout(timer);
-  }, [hydrated, logChangeFingerprint, refreshChatCounts]);
+  }, [hydrated, refreshChatCounts]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    if (!chatCountsHydrated) return;
+    const timer = window.setTimeout(() => {
+      void refreshChatCounts();
+    }, DEFERRED_CHAT_COUNTS_REFRESH_MS);
+    return () => window.clearTimeout(timer);
+  }, [chatCountsHydrated, hydrated, logChangeFingerprint, refreshChatCounts]);
 
   useEffect(() => {
     if (spaceQueryInitializedRef.current) return;
@@ -2543,14 +2548,9 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
 
   useEffect(() => {
     if (!composerTarget) return;
-    if (composerTarget.kind === "task") {
-      const exists = tasks.some((task) => task.id === composerTarget.taskId && task.topicId === composerTarget.topicId);
-      if (!exists) setComposerTarget(null);
-      return;
-    }
     const exists = topics.some((topic) => topic.id === composerTarget.topicId);
     if (!exists) setComposerTarget(null);
-  }, [composerTarget, tasks, topics]);
+  }, [composerTarget, topics]);
 
   const knownTopicTagOptions = useMemo(() => {
     return dedupeTagLabels(storeTopicTags ?? []).sort(
@@ -3787,18 +3787,18 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         let offset = 0;
         while (true) {
           const params = new URLSearchParams({
-            topicId: id,
             limit: String(pageSize),
             offset: String(offset),
           });
           if (selectedSpaceId) params.set("spaceId", selectedSpaceId);
           const res = await apiFetch(
-            `/api/log?${params.toString()}`,
+            `/api/topics/${encodeURIComponent(id)}/thread?${params.toString()}`,
             { cache: "no-store" },
             token
           );
           if (!res.ok) break;
-          const rows = (await res.json().catch(() => [])) as LogEntry[];
+          const payload = (await res.json().catch(() => null)) as { logs?: LogEntry[] } | LogEntry[] | null;
+          const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.logs) ? payload.logs : [];
           if (!Array.isArray(rows) || rows.length === 0) break;
           merged.push(...rows);
           if (rows.length < pageSize) break;
@@ -4124,10 +4124,32 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     if (mobileLayer === "chat" && mobileChatTarget?.taskId) {
       targets.add(mobileChatTarget.taskId);
     }
-    for (const taskId of targets) {
-      void hydrateTaskLogs(taskId);
-    }
-  }, [expandedTasksSafe, hydrateTaskLogs, mobileChatTarget, mobileLayer]);
+    if (targets.size === 0) return;
+    const taskIds = Array.from(targets).filter((taskId) => {
+      const knownCount = taskChatCountById[taskId] ?? 0;
+      const loadedCount = Math.max(
+        logsByTaskAll.get(taskId)?.length ?? 0,
+        topicChatLogsByTopicAll.get(taskId)?.length ?? 0
+      );
+      return chatCountsHydrated && knownCount > loadedCount;
+    });
+    if (taskIds.length === 0) return;
+    const timer = window.setTimeout(() => {
+      for (const taskId of taskIds) {
+        void hydrateTaskLogs(taskId);
+      }
+    }, DEFERRED_THREAD_HYDRATION_MS);
+    return () => window.clearTimeout(timer);
+  }, [
+    chatCountsHydrated,
+    expandedTasksSafe,
+    hydrateTaskLogs,
+    logsByTaskAll,
+    mobileChatTarget,
+    mobileLayer,
+    taskChatCountById,
+    topicChatLogsByTopicAll,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -6228,52 +6250,34 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
   }, [expandedTasksSafe, pushUrl]);
 
   const selectedComposerTarget = useMemo(() => {
-    if (composerTarget?.kind === "task") {
-      const task = tasks.find((entry) => entry.id === composerTarget.taskId);
-      if (task?.topicId) {
-        const topic = topics.find((entry) => entry.id === task.topicId) ?? null;
-        if (topic) return { kind: "task" as const, task, topic };
-      }
-      return null;
-    }
     if (composerTarget?.kind === "topic") {
       const topic = topics.find((entry) => entry.id === composerTarget.topicId) ?? null;
       if (topic) return { kind: "topic" as const, topic };
     }
     return null;
-  }, [composerTarget, tasks, topics]);
+  }, [composerTarget, topics]);
   const unifiedComposerIntent = useMemo(() => {
-    if (selectedComposerTarget?.kind === "task") {
-      return {
-        kind: "task" as const,
-        badge: "Topic",
-        chipLabel: `${selectedComposerTarget.topic.name}`,
-        submitLabel: unifiedComposerBusy ? "Sending..." : "Continue",
-      };
-    }
     if (selectedComposerTarget?.kind === "topic") {
       return {
         kind: "topic" as const,
         badge: "Topic",
         chipLabel: `${selectedComposerTarget.topic.name}`,
-        submitLabel: unifiedComposerBusy ? "Creating..." : "New in topic",
+        submitLabel: unifiedComposerBusy ? "Sending..." : "Continue",
       };
     }
     return {
       kind: "new" as const,
       badge: "New",
       chipLabel: "New topic",
-      submitLabel: unifiedComposerBusy ? "Creating topic..." : "Start new topic",
+      submitLabel: unifiedComposerBusy ? "Starting topic..." : "Start topic",
     };
   }, [selectedComposerTarget, unifiedComposerBusy]);
   const unifiedComposerHasText = unifiedComposerDraft.trim().length > 0;
   const unifiedComposerHasContent = unifiedComposerHasText || unifiedComposerAttachments.length > 0;
   const selectedComposerSessionKey = useMemo(() => {
-    if (selectedComposerTarget?.kind === "task") {
-      const topicId = String(selectedComposerTarget.task.topicId ?? "").trim();
-      const taskId = String(selectedComposerTarget.task.id ?? "").trim();
-      if (!topicId || !taskId) return "";
-      return taskSessionKey(topicId, taskId);
+    if (selectedComposerTarget?.kind === "topic") {
+      const topicId = String(selectedComposerTarget.topic.id ?? "").trim();
+      return topicId ? topicSessionKey(topicId) : "";
     }
     return "";
   }, [selectedComposerTarget]);
@@ -6426,21 +6430,13 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     setUnifiedComposerError(null);
     setUnifiedCancelNotice(null);
 
-    const selectedTask = selectedComposerTarget?.kind === "task" ? selectedComposerTarget.task : null;
-    const selectedTopic = selectedComposerTarget?.kind === "topic"
-      ? selectedComposerTarget.topic
-      : selectedComposerTarget?.kind === "task"
-        ? selectedComposerTarget.topic
-        : null;
-    const forceNewTopic = !selectedTask && !selectedTopic;
-    const forceNewTask = !selectedTask;
+    const selectedTopic = selectedComposerTarget?.kind === "topic" ? selectedComposerTarget.topic : null;
+    const forceNewTopic = !selectedTopic;
 
     const routedSpaceId = selectedSpaceId || undefined;
-    let resolvedTopicId = String(selectedTopic?.id ?? selectedTask?.topicId ?? "").trim();
-    let resolvedTaskId = String(selectedTask?.id ?? "").trim();
-    let sessionKey = selectedTask && resolvedTopicId
-      ? taskSessionKey(resolvedTopicId, resolvedTaskId)
-      : "";
+    let resolvedTopicId = String(selectedTopic?.id ?? "").trim();
+    let resolvedTaskId = String(resolvedTopicId ?? "").trim();
+    let sessionKey = resolvedTopicId ? topicSessionKey(resolvedTopicId) : "";
 
     setUnifiedComposerBusy(true);
     try {
@@ -6454,9 +6450,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
               message,
               spaceId: routedSpaceId,
               selectedTopicId: selectedTopic ? selectedTopic.id : undefined,
-              selectedTaskId: undefined,
               forceNewTopic,
-              forceNewTask,
             }),
           },
           token
@@ -6468,14 +6462,13 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         }
         const resolved = (await resolveRes.json().catch(() => null)) as {
           topicId?: string;
-          taskId?: string;
           sessionKey?: string;
         } | null;
         resolvedTopicId = String(resolved?.topicId ?? "").trim();
-        resolvedTaskId = String(resolved?.taskId ?? resolved?.topicId ?? "").trim();
+        resolvedTaskId = resolvedTopicId;
         sessionKey = String(resolved?.sessionKey ?? "").trim();
-        if (!sessionKey && resolvedTopicId && resolvedTaskId) {
-          sessionKey = taskSessionKey(resolvedTopicId, resolvedTaskId);
+        if (!sessionKey && resolvedTopicId) {
+          sessionKey = topicSessionKey(resolvedTopicId);
         }
       }
 
@@ -6527,14 +6520,14 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
 
       clearUnifiedComposerFields();
 
-      const applyTopicId = selectedTask ? String(selectedTask.topicId ?? "").trim() : resolvedTopicId;
-      const applyTaskId = selectedTask ? String(selectedTask.id ?? "").trim() : resolvedTaskId;
+      const applyTopicId = resolvedTopicId;
+      const applyTaskId = resolvedTaskId;
       if (!applyTopicId || !applyTaskId) return;
 
       // Ensure the topic exists in client state so its card renders immediately.
       // For new topics created by resolve-board-send, the SSE event hasn't arrived yet.
       // This optimistic insert is a no-op for existing topics (upsertById skips older data).
-      if (!selectedTask) {
+      if (!selectedTopic) {
         const now = new Date().toISOString();
         setTopics((prev) => {
           if (prev.some((t) => t.id === applyTopicId)) return prev;
@@ -6551,7 +6544,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
             ...prev,
           ];
         });
-        setComposerTarget({ kind: "task", topicId: applyTopicId, taskId: applyTaskId });
+        setComposerTarget({ kind: "topic", topicId: applyTopicId });
       }
       setExpandedTopics((prev) => new Set(prev).add(applyTopicId));
       setExpandedTasks((prev) => new Set(prev).add(applyTaskId));
@@ -6835,21 +6828,17 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                     data-testid="unified-composer-target-chip"
                     className={cn(
                       "inline-flex max-w-full items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] text-[rgb(var(--claw-text))]",
-                      unifiedComposerIntent.kind === "task"
-                        ? "border-[rgba(77,171,158,0.55)] bg-[rgba(18,28,34,0.9)]"
-                        : unifiedComposerIntent.kind === "topic"
-                          ? "border-[rgba(255,90,45,0.42)] bg-[rgba(34,22,18,0.9)]"
-                          : "border-[rgba(148,163,184,0.35)] bg-[rgba(18,22,28,0.88)]"
+                      unifiedComposerIntent.kind === "topic"
+                        ? "border-[rgba(255,90,45,0.42)] bg-[rgba(34,22,18,0.9)]"
+                        : "border-[rgba(148,163,184,0.35)] bg-[rgba(18,22,28,0.88)]"
                     )}
                   >
                     <span
                       className={cn(
                         "rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em]",
-                        unifiedComposerIntent.kind === "task"
-                          ? "bg-[rgba(77,171,158,0.16)] text-[rgb(var(--claw-accent-2))]"
-                          : unifiedComposerIntent.kind === "topic"
-                            ? "bg-[rgba(255,90,45,0.16)] text-[rgb(var(--claw-accent))]"
-                            : "bg-[rgba(148,163,184,0.16)] text-[rgb(var(--claw-muted))]"
+                        unifiedComposerIntent.kind === "topic"
+                          ? "bg-[rgba(255,90,45,0.16)] text-[rgb(var(--claw-accent))]"
+                          : "bg-[rgba(148,163,184,0.16)] text-[rgb(var(--claw-muted))]"
                       )}
                     >
                       {unifiedComposerIntent.badge}
@@ -7019,7 +7008,6 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
           const isUnassigned = topicId === "unassigned";
           const taskList = orderedTasksByTopic.get(topicId) ?? [];
           const topicSelectedForSend = selectedComposerTarget?.kind === "topic" && selectedComposerTarget.topic.id === topicId;
-          const selectedTaskIdForSend = selectedComposerTarget?.kind === "task" ? selectedComposerTarget.task.id : "";
           const lastTouchedAt =
             topicLastTouchedAt(
               topic,
@@ -8132,7 +8120,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                         : "";
 	                      const taskChatKey = chatKeyForTask(task.id);
                       const taskHiddenToolCallCount = hiddenToolCallCountForSession(taskChatSessionKey);
-                      const taskSelectedForSend = selectedTaskIdForSend === task.id;
+                      const taskSelectedForSend = topicSelectedForSend;
                       const start = normalizedSearch
                         ? 0
                         : computeChatStart(
@@ -8561,10 +8549,10 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                       className={cn("h-7 px-2 text-[11px]", taskSelectedForSend ? "border-[rgba(77,171,158,0.55)]" : "")}
                                       onClick={(event) => {
                                         event.stopPropagation();
-                                        setComposerTarget({ kind: "task", topicId, taskId: task.id });
+                                        setComposerTarget({ kind: "topic", topicId });
                                       }}
                                     >
-                                      {taskSelectedForSend ? "Selected" : "Continue here"}
+                                      {taskSelectedForSend ? "Topic selected" : "Use topic"}
                                     </Button>
                                   ) : null}
                                   <button

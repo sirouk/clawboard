@@ -73,6 +73,7 @@ from .schemas import (
     LogOut,
     LogOutLite,
     LogChatCountsResponse,
+    TopicThreadResponse,
     LogPatch,
     ChangesResponse,
     ClawgraphResponse,
@@ -340,7 +341,10 @@ if os.getenv("CLAWBOARD_WEB_HOT_RELOAD") == "1" or "*" in allowed_origins:
             if origin and origin not in normalized_origins:
                 normalized_origins.append(origin)
     allowed_origins = normalized_origins
-    allow_origin_regex = r"https?://.*"
+    # Keep hot-reload permissive for loopback dev hosts only; any non-loopback
+    # dev origin should be added explicitly via CLAWBOARD_ALLOWED_DEV_ORIGINS.
+    if os.getenv("CLAWBOARD_WEB_HOT_RELOAD") == "1":
+        allow_origin_regex = r"^https?://(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?$"
 else:
     normalized_origins = []
     extra_origins = [
@@ -11008,6 +11012,37 @@ def _resolve_board_send_target(
     }
 
 
+def _resolver_context_payload_for_board_send(
+    *,
+    message: str,
+    selected_topic_id: str | None,
+    force_new_topic: bool,
+    explicit_space_id: str | None,
+) -> tuple[dict[str, Any] | None, str]:
+    if force_new_topic:
+        return None, "skipped_force_new_topic"
+    if selected_topic_id:
+        return None, "skipped_selected_topic"
+
+    try:
+        context_result = context(
+            q=message,
+            sessionKey=None,
+            spaceId=explicit_space_id,
+            mode="cheap",
+            includePending=False,
+            maxChars=1400,
+            workingSetLimit=4,
+            timelineLimit=4,
+        )
+    except Exception:
+        return None, "cheap_error"
+
+    if isinstance(context_result, dict):
+        return context_result, "cheap"
+    return None, "cheap_empty"
+
+
 @app.post(
     "/api/openclaw/resolve-board-send",
     dependencies=[Depends(require_token)],
@@ -11025,25 +11060,12 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
 
     started = time.monotonic()
     fallback_mode = _resolver_fallback_mode()
-    context_payload: dict[str, Any] | None = None
-    try:
-        context_session_key = None
-        if selected_topic_id:
-            context_session_key = f"clawboard:topic:{selected_topic_id}"
-        context_result = context(
-            q=message,
-            sessionKey=context_session_key,
-            spaceId=explicit_space_id,
-            mode="auto",
-            includePending=True,
-            maxChars=2200,
-            workingSetLimit=6,
-            timelineLimit=6,
-        )
-        if isinstance(context_result, dict):
-            context_payload = context_result
-    except Exception:
-        context_payload = None
+    context_payload, context_strategy = _resolver_context_payload_for_board_send(
+        message=message,
+        selected_topic_id=selected_topic_id,
+        force_new_topic=force_new_topic,
+        explicit_space_id=explicit_space_id,
+    )
 
     with get_session() as session:
         resolved_space_id = _resolve_source_space_id(
@@ -11053,16 +11075,19 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
         )
         resolved_space_id = _normalize_space_id(resolved_space_id) or DEFAULT_SPACE_ID
 
-        routing_hints = _resolver_recent_routing_hints(
-            session,
-            selected_topic_id=selected_topic_id,
-            limit=16,
-        )
+        routing_hints: list[dict[str, Any]] = []
+        if not force_new_topic and not selected_topic_id:
+            routing_hints = _resolver_recent_routing_hints(
+                session,
+                selected_topic_id=selected_topic_id,
+                limit=16,
+            )
         resolver_context_package = {
             "prompt": message,
             "context": context_payload or {},
             "routingHints": routing_hints,
             "fallbackMode": fallback_mode,
+            "contextStrategy": context_strategy,
         }
 
         resolved = _resolve_board_send_target(
@@ -11111,6 +11136,9 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
         telemetry_payload = {
             "decisionSource": decision_source,
             "fallbackMode": fallback_mode,
+            "contextStrategy": context_strategy,
+            "contextLoaded": bool(context_payload),
+            "routingHintsCount": len(routing_hints),
             "topicCreated": topic_created,
             "latencyMs": int(max(0.0, (time.monotonic() - started) * 1000.0)),
             "topicId": str(topic.id or "").strip(),
@@ -13614,6 +13642,66 @@ def list_logs(
         return [LogOut.model_validate(row) for row in rows]
 
 
+def _topic_thread_snapshot_cursor(topic: Topic, rows: list[LogEntry]) -> str | None:
+    latest = normalize_iso(str(getattr(topic, "updatedAt", "") or "")) or normalize_iso(str(getattr(topic, "createdAt", "") or ""))
+    for row in rows:
+        candidate = normalize_iso(str(getattr(row, "updatedAt", "") or "")) or normalize_iso(str(getattr(row, "createdAt", "") or ""))
+        if candidate and (latest is None or candidate > latest):
+            latest = candidate
+    return latest
+
+
+@app.get("/api/topics/{topic_id}/thread", response_model=TopicThreadResponse, tags=["topics"])
+def get_topic_thread(
+    topic_id: str,
+    spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
+    allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
+    limit: int = Query(default=400, ge=1, le=2000, description="Max topic-thread rows.", example=400),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination.", example=0),
+):
+    """Return the authoritative operator-visible topic thread (newest first)."""
+    with get_session() as session:
+        allowed_space_ids = _resolve_allowed_space_ids(
+            session,
+            source_space_id=spaceId,
+            allowed_space_ids_raw=allowedSpaceIds,
+        )
+        topic = session.get(Topic, topic_id)
+        if not topic:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        if allowed_space_ids is not None and not _topic_matches_allowed_spaces(topic, allowed_space_ids):
+            raise HTTPException(status_code=404, detail="Topic not found")
+
+        ordered_query = (
+            select(LogEntry)
+            .options(defer(LogEntry.raw))
+            .where(LogEntry.topicId == topic_id)
+            .where(_visible_chat_count_log_predicate())
+            .order_by(
+                LogEntry.createdAt.desc(),
+                (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
+            )
+        )
+
+        rows = session.exec(ordered_query.offset(offset).limit(limit)).all()
+        if allowed_space_ids is not None and rows:
+            rows = [
+                row
+                for row in rows
+                if _log_matches_allowed_spaces(row, allowed_space_ids, {str(topic.id): topic})
+            ]
+
+        return {
+            "topicId": str(topic.id),
+            "sessionKey": f"clawboard:topic:{topic.id}",
+            "timelineScope": "topic_thread",
+            "cursor": _topic_thread_snapshot_cursor(topic, rows),
+            "cursorSeq": latest_live_event_id(),
+            "topic": TopicOut.model_validate(topic),
+            "logs": [LogOutLite.model_validate(row) for row in rows],
+        }
+
+
 _CHAT_PERSISTENCE_NOISE_PREFIXES = ("transcript write:", "tool result persisted:")
 _CHAT_ASSISTANT_CONTROL_NOISE_MARKERS = ("heartbeat_ok", "same recovery event already handled")
 
@@ -14178,10 +14266,12 @@ def _serialize_changes_payload(
     openclaw_thread_work: list[dict[str, Any]],
     cursor: str | None,
     cursor_seq: int | None,
+    reset_at: str | None = None,
 ) -> dict[str, Any]:
     return {
         "cursor": str(cursor or "").strip() or None,
         "cursorSeq": int(cursor_seq) if cursor_seq is not None else None,
+        "resetAt": str(reset_at or "").strip() or None,
         "spaces": [SpaceOut.model_validate(row).model_dump() for row in spaces],
         "topics": [TopicOut.model_validate(row).model_dump() for row in topics],
         "logs": [LogOutLite.model_validate(row).model_dump() for row in logs],
@@ -14236,6 +14326,7 @@ def _build_changes_payload_from_seq(
     limit_logs: int,
     include_raw: bool,
     allowed_space_ids: set[str] | None,
+    reset_at: str | None = None,
 ) -> dict[str, Any]:
     effective_limit_logs = int(limit_logs or 0)
     change_rows = session.exec(
@@ -14253,6 +14344,7 @@ def _build_changes_payload_from_seq(
             openclaw_thread_work=[],
             cursor=None,
             cursor_seq=since_seq,
+            reset_at=reset_at,
         )
 
     changed_space_ids: set[str] = set()
@@ -14369,6 +14461,7 @@ def _build_changes_payload_from_seq(
         openclaw_thread_work=openclaw_thread_work,
         cursor=cursor or None,
         cursor_seq=cursor_seq,
+        reset_at=reset_at,
     )
 
 
@@ -14381,6 +14474,9 @@ def _build_changes_payload(
     include_raw: bool,
     allowed_space_ids: set[str] | None,
 ) -> dict[str, Any]:
+    instance = session.get(InstanceConfig, 1)
+    reset_at = str(getattr(instance, "resetAt", None) or "").strip() or None
+
     normalized_since_seq = _coerce_change_seq(since_seq)
     if normalized_since_seq is not None:
         return _build_changes_payload_from_seq(
@@ -14389,6 +14485,7 @@ def _build_changes_payload(
             limit_logs=limit_logs,
             include_raw=include_raw,
             allowed_space_ids=allowed_space_ids,
+            reset_at=reset_at,
         )
 
     # `limit_logs <= 0` means "no cap" (return all matching logs).
@@ -14512,6 +14609,7 @@ def _build_changes_payload(
         openclaw_thread_work=openclaw_thread_work,
         cursor=cursor or None,
         cursor_seq=None,
+        reset_at=reset_at,
     )
 
 

@@ -1,21 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireToken } from "../../../../lib/auth";
+import { resolveServerApiBase } from "../../../../lib/server-api-base";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-
-function normalizeBase(raw: string) {
-  return String(raw || "").trim().replace(/\/+$/, "");
-}
-
-function resolveUpstreamBase() {
-  return normalizeBase(
-    process.env.CLAWBOARD_SERVER_API_BASE ||
-      process.env.CLAWBOARD_PUBLIC_API_BASE ||
-      process.env.NEXT_PUBLIC_CLAWBOARD_API_BASE ||
-      "http://localhost:8010",
-  );
-}
 
 function buildForwardHeaders(request: NextRequest) {
   const headers = new Headers(request.headers);
@@ -31,7 +19,7 @@ export async function GET(req: NextRequest) {
   const authError = requireToken(req, { allowLoopback: true });
   if (authError) return authError;
 
-  const base = resolveUpstreamBase();
+  const base = resolveServerApiBase();
   if (!base) {
     return NextResponse.json({ detail: "Missing CLAWBOARD_SERVER_API_BASE" }, { status: 500 });
   }

@@ -137,6 +137,81 @@ class SharedDomainContractTests(unittest.TestCase):
                 self.assertIn(field, payload[0], res.text)
         self.assertEqual([item.get("id") for item in payload[:3]], ["topic-new-pinned", "topic-old-pinned", "topic-unpinned"])
 
+    def test_topic_thread_contract_is_authoritative_topic_timeline(self):
+        topic_id = "topic-thread-contract"
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id=topic_id,
+                    name="Topic Thread Contract",
+                    color="#FF8A4A",
+                    description="contract",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    sortIndex=0,
+                    createdAt=now_iso(-120),
+                    updatedAt=now_iso(-10),
+                )
+            )
+            session.add(
+                LogEntry(
+                    id="log-thread-visible",
+                    topicId=topic_id,
+                    taskId=None,
+                    relatedLogId=None,
+                    idempotencyKey=None,
+                    type="conversation",
+                    content="Visible topic reply",
+                    summary="Visible topic reply",
+                    raw=None,
+                    classificationStatus="classified",
+                    classificationAttempts=1,
+                    classificationError=None,
+                    createdAt=now_iso(-30),
+                    updatedAt=now_iso(-30),
+                    agentId="assistant",
+                    agentLabel="Assistant",
+                    source={"sessionKey": f"clawboard:topic:{topic_id}"},
+                )
+            )
+            session.add(
+                LogEntry(
+                    id="log-thread-noise",
+                    topicId=topic_id,
+                    taskId=None,
+                    relatedLogId=None,
+                    idempotencyKey=None,
+                    type="action",
+                    content="Transcript write: hidden",
+                    summary="Transcript write: hidden",
+                    raw=None,
+                    classificationStatus="classified",
+                    classificationAttempts=1,
+                    classificationError=None,
+                    createdAt=now_iso(-20),
+                    updatedAt=now_iso(-20),
+                    agentId="toolresult",
+                    agentLabel="ToolResult",
+                    source={"sessionKey": f"clawboard:topic:{topic_id}"},
+                )
+            )
+            session.commit()
+
+        res = self.client.get(f"/api/topics/{topic_id}/thread", headers=self.auth_headers)
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertEqual(payload.get("topicId"), topic_id)
+        self.assertEqual(payload.get("sessionKey"), f"clawboard:topic:{topic_id}")
+        self.assertEqual(payload.get("timelineScope"), "topic_thread")
+        self.assertIsInstance(payload.get("topic"), dict, res.text)
+        self.assertEqual((payload.get("topic") or {}).get("id"), topic_id)
+        self.assertIsInstance(payload.get("logs"), list, res.text)
+        self.assertEqual([row.get("id") for row in payload.get("logs") or []], ["log-thread-visible"])
+        self._assert_log_shape(payload["logs"][0])
+
     def test_tasks_contract_is_array_and_sorted_for_shared_read(self):
         with get_session() as session:
             session.add(

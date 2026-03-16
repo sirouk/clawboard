@@ -576,6 +576,11 @@ def init_db() -> None:
                         (serialized_connectivity, seed_stamp, source_id),
                     )
 
+            ic_cols = conn.exec_driver_sql("PRAGMA table_info(instanceconfig);").fetchall()
+            ic_existing = {row[1] for row in ic_cols}
+            if "resetAt" not in ic_existing:
+                conn.exec_driver_sql("ALTER TABLE instanceconfig ADD COLUMN resetAt TEXT;")
+
             conn.commit()
 
     if not DATABASE_URL.startswith("sqlite"):
@@ -648,6 +653,16 @@ def init_db() -> None:
                         conn.exec_driver_sql(
                             'UPDATE logentry SET "taskId" = NULL;'
                         )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+
+        # Postgres: add resetAt to instanceconfig.
+        with engine.connect() as conn:
+            try:
+                conn.exec_driver_sql(
+                    'ALTER TABLE instanceconfig ADD COLUMN IF NOT EXISTS "resetAt" TEXT;'
+                )
                 conn.commit()
             except Exception:
                 conn.rollback()

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { resolveServerApiBase } from "@/lib/server-api-base";
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -16,19 +17,6 @@ const warnedLegacyRoutes = new Set<string>();
 type ProxyApiOptions = {
   legacyRouteId?: string;
 };
-
-function normalizeBase(raw: string) {
-  return String(raw || "").trim().replace(/\/+$/, "");
-}
-
-function resolveUpstreamBase() {
-  return normalizeBase(
-    process.env.CLAWBOARD_SERVER_API_BASE ||
-      process.env.CLAWBOARD_PUBLIC_API_BASE ||
-      process.env.NEXT_PUBLIC_CLAWBOARD_API_BASE ||
-      "http://localhost:8010",
-  );
-}
 
 function buildForwardHeaders(request: NextRequest) {
   const headers = new Headers(request.headers);
@@ -82,7 +70,7 @@ export async function proxyApiRequest(
     warnLegacyRouteOnce(request, options.legacyRouteId, "proxied", upstreamPath);
   }
 
-  const base = resolveUpstreamBase();
+  const base = resolveServerApiBase();
   if (!base) {
     return NextResponse.json({ detail: "Missing CLAWBOARD_SERVER_API_BASE" }, { status: 500 });
   }

@@ -22,6 +22,7 @@
     "test:e2e": "playwright test",
     "test:e2e:ci": "playwright test -c playwright.ci.config.ts",
     "test:e2e:live-smoke": "bash scripts/repo_live_smoke.sh",
+    "test:team-production": "node scripts/team_production_readiness_smoke.mjs",
     "test:visual": "playwright test -c playwright.visual.config.ts",
     "test:visual:ci": "playwright test -c playwright.visual.ci.config.ts",
     "test:visual:update": "playwright test -c playwright.visual.config.ts --update-snapshots",

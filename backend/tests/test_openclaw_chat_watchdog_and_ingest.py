@@ -119,7 +119,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         cleaned = main_module._resolver_clean_name("status: sessions — tasks", fallback="fallback")
         self.assertEqual(cleaned, "status sessions tasks")
 
-    def test_resolve_board_send_creates_task_session_for_empty_board(self):
+    def test_resolve_board_send_creates_topic_session_for_empty_board(self):
         published: list[dict] = []
         message = (
             "Have a look at openclaw for me and let me know any cron entries that are set up, "
@@ -134,22 +134,17 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.text)
         payload = res.json()
         topic_id = str(payload.get("topicId") or "")
-        task_id = str(payload.get("taskId") or "")
         self.assertTrue(topic_id)
-        self.assertTrue(task_id)
-        self.assertEqual(payload.get("sessionKey"), f"clawboard:task:{topic_id}:{task_id}")
+        self.assertEqual(payload.get("sessionKey"), f"clawboard:topic:{topic_id}")
         self.assertTrue(bool(str(payload.get("topicName") or "").strip()))
-        self.assertTrue(bool(str(payload.get("taskTitle") or "").strip()))
-        self.assertIn(payload.get("decisionSource"), {"heuristic", "selected_topic_fallback", "direct_selected_task"})
+        self.assertIn(payload.get("decisionSource"), {"heuristic", "direct_new_topic", "direct_selected_topic"})
 
         with get_session() as session:
             topic = session.get(Topic, topic_id)
-            task = session.get(Task, task_id)
             self.assertIsNotNone(topic)
-            self.assertIsNotNone(task)
-            self.assertEqual(task.topicId, topic.id)
+            self.assertEqual(session.exec(select(Task)).all(), [])
 
-    def test_resolve_board_send_force_new_topic_and_task_ignores_existing_matches(self):
+    def test_resolve_board_send_force_new_topic_skips_context_and_ignores_existing_matches(self):
         created = now_iso()
         with get_session() as session:
             topic = Topic(
@@ -186,18 +181,28 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             json={
                 "message": "Force new topic for openclaw rollout prep",
                 "forceNewTopic": True,
-                "forceNewTask": True,
             },
         )
         self.assertEqual(res.status_code, 200, res.text)
         payload = res.json()
         self.assertEqual(payload.get("decisionSource"), "direct_new_topic")
         self.assertTrue(payload.get("topicCreated"))
-        self.assertTrue(payload.get("taskCreated"))
         self.assertNotEqual(payload.get("topicId"), "topic-existing-force-new")
-        self.assertNotEqual(payload.get("taskId"), "task-existing-force-new")
+        self.assertEqual(payload.get("sessionKey"), f"clawboard:topic:{payload.get('topicId')}")
 
-    def test_resolve_board_send_selected_topic_creates_new_task_when_requested(self):
+        with patch.object(main_module, "context") as context_mock:
+            res = self.client.post(
+                "/api/openclaw/resolve-board-send",
+                headers=self.auth_headers,
+                json={
+                    "message": "Force new topic for openclaw rollout prep",
+                    "forceNewTopic": True,
+                },
+            )
+        self.assertEqual(res.status_code, 200, res.text)
+        context_mock.assert_not_called()
+
+    def test_resolve_board_send_selected_topic_reuses_topic_session_without_context(self):
         created = now_iso()
         with get_session() as session:
             topic = Topic(
@@ -228,27 +233,26 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
             session.add(existing_task)
             session.commit()
 
-        res = self.client.post(
-            "/api/openclaw/resolve-board-send",
-            headers=self.auth_headers,
-            json={
-                "message": "Create a fresh task in this topic for rollout QA",
-                "selectedTopicId": "topic-force-task",
-                "forceNewTask": True,
-            },
-        )
+        with patch.object(main_module, "context") as context_mock:
+            res = self.client.post(
+                "/api/openclaw/resolve-board-send",
+                headers=self.auth_headers,
+                json={
+                    "message": "Continue this topic for rollout QA",
+                    "selectedTopicId": "topic-force-task",
+                },
+            )
         self.assertEqual(res.status_code, 200, res.text)
         payload = res.json()
-        self.assertEqual(payload.get("decisionSource"), "direct_selected_topic_new_task")
+        self.assertEqual(payload.get("decisionSource"), "direct_selected_topic")
         self.assertEqual(payload.get("topicId"), "topic-force-task")
         self.assertFalse(payload.get("topicCreated"))
-        self.assertTrue(payload.get("taskCreated"))
-        self.assertNotEqual(payload.get("taskId"), "task-force-task-existing")
+        self.assertEqual(payload.get("sessionKey"), "clawboard:topic:topic-force-task")
+        context_mock.assert_not_called()
 
         with get_session() as session:
-            created_task = session.get(Task, str(payload.get("taskId") or ""))
-            self.assertIsNotNone(created_task)
-            self.assertEqual(created_task.topicId, "topic-force-task")
+            tasks = session.exec(select(Task).where(Task.topicId == "topic-force-task")).all()
+            self.assertEqual(len(tasks), 1)
 
     def test_ing_014_source_scope_metadata_is_normalized(self):
         created = now_iso()
