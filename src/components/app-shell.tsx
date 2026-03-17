@@ -896,8 +896,8 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     );
   };
 
-  const mobilePrimaryItems = NAV_ITEMS.slice(0, 4);
-  const mobileOverflowItems = NAV_ITEMS.slice(4);
+  // Mobile: all non-board/workspace items go into the secondary nav strip.
+  const mobileSecondaryItems = NAV_ITEMS.filter((item) => item.id !== "home" && item.id !== "workspaces");
 
   useEffect(() => {
     setMobileMenuOpen(false);
@@ -1254,21 +1254,21 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                  <aside
                     data-claw-shell-nav="1"
 				            className={cn(
-				              "relative z-[80] border-b border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] px-3 py-2.5 lg:z-auto lg:min-h-screen lg:h-screen lg:border-b-0 lg:border-r lg:px-4 lg:py-6 transition-all lg:sticky lg:top-0 lg:self-start lg:flex lg:flex-col lg:overflow-visible",
+				              "relative z-[80] border-b border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] px-3 pt-[max(0.625rem,env(safe-area-inset-top))] pb-2.5 lg:z-auto lg:min-h-screen lg:h-screen lg:border-b-0 lg:border-r lg:px-4 lg:pt-6 lg:pb-6 transition-all lg:sticky lg:top-0 lg:self-start lg:flex lg:flex-col lg:overflow-visible",
 				              collapsed ? "lg:w-20" : "lg:w-64"
 				            )}
 				          >
 		            <div className="min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
 		              <div className="flex items-center justify-between gap-2.5 lg:block">
-		                <div className="flex min-w-0 items-center gap-2.5 lg:mx-auto lg:w-fit lg:justify-center">
+		                <div className={cn("flex min-w-0 items-center gap-2.5", collapsed ? "lg:mx-auto lg:w-fit lg:justify-center" : "")}>
 		                  <Link
                         href={boardNavHref}
                         onClick={handleBrandToggleClick}
                         aria-label={navToggleLabel}
                         title={navToggleLabel}
-                        className="flex items-center justify-center"
+                        className={cn("flex items-center gap-2.5", collapsed ? "justify-center" : "")}
                       >
-				                    <div className={cn("relative transition-all", collapsed ? "h-8 w-8" : "h-8 w-8 lg:h-12 lg:w-12")}>
+				                    <div className={cn("relative shrink-0 transition-all", collapsed ? "h-8 w-8" : "h-8 w-8 lg:h-10 lg:w-10")}>
 				                      <Image
 				                        src="/clawboard-mark.png"
 				                        alt="ClawBoard"
@@ -1279,6 +1279,12 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                        className="h-full w-full object-contain"
 			                      />
 			                    </div>
+                            {!collapsed && (
+                              <div className="hidden min-w-0 lg:block">
+                                <div className="text-[10px] uppercase tracking-[0.25em] text-[rgb(var(--claw-muted))]">ClawBoard</div>
+                                <div className="truncate text-sm font-semibold text-[rgb(var(--claw-text))]">{instanceTitle}</div>
+                              </div>
+                            )}
 		                  </Link>
 				                  <div className="min-w-0 lg:hidden">
 				                    <div className="truncate text-xs font-semibold text-[rgb(var(--claw-text))]">{pageHeader.title}</div>
@@ -1317,103 +1323,65 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                           </span>
 					                </div>
 			              </div>
-              {showBoardWorkspaceTabs && boardWorkspaceActiveView ? (
-                <div className="mt-2 flex justify-center lg:hidden">
-                  <HeaderRouteTabs
-                    activeView={boardWorkspaceActiveView}
-                    boardHref={boardNavHref}
-                    workspaceHref={workspaceNavHref}
-                    compact
-                  />
-                </div>
-              ) : null}
-	              <nav className="mt-1.5 grid grid-cols-5 gap-1 lg:hidden">
-	                {mobilePrimaryItems.map((item) => {
-	                  const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
-	                  const active = isItemActive(item.href);
-                    const showBoardAttentionCount = item.href === "/u" && hiddenBoardAttentionCount > 0;
-	                  return (
-                    <Link
-                      key={item.href}
-                      href={resolvedHref}
-                      onClick={() => setMobileMenuOpen(false)}
-	                      className={cn(
-	                        "flex h-9 flex-col items-center justify-center gap-0.5 rounded-[var(--radius-sm)] px-1 py-1 text-[9px] transition",
-	                        active
-	                          ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.04))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]"
-	                          : "text-[rgb(var(--claw-muted))]"
-                      )}
-                      aria-label={item.label}
-                      aria-current={active ? "page" : undefined}
-                    >
-                      <span className="flex h-3.5 w-3.5 items-center justify-center text-current">
-                        {showBoardAttentionCount ? (
-                          <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full border border-[rgba(255,90,45,0.42)] bg-[rgba(255,90,45,0.16)] px-1 text-[9px] font-semibold text-[rgb(var(--claw-text))]">
-                            {hiddenBoardAttentionCount}
-                          </span>
-                        ) : (
-                          ICONS[item.id]
-                        )}
-                      </span>
-                      <span className="leading-none">{item.label}</span>
-                    </Link>
-                  );
-                })}
-                <div className="relative">
-	                  <button
-	                    type="button"
-	                    onClick={() => setMobileMenuOpen((prev) => !prev)}
-	                    className={cn(
-	                      "flex h-9 w-full flex-col items-center justify-center gap-0.5 rounded-[var(--radius-sm)] px-1 py-1 text-[9px] transition",
-	                      mobileMenuOpen ? "text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]" : "text-[rgb(var(--claw-muted))]"
-	                    )}
-	                    aria-expanded={mobileMenuOpen}
-                    aria-label="More navigation"
+              {/* Mobile nav: primary toggle (centered) + caret + secondary strip */}
+              <nav className="mt-1.5 lg:hidden" aria-label="Mobile navigation">
+                <div className="flex items-center">
+                  <div className="flex flex-1 justify-center">
+                    <HeaderRouteTabs
+                      activeView={boardWorkspaceActiveView ?? "board"}
+                      boardHref={boardNavHref}
+                      workspaceHref={workspaceNavHref}
+                      compact
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setMobileMenuOpen((prev) => !prev)}
+                    className={cn(
+                      "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition",
+                      mobileMenuOpen
+                        ? "text-[rgb(var(--claw-text))]"
+                        : "text-[rgb(var(--claw-muted))]"
+                    )}
+                    aria-expanded={mobileMenuOpen}
+                    aria-label={mobileMenuOpen ? "Hide navigation" : "More navigation"}
                   >
-                    <span className="text-sm">⋯</span>
-                    <span className="leading-none">More</span>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={cn("h-3.5 w-3.5 transition-transform duration-200", mobileMenuOpen ? "rotate-180" : "")}>
+                      <path d="m6 9 6 6 6-6"/>
+                    </svg>
                   </button>
-                  {mobileMenuOpen && (
-                    <>
-                      <button
-	                        type="button"
-	                        aria-label="Close more navigation"
-	                        onClick={() => setMobileMenuOpen(false)}
-	                        className="fixed inset-0 z-[85] bg-transparent"
-	                      />
-	                      <div className="absolute right-0 top-[108%] z-[90] min-w-[160px] rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] p-2 shadow-[0_16px_40px_rgba(0,0,0,0.45)]">
-	                        {mobileOverflowItems.map((item) => {
-                            const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
-	                          const active = isItemActive(item.href);
-                            const showBoardAttentionCount = item.href === "/u" && hiddenBoardAttentionCount > 0;
-	                          return (
-                            <Link
-                              key={item.href}
-                              href={resolvedHref}
-                              onClick={() => setMobileMenuOpen(false)}
-                              className={cn(
-                                "flex items-center gap-2 rounded-[var(--radius-sm)] px-3 py-2 text-xs transition",
-                                active
-                                  ? "bg-[rgba(255,90,45,0.15)] text-[rgb(var(--claw-text))]"
-                                  : "text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
-                              )}
-                            >
-                              <span className="flex h-4 w-4 items-center justify-center text-current">
-                                {showBoardAttentionCount ? (
-                                  <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full border border-[rgba(255,90,45,0.42)] bg-[rgba(255,90,45,0.16)] px-1 text-[9px] font-semibold text-[rgb(var(--claw-text))]">
-                                    {hiddenBoardAttentionCount}
-                                  </span>
-                                ) : (
-                                  ICONS[item.id]
-                                )}
-                              </span>
-                              <span>{item.label}</span>
-                            </Link>
-                          );
-                        })}
-                      </div>
-                    </>
+                </div>
+                <div
+                  className={cn(
+                    "claw-scrollbar-none mt-1.5 flex justify-center gap-1.5 overflow-x-auto overscroll-x-contain scroll-smooth transition-all duration-200",
+                    mobileMenuOpen
+                      ? "max-h-12 py-0.5 opacity-100"
+                      : "pointer-events-none max-h-0 opacity-0"
                   )}
+                >
+                  {mobileSecondaryItems.map((item) => {
+                    const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
+                    const active = isItemActive(item.href);
+                    return (
+                      <Link
+                        key={item.href}
+                        href={resolvedHref}
+                        onClick={() => setMobileMenuOpen(false)}
+                        className={cn(
+                          "flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium transition",
+                          active
+                            ? "border-[rgba(255,90,45,0.3)] bg-[rgba(255,90,45,0.12)] text-[rgb(var(--claw-text))]"
+                            : "border-transparent text-[rgb(var(--claw-muted))]"
+                        )}
+                        aria-current={active ? "page" : undefined}
+                      >
+                        <span className="flex h-3 w-3 items-center justify-center text-current opacity-70">
+                          {ICONS[item.id]}
+                        </span>
+                        <span>{item.label}</span>
+                      </Link>
+                    );
+                  })}
                 </div>
               </nav>
               {!collapsed && (
@@ -1687,22 +1655,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                 compactHeader ? "py-2" : "py-4"
               )}
             >
-              <div className="mr-auto grid w-full max-w-[1280px] grid-cols-[auto_1fr_auto] items-center gap-4">
-                <Link href={boardNavHref} className={cn("flex items-center gap-3", compactHeader ? "py-1" : "")}>
-                  <div
-                    aria-hidden="true"
-                    className={cn(
-                      "grid place-items-center rounded-[var(--radius-sm)] border border-[rgba(255,255,255,0.12)] bg-[rgba(10,12,16,0.35)] text-[rgb(var(--claw-muted))]",
-                      compactHeader ? "h-9 w-9 text-sm" : "h-10 w-10 text-base"
-                    )}
-                  >
-                    C
-                  </div>
-                  <div className={cn(compactHeader ? "sr-only" : "")}>
-                    <div className="text-sm uppercase tracking-[0.3em] text-[rgb(var(--claw-muted))]">ClawBoard</div>
-                    <div className="text-lg font-semibold text-[rgb(var(--claw-text))]">{instanceTitle}</div>
-                  </div>
-                </Link>
+              <div className="mr-auto grid w-full max-w-[1280px] grid-cols-[1fr_auto] items-center gap-4">
                 <div className="min-w-0 px-2 text-center">
                   {showBoardWorkspaceTabs && boardWorkspaceActiveView ? (
                     <div className="flex min-w-0 justify-center">

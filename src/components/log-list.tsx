@@ -1436,38 +1436,38 @@ const LogRow = memo(function LogRow({
 	              </div>
 
               <div className={`mt-2 flex min-h-[28px] w-full min-w-0 items-start gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
-                {!isUser && showChatFooterTools ? (
-                  <button
-                    type="button"
-                    aria-label={chatDetailToggleLabel}
-                    title={chatDetailToggleLabel}
-                    aria-pressed={chatDetailsExpanded}
-                    className="mt-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] text-[rgba(148,163,184,0.72)] transition hover:text-[rgb(var(--claw-text))]"
-                    onClick={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      setChatDetailsExpanded((prev) => !prev);
-                    }}
-                  >
-                    <span
-                      aria-hidden="true"
-                      className={`h-1.5 w-1.5 rounded-full transition ${
-                        chatDetailsExpanded
-                          ? "bg-[rgba(255,90,45,0.95)] shadow-[0_0_0_3px_rgba(255,90,45,0.14)]"
-                          : "bg-[rgba(148,163,184,0.72)]"
-                      }`}
-                    />
-                  </button>
-                ) : null}
                 <div
                   className={`flex min-w-0 flex-1 items-start gap-2 transition-all duration-150 ${
                     chatDetailsVisible ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-1 opacity-0"
                   } ${isUser ? "justify-end" : "justify-start"}`}
                 >
+                  {!isUser && showChatFooterTools ? (
+                    <button
+                      type="button"
+                      aria-label={chatDetailToggleLabel}
+                      title={chatDetailToggleLabel}
+                      aria-pressed={chatDetailsExpanded}
+                      className="mt-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] text-[rgba(148,163,184,0.72)] transition hover:text-[rgb(var(--claw-text))]"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setChatDetailsExpanded((prev) => !prev);
+                      }}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`h-1.5 w-1.5 rounded-full transition ${
+                          chatDetailsExpanded
+                            ? "bg-[rgba(255,90,45,0.95)] shadow-[0_0_0_3px_rgba(255,90,45,0.14)]"
+                            : "bg-[rgba(148,163,184,0.72)]"
+                        }`}
+                      />
+                    </button>
+                  ) : null}
                   <>
                     {isUser ? chatSourceMetaInline : null}
                     <div className={`flex shrink-0 items-center gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
-                      <CopyPill value={copyValue || messageSource || chatBubbleText} className={chatFooterCopyClass} />
+                      {!isUser && <CopyPill value={copyValue || messageSource || chatBubbleText} className={chatFooterCopyClass} />}
                       {allowEdit && !editOpen ? (
                         <>
                           {showReplay && (
@@ -1528,37 +1528,38 @@ const LogRow = memo(function LogRow({
                               setEditStatus(null);
                             }}
                           >
-                            Edit
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
                           </Button>
                         </>
                       ) : null}
+                      {isUser && <CopyPill value={copyValue || messageSource || chatBubbleText} className={chatFooterCopyClass} />}
                     </div>
                     {!isUser ? chatSourceMetaInline : null}
                   </>
+                  {isUser && showChatFooterTools ? (
+                    <button
+                      type="button"
+                      aria-label={chatDetailToggleLabel}
+                      title={chatDetailToggleLabel}
+                      aria-pressed={chatDetailsExpanded}
+                      className="mt-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] text-[rgba(148,163,184,0.72)] transition hover:text-[rgb(var(--claw-text))]"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setChatDetailsExpanded((prev) => !prev);
+                      }}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`h-1.5 w-1.5 rounded-full transition ${
+                          chatDetailsExpanded
+                            ? "bg-[rgba(255,90,45,0.95)] shadow-[0_0_0_3px_rgba(255,90,45,0.14)]"
+                            : "bg-[rgba(148,163,184,0.72)]"
+                        }`}
+                      />
+                    </button>
+                  ) : null}
                 </div>
-                {isUser && showChatFooterTools ? (
-                  <button
-                    type="button"
-                    aria-label={chatDetailToggleLabel}
-                    title={chatDetailToggleLabel}
-                    aria-pressed={chatDetailsExpanded}
-                    className="mt-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] text-[rgba(148,163,184,0.72)] transition hover:text-[rgb(var(--claw-text))]"
-                    onClick={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      setChatDetailsExpanded((prev) => !prev);
-                    }}
-                  >
-                    <span
-                      aria-hidden="true"
-                      className={`h-1.5 w-1.5 rounded-full transition ${
-                        chatDetailsExpanded
-                          ? "bg-[rgba(255,90,45,0.95)] shadow-[0_0_0_3px_rgba(255,90,45,0.14)]"
-                          : "bg-[rgba(148,163,184,0.72)]"
-                      }`}
-                    />
-                  </button>
-                ) : null}
               </div>
               {showReplay && replayStatus === "failed" && replayError ? (
                 <p className={`mt-1 text-xs ${isUser ? "text-right" : "text-left"} text-[rgb(var(--claw-warning))]`}>
@@ -1622,7 +1623,7 @@ const LogRow = memo(function LogRow({
               )}
 
               {allowEdit && editOpen && (
-                <div className="mt-2">
+                <div className="mt-2" onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setEditOpen(false); } }}>
                   <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
                     <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Edit message</div>
 
@@ -1933,34 +1934,34 @@ const LogRow = memo(function LogRow({
 	            </div>
 
             <div className="mt-2 flex min-h-[28px] w-full max-w-[78%] min-w-0 items-center gap-2 justify-start">
-              {showChatFooterTools ? (
-                <button
-                  type="button"
-                  aria-label={chatDetailToggleLabel}
-                  title={chatDetailToggleLabel}
-                  aria-pressed={chatDetailsExpanded}
-                  className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] text-[rgba(148,163,184,0.72)] transition hover:text-[rgb(var(--claw-text))]"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    setChatDetailsExpanded((prev) => !prev);
-                  }}
-                >
-                  <span
-                    aria-hidden="true"
-                    className={`h-1.5 w-1.5 rounded-full transition ${
-                      chatDetailsExpanded
-                        ? "bg-[rgba(255,90,45,0.95)] shadow-[0_0_0_3px_rgba(255,90,45,0.14)]"
-                        : "bg-[rgba(148,163,184,0.72)]"
-                    }`}
-                  />
-                </button>
-              ) : null}
               <div
                 className={`flex min-w-0 flex-1 items-center gap-2 transition-all duration-150 ${
                   chatDetailsVisible ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-1 opacity-0"
                 }`}
               >
+                {showChatFooterTools ? (
+                  <button
+                    type="button"
+                    aria-label={chatDetailToggleLabel}
+                    title={chatDetailToggleLabel}
+                    aria-pressed={chatDetailsExpanded}
+                    className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] text-[rgba(148,163,184,0.72)] transition hover:text-[rgb(var(--claw-text))]"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setChatDetailsExpanded((prev) => !prev);
+                    }}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`h-1.5 w-1.5 rounded-full transition ${
+                        chatDetailsExpanded
+                          ? "bg-[rgba(255,90,45,0.95)] shadow-[0_0_0_3px_rgba(255,90,45,0.14)]"
+                          : "bg-[rgba(148,163,184,0.72)]"
+                      }`}
+                    />
+                  </button>
+                ) : null}
                 <div className="flex shrink-0 items-center gap-2">
                   <CopyPill value={copyValue || messageSource || chatBubbleText} className={chatFooterCopyClass} />
                   {(allowEdit || (allowNotesEnabled && entry.type !== "note")) && !noteOpen && !editOpen ? (
@@ -1982,7 +1983,7 @@ const LogRow = memo(function LogRow({
                             setEditStatus(null);
                           }}
                         >
-                          Edit
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
                         </Button>
                       )}
                       {allowNotesEnabled && entry.type !== "note" && (
@@ -2439,7 +2440,7 @@ const LogRow = memo(function LogRow({
                 setEditStatus(null);
               }}
             >
-              Edit
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
             </Button>
           )}
           {allowNotesEnabled && entry.type !== "note" && (
@@ -2511,7 +2512,7 @@ const LogRow = memo(function LogRow({
         </div>
       )}
       {allowEdit && editOpen && (
-        <div className="mt-3">
+        <div className="mt-3" onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setEditOpen(false); } }}>
           <div className="space-y-2 rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.55)] p-3">
             <div className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Edit message</div>
 

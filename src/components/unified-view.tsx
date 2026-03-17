@@ -1821,9 +1821,7 @@ function mobileOverlaySurfaceStyle(color: string): CSSProperties {
 function stickyTaskHeaderStyle(color: string, index: number): CSSProperties {
   const band = index % 2 === 0;
   return {
-    backgroundColor: band ? "rgba(12, 15, 19, 0.58)" : "rgba(12, 15, 19, 0.52)",
-    backdropFilter: "blur(16px)",
-    WebkitBackdropFilter: "blur(16px)",
+    backgroundColor: band ? "rgb(12, 15, 19)" : "rgb(14, 17, 22)",
     borderBottom: `1px solid ${rgba(color, 0.08)}`,
   };
 }
@@ -2828,7 +2826,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
 
   useEffect(() => {
     if (!(editingTopicId && topicEditMode === "color")) {
-      setTopicColorMenuPosition(null);
+      setTopicColorMenuPosition((prev) => prev === null ? prev : null);
       return;
     }
 
@@ -7153,8 +7151,8 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
               }}
               data-topic-card-id={topicId}
               className={cn(
-                "relative overflow-hidden rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] transition-colors duration-300",
-                isExpanded ? "p-0" : "p-4 md:p-5",
+                "relative rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] transition-colors duration-300",
+                isExpanded ? "p-0" : "overflow-hidden p-4 md:p-5",
                 draggingTopicId && topicDropTargetId === topicId ? "ring-2 ring-[rgba(255,90,45,0.55)]" : "",
                 topicSelectedForSend ? "ring-2 ring-[rgba(77,171,158,0.55)]" : ""
               )}
@@ -7166,10 +7164,10 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                 className={cn(
                   "flex min-h-[92px] flex-col justify-center text-left",
                   isExpanded
-                    ? "sticky top-0 z-20 cursor-pointer px-4 py-3 md:px-5"
+                    ? "sticky top-0 z-20 cursor-pointer rounded-t-[var(--radius-lg)] px-4 py-3 md:px-5"
                     : "cursor-pointer"
                 )}
-                style={isExpanded ? { top: 0, ...stickyTaskHeaderStyle(topicColor, topicIndex) } : undefined}
+                style={isExpanded ? { top: "env(safe-area-inset-top, 0px)", ...stickyTaskHeaderStyle(topicColor, topicIndex) } : undefined}
                 onClick={(event) => {
                   if (!allowToggle(event.target as HTMLElement)) return;
                   toggleTopicExpanded(topicId);

@@ -100,46 +100,38 @@ export function WorkspacesLive({
     setLocalStorageItem(WORKSPACE_LAST_URL_KEY, nextUrl);
   }, [pathname]);
 
-  // Mark workspace as ready when active and token is available.
+  // Mount the selected workspace when active and token is available.
+  const selectedAgentNormalized = normalizeAgentId(selectedWorkspace?.agentId);
+  const shouldMount =
+    configured &&
+    Boolean(selectedWorkspace?.ideUrl) &&
+    (active || selectedWorkspaceMounted) &&
+    !mountedWorkspaceKeys.includes(selectedAgentNormalized) &&
+    Boolean(getApiToken());
+
   useEffect(() => {
-    let cancelled = false;
-    function authorizeEmbeddedWorkspace() {
-      if (!configured || !selectedWorkspace?.ideUrl) {
-        setIdeSessionStatus("idle");
-        setIdeSessionError(null);
-        return;
-      }
-      if (!active && !selectedWorkspaceMounted) {
-        setIdeSessionStatus("idle");
-        setIdeSessionError(null);
-        return;
-      }
-      if (mountedWorkspaceKeys.includes(normalizeAgentId(selectedWorkspace.agentId))) {
-        setIdeSessionStatus("ready");
-        setIdeSessionError(null);
-        return;
-      }
+    if (!shouldMount) return;
+    setMountedWorkspaceKeys((current) =>
+      current.includes(selectedAgentNormalized) ? current : [...current, selectedAgentNormalized]
+    );
+  }, [shouldMount, selectedAgentNormalized]);
 
-      const token = getApiToken();
-      if (!token) {
-        setIdeSessionStatus("error");
-        setIdeSessionError("Set your API token in Settings to access the Code Workspace.");
-        return;
-      }
+  // Derive session status from state (no setState in effect needed).
+  const derivedSessionStatus = !configured || !selectedWorkspace?.ideUrl
+    ? "idle"
+    : !active && !selectedWorkspaceMounted
+      ? "idle"
+      : !getApiToken()
+        ? "error"
+        : mountedWorkspaceKeys.includes(selectedAgentNormalized)
+          ? "ready"
+          : "idle";
+  const derivedSessionError = derivedSessionStatus === "error"
+    ? "Set your API token in Settings to access the Code Workspace."
+    : null;
 
-      if (cancelled) return;
-      setIdeSessionStatus("ready");
-      setIdeSessionError(null);
-      setMountedWorkspaceKeys((current) => {
-        const normalized = normalizeAgentId(selectedWorkspace.agentId);
-        return current.includes(normalized) ? current : [...current, normalized];
-      });
-    }
-    authorizeEmbeddedWorkspace();
-    return () => {
-      cancelled = true;
-    };
-  }, [active, configured, mountedWorkspaceKeys, selectedWorkspace?.agentId, selectedWorkspace?.ideUrl, selectedWorkspaceMounted]);
+  if (ideSessionStatus !== derivedSessionStatus) setIdeSessionStatus(derivedSessionStatus);
+  if (ideSessionError !== derivedSessionError) setIdeSessionError(derivedSessionError);
 
   // Build auto-login iframe URLs using the same-origin page route.
   const iframeUrls = useMemo(() => {
