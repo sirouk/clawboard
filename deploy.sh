@@ -251,6 +251,9 @@ rebuild() {
   local args=("$@")
   local services=()
 
+  # Remove stale Next.js build cache so Docker COPY gets a clean context.
+  rm -rf .next .next.stale-* 2>/dev/null || true
+
   if is_web_hot_reload_enabled; then
     if [ "${#args[@]}" -eq 0 ]; then
       services=(api classifier qdrant web-dev)

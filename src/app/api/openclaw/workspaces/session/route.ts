@@ -33,11 +33,6 @@ function resolveIdeBase(agentId: string | null | undefined) {
   return "";
 }
 
-function resolveIdeAuthMode() {
-  const value = String(process.env.CLAWBOARD_WORKSPACE_IDE_AUTH || "password").trim().toLowerCase();
-  return value === "none" ? "none" : "password";
-}
-
 function readCookieValues(response: Response) {
   const headers = response.headers as Headers & {
     getSetCookie?: () => string[];
@@ -48,52 +43,20 @@ function readCookieValues(response: Response) {
   return single ? [single] : [];
 }
 
-async function probeIdeBase(base: string) {
-  try {
-    const upstream = await fetch(base, {
-      method: "GET",
-      cache: "no-store",
-      redirect: "manual",
-    });
-    if (
-      upstream.ok ||
-      upstream.status === 302 ||
-      upstream.status === 303 ||
-      upstream.status === 307 ||
-      upstream.status === 308 ||
-      upstream.status === 401
-    ) {
-      return null;
-    }
-    return upstream.statusText || `Workspace IDE returned HTTP ${upstream.status}`;
-  } catch (error) {
-    return error instanceof Error && error.message.trim() ? error.message.trim() : "Workspace IDE is unavailable.";
-  }
-}
-
 export async function POST(req: NextRequest) {
   const agentId = req.nextUrl.searchParams.get("agentId");
   const base = resolveIdeBase(agentId);
-  const authMode = resolveIdeAuthMode();
   if (!base) {
-    return NextResponse.json({ detail: "Workspace IDE auth is not configured." }, { status: 503 });
-  }
-  if (authMode === "none") {
-    const probeError = await probeIdeBase(base);
-    if (probeError) {
-      return NextResponse.json({ detail: probeError }, { status: 502 });
-    }
-    const response = NextResponse.json({ ok: true, provider: "code-server" });
-    response.headers.set("cache-control", "no-store");
-    return response;
+    return NextResponse.json({ detail: "Workspace IDE is not configured." }, { status: 503 });
   }
 
-  const authError = requireToken(req, { allowLoopback: true });
+  const authError = requireToken(req);
   if (authError) return authError;
 
-  const password = String(process.env.CLAWBOARD_WORKSPACE_IDE_PASSWORD || "").trim();
-  if (!base || !password) {
-    return NextResponse.json({ detail: "Workspace IDE auth is not configured." }, { status: 503 });
+  // Use the same CLAWBOARD_TOKEN as the code-server password.
+  const password = String(process.env.CLAWBOARD_TOKEN || "").trim();
+  if (!password) {
+    return NextResponse.json({ detail: "Workspace IDE auth is not configured (no CLAWBOARD_TOKEN)." }, { status: 503 });
   }
 
   let upstream: Response;

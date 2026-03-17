@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireToken } from "../../../../lib/auth";
 import { normalizeApiBase, resolveServerApiBase } from "../../../../lib/server-api-base";
 
 export const dynamic = "force-dynamic";
@@ -31,10 +30,6 @@ function isLocalishHost(hostname: string) {
 function buildForwardHeaders(request: NextRequest) {
   const headers = new Headers(request.headers);
   headers.delete("host");
-  const fallbackToken = String(process.env.CLAWBOARD_SERVER_API_TOKEN || process.env.CLAWBOARD_TOKEN || "").trim();
-  if (fallbackToken && !headers.get("x-clawboard-token")) {
-    headers.set("x-clawboard-token", fallbackToken);
-  }
   return headers;
 }
 
@@ -91,9 +86,7 @@ function rewriteWorkspacePayloadForBrowser(payload: unknown, request: NextReques
 }
 
 export async function GET(req: NextRequest) {
-  const authError = requireToken(req, { allowLoopback: true });
-  if (authError) return authError;
-
+  // Auth is enforced by the FastAPI middleware via the forwarded X-Clawboard-Token header.
   const base = resolveServerApiBase();
   if (!base) {
     return NextResponse.json({ detail: "Missing CLAWBOARD_SERVER_API_BASE" }, { status: 500 });

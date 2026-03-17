@@ -19,10 +19,6 @@ function forwardRequestHeaders(request: NextRequest) {
   const headers = new Headers(request.headers);
   headers.delete("host");
   for (const key of HOP_BY_HOP_HEADERS) headers.delete(key);
-  const fallbackToken = String(process.env.CLAWBOARD_SERVER_API_TOKEN || "").trim();
-  if (fallbackToken && !headers.get("x-clawboard-token")) {
-    headers.set("x-clawboard-token", fallbackToken);
-  }
   return headers;
 }
 

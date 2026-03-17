@@ -3,6 +3,7 @@
 import { usePathname } from "next/navigation";
 import { startTransition, useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/cn";
+import { getApiToken } from "@/lib/api";
 import { useOpenClawWorkspaces } from "@/components/providers";
 import { setLocalStorageItem } from "@/lib/local-storage";
 import { orderOpenClawWorkspaces, workspaceLabel } from "@/lib/openclaw-workspaces";
@@ -20,6 +21,17 @@ function stringArraysEqual(a: string[], b: string[]) {
     if (a[index] !== b[index]) return false;
   }
   return true;
+}
+
+/**
+ * Build the iframe src URL that auto-authenticates with code-server.
+ * Points to a same-origin Next.js route that serves an auto-submitting
+ * login form. The form POSTs to code-server's /login (same-site, different
+ * port), so the SameSite=Lax auth cookie is properly saved.
+ */
+function buildAutoLoginUrl(ideBase: string, token: string): string {
+  const params = new URLSearchParams({ target: ideBase, t: token });
+  return `/workspace-auth?${params.toString()}`;
 }
 
 export function WorkspacesLive({
@@ -88,9 +100,10 @@ export function WorkspacesLive({
     setLocalStorageItem(WORKSPACE_LAST_URL_KEY, nextUrl);
   }, [pathname]);
 
+  // Mark workspace as ready when active and token is available.
   useEffect(() => {
     let cancelled = false;
-    async function authorizeEmbeddedWorkspace() {
+    function authorizeEmbeddedWorkspace() {
       if (!configured || !selectedWorkspace?.ideUrl) {
         setIdeSessionStatus("idle");
         setIdeSessionError(null);
@@ -106,52 +119,40 @@ export function WorkspacesLive({
         setIdeSessionError(null);
         return;
       }
-      setIdeSessionStatus("authorizing");
-      setIdeSessionError(null);
-      try {
-        const response = await fetch(
-          `/api/openclaw/workspaces/session?agentId=${encodeURIComponent(String(selectedWorkspace.agentId || ""))}`,
-          {
-            method: "POST",
-            cache: "no-store",
-          }
-        );
-        if (cancelled) return;
-        if (response.ok) {
-          setIdeSessionStatus("ready");
-          setIdeSessionError(null);
-          setMountedWorkspaceKeys((current) => {
-            const normalized = normalizeAgentId(selectedWorkspace.agentId);
-            return current.includes(normalized) ? current : [...current, normalized];
-          });
-          return;
-        }
-        let detail = "Workspace login failed.";
-        try {
-          const body = (await response.json()) as { detail?: unknown };
-          if (typeof body?.detail === "string" && body.detail.trim()) {
-            detail = body.detail.trim();
-          }
-        } catch {
-          // Ignore parse errors and keep generic detail.
-        }
+
+      const token = getApiToken();
+      if (!token) {
         setIdeSessionStatus("error");
-        setIdeSessionError(detail);
-      } catch (fetchError) {
-        if (cancelled) return;
-        const detail =
-          fetchError instanceof Error && fetchError.message.trim()
-            ? fetchError.message.trim()
-            : "Workspace login failed.";
-        setIdeSessionStatus("error");
-        setIdeSessionError(detail);
+        setIdeSessionError("Set your API token in Settings to access the Code Workspace.");
+        return;
       }
+
+      if (cancelled) return;
+      setIdeSessionStatus("ready");
+      setIdeSessionError(null);
+      setMountedWorkspaceKeys((current) => {
+        const normalized = normalizeAgentId(selectedWorkspace.agentId);
+        return current.includes(normalized) ? current : [...current, normalized];
+      });
     }
-    void authorizeEmbeddedWorkspace();
+    authorizeEmbeddedWorkspace();
     return () => {
       cancelled = true;
     };
   }, [active, configured, mountedWorkspaceKeys, selectedWorkspace?.agentId, selectedWorkspace?.ideUrl, selectedWorkspaceMounted]);
+
+  // Build auto-login iframe URLs using the same-origin page route.
+  const iframeUrls = useMemo(() => {
+    const token = getApiToken();
+    const urls: Record<string, string> = {};
+    for (const workspace of mountedWorkspaces) {
+      const key = normalizeAgentId(workspace.agentId);
+      if (!workspace.ideUrl || !token) continue;
+      urls[key] = buildAutoLoginUrl(workspace.ideUrl, token);
+    }
+    return urls;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mountedWorkspaces.map((w) => normalizeAgentId(w.agentId)).join(",")]);
 
   return (
     <div className="space-y-4">
@@ -175,22 +176,24 @@ export function WorkspacesLive({
         <div className="relative h-[76vh] min-h-[32rem] overflow-hidden rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] bg-black">
           {ideSessionStatus === "authorizing" && !selectedWorkspaceMounted ? (
             <div className="absolute inset-0 z-20 flex items-center justify-center bg-[rgba(5,8,12,0.82)] text-sm text-[rgb(var(--claw-muted))]">
-              Opening workspace...
+              Opening workspace…
             </div>
           ) : null}
           {mountedWorkspaces.map((workspace) => {
             const normalizedAgentId = normalizeAgentId(workspace.agentId);
-            const active = normalizedAgentId === normalizeAgentId(selectedWorkspace.agentId);
+            const isActive = normalizedAgentId === normalizeAgentId(selectedWorkspace.agentId);
+            const src = iframeUrls[normalizedAgentId];
+            if (!src) return null;
             return (
               <iframe
                 key={normalizedAgentId}
-                data-testid={active ? "workspace-ide-frame" : `workspace-ide-frame-${normalizedAgentId}`}
+                data-testid={isActive ? "workspace-ide-frame" : `workspace-ide-frame-${normalizedAgentId}`}
                 title={`${workspaceLabel(workspace.agentId, workspace.agentName)} workspace`}
-                src={workspace.ideUrl ?? undefined}
+                src={src}
                 allow="clipboard-read; clipboard-write; fullscreen"
                 className={cn(
                   "absolute inset-0 h-full w-full border-0 bg-black transition-opacity",
-                  active ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
+                  isActive ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
                 )}
               />
             );
