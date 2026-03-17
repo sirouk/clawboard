@@ -46,7 +46,7 @@ test.describe("layout stability — Cumulative Layout Shift", () => {
     }
 
     // Navigate to Workspaces via the header tab.
-    const workspacesLink = page.getByRole("link", { name: "Code Workspaces" }).first();
+    const workspacesLink = page.getByRole("link", { name: "Code Workspace" }).first();
     await expect(workspacesLink).toBeVisible({ timeout: 10_000 });
     await workspacesLink.click();
 
@@ -102,20 +102,19 @@ test.describe("layout stability — Cumulative Layout Shift", () => {
     });
 
     await page.goto("/workspaces/main");
-    // Wait for the workspace chip to appear on the first successful load.
-    await expect(page.getByTestId("workspace-chip-row")).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId("open-workspace-main")).toBeVisible();
+    // Wait for the workspace IDE frame to appear on the first successful load.
+    await expect(page.getByTestId("workspace-ide-frame")).toBeVisible({ timeout: 15_000 });
 
     // Navigate to board and back; this triggers a re-fetch that will fail.
     const boardLink = page.getByRole("link", { name: "Unified View" }).first();
     await boardLink.click();
     await page.getByRole("heading", { name: "Unified View" }).waitFor({ timeout: 10_000 });
 
-    const workspacesLink = page.getByRole("link", { name: "Code Workspaces" }).first();
+    const workspacesLink = page.getByRole("link", { name: "Code Workspace" }).first();
     await workspacesLink.click();
 
-    // Even after the failing refetch, the previously loaded workspace chip must still be visible.
+    // Even after the failing refetch, the previously loaded workspace IDE frame must still be visible.
     // The providers.tsx error path preserves previous data instead of clearing it.
-    await expect(page.getByTestId("open-workspace-main")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId("workspace-ide-frame")).toBeVisible({ timeout: 10_000 });
   });
 });

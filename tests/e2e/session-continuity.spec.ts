@@ -49,7 +49,7 @@ test.describe("session continuity — Board ↔ Workspaces keep-alive", () => {
     await expect(page.locator(`[data-task-card-id="${taskId}"]`).first()).toBeVisible();
 
     // Navigate to Workspaces.
-    const workspacesLink = page.getByRole("link", { name: "Code Workspaces" }).first();
+    const workspacesLink = page.getByRole("link", { name: "Code Workspace" }).first();
     await expect(workspacesLink).toBeVisible();
     await workspacesLink.click();
     const workspacePanel = page.getByTestId("workspace-hub-panel");
@@ -99,7 +99,7 @@ test.describe("session continuity — Board ↔ Workspaces keep-alive", () => {
     await expect(textbox).toHaveValue(draftText);
 
     // Navigate to Workspaces.
-    const workspacesLink = page.getByRole("link", { name: "Code Workspaces" }).first();
+    const workspacesLink = page.getByRole("link", { name: "Code Workspace" }).first();
     await expect(workspacesLink).toBeVisible();
     await workspacesLink.click();
     await expect(page.getByTestId("workspace-hub-panel")).toBeVisible({ timeout: 10_000 });
@@ -122,7 +122,7 @@ test.describe("session continuity — Board ↔ Workspaces keep-alive", () => {
     await expect(workspacePanel).not.toBeAttached();
 
     // Navigate to Workspaces — panel mounts.
-    const workspacesLink = page.getByRole("link", { name: "Code Workspaces" }).first();
+    const workspacesLink = page.getByRole("link", { name: "Code Workspace" }).first();
     await expect(workspacesLink).toBeVisible();
     await workspacesLink.click();
     await expect(workspacePanel).toBeAttached({ timeout: 10_000 });

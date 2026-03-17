@@ -5034,6 +5034,16 @@ case "$AGENTIC_TEAM_SETUP_STATUS" in
     fi
     ;;
 esac
+# Shared workspace notice
+main_ws_resolved="$(resolve_agent_workspace_path "main" 2>/dev/null || true)"
+main_ws_resolved="${main_ws_resolved:-$OPENCLAW_HOME/workspace}"
+main_ws_resolved="${main_ws_resolved/#\~/$HOME}"
+if [ -d "$main_ws_resolved/projects" ]; then
+  echo "Shared code:   $main_ws_resolved/projects/"
+  echo "               All specialist agents share this directory via symlink."
+  echo "               Each agent keeps separate memory/ and obsidian/ in its own workspace."
+fi
+
 BACKUP_SETUP_HINT="$OPENCLAW_SKILLS_DIR/clawboard/scripts/setup-openclaw-memory-backup.sh"
 if backup_setup_path="$(resolve_memory_backup_setup_script 2>/dev/null)"; then
   BACKUP_SETUP_HINT="$backup_setup_path"

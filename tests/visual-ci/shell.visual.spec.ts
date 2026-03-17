@@ -13,6 +13,6 @@ test("unified shell visual baseline", async ({ page }) => {
 
 test("workspaces shell visual baseline", async ({ page }) => {
   await gotoPath(page, "/workspaces");
-  await expect(page.getByRole("link", { name: "Code Workspaces" })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("link", { name: "Code Workspace" })).toHaveAttribute("aria-current", "page");
   await expect(page).toHaveScreenshot("shell-workspaces.png");
 });

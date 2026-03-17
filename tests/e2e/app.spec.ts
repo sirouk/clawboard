@@ -53,55 +53,14 @@ test("graph route loads clawgraph view", async ({ page }) => {
   await expect(page.getByTestId("clawgraph-canvas")).toBeVisible();
 });
 
-test("workspaces route loads embedded workspace surface with quick-switch chips", async ({ page }) => {
+test("workspaces route loads embedded workspace surface", async ({ page }) => {
   await page.goto("/workspaces");
-  await expect(page.getByRole("heading", { name: "Workspaces" }).first()).toBeVisible();
-  await expect(page.getByTestId("workspace-chip-row")).toBeVisible();
-  await expect(page.getByTestId("workspace-nav-toggle")).toHaveCount(0);
-  await expect(page.locator("[data-testid='workspace-chip-row'] a").first()).toContainText("main");
-  const navMainLink = page.getByTestId("workspace-nav-main");
-  const navCodingLink = page.getByTestId("workspace-nav-coding");
-  await expect(navMainLink).toBeVisible();
-  await expect(navCodingLink).toBeVisible();
-  await expect(navMainLink).toHaveAttribute("href", "/workspaces/main");
-  await expect(navMainLink).toHaveAttribute("aria-current", "page");
-  await expect(navMainLink).toContainText("main");
-  await expect(navMainLink).toContainText("workspace");
-  await expect(navMainLink).not.toContainText("/Users/");
-  await expect(navMainLink).not.toContainText("Viewing");
-  await expect(navCodingLink).toContainText("workspace-coding");
-  await expect(navCodingLink).not.toContainText("/Users/");
-  await expect(navCodingLink).not.toContainText("Preferred");
-  await expect(navCodingLink).not.toHaveClass(/77,171,158/);
-  const mainLink = page.getByTestId("open-workspace-main");
-  await expect(mainLink).toBeVisible();
-  await expect(mainLink).toHaveAttribute("href", "/workspaces/main");
   await expect(page.getByTestId("workspace-ide-frame")).toHaveAttribute(
     "src",
     /\?folder=/
   );
-
-  const codingLink = page.getByTestId("open-workspace-coding");
-  await expect(codingLink).toBeVisible();
-  await expect(codingLink).toHaveAttribute("href", "/workspaces/coding");
-  await codingLink.click();
-  await expect(page).toHaveURL(/\/workspaces\/coding$/);
-  await expect(page.getByTestId("workspace-ide-frame")).toHaveAttribute(
-    "src",
-    /13338\/\?folder=\/workspace$/
-  );
-  await expect(navCodingLink).toHaveAttribute("aria-current", "page");
-  await expect(navMainLink).not.toHaveAttribute("aria-current", "page");
-
-  await mainLink.click();
-  await expect(page).toHaveURL(/\/workspaces\/main$/);
-  await expect(page.getByTestId("workspace-ide-frame")).toHaveAttribute(
-    "src",
-    /\/workspace$/
-  );
-  await expect(navMainLink).toHaveAttribute("aria-current", "page");
-  await expect(navCodingLink).not.toHaveAttribute("aria-current", "page");
-  await expect(page.getByTestId("workspace-ide-frame-coding")).toHaveCount(1);
+  // Workspace chips should not be present (removed in favor of single shared workspace)
+  await expect(page.getByTestId("workspace-chip-row")).toHaveCount(0);
 });
 
 test("board nav stays expanded and keeps the last selected task highlighted off-board", async ({ page }) => {

@@ -139,3 +139,171 @@ test("typed /abort in task composer cancels in-flight run as a /stop alias", asy
   expect(deletePayloads[0]?.requestId).toBe(requestId);
   await expect(taskComposer.getByText("Cancellation requested.")).toBeVisible();
 });
+
+test("topic chat history window stays anchored when new entries arrive", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-history-stable-${suffix}`;
+  const topicName = `History Stable ${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  // Seed 4 conversation logs: user-1, asst-1, user-2, asst-2.
+  // With TASK_TIMELINE_LIMIT=2 only the last 2 visible entries (user-2, asst-2) show initially.
+  const base = Date.now() - 10_000;
+  const msgOldest = `oldest-${suffix}`;
+  const msgNewest = `newest-${suffix}`;
+  const seedLogs = [
+    { agentId: "user",      content: msgOldest,           createdAt: new Date(base).toISOString() },
+    { agentId: "assistant", content: `asst-1-${suffix}`,  createdAt: new Date(base + 1000).toISOString() },
+    { agentId: "user",      content: msgNewest,           createdAt: new Date(base + 2000).toISOString() },
+    { agentId: "assistant", content: `asst-2-${suffix}`,  createdAt: new Date(base + 3000).toISOString() },
+  ];
+  for (const entry of seedLogs) {
+    const r = await request.post(`${apiBase}/api/log`, {
+      data: { topicId, type: "conversation", classificationStatus: "classified", ...entry },
+    });
+    expect(r.ok()).toBeTruthy();
+  }
+
+  await page.goto(`/u/topic/${topicId}`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const scrollEl = page.getByTestId(`topic-chat-scroll-${topicId}`);
+  await expect(scrollEl).toBeVisible({ timeout: 15_000 });
+
+  // Newest message must be visible; oldest must be absent from DOM (truncated).
+  await expect(scrollEl.getByText(msgNewest, { exact: false })).toBeVisible();
+  await expect(scrollEl.locator(`text=${msgOldest}`)).toHaveCount(0);
+
+  // Inject 5 action entries to simulate agent activity arriving via SSE.
+  for (let i = 0; i < 5; i++) {
+    await request.post(`${apiBase}/api/log`, {
+      data: {
+        topicId,
+        type: "action",
+        agentId: "agent",
+        content: `agent-action-${i}-${suffix}`,
+        summary: `action ${i}`,
+        createdAt: new Date(base + 4000 + i * 200).toISOString(),
+        classificationStatus: "classified",
+      },
+    });
+  }
+
+  // Allow time for the client to process SSE events and re-render.
+  await page.waitForTimeout(1500);
+
+  // After new entries the window must remain anchored:
+  // - newest user message still visible (not scrolled away)
+  // - oldest user message still absent (no backward drift)
+  await expect(scrollEl.getByText(msgNewest, { exact: false })).toBeVisible();
+  await expect(scrollEl.locator(`text=${msgOldest}`)).toHaveCount(0);
+});
+
+test("topic chat scroll to top loads older messages", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-scroll-older-${suffix}`;
+  const topicName = `Scroll Older ${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  // Long content ensures the 2 visible messages overflow the scroll container,
+  // so the initial scrollTop will be > 0 and setting it to 0 fires a real scroll event.
+  const longBody = "x".repeat(1500);
+  const base = Date.now() - 10_000;
+  const msgOldest = `oldest-scroll-${suffix}`;
+  const msgNewest = `newest-scroll-${suffix}`;
+  const seedLogs = [
+    { agentId: "user",      content: `${msgOldest} ${longBody}`, createdAt: new Date(base).toISOString() },
+    { agentId: "assistant", content: `asst-1-${suffix} ${longBody}`, createdAt: new Date(base + 1000).toISOString() },
+    { agentId: "user",      content: `${msgNewest} ${longBody}`, createdAt: new Date(base + 2000).toISOString() },
+    { agentId: "assistant", content: `asst-2-${suffix} ${longBody}`, createdAt: new Date(base + 3000).toISOString() },
+  ];
+  for (const entry of seedLogs) {
+    const r = await request.post(`${apiBase}/api/log`, {
+      data: { topicId, type: "conversation", classificationStatus: "classified", ...entry },
+    });
+    expect(r.ok()).toBeTruthy();
+  }
+
+  await page.goto(`/u/topic/${topicId}`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const scrollEl = page.getByTestId(`topic-chat-scroll-${topicId}`);
+  await expect(scrollEl).toBeVisible({ timeout: 15_000 });
+
+  // Give the chat time to auto-scroll to the bottom.
+  await page.waitForTimeout(500);
+
+  // Oldest message must not be in the DOM yet.
+  await expect(scrollEl.locator(`text=${msgOldest}`)).toHaveCount(0);
+  // Newest is visible.
+  await expect(scrollEl.getByText(msgNewest, { exact: false })).toBeVisible();
+
+  // Scroll the chat area to the top.  React's onScroll handler calls loadOlderChat
+  // when scrollTop <= 24 and the chat is truncated.
+  await scrollEl.evaluate((el) => {
+    el.scrollTop = 0;
+  });
+
+  // Wait for React to re-render with the older slice appended.
+  await expect(scrollEl.getByText(msgOldest, { exact: false })).toBeVisible({ timeout: 5_000 });
+});
+
+test("sent topic chat message stays visible after the server confirms it", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-msg-persist-${suffix}`;
+  const topicName = `Message Persist ${suffix}`;
+  const sentMessage = `persist-msg-${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  // Seed 4 logs (2 user turns) so the chat window is truncated (start > 0).
+  // This is the condition under which the "disappear" bug manifested.
+  const base = Date.now() - 10_000;
+  const seedLogs = [
+    { agentId: "user",      content: `user-prior-1-${suffix}`, createdAt: new Date(base).toISOString() },
+    { agentId: "assistant", content: `asst-prior-1-${suffix}`, createdAt: new Date(base + 1000).toISOString() },
+    { agentId: "user",      content: `user-prior-2-${suffix}`, createdAt: new Date(base + 2000).toISOString() },
+    { agentId: "assistant", content: `asst-prior-2-${suffix}`, createdAt: new Date(base + 3000).toISOString() },
+  ];
+  for (const entry of seedLogs) {
+    const r = await request.post(`${apiBase}/api/log`, {
+      data: { topicId, type: "conversation", classificationStatus: "classified", ...entry },
+    });
+    expect(r.ok()).toBeTruthy();
+  }
+
+  await page.goto(`/u/topic/${topicId}`);
+  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+
+  const scrollEl = page.getByTestId(`topic-chat-scroll-${topicId}`);
+  const composer = page.getByTestId(`topic-chat-composer-${topicId}`);
+  await expect(composer).toBeVisible({ timeout: 15_000 });
+
+  // Send a message via the topic chat composer.
+  await composer.getByRole("textbox").fill(sentMessage);
+  await composer.getByRole("button", { name: "Send" }).click();
+
+  // Message must appear immediately as a pending entry.
+  await expect(scrollEl.getByText(sentMessage, { exact: false })).toBeVisible({ timeout: 5_000 });
+
+  // The mock API immediately confirms the message via SSE (log.appended event).
+  // After confirmation the pending entry is replaced by the real log entry.
+  // With chatHistoryStarts anchored at its initial value the window does not
+  // drift past the new entry, so the message stays visible.
+  await page.waitForTimeout(1500);
+  await expect(scrollEl.getByText(sentMessage, { exact: false })).toBeVisible();
+});

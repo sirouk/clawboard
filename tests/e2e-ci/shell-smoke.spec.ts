@@ -32,15 +32,15 @@ test("topic-first shell loads and the centered header tabs switch views", async 
   await waitForUnifiedViewReady(page);
 
   const unifiedTab = page.getByRole("link", { name: "Unified View" });
-  const workspaceTab = page.getByRole("link", { name: "Code Workspaces" });
+  const workspaceTab = page.getByRole("link", { name: "Code Workspace" });
 
   await expect(unifiedTab).toHaveAttribute("aria-current", "page");
   await expect(unifiedTab).toHaveAttribute("href", /\/u/);
   await expect(workspaceTab).toHaveAttribute("href", /\/workspaces/);
   await expect(page.locator("[data-topic-card-id='topic-1']")).toBeVisible();
 
-  await clickPrimaryTabUntilUrl(page, "Code Workspaces", /\/workspaces/);
-  await expect(page.getByTestId("workspace-chip-row")).toBeVisible();
+  await clickPrimaryTabUntilUrl(page, "Code Workspace", /\/workspaces/);
+  await expect(page.getByTestId("workspace-ide-frame")).toBeVisible();
 
   await clickPrimaryTabUntilUrl(page, "Unified View", /\/u/);
   await expect(page.locator("[data-topic-card-id='topic-1']")).toBeVisible();

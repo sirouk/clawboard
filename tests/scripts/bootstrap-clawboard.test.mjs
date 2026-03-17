@@ -1678,7 +1678,14 @@ test("specialist contracts document dynamic clawboard repo resolution", async ()
       readFile(mainAgentPath, "utf8"),
     ]);
 
-  for (const text of [codingAgentText, docsAgentText, codingDirectiveText, docsDirectiveText]) {
+  // AGENTS.md templates use simplified shared-workspace language (symlink).
+  for (const text of [codingAgentText, docsAgentText]) {
+    assert.match(text, /projects\/clawboard/i);
+    assert.match(text, /Do not assume .*OPENCLAW_HOME.* set|Do not assume .*OPENCLAW_HOME.* exported/i);
+    assert.match(text, /share.*projects.*symlink|symlink.*projects/i);
+  }
+  // Directive files retain detailed dynamic resolution instructions.
+  for (const text of [codingDirectiveText, docsDirectiveText]) {
     assert.match(text, /configured OpenClaw workspaces|installation config/i);
     assert.match(text, /explicit path from the (task|delegated task)|current working tree/i);
     assert.match(text, /projects\/clawboard/i);

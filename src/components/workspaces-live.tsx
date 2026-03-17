@@ -1,12 +1,11 @@
 "use client";
 
-import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { startTransition, useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/cn";
 import { useOpenClawWorkspaces } from "@/components/providers";
 import { setLocalStorageItem } from "@/lib/local-storage";
-import { orderOpenClawWorkspaces, workspaceLabel, workspaceRoute } from "@/lib/openclaw-workspaces";
+import { orderOpenClawWorkspaces, workspaceLabel } from "@/lib/openclaw-workspaces";
 
 const WORKSPACE_LAST_URL_KEY = "clawboard.workspaces.lastUrl";
 
@@ -31,7 +30,6 @@ export function WorkspacesLive({
   active?: boolean;
 }) {
   const pathname = usePathname();
-  const router = useRouter();
   const { error, configured, workspaces } = useOpenClawWorkspaces();
   const [ideSessionStatus, setIdeSessionStatus] = useState<"idle" | "authorizing" | "ready" | "error">("idle");
   const [ideSessionError, setIdeSessionError] = useState<string | null>(null);
@@ -81,16 +79,6 @@ export function WorkspacesLive({
     () => mountedWorkspaceKeys.includes(normalizeAgentId(selectedWorkspace?.agentId)),
     [mountedWorkspaceKeys, selectedWorkspace?.agentId]
   );
-
-  const selectWorkspace = (agentId: string) => {
-    const normalized = normalizeAgentId(agentId);
-    if (!normalized) return;
-    const nextUrl = workspaceRoute(normalized);
-    setSelectedWorkspaceKey(normalized);
-    setMountedWorkspaceKeys((current) => (current.includes(normalized) ? current : [...current, normalized]));
-    setLocalStorageItem(WORKSPACE_LAST_URL_KEY, nextUrl);
-    router.replace(nextUrl, { scroll: false });
-  };
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -167,40 +155,6 @@ export function WorkspacesLive({
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-2" data-testid="workspace-chip-row">
-        {ordered.map((workspace) => {
-          const agentId = String(workspace.agentId || "").trim();
-          const normalizedAgentId = normalizeAgentId(agentId);
-          const label = workspaceLabel(agentId, workspace.agentName);
-          const selected = normalizeAgentId(selectedWorkspace?.agentId) === normalizedAgentId;
-          const preferred = Boolean(workspace.preferred) || normalizedAgentId === "coding";
-          return (
-            <Link
-              key={agentId}
-              href={workspaceRoute(agentId)}
-              data-testid={`open-workspace-${agentId}`}
-              onClick={(event) => {
-                event.preventDefault();
-                selectWorkspace(agentId);
-              }}
-              className={cn(
-                "inline-flex h-10 items-center gap-2 rounded-full border px-4 text-sm font-medium transition",
-                selected
-                  ? "border-[rgba(255,90,45,0.42)] bg-[linear-gradient(90deg,rgba(255,90,45,0.28),rgba(255,90,45,0.1))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.22)]"
-                  : preferred
-                    ? "border-[rgba(77,171,158,0.35)] bg-[rgba(77,171,158,0.12)] text-[rgb(var(--claw-text))] hover:border-[rgba(77,171,158,0.48)]"
-                    : "border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.45)] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
-              )}
-            >
-              <span>{label}</span>
-              {selected ? (
-                <span className="text-[10px] uppercase tracking-[0.16em] text-[rgba(255,198,179,0.95)]">Viewing</span>
-              ) : null}
-            </Link>
-          );
-        })}
-      </div>
-
       {!configured ? (
         <div className="rounded-[var(--radius-md)] border border-[rgba(255,90,45,0.24)] bg-[rgba(43,18,12,0.42)] px-3 py-2 text-sm text-[rgb(var(--claw-warning))]">
           Workspace IDE is not configured yet.

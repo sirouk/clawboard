@@ -4,6 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { SearchInput, Select } from "@/components/ui";
 import { useAppConfig, useOpenClawWorkspaces } from "@/components/providers";
 import { BoardWorkspaceHub } from "@/components/board-workspace-hub";
@@ -16,9 +17,6 @@ import { formatRelativeTime } from "@/lib/format";
 import {
   WORKSPACE_NAV_SYNC_EVENT,
   orderOpenClawWorkspaces,
-  workspaceDirLabel,
-  workspaceDirPrefix,
-  workspaceLabel,
   workspaceRoute,
 } from "@/lib/openclaw-workspaces";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
@@ -26,7 +24,7 @@ import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "
 import { buildTopicUrl, withFocusParam, withRevealParam, withSpaceParam } from "@/lib/url";
 import { getApiBase } from "@/lib/api";
 import { queueableApiMutation } from "@/lib/write-queue";
-import type { OpenClawWorkspace, Space, Topic } from "@/lib/types";
+import type { Space, Topic } from "@/lib/types";
 import { buildLatestTopicTouchById, deriveAttentionTopicIds, topicAttentionActivityAt } from "@/lib/topic-attention";
 import { compareByBoardOrder } from "@/lib/topic-order";
 
@@ -91,18 +89,6 @@ const ICONS: Record<string, React.ReactElement> = {
   ),
 };
 
-function GripIcon({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" className={cn("h-4 w-4", className)}>
-      <circle cx="7" cy="5" r="1" />
-      <circle cx="13" cy="5" r="1" />
-      <circle cx="7" cy="10" r="1" />
-      <circle cx="13" cy="10" r="1" />
-      <circle cx="7" cy="15" r="1" />
-      <circle cx="13" cy="15" r="1" />
-    </svg>
-  );
-}
 
 function SpacesIcon({ className }: { className?: string }) {
   return (
@@ -215,7 +201,7 @@ function topicMatchesSelectedSpace(
 
 const NAV_ITEMS = [
   { href: "/u", label: "Board", id: "home" },
-  { href: "/workspaces", label: "Workspaces", id: "workspaces" },
+  { href: "/workspaces", label: "Workspace", id: "workspaces" },
   { href: "/graph", label: "Graph", id: "graph" },
   { href: "/log", label: "Logs", id: "log" },
   { href: "/stats", label: "Stats", id: "stats" },
@@ -225,7 +211,6 @@ const NAV_ITEMS = [
 
 const BOARD_TOPICS_EXPANDED_KEY = "clawboard.board.topics.navExpanded";
 const BOARD_SPACES_EXPANDED_KEY = "clawboard.board.spaces.navExpanded";
-const WORKSPACES_EXPANDED_KEY = "clawboard.workspaces.navExpanded";
 const BOARD_TOPICS_SEARCH_KEY = "clawboard.board.topics.search";
 const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
 const WORKSPACE_LAST_URL_KEY = "clawboard.workspaces.lastUrl";
@@ -328,46 +313,6 @@ function StatusGlyph({ status, className }: { status: string; className?: string
   );
 }
 
-function normalizeWorkspaceAgentId(value: string | null | undefined) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function WorkspaceNavRow({
-  workspace,
-  pathLabel,
-  selected,
-}: {
-  workspace: OpenClawWorkspace;
-  pathLabel: string;
-  selected: boolean;
-}) {
-  const agentId = String(workspace.agentId || "").trim();
-  const label = workspaceLabel(agentId, workspace.agentName);
-  const href = workspaceRoute(agentId);
-
-  return (
-    <Link
-      href={href}
-      data-testid={`workspace-nav-${agentId}`}
-      aria-current={selected ? "page" : undefined}
-      className={cn(
-        "flex w-full items-center justify-between rounded-[var(--radius-sm)] border px-3 py-2 text-left text-xs transition",
-        selected
-          ? "border-[rgba(255,90,45,0.4)] bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.08))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.18)]"
-          : "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
-      )}
-    >
-      <span className="min-w-0 flex-1">
-        <span className="block truncate font-semibold">{label}</span>
-        <span className="mt-1 block truncate font-mono text-[10px] text-[rgba(148,163,184,0.82)]">{pathLabel}</span>
-      </span>
-      <span className="ml-3 shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.82)]">
-        View
-      </span>
-    </Link>
-  );
-}
-
 function HeaderRouteTabs({
   activeView,
   boardHref,
@@ -381,7 +326,7 @@ function HeaderRouteTabs({
 }) {
   const items = [
     { href: boardHref, label: "Unified View", id: "board" as const },
-    { href: workspaceHref, label: "Code Workspaces", id: "workspaces" as const },
+    { href: workspaceHref, label: "Code Workspace", id: "workspaces" as const },
   ];
   const router = useRouter();
 
@@ -440,25 +385,157 @@ function HeaderRouteTabs({
   );
 }
 
+const NAV_COLOR_PALETTE = [
+  "#FF1744", "#FF3D00", "#FF6D00", "#FF9100", "#FFAB00", "#FFC400", "#FFD600",
+  "#AEEA00", "#76FF03", "#64DD17", "#00E676", "#00C853", "#1DE9B6", "#00E5FF",
+  "#00B8D4", "#00B0FF", "#0091EA", "#2979FF", "#3D5AFE", "#536DFE", "#651FFF",
+  "#7C4DFF", "#AA00FF", "#D500F9", "#E040FB", "#F50057", "#FF4081", "#FF6E6E",
+  "#FF7F50", "#FF8F00", "#C6FF00", "#69F0AE", "#64FFDA", "#18FFFF", "#40C4FF",
+  "#82B1FF", "#B388FF", "#EA80FC", "#FF80AB", "#FF5252",
+];
+
+function navNormalizeHex(value: string | undefined | null) {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) return trimmed.toUpperCase();
+  return null;
+}
+
+function navColorFromSeed(seed: string) {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash = (hash << 5) - hash + seed.charCodeAt(i);
+    hash |= 0;
+  }
+  return NAV_COLOR_PALETTE[Math.abs(hash) % NAV_COLOR_PALETTE.length];
+}
+
+function resolveTopicColor(topic: Topic) {
+  return navNormalizeHex(topic.color) ?? navColorFromSeed(`topic:${topic.id}:${topic.name}`);
+}
+
+function NavColorPicker({
+  topicId,
+  currentColor,
+  position,
+  onPick,
+  onClose,
+}: {
+  topicId: string;
+  currentColor: string;
+  position: { top: number; left: number; openUp: boolean };
+  onPick: (topicId: string, color: string) => void;
+  onClose: () => void;
+}) {
+  const colorInputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    const handler = (event: MouseEvent) => {
+      const el = (event.target as HTMLElement)?.closest?.("[data-nav-color-menu]");
+      if (!el) onClose();
+    };
+    window.addEventListener("pointerdown", handler, true);
+    return () => window.removeEventListener("pointerdown", handler, true);
+  }, [onClose]);
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+  return createPortal(
+    <div
+      data-nav-color-menu
+      className="fixed z-[1200] rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(12,14,18,0.96)] p-2 shadow-[0_12px_28px_rgba(0,0,0,0.35)]"
+      style={{
+        top: position.top,
+        left: position.left,
+        transform: position.openUp ? "translateY(-100%)" : undefined,
+      }}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <div className="mb-2 grid grid-cols-5 gap-1.5">
+        {NAV_COLOR_PALETTE.map((candidate) => {
+          const normalized = navNormalizeHex(candidate) ?? candidate;
+          const selected = navNormalizeHex(currentColor) === normalized;
+          return (
+            <button
+              key={`nav-color-${topicId}-${normalized}`}
+              type="button"
+              aria-label={`Use color ${normalized}`}
+              title={normalized}
+              className={cn(
+                "h-7 w-7 rounded-[6px] border transition",
+                selected
+                  ? "border-white/70 shadow-[0_0_0_2px_rgba(255,255,255,0.18)]"
+                  : "border-[rgba(255,255,255,0.14)] hover:border-[rgba(255,255,255,0.32)]"
+              )}
+              style={{ backgroundColor: normalized }}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onPick(topicId, normalized);
+              }}
+            />
+          );
+        })}
+      </div>
+      <input
+        ref={colorInputRef}
+        type="color"
+        value={currentColor}
+        onChange={(event) => {
+          const next = navNormalizeHex(event.target.value);
+          if (!next) return;
+          onPick(topicId, next);
+        }}
+        className="sr-only"
+      />
+      <button
+        type="button"
+        className="inline-flex h-8 items-center justify-center rounded-full border border-[rgb(var(--claw-border))] px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))] transition hover:text-[rgb(var(--claw-text))]"
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          colorInputRef.current?.click();
+        }}
+      >
+        Custom
+      </button>
+    </div>,
+    document.body
+  );
+}
+
 function TopicNavRow({
   topic,
   selected,
   attentionCount,
   onGo,
-  onDoubleClick,
   reorderEnabled,
   dropActive,
   onReorderPointerDown,
+  onColorPick,
 }: {
   topic: Topic;
   selected: boolean;
   attentionCount: number;
   onGo: () => void;
-  onDoubleClick?: () => void;
   reorderEnabled: boolean;
   dropActive: boolean;
   onReorderPointerDown: (topicId: string, event: React.PointerEvent) => void;
+  onColorPick: (topicId: string, color: string) => void;
 }) {
+  const topicColor = resolveTopicColor(topic);
+  const [colorMenuPos, setColorMenuPos] = useState<{ top: number; left: number; openUp: boolean } | null>(null);
+  const closeColorMenu = useCallback(() => setColorMenuPos(null), []);
+  const handleColorPick = useCallback(
+    (tid: string, color: string) => {
+      setColorMenuPos(null);
+      onColorPick(tid, color);
+    },
+    [onColorPick]
+  );
   return (
     <div
       data-board-topic-id={topic.id}
@@ -471,7 +548,6 @@ function TopicNavRow({
       <button
         type="button"
         onClick={onGo}
-        onDoubleClick={onDoubleClick}
         className={cn(
           "flex w-full items-stretch gap-2 bg-transparent px-3 py-2 text-left text-xs",
           selected
@@ -489,27 +565,47 @@ function TopicNavRow({
               {attentionCount}
             </span>
           </span>
-        ) : reorderEnabled ? (
+        ) : (
           <span
             role="button"
             tabIndex={-1}
-            aria-label={`Reorder topic ${topic.name}`}
-            title={dropActive ? "Drop to reorder" : "Drag to reorder topics"}
-            onPointerDown={(event) => onReorderPointerDown(topic.id, event)}
+            aria-label={reorderEnabled ? `Drag to reorder topic ${topic.name}` : `Color for ${topic.name}`}
+            title={
+              dropActive
+                ? "Drop to reorder"
+                : reorderEnabled
+                  ? "Drag to reorder · Double-click to change color"
+                  : "Double-click to change color"
+            }
+            onPointerDown={(event) => {
+              if (reorderEnabled) onReorderPointerDown(topic.id, event);
+            }}
             onClick={(event) => {
-              // Prevent accidental navigation clicks when the user is just grabbing the handle.
               event.preventDefault();
               event.stopPropagation();
             }}
+            onDoubleClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+              const openUp = rect.bottom + 260 > window.innerHeight;
+              setColorMenuPos({
+                top: openUp ? rect.top : rect.bottom + 4,
+                left: Math.min(rect.left, window.innerWidth - 220),
+                openUp,
+              });
+            }}
             className={cn(
-              "flex w-7 shrink-0 items-center justify-center text-[rgb(var(--claw-muted))]",
-              "cursor-grab active:cursor-grabbing",
-              dropActive ? "text-[rgb(var(--claw-text))]" : ""
+              "flex w-7 shrink-0 items-center justify-center",
+              reorderEnabled ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"
             )}
           >
-            <GripIcon />
+            <span
+              className="inline-block h-3.5 w-3.5 rounded-full border border-[rgba(255,255,255,0.18)] shadow-[0_0_0_1px_rgba(0,0,0,0.18)]"
+              style={{ backgroundColor: topicColor }}
+            />
           </span>
-        ) : null}
+        )}
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
@@ -522,6 +618,15 @@ function TopicNavRow({
           </div>
         </div>
       </button>
+      {colorMenuPos ? (
+        <NavColorPicker
+          topicId={topic.id}
+          currentColor={topicColor}
+          position={colorMenuPos}
+          onPick={handleColorPick}
+          onClose={closeColorMenu}
+        />
+      ) : null}
     </div>
   );
 }
@@ -548,11 +653,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     sseConnected,
   } = useDataStore();
   const { instanceTitle, token, tokenRequired, tokenConfigured, remoteReadLocked } = useAppConfig();
-  const { configured: workspaceConfigured, workspaces: resolvedWorkspaces } = useOpenClawWorkspaces();
+  const { workspaces: resolvedWorkspaces } = useOpenClawWorkspaces();
   const collapsed = useLocalStorageItem("clawboard.navCollapsed") === "true";
   const boardSpacesExpanded = useLocalStorageItem(BOARD_SPACES_EXPANDED_KEY) !== "false";
   const boardTopicsExpanded = useLocalStorageItem(BOARD_TOPICS_EXPANDED_KEY) === "true";
-  const workspacesExpanded = useLocalStorageItem(WORKSPACES_EXPANDED_KEY) !== "false";
   const topicPanelSearch = useLocalStorageItem(BOARD_TOPICS_SEARCH_KEY) ?? "";
   const lastBoardUrlStored = useLocalStorageItem(BOARD_LAST_URL_KEY) ?? "";
   const lastWorkspaceUrlStored = useLocalStorageItem(WORKSPACE_LAST_URL_KEY) ?? "";
@@ -654,15 +758,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const apiBase = getApiBase();
   const showBoardTopics = boardTopicsExpanded && !collapsed;
   const orderedWorkspaces = useMemo(() => orderOpenClawWorkspaces(resolvedWorkspaces), [resolvedWorkspaces]);
-  const workspaceDirPrefixValue = useMemo(() => workspaceDirPrefix(orderedWorkspaces), [orderedWorkspaces]);
-  const activeWorkspaceNavKey = useMemo(() => {
-    const segments = browserPathname.split("/").filter(Boolean);
-    if (segments[0] !== "workspaces") return "";
-    const fromRoute = normalizeWorkspaceAgentId(segments[1] ?? "");
-    if (fromRoute) return fromRoute;
-    return normalizeWorkspaceAgentId(orderedWorkspaces[0]?.agentId);
-  }, [browserPathname, orderedWorkspaces]);
-  const showWorkspaceNav = !collapsed && workspacesExpanded && orderedWorkspaces.length > 0;
   const boardSurfaceActive = useMemo(() => isUnifiedRoutePath(browserPathname), [browserPathname]);
   const workspaceSurfaceActive = useMemo(() => isWorkspaceRoutePath(browserPathname), [browserPathname]);
   const showBoardWorkspaceTabs = boardSurfaceActive || workspaceSurfaceActive;
@@ -756,13 +851,14 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const handleBrandToggleClick = useCallback(
     (event: React.MouseEvent<HTMLAnchorElement>) => {
       if (typeof window === "undefined") return;
-      // Desktop sidebar affordance: logo toggles expand/collapse.
-      // On mobile, preserve existing behavior (navigate to board route).
+      // Desktop sidebar affordance: logo toggles expand/collapse and navigates to board.
+      // On mobile, preserve existing behavior (navigate to board route via href).
       if (!window.matchMedia("(min-width: 1024px)").matches) return;
       event.preventDefault();
       toggleCollapsed();
+      router.push("/u");
     },
-    [toggleCollapsed]
+    [router, toggleCollapsed]
   );
   const navToggleLabel = collapsed ? "Expand navigation" : "Collapse navigation";
 
@@ -1069,6 +1165,35 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     ]
   );
 
+  const patchTopicColor = useCallback(
+    async (topicId: string, color: string) => {
+      if (readOnly) return;
+      const current = topics.find((t) => t.id === topicId);
+      if (!current) return;
+      const snapshot = topics;
+      setTopics((prev) => prev.map((t) => (t.id === topicId ? { ...t, color } : t)));
+      try {
+        const res = await queueableApiMutation(
+          `/api/topics/${encodeURIComponent(topicId)}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ color }),
+          },
+          {
+            token,
+            queuedResponse: { ...current, color, updatedAt: new Date().toISOString(), queued: true },
+          }
+        );
+        if (!res.ok) throw new Error(`Failed to update topic color (${res.status}).`);
+      } catch (err) {
+        setTopics(snapshot);
+        console.error(err);
+      }
+    },
+    [readOnly, setTopics, token, topics]
+  );
+
   const beginPointerTopicReorder = useCallback(
     (topicId: string, event: React.PointerEvent) => {
       if (!boardTopicReorderEnabled) return;
@@ -1165,6 +1290,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                             onChange={(event) => {
                               const next = String(event.target.value || "").trim();
                               setLocalStorageItem(ACTIVE_SPACE_KEY, next);
+                              router.push("/u");
                             }}
                             className="h-8 min-w-[130px] max-w-[52vw] rounded-full px-2.5 py-0 text-[11px]"
                             aria-label="Active space"
@@ -1335,6 +1461,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                           onClick={() => {
                             setLocalStorageItem(ACTIVE_SPACE_KEY, "");
                             setLocalStorageItem(BOARD_SPACES_EXPANDED_KEY, "false");
+                            router.push("/u");
                           }}
                           className={cn(
                             "w-full rounded-full px-3 py-2 text-left text-xs transition",
@@ -1361,6 +1488,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                                 onClick={() => {
                                   setLocalStorageItem(ACTIVE_SPACE_KEY, space.id);
                                   setLocalStorageItem(BOARD_SPACES_EXPANDED_KEY, "false");
+                                  router.push("/u");
                                 }}
                                 className={cn(
                                   "w-full rounded-full px-3 py-2 text-left text-xs transition",
@@ -1400,7 +1528,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 		                  const active = isItemActive(item.href);
 		                  const isBoardItem = item.href === "/u";
                       const isWorkspaceItem = item.href === "/workspaces";
-		                  const expanded = isBoardItem ? showBoardTopics : isWorkspaceItem ? showWorkspaceNav : false;
+		                  const expanded = isBoardItem ? showBoardTopics : false;
                       const showBoardAttentionCount = isBoardItem && hiddenBoardAttentionCount > 0;
 	
 	                  const navLink = (
@@ -1408,16 +1536,11 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                      key={item.href}
 	                      href={resolvedHref}
 		                      onClick={(event) => {
-		                        const isToggleItem = isBoardItem || isWorkspaceItem;
-		                        if (!isToggleItem) return;
+		                        if (!isBoardItem) return;
 		                        if (!active) return;
 		                        if (collapsed) return;
 		                        event.preventDefault();
-		                        if (isBoardItem) {
-		                          setLocalStorageItem(BOARD_TOPICS_EXPANDED_KEY, showBoardTopics ? "false" : "true");
-		                        } else if (isWorkspaceItem) {
-                                  setLocalStorageItem(WORKSPACES_EXPANDED_KEY, workspacesExpanded ? "false" : "true");
-		                        }
+		                        setLocalStorageItem(BOARD_TOPICS_EXPANDED_KEY, showBoardTopics ? "false" : "true");
 		                      }}
                       title={collapsed ? item.label : undefined}
                       className={cn(
@@ -1429,7 +1552,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                       )}
 		                      aria-label={item.label}
 		                      aria-current={active ? "page" : undefined}
-		                      aria-expanded={isBoardItem || isWorkspaceItem ? expanded : undefined}
+		                      aria-expanded={isBoardItem ? expanded : undefined}
 		                    >
                       <span className="flex items-center gap-2">
                         <span className="flex h-4 w-4 items-center justify-center text-current">
@@ -1443,37 +1566,13 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                         </span>
                         {!collapsed && <span>{item.label}</span>}
                       </span>
-		                      {!collapsed && (isBoardItem || isWorkspaceItem) ? (
+		                      {!collapsed && isBoardItem ? (
 		                        <span className="text-xs uppercase tracking-[0.2em]">{expanded ? "▾" : "▸"}</span>
 		                      ) : null}
 		                    </Link>
 		                  );
 		
-                      if (isWorkspaceItem) {
-                        return (
-                          <div key={item.href} className="flex flex-col gap-2">
-                            {navLink}
-                            {showWorkspaceNav && (
-                              <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.18)] p-3">
-                                <div className="mb-2 flex items-center justify-between gap-2 text-[10px] uppercase tracking-[0.18em] text-[rgb(var(--claw-muted))]">
-                                  <span>{workspaceConfigured ? "Workspace tabs" : "Workspace paths"}</span>
-                                  <span>{orderedWorkspaces.length}</span>
-                                </div>
-                                <div className="space-y-2">
-                                  {orderedWorkspaces.map((workspace) => (
-                                    <WorkspaceNavRow
-                                      key={workspace.agentId}
-                                      workspace={workspace}
-                                      pathLabel={workspaceDirLabel(workspace.workspaceDir, workspaceDirPrefixValue)}
-                                      selected={normalizeWorkspaceAgentId(workspace.agentId) === activeWorkspaceNavKey}
-                                    />
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      }
+                      if (isWorkspaceItem) return navLink;
 
 		                  if (!isBoardItem) return navLink;
 		
@@ -1530,6 +1629,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                                    reorderEnabled={boardTopicReorderEnabled}
 			                                    dropActive={dropActive}
 			                                    onReorderPointerDown={beginPointerTopicReorder}
+			                                    onColorPick={patchTopicColor}
 			                                  />
 			                                );
 			                              })

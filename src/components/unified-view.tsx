@@ -2953,16 +2953,13 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         if (visibleCount >= initialLimit) break;
       }
     }
-    for (let i = all.length - 1; i >= 0; i -= 1) {
-      const entry = all[i];
-      const type = String(entry.type ?? "")
-        .trim()
-        .toLowerCase();
-      const agentId = String(entry.agentId ?? "")
-        .trim()
-        .toLowerCase();
-      if (type !== "conversation" || agentId !== "user") continue;
-      return Math.min(fallback, i);
+    // Snap back to the nearest user-message boundary at or before fallback.
+    // This ensures the visible slice always starts at the beginning of a user turn,
+    // never mid-turn at an orphaned assistant or action entry.
+    for (let i = fallback; i >= 0; i -= 1) {
+      const eType = String(all[i].type ?? "").trim().toLowerCase();
+      const eAgent = String(all[i].agentId ?? "").trim().toLowerCase();
+      if (eType === "conversation" && eAgent === "user") return i;
     }
     return fallback;
   };
@@ -3016,41 +3013,25 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
       if (chatHistoryLoadingOlderRef.current.has(key)) return;
       chatHistoryLoadingOlderRef.current.add(key);
       chatHistoryLoadedOlderRef.current.add(key);
-      const scroller = chatScrollers.current.get(key) ?? null;
-      const beforeTop = scroller?.scrollTop ?? 0;
-      const beforeHeight = scroller?.scrollHeight ?? 0;
       let changed = false;
 
       setChatHistoryStarts((prev) => {
-        const current = computeChatStart(prev, key, len, initialLimit);
+        const current = computeChatStart(prev, key, len, initialLimit, allLogs);
         const nextStart = computeOlderChatStart(allLogs, current, userTurns);
         if (nextStart >= current) return prev;
         changed = true;
         return { ...prev, [key]: nextStart };
       });
 
-      if (!changed) {
-        window.setTimeout(() => {
-          chatHistoryLoadingOlderRef.current.delete(key);
-        }, 90);
-        return;
-      }
-
-      if (!scroller) {
-        window.setTimeout(() => {
-          chatHistoryLoadingOlderRef.current.delete(key);
-        }, 90);
-        return;
-      }
+      // Release the debounce guard after a frame so the browser's overflow-anchor
+      // has finished adjusting scroll position before we allow the next load.
+      // We deliberately do NOT set scrollTop here — the container's overflow-anchor: auto
+      // behaviour maintains the current content's visual position without cancelling
+      // the user's scroll momentum.
       window.requestAnimationFrame(() => {
-        const node = chatScrollers.current.get(key);
-        if (!node) return;
-        const afterHeight = node.scrollHeight;
-        const delta = afterHeight - beforeHeight;
-        node.scrollTop = beforeTop + delta;
         window.setTimeout(() => {
           chatHistoryLoadingOlderRef.current.delete(key);
-        }, 90);
+        }, changed ? 90 : 0);
       });
     },
     [computeChatStart, computeOlderChatStart, setChatHistoryStarts]
@@ -6126,6 +6107,14 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     setChatHistoryStarts((prev) => {
       let changed = false;
       const next = { ...prev };
+      for (const topicId of expandedTopicsSafe) {
+        const key = chatKeyForTask(topicId);
+        if (Object.prototype.hasOwnProperty.call(prev, key)) continue;
+        const all = topicChatLogsByTopicAll.get(topicId) ?? [];
+        const start = computeDefaultChatStart(all, TASK_TIMELINE_LIMIT, showToolCalls);
+        next[key] = start;
+        changed = true;
+      }
       for (const taskId of expandedTasksSafe) {
         const key = chatKeyForTask(taskId);
         if (Object.prototype.hasOwnProperty.call(prev, key)) continue;
@@ -6136,7 +6125,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
       }
       return changed ? next : prev;
     });
-  }, [expandedTasksSafe, hydrated, logsByTaskAll, showToolCalls]);
+  }, [expandedTasksSafe, expandedTopicsSafe, hydrated, logsByTaskAll, topicChatLogsByTopicAll, showToolCalls]);
 
   const pushUrl = useCallback(
     (
@@ -7030,12 +7019,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
           const topicChatBlurb = deriveChatHeaderBlurb(topicChatAllLogs);
           const topicChatKey = chatKeyForTask(topicId);
           const topicChatSessionKey = topicSessionKey(topicId);
-          const topicWorkspaceAttention = deriveTaskWorkspaceAttention(
-            topicChatAllLogs,
-            workspaceByAgentId,
-            topicChatSessionKey,
-            workspaceAttentionSeenByKey
-          );
+
           const topicHiddenToolCallCount = hiddenToolCallCountForSession(topicChatSessionKey);
           const topicResponding = isSessionResponding(topicChatSessionKey);
           const normalizedTopicStatus = String(topic.status ?? "active").trim().toLowerCase();
@@ -7099,9 +7083,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
           const topicNameEditHandlers = buildTopicInlineEditGestureHandlers(topic, topicColor, "name");
           const topicTagsEditHandlers = buildTopicInlineEditGestureHandlers(topic, topicColor, "tags");
           const topicColorEditHandlers = buildTopicInlineEditGestureHandlers(topic, topicColor, "color");
-          const topicWorkspacePathLabel = topicWorkspaceAttention
-            ? workspaceDirDisplay(topicWorkspaceAttention.workspace.workspaceDir)
-            : "";
+
 
 	          const swipeActions = isUnassigned ? (
 	            <button
@@ -7782,34 +7764,6 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                               {topicChatMetricsLabel}
                             </span>
                           </div>
-                          {topicWorkspaceAttention ? (
-                            <div
-                              className={cn(
-                                "mb-2 flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-md)] border px-3 py-2 text-xs",
-                                "border-[rgba(77,171,158,0.28)] bg-[rgba(16,27,26,0.42)]"
-                              )}
-                            >
-                              <div className="min-w-0">
-                                <div className="text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-accent-2))]">
-                                  {topicWorkspaceAttention.hint}
-                                </div>
-                                <div
-                                  className="overflow-x-auto whitespace-nowrap text-[rgb(var(--claw-muted))]"
-                                  title={topicWorkspaceAttention.workspace.workspaceDir}
-                                >
-                                  {topicWorkspacePathLabel}
-                                </div>
-                              </div>
-                              <Link
-                                href={workspaceRoute(topicWorkspaceAttention.agentId)}
-                                data-testid={`topic-chat-workspace-link-${topic.id}`}
-                                onClick={() => markWorkspaceAttentionSeen(topicWorkspaceAttention)}
-                                className="inline-flex h-8 shrink-0 items-center justify-center rounded-full border border-[rgba(77,171,158,0.35)] bg-[rgba(77,171,158,0.14)] px-3 text-[11px] font-semibold text-[rgb(var(--claw-text))] transition hover:border-[rgba(255,90,45,0.35)] hover:text-[rgb(var(--claw-text))]"
-                              >
-                                {topicWorkspaceAttention.label}
-                              </Link>
-                            </div>
-                          ) : null}
                           {topicChatAllLogs.length === 0 &&
                           findPendingMessagesBySession(topicChatSessionKey).length === 0 &&
                           !isSessionResponding(topicChatSessionKey) ? (
