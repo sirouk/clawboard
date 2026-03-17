@@ -74,7 +74,7 @@ class SharedDomainContractTests(unittest.TestCase):
 
     @property
     def auth_headers(self) -> dict[str, str]:
-        return {"X-Clawboard-Token": "test-token"}
+        return {"X-ClawBoard-Token": "test-token"}
 
     def test_topics_contract_is_array_and_sorted_for_shared_read(self):
         with get_session() as session:

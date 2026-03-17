@@ -21,12 +21,12 @@ from vector_maintenance import (  # noqa: E402
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="One-time cleanup pass for Clawboard embeddings (stale + non-semantic vectors).",
+        description="One-time cleanup pass for ClawBoard embeddings (stale + non-semantic vectors).",
     )
     parser.add_argument(
         "--clawboard-db",
         default=resolve_clawboard_db_path(),
-        help="Path to Clawboard sqlite DB (default: resolved from CLAWBOARD_DB_URL or ./data/clawboard.db).",
+        help="Path to ClawBoard sqlite DB (default: resolved from CLAWBOARD_DB_URL or ./data/clawboard.db).",
     )
     parser.add_argument(
         "--embeddings-db",

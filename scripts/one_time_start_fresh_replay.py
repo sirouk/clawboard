@@ -75,7 +75,7 @@ def _admin_reset(api_base: str, token: str, integration_level: str) -> None:
     body = json.dumps({"integrationLevel": integration_level, "replayMode": "fresh"}).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if token:
-        headers["X-Clawboard-Token"] = token
+        headers["X-ClawBoard-Token"] = token
 
     last_error: Exception | None = None
     for attempt in range(6):

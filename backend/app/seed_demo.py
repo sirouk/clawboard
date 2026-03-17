@@ -26,7 +26,7 @@ def seed_from_fixture(session, fixture: dict):
     instance = fixture.get("instance") or {}
     inst = InstanceConfig(
         id=1,
-        title=instance.get("title", "Clawboard"),
+        title=instance.get("title", "ClawBoard"),
         integrationLevel=instance.get("integrationLevel", "manual"),
         updatedAt=instance.get("updatedAt", ""),
     )
@@ -43,7 +43,7 @@ def seed_from_fixture(session, fixture: dict):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Seed Clawboard demo data into the configured runtime database.")
+    parser = argparse.ArgumentParser(description="Seed ClawBoard demo data into the configured runtime database.")
     parser.add_argument("--fixture", default="/tmp/portal.json", help="Path to fixture JSON")
     parser.add_argument("--reset", action="store_true", help="Reset database before seeding")
     parser.add_argument("--reset-only", action="store_true", help="Only reset database")

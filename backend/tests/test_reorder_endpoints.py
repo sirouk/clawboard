@@ -50,7 +50,7 @@ class ReorderEndpointTests(unittest.TestCase):
 
     @property
     def auth_headers(self) -> dict[str, str]:
-        return {"X-Clawboard-Token": "test-token"}
+        return {"X-ClawBoard-Token": "test-token"}
 
     def test_topics_reorder_updates_sort_index(self):
         ts = now_iso()

@@ -8,7 +8,7 @@ const resolveToken = () =>
 
 const authHeaders = (token: string): Record<string, string> => {
   if (!token) return {};
-  return { "X-Clawboard-Token": token };
+  return { "X-ClawBoard-Token": token };
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -110,7 +110,7 @@ test.describe("live stack smoke", () => {
       });
     } catch (error) {
       throw new Error(
-        `Live stack API unreachable at ${apiBase}. Ensure Clawboard services are running and PLAYWRIGHT_API_BASE is correct. ${String(error)}`
+        `Live stack API unreachable at ${apiBase}. Ensure ClawBoard services are running and PLAYWRIGHT_API_BASE is correct. ${String(error)}`
       );
     }
     if (createTopic.status() === 401 || createTopic.status() === 403) {

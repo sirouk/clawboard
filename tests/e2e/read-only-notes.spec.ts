@@ -11,7 +11,7 @@ test("read-only mode keeps note composer visible but disabled", async ({ page })
       contentType: "application/json",
       body: JSON.stringify({
         instance: {
-          title: "Clawboard",
+          title: "ClawBoard",
           integrationLevel: "manual",
           updatedAt: "2026-02-06T00:00:00.000Z",
         },

@@ -817,7 +817,7 @@ configure_qmd_memory_boost() {
   log_info "Detected memory.backend=qmd; applying qmd-side tuning."
   set_cfg memory.qmd.includeDefaultMemory true json true
   # Keep session transcripts out of QMD. We intentionally route continuity/state recovery
-  # through Clawboard context/search, while QMD remains documentation/thinking-vault focused.
+  # through ClawBoard context/search, while QMD remains documentation/thinking-vault focused.
   # This avoids session transcript chunks crowding out documentation recall.
   set_cfg memory.qmd.sessions.enabled false json true
   set_cfg memory.qmd.update.interval "5m" string false
@@ -1079,7 +1079,7 @@ PY
 
   run_cfg_set "${base}.subagents.allowAgents" "$allow_agents_json" json true
 
-  # Explicit allow: delegation + memory + Clawboard ledger + image inspection for staged attachments.
+  # Explicit allow: delegation + memory + ClawBoard ledger + image inspection for staged attachments.
   # cron allows durable one-shot follow-up jobs per delegation.
   # image lets main inspect screenshot-style attachments directly inside its own workspace.
   # clawboard_* tools allow reading/writing the external topic ledger for restart-resilient state recovery.
@@ -1115,7 +1115,7 @@ PY
   run_cfg_set "${base}.heartbeat.every" "5m" string true
   run_cfg_set "${base}.heartbeat.target" "last" string true
   run_cfg_set "${base}.heartbeat.prompt" \
-    "Heartbeat: (1) read the Clawboard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call clawboard_search(\"delegating\") as a backup sweep; (3) for each tagged child session key, call session_status(sessionKey=<childSessionKey>); (4) enforce follow-up ladder 1m->3m->10m->15m->30m->1h (cap 1h): each in-flight delegation must have a one-shot cron follow-up and the next wait must come from this ladder; (5) if any queued sub-agent completion message is present, treat it as an internal supervision wake-up, read the current task thread first, and if the result is already visible there, do not restate or paraphrase the full body or re-dispatch the same specialists; if sibling specialists from the same workflow are still active, keep partial results internal unless they change the user's next decision or the user has gone >5m without a visible update; do not send a user-facing message that only says you are checking or waiting on the remaining specialists; close the loop with validation, key delta/caveats, and a clear satisfied-or-blocked status; (6) if any tagged run is missing or terminal without a relayed result: re-spawn and reset follow-up to +1m; (7) if any run is still active beyond 5 minutes, send the user a brief status update with next check ETA; if nothing materially changed and the last visible status is newer than 5 minutes, do not send another status-only update. If nothing needs attention, reply HEARTBEAT_OK." \
+    "Heartbeat: (1) read the ClawBoard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call clawboard_search(\"delegating\") as a backup sweep; (3) for each tagged child session key, call session_status(sessionKey=<childSessionKey>); (4) enforce follow-up ladder 1m->3m->10m->15m->30m->1h (cap 1h): each in-flight delegation must have a one-shot cron follow-up and the next wait must come from this ladder; (5) if any queued sub-agent completion message is present, treat it as an internal supervision wake-up, read the current task thread first, and if the result is already visible there, do not restate or paraphrase the full body or re-dispatch the same specialists; if sibling specialists from the same workflow are still active, keep partial results internal unless they change the user's next decision or the user has gone >5m without a visible update; do not send a user-facing message that only says you are checking or waiting on the remaining specialists; close the loop with validation, key delta/caveats, and a clear satisfied-or-blocked status; (6) if any tagged run is missing or terminal without a relayed result: re-spawn and reset follow-up to +1m; (7) if any run is still active beyond 5 minutes, send the user a brief status update with next check ETA; if nothing materially changed and the last visible status is newer than 5 minutes, do not send another status-only update. If nothing needs attention, reply HEARTBEAT_OK." \
     string true
   run_cfg_set "${base}.heartbeat.ackMaxChars" 300 json true
 
@@ -1158,8 +1158,8 @@ jobs[:] = [j for j in jobs if "watchdog" not in j.get("name", "").lower()]
 now_ms = int(time.time() * 1000)
 watchdog_text = (
     "WATCHDOG RECOVERY:\n"
-    "1. Call clawboard_search(\"delegating\") to find all topics tagged \"delegating\" in Clawboard.\n"
-    "2. For each Clawboard topic with status \"doing\": extract childSessionKey from tag starting with \"session:\", "
+    "1. Call clawboard_search(\"delegating\") to find all topics tagged \"delegating\" in ClawBoard.\n"
+    "2. For each ClawBoard topic with status \"doing\": extract childSessionKey from tag starting with \"session:\", "
     "extract agentId from tag starting with \"agent:\". Call session_status(childSessionKey). "
     "COMPLETE (queued sub-agent result already arrived): treat this as an internal supervision wake-up, not a fresh user request; read the current topic thread before any extra tool call or ledger write; if the result is already visible there, do not restate or paraphrase the full body or re-dispatch the same specialists; validate the work, add only the key delta/caveats, clawboard_update_topic(topicId, { status: \"done\", tags: [] }), and close the loop with the user. "
     "STILL RUNNING: send brief status if >5 minutes and include next check ETA from ladder [1,3,10,15,30,60] minutes. "
@@ -1190,7 +1190,7 @@ with open(cron_file, "w") as f:
 
 print(f"Watchdog cron job upserted in {cron_file}")
 PY
-  log_success "Sub-agent watchdog cron job upserted (every 5m, main session, Clawboard-aware)."
+  log_success "Sub-agent watchdog cron job upserted (every 5m, main session, ClawBoard-aware)."
 }
 
 main() {
@@ -1238,7 +1238,7 @@ main() {
   echo "Main allowAgents: $MAIN_ALLOW_AGENTS_JSON"
   echo ""
   echo "Delegation tools: sessions_spawn, session_status, sessions_list, sessions_send, cron"
-  echo "Clawboard ledger tools: clawboard_search, clawboard_update_topic, clawboard_get_topic, clawboard_update_task, clawboard_context, clawboard_get_task"
+  echo "ClawBoard ledger tools: clawboard_search, clawboard_update_topic, clawboard_get_topic, clawboard_update_task, clawboard_context, clawboard_get_task"
   echo "Delegation check-in cadence: 1m -> 3m -> 10m -> 15m -> 30m -> 1h (cap 1h; >5m user updates)"
   echo "Follow-up guarantee: heartbeat watchdog + session-start clawboard_search + delegation cron ladder"
 }

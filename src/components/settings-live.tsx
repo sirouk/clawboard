@@ -6,6 +6,7 @@ import { useAppConfig } from "@/components/providers";
 import { useDataStore } from "@/components/data-provider";
 import { apiFetch, getApiBase, setApiBase } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { getSpaceDefaultVisibility } from "@/lib/space-visibility";
 import { setPwaBadge, showPwaNotification, usePwaNotifications, usePwaBadging } from "@/lib/pwa-utils";
 import type { IntegrationLevel, Space, Topic } from "@/lib/types";
@@ -175,6 +176,13 @@ export function SettingsLive() {
   const [testPwaPending, setTestPwaPending] = useState(false);
   const [testPwaStatus, setTestPwaStatus] = useState<string | null>(null);
   const testPwaTimerRef = useRef<number | null>(null);
+  const [resetArmed, setResetArmed] = useState(false);
+  const [resetRunning, setResetRunning] = useState(false);
+
+  const showFullMessagesRaw = useLocalStorageItem("clawboard.display.showFullMessages");
+  const showFullMessages = showFullMessagesRaw !== "false";
+  const showToolCallsRaw = useLocalStorageItem("clawboard.display.showToolCalls");
+  const showToolCallsSetting = showToolCallsRaw === "true";
 
   useEffect(() => setLocalTitle(instanceTitle), [instanceTitle]);
   useEffect(() => setLocalIntegration(integrationLevel), [integrationLevel]);
@@ -262,14 +270,14 @@ export function SettingsLive() {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            title: localTitle.trim() || "Clawboard",
+            title: localTitle.trim() || "ClawBoard",
             integrationLevel: localIntegration,
           }),
         },
         localToken.trim()
       );
       if (!res.ok) throw new Error("Failed to update instance settings.");
-      setInstanceTitle(localTitle.trim() || "Clawboard");
+      setInstanceTitle(localTitle.trim() || "ClawBoard");
       setIntegrationLevel(localIntegration);
       setToken(localToken.trim());
       setMessage("Settings saved.");
@@ -538,7 +546,7 @@ export function SettingsLive() {
           await setPwaBadge(1);
           const sent = await showPwaNotification(
             {
-              title: "Clawboard test ping",
+              title: "ClawBoard test ping",
               body: "This is your delayed test notification + badge.",
               tag: "clawboard-test-pwa",
               data: { url: "/settings" },
@@ -576,7 +584,7 @@ export function SettingsLive() {
         <div className="grid gap-3 md:grid-cols-2">
           <div>
             <label className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Instance Name</label>
-            <Input value={localTitle} onChange={(event) => setLocalTitle(event.target.value)} placeholder="Clawboard" />
+            <Input value={localTitle} onChange={(event) => setLocalTitle(event.target.value)} placeholder="ClawBoard" />
           </div>
           <div>
             <label className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Integration</label>
@@ -613,6 +621,51 @@ export function SettingsLive() {
               Token required to apply write-side settings and space visibility changes.
             </span>
           ) : null}
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div>
+            <h2 className="text-lg font-semibold">Display</h2>
+            <p className="mt-1 text-sm text-[rgb(var(--claw-muted))]">
+              Control how chat messages appear on the board.
+            </p>
+          </div>
+        </CardHeader>
+        <div className="space-y-6">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold">Show Full Messages</h3>
+              <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
+                Display the complete content of each chat message instead of a condensed summary.
+              </p>
+            </div>
+            <div className="flex flex-none items-center">
+              <Switch
+                checked={showFullMessages}
+                onCheckedChange={(checked) =>
+                  setLocalStorageItem("clawboard.display.showFullMessages", checked ? "true" : "false")
+                }
+              />
+            </div>
+          </div>
+          <div className="flex items-center justify-between gap-4 border-t border-[rgb(var(--claw-border))] pt-6">
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold">Show Tool Calls</h3>
+              <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
+                Show tool call entries (code execution, file reads, API requests) in chat logs.
+              </p>
+            </div>
+            <div className="flex flex-none items-center">
+              <Switch
+                checked={showToolCallsSetting}
+                onCheckedChange={(checked) =>
+                  setLocalStorageItem("clawboard.display.showToolCalls", checked ? "true" : "false")
+                }
+              />
+            </div>
+          </div>
         </div>
       </Card>
 
@@ -906,7 +959,7 @@ export function SettingsLive() {
             <div className="flex-1">
               <h3 className="text-sm font-semibold">Allow Push Notifications</h3>
               <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
-                Globally enable or disable notifications from Clawboard.
+                Globally enable or disable notifications from ClawBoard.
               </p>
             </div>
             <div className="flex flex-none items-center">
@@ -951,6 +1004,98 @@ export function SettingsLive() {
               </div>
             </div>
           </div>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div>
+            <h2 className="text-lg font-semibold">Reset Local Data</h2>
+            <p className="mt-1 text-sm text-[rgb(var(--claw-muted))]">
+              Clear all local storage, IndexedDB caches, and reload to re-sync from the server.
+              Your remote data is not affected.
+            </p>
+          </div>
+        </CardHeader>
+        <div className="flex flex-wrap items-center gap-3">
+          {!resetArmed ? (
+            <Button
+              variant="secondary"
+              onClick={() => setResetArmed(true)}
+              disabled={resetRunning}
+            >
+              Reset local data…
+            </Button>
+          ) : (
+            <>
+              <Button
+                disabled={resetRunning}
+                onClick={async () => {
+                  setResetRunning(true);
+                  const deleteIdb = (name: string) =>
+                    new Promise<void>((resolve) => {
+                      try {
+                        const req = window.indexedDB.deleteDatabase(name);
+                        req.onsuccess = () => resolve();
+                        req.onerror = () => resolve();
+                        req.onblocked = () => resolve();
+                      } catch {
+                        resolve();
+                      }
+                    });
+                  try {
+                    window.localStorage.clear();
+                    window.sessionStorage.clear();
+                    // Delete known databases by name (works everywhere)
+                    await Promise.allSettled([
+                      deleteIdb("clawboard-board-cache"),
+                      deleteIdb("clawboard-write-queue"),
+                    ]);
+                    // Also enumerate and delete any others if the API is available
+                    if (typeof window.indexedDB.databases === "function") {
+                      try {
+                        const dbs = await window.indexedDB.databases();
+                        await Promise.allSettled(
+                          dbs
+                            .map((db) => db.name)
+                            .filter((name): name is string => Boolean(name))
+                            .map(deleteIdb)
+                        );
+                      } catch {
+                        // databases() not supported — known DBs already deleted above
+                      }
+                    }
+                    // Clear Cache API (service worker caches)
+                    if (typeof caches !== "undefined") {
+                      try {
+                        const keys = await caches.keys();
+                        await Promise.allSettled(keys.map((key) => caches.delete(key)));
+                      } catch {
+                        // ok
+                      }
+                    }
+                    // Unregister service workers
+                    if (navigator.serviceWorker) {
+                      try {
+                        const registrations = await navigator.serviceWorker.getRegistrations();
+                        await Promise.allSettled(registrations.map((r) => r.unregister()));
+                      } catch {
+                        // ok
+                      }
+                    }
+                  } catch (err) {
+                    console.error("Reset failed:", err);
+                  }
+                  window.location.replace("/u");
+                }}
+              >
+                {resetRunning ? "Resetting…" : "Confirm reset & reload"}
+              </Button>
+              <Button variant="secondary" onClick={() => setResetArmed(false)} disabled={resetRunning}>
+                Cancel
+              </Button>
+            </>
+          )}
         </div>
       </Card>
     </div>

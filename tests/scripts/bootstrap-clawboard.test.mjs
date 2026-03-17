@@ -427,7 +427,7 @@ done
 
 token_ok="0"
 for header in "\${headers[@]}"; do
-  if [[ "$header" == "X-Clawboard-Token: $expected_token" ]]; then
+  if [[ "$header" == "X-ClawBoard-Token: $expected_token" ]]; then
     token_ok="1"
     break
   fi
@@ -913,8 +913,8 @@ test("bootstrap_clawboard.sh: uses CLAWBOARD_TOKEN for API health and config wri
   );
 
   assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
-  assert.match(res.stdout, /Clawboard API is reachable at http:\/\/localhost:8010\/api\/health/);
-  assert.match(res.stdout, /Clawboard config set: title=Clawboard, integrationLevel=write\./);
+  assert.match(res.stdout, /ClawBoard API is reachable at http:\/\/localhost:8010\/api\/health/);
+  assert.match(res.stdout, /ClawBoard config set: title=ClawBoard, integrationLevel=write\./);
   assert.doesNotMatch(res.stdout, /Skipping \/api\/config update until API is reachable/);
 
   const curlLog = await readFile(curlLogPath, "utf8");
@@ -1721,7 +1721,7 @@ test("main-agent orchestration contract documents runtime model, specialist map,
   ]);
 
   assert.match(agentsText, /OpenClaw.*runtime/i);
-  assert.match(agentsText, /Clawboard.*durable ledger/i);
+  assert.match(agentsText, /ClawBoard.*durable ledger/i);
   assert.match(agentsText, /coding.*docs.*web.*social/is);
   assert.match(agentsText, /user decision|missing constraints|blocked/i);
   assert.match(agentsText, /session_status/i);
@@ -1735,7 +1735,7 @@ test("main-agent orchestration contract documents runtime model, specialist map,
   assert.match(agentsText, /very next action.*plain-text user update/i);
 
   assert.match(soulText, /OpenClaw.*sessions.*cron/i);
-  assert.match(soulText, /Clawboard.*durable external ledger/i);
+  assert.match(soulText, /ClawBoard.*durable external ledger/i);
   assert.match(soulText, /coding.*docs.*web.*social/is);
   assert.match(soulText, /blocker requires a user decision/i);
   assert.match(soulText, /do not parrot|do not repeat the full body/i);
@@ -1759,7 +1759,7 @@ test("main-agent orchestration contract documents runtime model, specialist map,
   assert.match(bootstrapText, /checking the others|awaiting the rest/i);
   assert.match(bootstrapText, /before any extra tool call or (task|ledger) write/i);
   assert.match(directiveText, /OpenClaw is the runtime/i);
-  assert.match(directiveText, /Clawboard is the durable ledger/i);
+  assert.match(directiveText, /ClawBoard is the durable ledger/i);
   assert.match(directiveText, /user decision/i);
   assert.match(directiveText, /do not parrot the full body back/i);
   assert.match(directiveText, /sibling specialists.*still active|partial completions internal/i);

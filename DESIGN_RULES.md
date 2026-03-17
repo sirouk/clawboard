@@ -1,9 +1,9 @@
-# Clawboard Design Rules
+# ClawBoard Design Rules
 
 This document captures the durable product, UX, and implementation rules the repo should keep obeying as the system evolves.
 
 ## 1) Product North Star
-- Clawboard is the operator-facing continuity layer for an OpenClaw instance.
+- ClawBoard is the operator-facing continuity layer for an OpenClaw instance.
 - The operator should be able to answer "What is happening, where should I continue, and what already happened?" in under 10 seconds.
 - Structure wins over raw transcript volume: Topic -> Task -> timeline is the primary mental model.
 - The product should feel like a live control surface, not a passive log archive.

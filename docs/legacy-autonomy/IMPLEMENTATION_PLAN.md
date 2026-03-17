@@ -1,7 +1,7 @@
 # Implementation Plan
 
 ## Goal
-Deliver a deterministic, evidence-first BUILD path that reduces architectural ambiguity and regression risk while preserving current Clawboard runtime behavior.
+Deliver a deterministic, evidence-first BUILD path that reduces architectural ambiguity and regression risk while preserving current ClawBoard runtime behavior.
 
 ## Decision Focus
 The main uncertainty is API ownership:

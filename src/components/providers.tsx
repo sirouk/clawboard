@@ -53,7 +53,7 @@ export function AppConfigProvider({ children }: { children: React.ReactNode }) {
   const storedLevelRaw = useLocalStorageItem("clawboard.integrationLevel");
   const storedApiBaseRaw = useLocalStorageItem("clawboard.apiBase");
 
-  const [serverInstanceTitle, setServerInstanceTitle] = useState("Clawboard");
+  const [serverInstanceTitle, setServerInstanceTitle] = useState("ClawBoard");
   const [tokenRequired, setTokenRequired] = useState(true);
   const [tokenConfigured, setTokenConfigured] = useState(false);
   const [remoteReadLocked, setRemoteReadLocked] = useState(false);

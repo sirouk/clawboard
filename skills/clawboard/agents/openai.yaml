@@ -1,4 +1,4 @@
 interface:
-  display_name: "Clawboard"
+  display_name: "ClawBoard"
   short_description: "OpenClaw companion for topics & logs"
-  default_prompt: "Use $clawboard to connect my OpenClaw instance to my Clawboard base URL and start auto-tracking."
+  default_prompt: "Use $clawboard to connect my OpenClaw instance to my ClawBoard base URL and start auto-tracking."

@@ -1,9 +1,9 @@
 ---
 name: clawboard
-description: "Install and operate Clawboard with OpenClaw. Use for scripted/manual/agentic install, token setup, Docker startup, logger plugin wiring, and validation."
+description: "Install and operate ClawBoard with OpenClaw. Use for scripted/manual/agentic install, token setup, Docker startup, logger plugin wiring, and validation."
 ---
 
-# Clawboard
+# ClawBoard
 
 ## Status
 
@@ -27,12 +27,12 @@ Retrieval/search stack:
 
 ## Goal
 
-Get a user to a working Clawboard install where:
+Get a user to a working ClawBoard install where:
 
-1. Clawboard web/api/classifier are running.
+1. ClawBoard web/api/classifier are running.
 2. `clawboard-logger` plugin is installed and enabled.
 3. Token flow is configured correctly (required for writes + non-localhost reads).
-4. OpenClaw gateway is restarted and logging into Clawboard.
+4. OpenClaw gateway is restarted and logging into ClawBoard.
 
 ## Hard Rules (Repo vs Installed Skill)
 
@@ -66,11 +66,11 @@ bash scripts/sync_openclaw_skill.sh --to-repo --apply
 
 ## Workspace + Runtime Assumptions (for coding tasks)
 
-- Typical repo locations for Clawboard code:
+- Typical repo locations for ClawBoard code:
   - `~/[agent_name]/clawboard`
   - `~/[agent_name]/projects/clawboard`
 - For scripted installs, bootstrap auto-detects OpenClaw workspace conventions and usually lands in one of those layouts.
-- When asked to work on Clawboard frontend/backend, prefer the active git repo copy under those locations, not `~/.openclaw/skills/*`.
+- When asked to work on ClawBoard frontend/backend, prefer the active git repo copy under those locations, not `~/.openclaw/skills/*`.
 - After typical bootstrap, assume Docker services are running:
   - `CLAWBOARD_WEB_HOT_RELOAD=1`: `web-dev` is used for Next.js hot reload (`web` is stopped).
   - `CLAWBOARD_WEB_HOT_RELOAD=0`: production-style `web` service is used.
@@ -112,7 +112,7 @@ What the script does:
 - Restarts OpenClaw gateway.
 - Sets `/api/config` title + integration level.
 
-If `openclaw` CLI is not installed yet, the script still deploys Clawboard and prints follow-up instructions.
+If `openclaw` CLI is not installed yet, the script still deploys ClawBoard and prints follow-up instructions.
 It now also offers to run the Chutes fast path automatically when `openclaw` is missing.
 
 Useful flags:
@@ -165,7 +165,7 @@ Examples:
 - tailscale: `http://100.x.y.z:8010`
 - custom domain: `https://api.example.com`
 
-3. Start Clawboard:
+3. Start ClawBoard:
 
 ```bash
 docker compose up -d --build
@@ -233,7 +233,7 @@ Notes:
 Use this exact prompt:
 
 ```md
-Install Clawboard for me end-to-end. ClawHub is not available yet, so choose one of these:
+Install ClawBoard for me end-to-end. ClawHub is not available yet, so choose one of these:
 
 1) Scripted install (preferred):
 - Run: curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/scripts/bootstrap_openclaw.sh | bash
@@ -253,7 +253,7 @@ After install, validate:
 - http://localhost:8010/api/health
 - http://localhost:8010/api/config
 - plugin enabled + gateway restarted
-- send one test message and confirm it appears in Clawboard logs
+- send one test message and confirm it appears in ClawBoard logs
 
 Ask me before choosing local vs Tailscale API base URL.
 ```
@@ -283,7 +283,7 @@ Expect:
 - `tokenConfigured` is `true`.
 - Logger plugin is enabled.
 - Search endpoint returns mode/details (and will include qdrant mode when vectors are available).
-- New OpenClaw message appears in Clawboard Logs.
+- New OpenClaw message appears in ClawBoard Logs.
 
 ## Optional Helpers
 
@@ -294,7 +294,7 @@ Expect:
     - `$CLAWBOARD_DIR/skills/clawboard/scripts/setup-openclaw-memory-backup.sh`
   - Backup run (safe for automation; commits/pushes only when changed):
     - `$CLAWBOARD_DIR/skills/clawboard/scripts/backup_openclaw_curated_memories.sh`
-  - Includes optional full Clawboard state export (config/topics/tasks/logs + optional attachments).
+  - Includes optional full ClawBoard state export (config/topics/tasks/logs + optional attachments).
   - Stores config at:
     - `$HOME/.openclaw/credentials/clawboard-memory-backup.json` (chmod 600)
 - Chutes provider helper:

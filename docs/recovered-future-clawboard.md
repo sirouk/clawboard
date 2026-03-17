@@ -1,26 +1,26 @@
-# Recovered: Future Clawboard
+# Recovered: Future ClawBoard
 
-Recovered on 2026-03-13 from the live Clawboard Postgres database and local OpenClaw session context.
+Recovered on 2026-03-13 from the live ClawBoard Postgres database and local OpenClaw session context.
 
 ## What Was Recoverable
 
 Topic:
 
-- `Future Clawboard`
+- `Future ClawBoard`
 - topic id: `topic-dd635861-1668-48b8-a251-6c4a69fe197b`
 - space: `space-openclaw`
 - created: `2026-03-10T04:27:57.362Z`
 
 Linked legacy task:
 
-- `Future Clawboard`
+- `Future ClawBoard`
 - task id: `task-05f1b774-29ef-4299-a057-8c9a16048a23`
 
 ## Direct User-Authored Content
 
 Only one clearly user-authored seed note was recoverable from the thread:
 
-> Future of Clawboard
+> Future of ClawBoard
 
 Timestamp:
 
@@ -38,7 +38,7 @@ The main substantive content tied to that seed was a follow-up assistant message
 ### Current Layers
 
 - `Space`: highest-level container such as Work or Personal.
-- `Topic`: project boundary such as Future Clawboard.
+- `Topic`: project boundary such as Future ClawBoard.
 - `Task`: atomic unit of work.
 - `Specialist Session`: ephemeral execution context.
 - `OpenClaw Memory`: long-term global semantic store.
@@ -88,12 +88,12 @@ Key insight:
 #### 3. Storage Mapping
 
 - `Project Memory`
-  - storage: Clawboard topic-level records
+  - storage: ClawBoard topic-level records
   - scope: topic
   - access: auto-inject on spawn
 
 - `Cross-Project Pattern Memory`
-  - storage: Clawboard pattern-indexed records
+  - storage: ClawBoard pattern-indexed records
   - scope: global
   - access: query on demand
 
@@ -102,7 +102,7 @@ Key insight:
   - scope: session
   - access: always in context
 
-Clawboard was framed here as the durable specialist memory layer, not just task tracking.
+ClawBoard was framed here as the durable specialist memory layer, not just task tracking.
 
 Suggested per-topic structured memory fields:
 
@@ -119,14 +119,14 @@ The recovered note also proposed a shared topic workspace folder used by spawned
   - `DECISIONS.md`
   - `PATTERNS.md`
   - `CONVENTIONS.md`
-- tool-mediated structured memory stored in Clawboard
-- structured recall hitting Clawboard
+- tool-mediated structured memory stored in ClawBoard
+- structured recall hitting ClawBoard
 - exploratory / human-readable context living in the workspace
 
 Framing:
 
 - workspace = scratchpad and document layer
-- Clawboard = structured recall layer
+- ClawBoard = structured recall layer
 
 #### 5. Open Questions Captured
 
@@ -137,7 +137,7 @@ Framing:
 
 ## Important Caveat
 
-I did not recover a longer user-written bullet list of ideas beyond the seed line `Future of Clawboard`.
+I did not recover a longer user-written bullet list of ideas beyond the seed line `Future of ClawBoard`.
 
 What survived was:
 

@@ -944,7 +944,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     if (cleanPath === "/setup" || cleanPath === "/settings") {
       return {
         title: "Settings",
-        subtitle: "Configure your Clawboard instance, integration level, and space visibility.",
+        subtitle: "Configure your ClawBoard instance, integration level, and space visibility.",
       };
     }
     if (cleanPath === "/log") {
@@ -974,7 +974,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
         subtitle: "Topic details",
       };
     }
-    return { title: "Clawboard", subtitle: "" };
+    return { title: "ClawBoard", subtitle: "" };
   }, [pathname, topics]);
 
   const normalizedTopicSearch = topicPanelSearch.trim().toLowerCase();
@@ -1271,7 +1271,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 				                    <div className={cn("relative transition-all", collapsed ? "h-8 w-8" : "h-8 w-8 lg:h-12 lg:w-12")}>
 				                      <Image
 				                        src="/clawboard-mark.png"
-				                        alt="Clawboard"
+				                        alt="ClawBoard"
 			                        width={iconSize}
 			                        height={iconSize}
 			                        priority
@@ -1699,7 +1699,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                     C
                   </div>
                   <div className={cn(compactHeader ? "sr-only" : "")}>
-                    <div className="text-sm uppercase tracking-[0.3em] text-[rgb(var(--claw-muted))]">Clawboard</div>
+                    <div className="text-sm uppercase tracking-[0.3em] text-[rgb(var(--claw-muted))]">ClawBoard</div>
                     <div className="text-lg font-semibold text-[rgb(var(--claw-text))]">{instanceTitle}</div>
                   </div>
                 </Link>

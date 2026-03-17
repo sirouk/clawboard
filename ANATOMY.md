@@ -1,6 +1,6 @@
-# Clawboard Anatomy
+# ClawBoard Anatomy
 
-This document is a full implementation map of how Clawboard works today: user-facing behavior, backend internals, classifier routing, retrieval, visibility scope, and realtime synchronization.
+This document is a full implementation map of how ClawBoard works today: user-facing behavior, backend internals, classifier routing, retrieval, visibility scope, and realtime synchronization.
 
 It is intended to be read with code open.
 
@@ -11,7 +11,7 @@ Documentation contract:
 
 ## Question
 
-How does Clawboard work end-to-end, including every major user path, every scope/visibility rule, and the exact code paths between UI actions, APIs, classifiers, retrieval, and realtime updates?
+How does ClawBoard work end-to-end, including every major user path, every scope/visibility rule, and the exact code paths between UI actions, APIs, classifiers, retrieval, and realtime updates?
 
 ## End-State Spec
 
@@ -96,10 +96,10 @@ Blockers:
 
 ## 1) Product Purpose
 
-Clawboard is a durable memory and routing layer that sits beside OpenClaw.
+ClawBoard is a durable memory and routing layer that sits beside OpenClaw.
 
 OpenClaw runs agents.
-Clawboard stores everything useful, organizes it into Topics and Tasks, retrieves it intelligently, and feeds that context back into future turns.
+ClawBoard stores everything useful, organizes it into Topics and Tasks, retrieves it intelligently, and feeds that context back into future turns.
 
 Core value:
 - Continuity across long-running work.
@@ -156,7 +156,7 @@ Primary tables:
 - `OpenClawRequestRoute`
 - `IngestQueue`
 - `IngestReceipt` — exactly-once ingest ledger keyed by immutable source event id (live|history paths).
-- `OpenClawChatDispatchQueue` — durable outbound dispatch queue for Clawboard → OpenClaw gateway sends (pending|retry|processing|sent|failed).
+- `OpenClawChatDispatchQueue` — durable outbound dispatch queue for ClawBoard → OpenClaw gateway sends (pending|retry|processing|sent|failed).
 - `OrchestrationRun` — durable run anchored to one user request; tracks execution mode and overall status (running|stalled|done|failed|cancelled).
 - `OrchestrationItem` — delegated work item inside a run (main|subagent|verify|synthesize kinds).
 - `OrchestrationEvent` — append-only lifecycle event stream for runs and items (run_created, item_done, run_failed, etc.).
@@ -254,7 +254,7 @@ Reliability:
 - gateway history ingest skips injected context wrapper artifacts and still advances cursor, preventing replay loops of non-user-visible control text.
 - history-sync fallback session seeding includes unresolved requests + `sessions_spawn` child-session lineage so delegated subagent transcripts are recoverable even when `sessions.list` is disabled/degraded.
 
-### 6.2 Board chat flow (Clawboard UI -> OpenClaw)
+### 6.2 Board chat flow (ClawBoard UI -> OpenClaw)
 
 Primary code:
 - `src/components/unified-view.tsx` (composer state + local pending UI)

@@ -42,7 +42,7 @@ class AdminEndpointTests(unittest.TestCase):
 
     @property
     def auth_headers(self) -> dict[str, str]:
-        return {"X-Clawboard-Token": "test-token"}
+        return {"X-ClawBoard-Token": "test-token"}
 
     def setUp(self):
         with get_session() as session:
@@ -62,7 +62,7 @@ class AdminEndpointTests(unittest.TestCase):
     def test_start_fresh_replay_defaults_to_non_destructive_reclassify(self):
         ts = now_iso()
         with get_session() as session:
-            session.add(InstanceConfig(id=1, title="Clawboard", integrationLevel="write", updatedAt=ts))
+            session.add(InstanceConfig(id=1, title="ClawBoard", integrationLevel="write", updatedAt=ts))
             session.add(
                 Topic(
                     id="topic-1",
@@ -244,7 +244,7 @@ class AdminEndpointTests(unittest.TestCase):
     def test_start_fresh_replay_fresh_mode_clears_derived_state(self):
         ts = now_iso()
         with get_session() as session:
-            session.add(InstanceConfig(id=1, title="Clawboard", integrationLevel="write", updatedAt=ts))
+            session.add(InstanceConfig(id=1, title="ClawBoard", integrationLevel="write", updatedAt=ts))
             session.add(
                 Topic(
                     id="topic-1",

@@ -10,7 +10,7 @@ usage() {
   cat <<'EOF'
 Usage: ./tests.sh [--skip-e2e]
 
-Runs the full Clawboard test suite:
+Runs the full ClawBoard test suite:
 1) Docker services build/start + health checks
 2) Security policy smoke tests
 3) Backend unit tests (unittest)
@@ -113,7 +113,7 @@ run_security_checks() {
   local read_with_token_code
   read_with_token_code="$(
     curl -sS -o /dev/null -w "%{http_code}" \
-      -H "X-Clawboard-Token: ${CLAWBOARD_TOKEN}" \
+      -H "X-ClawBoard-Token: ${CLAWBOARD_TOKEN}" \
       http://localhost:8010/api/config || true
   )"
   [[ "$read_with_token_code" == "200" ]] || fail "Read with token should be 200, got $read_with_token_code"
@@ -130,7 +130,7 @@ run_security_checks() {
   remote_with_token_code="$(
     curl -sS -o /dev/null -w "%{http_code}" \
       -H "Host: clawboard.example.test:8010" \
-      -H "X-Clawboard-Token: ${CLAWBOARD_TOKEN}" \
+      -H "X-ClawBoard-Token: ${CLAWBOARD_TOKEN}" \
       http://localhost:8010/api/config || true
   )"
   [[ "$remote_with_token_code" == "200" ]] || fail "Remote read with token should be 200, got $remote_with_token_code"
@@ -150,7 +150,7 @@ run_security_checks() {
     curl -sS -o /dev/null -w "%{http_code}" \
       -X POST \
       -H "Content-Type: application/json" \
-      -H "X-Clawboard-Token: ${CLAWBOARD_TOKEN}" \
+      -H "X-ClawBoard-Token: ${CLAWBOARD_TOKEN}" \
       -d "$body" \
       http://localhost:8010/api/topics || true
   )"
@@ -160,7 +160,7 @@ run_security_checks() {
   cleanup_code="$(
     curl -sS -o /dev/null -w "%{http_code}" \
       -X DELETE \
-      -H "X-Clawboard-Token: ${CLAWBOARD_TOKEN}" \
+      -H "X-ClawBoard-Token: ${CLAWBOARD_TOKEN}" \
       "http://localhost:8010/api/topics/${topic_id}" || true
   )"
   [[ "$cleanup_code" == "200" ]] || fail "Cleanup delete should be 200, got $cleanup_code"
@@ -197,7 +197,7 @@ fi
 # Override the classifier to heuristic mode unless the caller explicitly set a mode.
 CLASSIFIER_LLM_MODE="${CLASSIFIER_LLM_MODE:-off}" docker compose up -d --build api web classifier
 
-wait_for_http "http://localhost:8010/api/health" "200" "API" 60 -H "X-Clawboard-Token: ${CLAWBOARD_TOKEN}"
+wait_for_http "http://localhost:8010/api/health" "200" "API" 60 -H "X-ClawBoard-Token: ${CLAWBOARD_TOKEN}"
 wait_for_http "http://localhost:3010/u" "200" "Web UI"
 
 running_services="$(docker compose ps --services --filter status=running)"

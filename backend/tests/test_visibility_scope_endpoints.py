@@ -44,11 +44,11 @@ class VisibilityScopeEndpointTests(unittest.TestCase):
 
     @property
     def auth_headers(self) -> dict[str, str]:
-        return {"X-Clawboard-Token": "test-token"}
+        return {"X-ClawBoard-Token": "test-token"}
 
     @property
     def write_headers(self) -> dict[str, str]:
-        return {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        return {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
 
     @property
     def read_headers(self) -> dict[str, str]:

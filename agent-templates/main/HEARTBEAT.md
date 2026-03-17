@@ -11,7 +11,7 @@
 
 ## Required heartbeat response
 When the heartbeat fires:
-1. **Read the Clawboard context already injected at the top of this prompt.** Any topic with `status: "doing"` and a tag like `"session:<childSessionKey>"` is an in-flight delegation. Record its `topicId`, `childSessionKey`, and `agentId` (from `"agent:<id>"` tag) before calling any tools.
+1. **Read the ClawBoard context already injected at the top of this prompt.** Any topic with `status: "doing"` and a tag like `"session:<childSessionKey>"` is an in-flight delegation. Record its `topicId`, `childSessionKey`, and `agentId` (from `"agent:<id>"` tag) before calling any tools.
 2. For each recorded `childSessionKey`, call `session_status`.
 3. For each delegated run:
     - If `session_status` shows it is still running: report status, blockers, and the next check ETA from the ladder.

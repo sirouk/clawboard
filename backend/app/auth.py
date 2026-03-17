@@ -20,7 +20,7 @@ def _validate_token(value: str | None) -> None:
         )
     provided = (value or "").strip()
     if not provided or not secrets.compare_digest(provided, configured):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized: invalid or missing X-Clawboard-Token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized: invalid or missing X-ClawBoard-Token")
 
 
 def _first_forwarded_hop(value: str) -> str:
@@ -75,9 +75,7 @@ def is_local_request(request: Request) -> bool:
 
 
 def ensure_read_access(request: Request, provided_token: str | None) -> None:
-    """Allow loopback reads without token, but require token for non-local reads."""
-    if is_local_request(request):
-        return
+    """Require token for all reads — no unauthenticated access."""
     _validate_token(provided_token)
 
 
@@ -88,7 +86,7 @@ def ensure_write_access(provided_token: str | None) -> None:
 def require_token(
     x_clawboard_token: str | None = Header(
         default=None,
-        alias="X-Clawboard-Token",
+        alias="X-ClawBoard-Token",
         description="Server token required for all write operations.",
         example="your-token-here",
     ),

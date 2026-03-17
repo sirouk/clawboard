@@ -9,7 +9,7 @@ set -euo pipefail
 # Option B support:
 # - Always backs up curated workspace text (MEMORY.md, memory/*.md, SOUL/USER/etc.)
 # - Optionally backs up selected OpenClaw files (openclaw.json*, skills/) based on config flags.
-# - Optionally exports full Clawboard state (config/topics/tasks/logs + optional attachments).
+# - Optionally exports full ClawBoard state (config/topics/tasks/logs + optional attachments).
 #
 # Config is read from:
 #   $HOME/.openclaw/credentials/clawboard-memory-backup.json
@@ -1107,11 +1107,11 @@ if [[ -f "$CRED_JSON" ]]; then
   BRANCH="$(json_get "$CRED_JSON" '.branch')"
   INCLUDE_OPENCLAW_CONFIG="$(json_get "$CRED_JSON" '.includeOpenclawConfig')"
   INCLUDE_OPENCLAW_SKILLS="$(json_get "$CRED_JSON" '.includeOpenclawSkills')"
-  INCLUDE_CLAWBOARD_STATE="$(json_get "$CRED_JSON" '.includeClawboardState')"
+  INCLUDE_CLAWBOARD_STATE="$(json_get "$CRED_JSON" '.includeClawBoardState')"
   CLAWBOARD_DIR="$(json_get "$CRED_JSON" '.clawboardDir')"
   CLAWBOARD_API_URL="$(json_get "$CRED_JSON" '.clawboardApiUrl')"
-  INCLUDE_CLAWBOARD_ATTACHMENTS="$(json_get "$CRED_JSON" '.includeClawboardAttachments')"
-  INCLUDE_CLAWBOARD_ENV="$(json_get "$CRED_JSON" '.includeClawboardEnv')"
+  INCLUDE_CLAWBOARD_ATTACHMENTS="$(json_get "$CRED_JSON" '.includeClawBoardAttachments')"
+  INCLUDE_CLAWBOARD_ENV="$(json_get "$CRED_JSON" '.includeClawBoardEnv')"
   CLAWBOARD_TOKEN="$(json_get "$CRED_JSON" '.clawboardToken')"
   CLAWBOARD_ATTACHMENTS_DIR="$(json_get "$CRED_JSON" '.clawboardAttachmentsDir')"
   SWEEP_ORPHAN_ATTACHMENTS="$(json_get "$CRED_JSON" '.sweepOrphanAttachments')"
@@ -1196,14 +1196,14 @@ if [[ "$INTERACTIVE" == "1" ]]; then
 
   INCLUDE_OPENCLAW_CONFIG="$(prompt_bool "Include OpenClaw config backups?" "${INCLUDE_OPENCLAW_CONFIG:-false}")"
   INCLUDE_OPENCLAW_SKILLS="$(prompt_bool "Include OpenClaw skills backups?" "${INCLUDE_OPENCLAW_SKILLS:-false}")"
-  INCLUDE_CLAWBOARD_STATE="$(prompt_bool "Include Clawboard state export?" "${INCLUDE_CLAWBOARD_STATE:-false}")"
+  INCLUDE_CLAWBOARD_STATE="$(prompt_bool "Include ClawBoard state export?" "${INCLUDE_CLAWBOARD_STATE:-false}")"
 
   if as_bool "${INCLUDE_CLAWBOARD_STATE:-}"; then
     CLAWBOARD_API_URL="$(prompt_value "clawboardApiUrl" "${CLAWBOARD_API_URL:-http://localhost:8010}")"
     CLAWBOARD_DIR="$(prompt_value "clawboardDir (optional)" "${CLAWBOARD_DIR:-}")"
     CLAWBOARD_TOKEN="$(prompt_value "clawboardToken" "${CLAWBOARD_TOKEN:-}" 1)"
-    INCLUDE_CLAWBOARD_ATTACHMENTS="$(prompt_bool "Include Clawboard attachments dir?" "${INCLUDE_CLAWBOARD_ATTACHMENTS:-true}")"
-    INCLUDE_CLAWBOARD_ENV="$(prompt_bool "Include Clawboard .env in backup?" "${INCLUDE_CLAWBOARD_ENV:-false}")"
+    INCLUDE_CLAWBOARD_ATTACHMENTS="$(prompt_bool "Include ClawBoard attachments dir?" "${INCLUDE_CLAWBOARD_ATTACHMENTS:-true}")"
+    INCLUDE_CLAWBOARD_ENV="$(prompt_bool "Include ClawBoard .env in backup?" "${INCLUDE_CLAWBOARD_ENV:-false}")"
     if as_bool "${INCLUDE_CLAWBOARD_ATTACHMENTS:-}"; then
       CLAWBOARD_ATTACHMENTS_DIR="$(prompt_value "clawboardAttachmentsDir override (optional)" "${CLAWBOARD_ATTACHMENTS_DIR:-}")"
       SWEEP_ORPHAN_ATTACHMENTS="$(prompt_bool "Sweep orphaned backup attachments?" "${SWEEP_ORPHAN_ATTACHMENTS:-true}")"
@@ -1316,7 +1316,7 @@ fi
 
 # Ensure commits can be created in clean environments without global git identity.
 if [[ -z "$(git -C "$BACKUP_DIR" config --get user.name || true)" ]]; then
-  git -C "$BACKUP_DIR" config user.name "Clawboard Backup Bot"
+  git -C "$BACKUP_DIR" config user.name "ClawBoard Backup Bot"
 fi
 if [[ -z "$(git -C "$BACKUP_DIR" config --get user.email || true)" ]]; then
   git -C "$BACKUP_DIR" config user.email "clawboard-backup@localhost"
@@ -1469,13 +1469,13 @@ if as_bool "${INCLUDE_OPENCLAW_SKILLS:-}"; then
   fi
 fi
 
-# --- C) Full Clawboard state backup (optional, best-effort) ---
+# --- C) Full ClawBoard state backup (optional, best-effort) ---
 CLAWBOARD_STATE_EXPORT_OK=0
 if as_bool "${INCLUDE_CLAWBOARD_STATE:-}"; then
   SKIP_CLAWBOARD_EXPORT=0
 
   if [[ ! -f "$EXPORT_CLAWBOARD_HELPER" ]]; then
-    say "WARN: Missing exporter helper: $EXPORT_CLAWBOARD_HELPER. Skipping Clawboard state export for this run."
+    say "WARN: Missing exporter helper: $EXPORT_CLAWBOARD_HELPER. Skipping ClawBoard state export for this run."
     preserve_existing_clawboard_snapshot
     SKIP_CLAWBOARD_EXPORT=1
   fi
@@ -1528,7 +1528,7 @@ if as_bool "${INCLUDE_CLAWBOARD_STATE:-}"; then
       CLAWBOARD_TOKEN="$(read_env_value "$CLAWBOARD_DIR/.env" "CLAWBOARD_TOKEN" || true)"
     fi
     if [[ -z "${CLAWBOARD_TOKEN:-}" ]]; then
-      say "WARN: Clawboard token missing. Skipping Clawboard state export for this run."
+      say "WARN: ClawBoard token missing. Skipping ClawBoard state export for this run."
       preserve_existing_clawboard_snapshot
       SKIP_CLAWBOARD_EXPORT=1
     fi
@@ -1537,12 +1537,12 @@ if as_bool "${INCLUDE_CLAWBOARD_STATE:-}"; then
   if [[ "$SKIP_CLAWBOARD_EXPORT" -eq 0 ]]; then
     reachable_clawboard_api="$(first_reachable_clawboard_api || true)"
     if [[ -z "$reachable_clawboard_api" ]]; then
-      say "WARN: Clawboard API unreachable at configured endpoints. Skipping Clawboard state export for this run."
+      say "WARN: ClawBoard API unreachable at configured endpoints. Skipping ClawBoard state export for this run."
       preserve_existing_clawboard_snapshot
       SKIP_CLAWBOARD_EXPORT=1
     else
       if [[ "$reachable_clawboard_api" != "${CLAWBOARD_API_URL:-}" ]]; then
-        say "WARN: Clawboard API fallback selected: $reachable_clawboard_api"
+        say "WARN: ClawBoard API fallback selected: $reachable_clawboard_api"
       fi
       CLAWBOARD_API_URL="$reachable_clawboard_api"
     fi
@@ -1559,7 +1559,7 @@ if as_bool "${INCLUDE_CLAWBOARD_STATE:-}"; then
       >/dev/null; then
       CLAWBOARD_STATE_EXPORT_OK=1
     else
-      say "WARN: Clawboard state export failed against $CLAWBOARD_API_URL. Preserving prior state snapshot."
+      say "WARN: ClawBoard state export failed against $CLAWBOARD_API_URL. Preserving prior state snapshot."
       rm -rf "$STAGE_DIR/clawboard"
       preserve_existing_clawboard_snapshot
       SKIP_CLAWBOARD_EXPORT=1
@@ -1626,7 +1626,7 @@ if [[ "${CLAWBOARD_STATE_EXPORT_OK:-0}" -eq 1 ]] \
     "$ORPHAN_ATTACHMENT_SWEEP_MODE"
 fi
 
-# Keep Clawboard logs backup lightweight for GitHub limits:
+# Keep ClawBoard logs backup lightweight for GitHub limits:
 # - store only a compressed tail snapshot for quick forensic context
 # - never track the full growing logs.jsonl file
 LOGS_PATH="$BACKUP_DIR/clawboard/export/logs.jsonl"
@@ -1660,9 +1660,9 @@ git add -A
 ts="$(date -u +"%Y-%m-%d %H:%M:%SZ")"
 scope="OpenClaw continuity (curated + selected)"
 if as_bool "${INCLUDE_CLAWBOARD_STATE:-}"; then
-  scope="$scope + Clawboard state"
+  scope="$scope + ClawBoard state"
 fi
-msg="Clawboard: auto backup $scope ($ts)"
+msg="ClawBoard: auto backup $scope ($ts)"
 if ! git commit -m "$msg" >/dev/null 2>&1; then
   if [[ -z "$(git status --porcelain)" ]]; then
     exit 0

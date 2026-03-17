@@ -1,4 +1,4 @@
-# Clawboard Visual Test End-State Spec
+# ClawBoard Visual Test End-State Spec
 
 ## Goal
 Create a deterministic visual regression suite that catches UI/UX drift across core routes and high-risk unified-view interaction states on desktop and mobile.

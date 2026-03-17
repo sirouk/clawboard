@@ -160,7 +160,7 @@ export function isRetryableFetchError(err: unknown) {
 const REPLY_DIRECTIVE_TAG_RE =
   /(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*/gi;
 
-export function stripClawboardWrapperArtifacts(content: string) {
+export function stripClawBoardWrapperArtifacts(content: string) {
   let text = content ?? "";
   text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\]\s*/gi, "");
   text = text.replace(/\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
@@ -172,7 +172,7 @@ export function stripClawboardWrapperArtifacts(content: string) {
 
 export function sanitizeRetrievedContextBlock(content: string) {
   let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
-  text = stripClawboardWrapperArtifacts(text);
+  text = stripClawBoardWrapperArtifacts(text);
   text = text.replace(/[ \t]{2,}/g, " ");
   text = text.replace(/\n{3,}/g, "\n\n");
   return text.trim();
@@ -181,9 +181,9 @@ export function sanitizeRetrievedContextBlock(content: string) {
 export function sanitizeMessageContent(content: string) {
   let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
   text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\][\s\S]*?\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
-  text = stripClawboardWrapperArtifacts(text);
+  text = stripClawBoardWrapperArtifacts(text);
   text = text.replace(
-    /Clawboard continuity hook is active for this turn\.[\s\S]*?Prioritize curated user notes when present\.\s*/gi,
+    /ClawBoard continuity hook is active for this turn\.[\s\S]*?Prioritize curated user notes when present\.\s*/gi,
     "",
   );
   text = text.replace(/^\s*summary\s*[:\-]\s*/gim, "");

@@ -23,11 +23,11 @@ If you must ask:
 1. **Recency**: If a topic was active in the last N turns, prefer it.
 2. **Keywords**: Match project names, systems, or people to known topics.
 3. **Task overlap**: If a task matches the message, use its topic.
-4. **Agent lane**: Subagent identity can bias routing (e.g., coding -> Clawboard topic).
+4. **Agent lane**: Subagent identity can bias routing (e.g., coding -> ClawBoard topic).
 
 ## Examples
 
 - “Deploy trading changes” -> Trading Systems
 - “Call the insurer” -> Ops/Admin/Finance
 - “Add a new client site task” -> Legacy Clients
-- “Fix Clawboard UI” -> Clawboard
+- “Fix ClawBoard UI” -> ClawBoard

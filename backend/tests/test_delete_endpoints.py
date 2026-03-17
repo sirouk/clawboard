@@ -56,7 +56,7 @@ class DeleteEndpointTests(unittest.TestCase):
 
     @property
     def auth_headers(self) -> dict[str, str]:
-        return {"X-Clawboard-Token": "test-token"}
+        return {"X-ClawBoard-Token": "test-token"}
 
     def test_delete_topic_detaches_tasks_and_logs(self):
         ts = now_iso()

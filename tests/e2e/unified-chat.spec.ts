@@ -970,7 +970,7 @@ test("terminal system failures stay visible when tool/system rows are hidden", a
       content: terminalText,
       classificationStatus: "classified",
       agentId: "system",
-      agentLabel: "Clawboard",
+      agentLabel: "ClawBoard",
       source: { sessionKey, requestId: `req-terminal-${suffix}`, requestTerminal: true },
     },
   });

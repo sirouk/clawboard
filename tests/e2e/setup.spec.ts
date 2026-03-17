@@ -11,7 +11,7 @@ test("setup wizard enforces token gating and persists instance settings", async 
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          instance: { title: "Clawboard", integrationLevel: "manual", updatedAt: "2026-02-06T00:00:00.000Z" },
+          instance: { title: "ClawBoard", integrationLevel: "manual", updatedAt: "2026-02-06T00:00:00.000Z" },
           tokenRequired: true,
           tokenConfigured: true,
         }),
@@ -54,7 +54,7 @@ test("setup wizard enforces token gating and persists instance settings", async 
   await continueBtn.click();
 
   await expect(page.getByRole("heading", { name: "Instance Details" })).toBeVisible();
-  await page.getByPlaceholder("Clawboard").fill("Clawboard Test Instance");
+  await page.getByPlaceholder("ClawBoard").fill("ClawBoard Test Instance");
   await page.locator("select:visible").first().selectOption("full");
 
   // Preserve the existing api base, but ensure trailing slashes are normalized.
@@ -68,14 +68,14 @@ test("setup wizard enforces token gating and persists instance settings", async 
   const storedToken = await page.evaluate(() => window.localStorage.getItem("clawboard.token"));
   expect(storedToken).toBe("test-token");
   const storedTitle = await page.evaluate(() => window.localStorage.getItem("clawboard.instanceTitle"));
-  expect(storedTitle).toBe("Clawboard Test Instance");
+  expect(storedTitle).toBe("ClawBoard Test Instance");
   const storedLevel = await page.evaluate(() => window.localStorage.getItem("clawboard.integrationLevel"));
   expect(storedLevel).toBe("full");
   const storedApiBase = await page.evaluate(() => window.localStorage.getItem("clawboard.apiBase"));
   expect(storedApiBase).toBe(currentApiBase.replace(/\/$/, ""));
 
   expect(seen.authHeader).toBe("test-token");
-  expect(seen.configBody?.title).toBe("Clawboard Test Instance");
+  expect(seen.configBody?.title).toBe("ClawBoard Test Instance");
   expect(seen.configBody?.integrationLevel).toBe("full");
 });
 

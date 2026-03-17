@@ -39,7 +39,7 @@ class SessionRoutingMemoryTests(unittest.TestCase):
 
     @property
     def auth_headers(self) -> dict[str, str]:
-        return {"X-Clawboard-Token": "test-token"}
+        return {"X-ClawBoard-Token": "test-token"}
 
     def setUp(self):
         with get_session() as session:
@@ -63,7 +63,7 @@ class SessionRoutingMemoryTests(unittest.TestCase):
         first = {
             "sessionKey": session_key,
             "topicId": "topic-1",
-            "topicName": "Clawboard",
+            "topicName": "ClawBoard",
             "taskId": "task-1",
             "taskTitle": "Ship onboarding",
             "anchor": "Fix the login redirect bug.",

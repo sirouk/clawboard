@@ -17,7 +17,7 @@ from clawgraph import build_clawgraph  # noqa: E402
 class ClawgraphBuildTests(unittest.TestCase):
     def _sample_rows(self):
         topics = [
-            SimpleNamespace(id="topic-1", name="Clawboard Memory", description="Memory work", pinned=True),
+            SimpleNamespace(id="topic-1", name="ClawBoard Memory", description="Memory work", pinned=True),
             SimpleNamespace(id="topic-2", name="Discord Ops", description="Discord bot quality", pinned=False),
         ]
         tasks = [
@@ -31,7 +31,7 @@ class ClawgraphBuildTests(unittest.TestCase):
                 taskId="task-1",
                 type="conversation",
                 summary="Build Clawgraph using OpenClaw and Discord context",
-                content="Need relationships between Clawboard, OpenClaw, Discord, and Tasks.",
+                content="Need relationships between ClawBoard, OpenClaw, Discord, and Tasks.",
                 raw="",
                 agentId="assistant",
                 agentLabel="OpenClaw",

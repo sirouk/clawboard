@@ -26,7 +26,7 @@ Required gates:
 
 ## Contract
 
-- Clawboard owns durable topic continuity, replay cursors, operator-visible provenance, and the canonical topic timeline.
+- ClawBoard owns durable topic continuity, replay cursors, operator-visible provenance, and the canonical topic timeline.
 - OpenClaw owns execution, delegation, tool use, and ephemeral reasoning.
 - The top unified composer is topic-first:
   - no selection starts a topic

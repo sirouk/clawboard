@@ -280,7 +280,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertEqual(patched_impl.call_count, 2)
 
     def test_search_caps_log_propagation_for_topics(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic_a = self.client.post("/api/topics", json={"name": "Dense Topic"}, headers=write_headers).json()
@@ -385,7 +385,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertGreater(score_b, score_a)
 
     def test_search_uses_task_signal_to_lift_parent_topic(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic_a = self.client.post("/api/topics", json={"name": "Generic Topic"}, headers=write_headers).json()
@@ -475,7 +475,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertEqual(rows[0]["id"], topic_b["id"])
 
     def test_search_multi_term_requires_sparse_signal_for_parent_propagation(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic_a = self.client.post("/api/topics", json={"name": "Broad Topic"}, headers=write_headers).json()
@@ -599,7 +599,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertAlmostEqual(float(by_id[topic_b["id"]].get("taskPropagationWeight") or 0.0), 0.0, places=6)
 
     def test_search_topic_hints_ignore_tool_call_logs_when_disabled(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic = self.client.post("/api/topics", json={"name": "Hint Topic"}, headers=write_headers).json()
@@ -642,7 +642,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertNotIn("florian", str((row or {}).get("searchText") or "").lower())
 
     def test_search_response_content_prefers_content_preview_not_summary(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic = self.client.post("/api/topics", json={"name": "Preview Topic"}, headers=write_headers).json()
@@ -711,7 +711,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertIn("note sentinel", str(notes[0].get("content") or "").lower())
 
     def test_search_linked_notes_are_emitted_and_weight_scores(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic = self.client.post("/api/topics", json={"name": "Notes Weight Topic"}, headers=write_headers).json()
@@ -813,7 +813,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertEqual(int(logs[0].get("noteCount") or 0), 1)
 
     def test_search_passes_content_snippets_into_semantic_payload(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic = self.client.post("/api/topics", json={"name": "Insurance Topic"}, headers=write_headers).json()
@@ -859,7 +859,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertIn("insurance", joined)
 
     def test_search_global_lexical_rescue_includes_older_match_outside_recent_window(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic = self.client.post("/api/topics", json={"name": "Personal Memory Topic"}, headers=write_headers).json()
@@ -955,7 +955,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertGreaterEqual(int(meta.get("globalLexicalRescueAdded") or 0), 1)
 
     def test_search_global_lexical_rescue_skips_when_recent_window_already_has_hits(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic = self.client.post("/api/topics", json={"name": "Window Hit Topic"}, headers=write_headers).json()
@@ -1063,7 +1063,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertEqual(int(meta.get("globalLexicalRescueAdded") or 0), 0)
 
     def test_search_adds_query_aware_topic_hints(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic = self.client.post("/api/topics", json={"name": "KorBon"}, headers=write_headers).json()
@@ -1109,7 +1109,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertIn("insurance", search_text)
 
     def test_search_low_signal_board_session_expands_semantic_query(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic = self.client.post("/api/topics", json={"name": "Scoped Semantic Topic"}, headers=write_headers).json()
@@ -1165,7 +1165,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertIn("scoped semantic task", str(meta.get("semanticQuery") or "").lower())
 
     def test_search_low_signal_uses_routing_memory_anchor_for_semantic_and_task_hints(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic = self.client.post("/api/topics", json={"name": "Routing Semantic Topic"}, headers=write_headers).json()
@@ -1302,7 +1302,7 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertIn("queryTokenCount", meta)
 
     def test_search_session_boost_matches_base_and_suffixed_session_keys(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         topic = self.client.post("/api/topics", json={"name": "Session Topic"}, headers=write_headers).json()

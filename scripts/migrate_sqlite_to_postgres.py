@@ -96,7 +96,7 @@ def _truncate_target(target_session: Session) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Migrate Clawboard canonical data from SQLite to Postgres.",
+        description="Migrate ClawBoard canonical data from SQLite to Postgres.",
     )
     parser.add_argument(
         "--source-url",
@@ -117,7 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--truncate-target",
         action="store_true",
-        help="Truncate known Clawboard tables in target before copy.",
+        help="Truncate known ClawBoard tables in target before copy.",
     )
     parser.add_argument(
         "--dry-run",

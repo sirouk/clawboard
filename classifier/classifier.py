@@ -495,9 +495,9 @@ def headers_clawboard(actor: str | None = None):
         raise RuntimeError("classifier dependency missing: requests")
     h = {"Content-Type": "application/json"}
     if CLAWBOARD_TOKEN:
-        h["X-Clawboard-Token"] = CLAWBOARD_TOKEN
+        h["X-ClawBoard-Token"] = CLAWBOARD_TOKEN
     if actor:
-        h["X-Clawboard-Actor"] = str(actor).strip()
+        h["X-ClawBoard-Actor"] = str(actor).strip()
     return h
 
 
@@ -514,7 +514,7 @@ def oc_headers_with_session(session_key: str | None):
     headers = oc_headers()
     if session_key:
         # OpenClaw gateway honors this header and uses it as the session key for the run.
-        # We tag classifier runs with a stable prefix so Clawboard logger can ignore them.
+        # We tag classifier runs with a stable prefix so ClawBoard logger can ignore them.
         headers["x-openclaw-session-key"] = session_key
     return headers
 

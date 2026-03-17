@@ -40,7 +40,7 @@ export function QuickLogForm({ topicId, taskId }: { topicId?: string | null; tas
           content: content.trim(),
           summary: content.trim(),
           agentId: "ui",
-          agentLabel: "Clawboard UI",
+          agentLabel: "ClawBoard UI",
         }),
         },
         token

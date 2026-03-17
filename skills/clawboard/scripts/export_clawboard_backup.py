@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Export Clawboard state into deterministic JSON/JSONL files for git-friendly backups.
+Export ClawBoard state into deterministic JSON/JSONL files for git-friendly backups.
 
 This exporter intentionally captures user/instance state (config/topics/tasks/logs)
 and avoids derived vector/index stores that can be rebuilt.
@@ -31,7 +31,7 @@ def _http_json(
     url = f"{base}{path}{query}"
     headers = {"Accept": "application/json"}
     if token:
-        headers["X-Clawboard-Token"] = token
+        headers["X-ClawBoard-Token"] = token
     req = Request(url, headers=headers, method="GET")
     try:
         with urlopen(req, timeout=timeout_sec) as resp:
@@ -141,9 +141,9 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Export Clawboard state for git backup.")
-    p.add_argument("--api-base", required=True, help="Clawboard API base URL (e.g., http://localhost:8010)")
-    p.add_argument("--token", default="", help="Optional API token (X-Clawboard-Token)")
+    p = argparse.ArgumentParser(description="Export ClawBoard state for git backup.")
+    p.add_argument("--api-base", required=True, help="ClawBoard API base URL (e.g., http://localhost:8010)")
+    p.add_argument("--token", default="", help="Optional API token (X-ClawBoard-Token)")
     p.add_argument("--out-dir", required=True, help="Output directory for backup files")
     p.add_argument("--task-page-size", type=int, default=1000, help="Pagination size for /api/tasks")
     p.add_argument("--log-page-size", type=int, default=1000, help="Pagination size for /api/log")

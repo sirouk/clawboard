@@ -94,7 +94,7 @@ function queuedResponse(body: unknown) {
     status: 202,
     headers: {
       "Content-Type": "application/json",
-      "X-Clawboard-Queued": "1",
+      "X-ClawBoard-Queued": "1",
     },
   });
 }

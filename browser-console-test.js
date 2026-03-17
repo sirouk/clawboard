@@ -1,5 +1,5 @@
 /**
- * Browser Console Test Script for Clawboard UI Changes
+ * Browser Console Test Script for ClawBoard UI Changes
  * 
  * Instructions:
  * 1. Open http://localhost:3010/u in your browser
@@ -11,9 +11,9 @@
  * The script will automatically check all UI changes and report results.
  */
 
-(function testClawboardUIChanges() {
+(function testClawBoardUIChanges() {
   console.clear();
-  console.log('%c🧪 Clawboard UI Changes Test', 'font-size: 20px; font-weight: bold; color: #4dabf7;');
+  console.log('%c🧪 ClawBoard UI Changes Test', 'font-size: 20px; font-weight: bold; color: #4dabf7;');
   console.log('%c═══════════════════════════════════════════════════════════', 'color: #868e96;');
   console.log('');
 

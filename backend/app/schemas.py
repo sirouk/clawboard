@@ -102,7 +102,7 @@ class InstanceUpdate(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "title": "Clawboard Ops",
+                "title": "ClawBoard Ops",
                 "integrationLevel": "manual",
             }
         }
@@ -110,7 +110,7 @@ class InstanceUpdate(BaseModel):
     title: Optional[str] = Field(
         default=None,
         description="Instance title displayed in the UI.",
-        examples=["Clawboard Ops"],
+        examples=["ClawBoard Ops"],
     )
     integrationLevel: Optional[str] = Field(
         default=None,
@@ -138,7 +138,7 @@ class InstanceResponse(BaseModel):
 
 class InstanceOut(ModelBase):
     id: int = Field(description="Singleton config row ID (always 1).", examples=[1])
-    title: str = Field(description="Instance title displayed in the UI.", examples=["Clawboard Ops"])
+    title: str = Field(description="Instance title displayed in the UI.", examples=["ClawBoard Ops"])
     integrationLevel: str = Field(description="Integration depth (manual | write | full).", examples=["manual"])
     updatedAt: str = Field(description="ISO timestamp of the last config update.", examples=["2026-02-03T20:05:00.000Z"])
 
@@ -200,7 +200,7 @@ class SpaceAllowedResponse(BaseModel):
 class TopicOut(ModelBase):
     id: str = Field(description="Topic ID.", examples=["topic-1"])
     spaceId: str = Field(description="Owning space ID.", examples=["space-default"])
-    name: str = Field(description="Topic name.", examples=["Clawboard"])
+    name: str = Field(description="Topic name.", examples=["ClawBoard"])
     createdBy: Optional[str] = Field(
         description="Creation source (user | classifier | import).",
         examples=["user"],
@@ -329,7 +329,7 @@ class TopicUpsert(BaseModel):
         json_schema_extra={
             "example": {
                 "id": "topic-1",
-                "name": "Clawboard",
+                "name": "ClawBoard",
                 "description": "Product work.",
                 "priority": "high",
                 "status": "active",
@@ -340,7 +340,7 @@ class TopicUpsert(BaseModel):
     )
     id: Optional[str] = Field(default=None, description="Topic ID (omit to create).", examples=["topic-1"])
     spaceId: Optional[str] = Field(default=None, description="Owning space ID.", examples=["space-default"])
-    name: str = Field(description="Topic name.", examples=["Clawboard"])
+    name: str = Field(description="Topic name.", examples=["ClawBoard"])
     color: Optional[str] = Field(default=None, description="Optional topic color #RRGGBB.", examples=["#FF8A4A"])
     description: Optional[str] = Field(default=None, description="Topic description.", examples=["Product work."])
     priority: Optional[str] = Field(default=None, description="Priority (low | medium | high).", examples=["high"])
@@ -644,7 +644,7 @@ class OpenClawChatRequest(BaseModel):
     message: str = Field(
         ...,
         description="User message content to send to OpenClaw.",
-        examples=["Hello from Clawboard."],
+        examples=["Hello from ClawBoard."],
         min_length=1,
         max_length=20_000,
     )
@@ -657,7 +657,7 @@ class OpenClawChatRequest(BaseModel):
     agentId: Optional[str] = Field(
         default="main",
         description=(
-            "Optional routing metadata for Clawboard queue/orchestration bookkeeping. "
+            "Optional routing metadata for ClawBoard queue/orchestration bookkeeping. "
             "Board chat sends are sessionKey-scoped and handled by main orchestration; this field does not force direct subagent dispatch."
         ),
         examples=["main"],
@@ -878,7 +878,7 @@ class ReindexRequest(BaseModel):
 
 class ClawgraphNode(BaseModel):
     id: str = Field(description="Stable graph node ID.", examples=["topic:topic-1"])
-    label: str = Field(description="Human label.", examples=["Clawboard"])
+    label: str = Field(description="Human label.", examples=["ClawBoard"])
     type: str = Field(description="Node type (topic|entity|agent).", examples=["topic"])
     score: float = Field(description="Node score (importance/centrality).", examples=[3.42])
     size: float = Field(description="Visual node size hint.", examples=[18.4])
@@ -919,7 +919,7 @@ class SessionRoutingItem(BaseModel):
 
     ts: str = Field(description="Decision timestamp (ISO).", examples=["2026-02-10T18:00:00.000Z"])
     topicId: str = Field(description="Chosen topic id.", examples=["topic-1"])
-    topicName: Optional[str] = Field(default=None, description="Chosen topic name (best-effort).", examples=["Clawboard"])
+    topicName: Optional[str] = Field(default=None, description="Chosen topic name (best-effort).", examples=["ClawBoard"])
     anchor: Optional[str] = Field(
         default=None,
         description="Compact intent anchor text used to resolve future follow-ups.",
@@ -940,7 +940,7 @@ class SessionRoutingAppend(BaseModel):
             "example": {
                 "sessionKey": "channel:discord|thread:123",
                 "topicId": "topic-1",
-                "topicName": "Clawboard",
+                "topicName": "ClawBoard",
                 "anchor": "Fix the login redirect bug in NIMBUS.",
                 "ts": "2026-02-10T18:00:00.000Z",
             }

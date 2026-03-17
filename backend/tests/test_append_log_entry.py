@@ -63,7 +63,7 @@ class AppendLogEntryTests(unittest.TestCase):
 
     @property
     def auth_headers(self) -> dict[str, str]:
-        return {"X-Clawboard-Token": "test-token"}
+        return {"X-ClawBoard-Token": "test-token"}
 
     def test_append_log_aligns_topic_to_task(self):
         ts = now_iso()

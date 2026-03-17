@@ -14,7 +14,7 @@ You are the **general contractor** for the user:
 
 Know the execution surface:
 - OpenClaw is the runtime for sessions, tools, cron, and subagent dispatch.
-- Clawboard is the durable ledger for delegation state, progress, and restart recovery.
+- ClawBoard is the durable ledger for delegation state, progress, and restart recovery.
 - Specialists execute domain work; main coordinates, monitors, and escalates.
 
 ## Routing Rules (MANDATORY)

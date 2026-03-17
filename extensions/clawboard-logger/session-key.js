@@ -18,7 +18,7 @@ export function boardSessionRouteToSessionKeys(route) {
     return route.kind === "task" ? [canonical, `clawboard:topic:${route.topicId}`] : [canonical];
 }
 /**
- * Returns true if the session key is an explicit Clawboard board session.
+ * Returns true if the session key is an explicit ClawBoard board session.
  * Handles wrapped keys (e.g. agent:main:clawboard:topic:...).
  */
 export function isBoardSessionKey(sessionKey) {
@@ -58,9 +58,9 @@ export function computeEffectiveSessionKey(meta, ctx) {
         ? String(meta.threadId).trim()
         : "";
     const isBoard = (value) => isBoardSessionKey(value);
-    // Board sessions are explicitly chosen by Clawboard Topic Chat. When present, they must
+    // Board sessions are explicitly chosen by ClawBoard Topic Chat. When present, they must
     // win even if OpenClaw supplies an unrelated conversationId, otherwise logs get mis-attributed
-    // (and Clawboard can double-log user input).
+    // (and ClawBoard can double-log user input).
     let base = (metaSession && isBoard(metaSession) ? metaSession : "") ||
         (ctxSession && isBoard(ctxSession) ? ctxSession : "") ||
         (conversationId && isBoard(conversationId) ? conversationId : "") ||

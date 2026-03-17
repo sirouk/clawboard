@@ -43,7 +43,7 @@ class ClassifierReplayTests(unittest.TestCase):
 
     @property
     def auth_headers(self) -> dict[str, str]:
-        return {"X-Clawboard-Token": "test-token"}
+        return {"X-ClawBoard-Token": "test-token"}
 
     def setUp(self):
         with get_session() as session:

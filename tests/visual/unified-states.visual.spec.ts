@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { applyVisualStabilizers, gotoPath, openTask, openTopic, waitForUnifiedViewReady } from "./helpers";
 
-const TOPIC_NAME = "Clawboard";
+const TOPIC_NAME = "ClawBoard";
 const TOPIC_ID = "topic-1";
 const TASK_NAME = "Ship onboarding wizard";
 const TASK_ID = "task-1";

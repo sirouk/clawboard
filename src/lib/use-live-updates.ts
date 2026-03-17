@@ -318,7 +318,7 @@ export function useLiveUpdates(options: {
 
       const headers = new Headers();
       headers.set("Accept", "text/event-stream");
-      if (token) headers.set("X-Clawboard-Token", token);
+      if (token) headers.set("X-ClawBoard-Token", token);
       if (lastSseId.current) headers.set("Last-Event-ID", lastSseId.current);
 
       try {

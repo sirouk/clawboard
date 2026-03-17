@@ -1,30 +1,30 @@
 ### What this document is
-This describes, concretely, what **context the OpenClaw agent can see from Clawboard** today, and how the integration is **bidirectional**:
-- **OpenClaw -> Clawboard**: the OpenClaw plugin logs messages/tool activity into Clawboard so it can be classified/indexed.
-- **Clawboard -> OpenClaw**: before each agent run, the same plugin retrieves a small, ranked continuity bundle from Clawboard and prepends it into the agent prompt.
+This describes, concretely, what **context the OpenClaw agent can see from ClawBoard** today, and how the integration is **bidirectional**:
+- **OpenClaw -> ClawBoard**: the OpenClaw plugin logs messages/tool activity into ClawBoard so it can be classified/indexed.
+- **ClawBoard -> OpenClaw**: before each agent run, the same plugin retrieves a small, ranked continuity bundle from ClawBoard and prepends it into the agent prompt.
 
 Primary implementation: `extensions/clawboard-logger/index.ts`.
 
 As of Feb 2026, the plugin uses the single-call layered context endpoint:
 - `GET /api/context` (prompt-ready block + structured data)
-- Scope guardrail: retrieval is filtered by Clawboard Space visibility whenever the API can resolve a source space (from explicit `spaceId` or inferred `sessionKey`)
+- Scope guardrail: retrieval is filtered by ClawBoard Space visibility whenever the API can resolve a source space (from explicit `spaceId` or inferred `sessionKey`)
 
 ---
 
 ### Data flow (bidirectional bridge)
-1. **User and agent messages happen in OpenClaw** (Discord/CLI/Clawboard UI, etc.).
-2. The OpenClaw plugin `clawboard-logger` logs relevant events into Clawboard:
+1. **User and agent messages happen in OpenClaw** (Discord/CLI/ClawBoard UI, etc.).
+2. The OpenClaw plugin `clawboard-logger` logs relevant events into ClawBoard:
    - inbound user text (`message_received`)
    - outbound assistant text (`message_sending`)
    - tool calls/results/errors (`before_tool_call` / `after_tool_call`)
    - agent end output (`agent_end`, as a fallback when providers do not emit outbound hooks)
-3. Clawboard persists logs (`LogEntry` rows) and emits live update events (SSE).
+3. ClawBoard persists logs (`LogEntry` rows) and emits live update events (SSE).
 4. The **classifier** (`classifier/classifier.py`) asynchronously:
    - attaches logs to a **Topic** (always) and optional **Task**
    - writes short summary chips
    - updates `classificationStatus` (`pending -> classified/failed`)
    - updates embedding indices (Qdrant-backed in core runtimes; no local SQLite mirror)
-5. On the next OpenClaw run, the same plugin retrieves a compact "continuity context" block from Clawboard and prepends it into the agent prompt (`before_agent_start`).
+5. On the next OpenClaw run, the same plugin retrieves a compact "continuity context" block from ClawBoard and prepends it into the agent prompt (`before_agent_start`).
 
 Net effect: the agent can "remember" what happened across Topics/Tasks/logs/notes without relying only on the current chat window or OpenClaw-native memory.
 
@@ -35,7 +35,7 @@ Net effect: the agent can "remember" what happened across Topics/Tasks/logs/note
   - no selection -> `start topic`
   - selected topic -> `continue topic`
   - selected task match -> resolve to its parent topic and `continue topic`
-- Unified top-composer sends from Clawboard go through `POST /api/openclaw/chat` with a topic board session key (`clawboard:topic:*`).
+- Unified top-composer sends from ClawBoard go through `POST /api/openclaw/chat` with a topic board session key (`clawboard:topic:*`).
 - Lower task-chat surfaces and legacy routes may still use `clawboard:task:*:*` as compatibility session keys.
 - Board sessions are still main-mediated orchestration lanes: main receives the turn, then delegates as needed.
 - `agentId` on board chat requests is advisory metadata for dispatch bookkeeping; it does not force direct subagent ownership of a topic or task thread.
@@ -73,9 +73,9 @@ On `before_agent_start`, if `contextAugment` is enabled (default), the plugin pr
 
 ```text
 [CLAWBOARD_CONTEXT_BEGIN]
-Clawboard continuity hook is active for this turn...
-Use this Clawboard retrieval context merged with existing OpenClaw memory/turn context...
-Clawboard context (layered):
+ClawBoard continuity hook is active for this turn...
+Use this ClawBoard retrieval context merged with existing OpenClaw memory/turn context...
+ClawBoard context (layered):
 Current user intent: ...
 Mode: ...
 Active board location:
@@ -118,7 +118,7 @@ Configuration knobs (OpenClaw plugin config):
 - `contextCacheMaxEntries`
 - `contextUseCacheOnFailure`
 
-If you installed via `scripts/bootstrap_clawboard.sh` (or the legacy alias `scripts/bootstrap_openclaw.sh`), you can set these in Clawboard `.env` as:
+If you installed via `scripts/bootstrap_clawboard.sh` (or the legacy alias `scripts/bootstrap_openclaw.sh`), you can set these in ClawBoard `.env` as:
 - `CLAWBOARD_LOGGER_CONTEXT_MODE`
 - `CLAWBOARD_LOGGER_CONTEXT_FETCH_TIMEOUT_MS`
 - `CLAWBOARD_LOGGER_CONTEXT_FETCH_RETRIES`
@@ -132,7 +132,7 @@ Then rerun bootstrap with `--skip-docker` to reconfigure the OpenClaw plugin.
 ---
 
 ### Where that context comes from (exact API calls)
-The plugin fetches context from the Clawboard API.
+The plugin fetches context from the ClawBoard API.
 
 Primary path (single call):
 
@@ -145,7 +145,7 @@ This call is intentionally bounded and time-limited so it stays safe as instance
 ---
 
 ### Space tags + visibility scope (what context can cross)
-Clawboard context/search is visibility-scoped whenever a source space can be resolved.
+ClawBoard context/search is visibility-scoped whenever a source space can be resolved.
 
 Source-space resolution (server-side):
 - explicit `spaceId` query param wins
@@ -205,7 +205,7 @@ Two separate protections exist to keep injected context from poisoning logs, emb
 1. **Sanitization before logging/searching**
    - `sanitizeMessageContent(...)` in `extensions/clawboard-logger/index.ts` removes:
      - any `[CLAWBOARD_CONTEXT_BEGIN] ... [CLAWBOARD_CONTEXT_END]` region
-     - the "Clawboard continuity hook is active..." preamble
+     - the "ClawBoard continuity hook is active..." preamble
      - other transport noise (Discord tags, local-time prefixes, message-id decorations)
    - This keeps the *agent's prompt augmentation* from being re-ingested as if it were the user/assistant's content.
    - Backend ingest also strips these wrappers via `_sanitize_log_text(...)`, so replay paths and non-plugin emitters converge to the same clean payload.
@@ -225,7 +225,7 @@ Two separate protections exist to keep injected context from poisoning logs, emb
    - efficiency tuning: `CLAWBOARD_SEARCH_SINGLE_TOKEN_WINDOW_MAX_LOGS`, `CLAWBOARD_SEARCH_SOURCE_TOPK_*`, `CLAWBOARD_SEARCH_GLOBAL_LEXICAL_RESCUE_*`, `CLAWBOARD_RERANK_CHUNKS_PER_DOC`, and `CLAWBOARD_SEARCH_EMBED_QUERY_CACHE_SIZE`
 
 4. **Control-plane and tool-trace suppression at ingest/classification**
-   - logger conversation hooks suppress heartbeat/control-plane and subagent scaffold payloads before they hit Clawboard
+   - logger conversation hooks suppress heartbeat/control-plane and subagent scaffold payloads before they hit ClawBoard
    - API ingest terminal-filters any surviving control-plane conversations:
      - `filtered_control_plane`
      - `filtered_subagent_scaffold`
@@ -244,7 +244,7 @@ Additional guardrail:
 ---
 
 ### Agent tools (bidirectional skills for the main agent)
-In addition to passive prompt injection, the plugin registers explicit agent tools (when the OpenClaw SDK supports `registerTool`) so the agent can read and update Clawboard intentionally:
+In addition to passive prompt injection, the plugin registers explicit agent tools (when the OpenClaw SDK supports `registerTool`) so the agent can read and update ClawBoard intentionally:
 
 - `clawboard_search` (hybrid recall): calls `GET /api/search`
 - `clawboard_context` (layered bundle): calls `GET /api/context`
@@ -262,7 +262,7 @@ This is what turns "helpful retrieval context" into an expert system that contin
 ---
 
 ### Topic/task digests (compressed memory)
-Clawboard supports short digests on Topics and Tasks:
+ClawBoard supports short digests on Topics and Tasks:
 
 - fields: `digest`, `digestUpdatedAt`
 - written opportunistically by the classifier (LLM when available; heuristic fallback)
@@ -272,18 +272,18 @@ Clawboard supports short digests on Topics and Tasks:
 ---
 
 ### Session keys (how context is routed to the right place)
-Clawboard uses `source.sessionKey` as the main continuity bucket across channels and UIs.
+ClawBoard uses `source.sessionKey` as the main continuity bucket across channels and UIs.
 
 The plugin computes an "effective session key" in `computeEffectiveSessionKey(...)` (`extensions/clawboard-logger/session-key.ts`):
-- If the session is a **Clawboard board task session**, it uses reserved task session keys:
+- If the session is a **ClawBoard board task session**, it uses reserved task session keys:
   - `clawboard:task:<topicId>:<taskId>`
   These keys intentionally win over provider conversation ids to prevent mis-attribution.
 - Otherwise it prefers the provider's `conversationId`, and optionally appends `|thread:<threadId>` to avoid collisions.
 - If nothing else exists, it falls back to `channel:<channelId>` (broad bucket).
 
-Important: to avoid double-logging Clawboard UI chat, the plugin explicitly skips logging `message_received` when the effective session key parses as a board session (`parseBoardSessionKey(...)`), because Clawboard's own backend persists those messages immediately via its task-chat endpoint.
+Important: to avoid double-logging ClawBoard UI chat, the plugin explicitly skips logging `message_received` when the effective session key parses as a board session (`parseBoardSessionKey(...)`), because ClawBoard's own backend persists those messages immediately via its task-chat endpoint.
 
-During ingest, Clawboard normalizes source scope metadata (`boardScopeTopicId`, `boardScopeTaskId`, `boardScopeSpaceId`) so later context/search calls can infer the correct source space from session continuity.
+During ingest, ClawBoard normalizes source scope metadata (`boardScopeTopicId`, `boardScopeTaskId`, `boardScopeSpaceId`) so later context/search calls can infer the correct source space from session continuity.
 
 When routing assigns a task:
 - patching aligns `source.boardScope*` to the resolved task scope and rebases same-request rows into that task where eligible
@@ -297,11 +297,11 @@ For subagents, board scope inheritance is explicit-link only:
 ---
 
 ### Config knobs (what you can tune)
-The plugin is configured via `extensions/clawboard-logger/openclaw.plugin.json` and the `ClawboardLoggerConfig` type in `extensions/clawboard-logger/index.ts`.
+The plugin is configured via `extensions/clawboard-logger/openclaw.plugin.json` and the `ClawBoardLoggerConfig` type in `extensions/clawboard-logger/index.ts`.
 
 Key settings:
-- `baseUrl` (required): Clawboard API base URL
-- `token` (optional): sent as `X-Clawboard-Token`
+- `baseUrl` (required): ClawBoard API base URL
+- `token` (optional): sent as `X-ClawBoard-Token`
 - `enabled` (default true)
 - `queuePath` (default `~/.openclaw/clawboard-queue.sqlite`): local durable queue for log delivery
 - `queue` (default false): if true, send to `/api/ingest` (server-side async queue) instead of `/api/log`
@@ -335,11 +335,11 @@ Because the agent sees:
 - answer with continuity even if the current chat window is short
 - respect Topic/Task boundaries and ongoing work
 - avoid re-asking for stable facts that were already captured as notes
-- leverage Clawboard's hybrid retrieval in addition to OpenClaw-native memory
+- leverage ClawBoard's hybrid retrieval in addition to OpenClaw-native memory
 
 ### Context Contract
 
-This section defines the **end-state contract** for how Clawboard provides **robust, efficient, bidirectional context** to the OpenClaw agent (and vice versa), at scale.
+This section defines the **end-state contract** for how ClawBoard provides **robust, efficient, bidirectional context** to the OpenClaw agent (and vice versa), at scale.
 
 
 #### Goals
@@ -347,15 +347,15 @@ This section defines the **end-state contract** for how Clawboard provides **rob
 - **Continuity without huge prompts**: handle ambiguity over long history without stuffing massive context into every run.
 - **Cheap-by-default**: most turns should use a small, deterministic "working set" bundle; semantic recall is conditional.
 - **Bidirectional improvement loop**:
-  - OpenClaw emits conversation + tool activity into Clawboard (durable memory).
-  - OpenClaw can *query and update* Clawboard through explicit tools (notes, task status, etc.).
+  - OpenClaw emits conversation + tool activity into ClawBoard (durable memory).
+  - OpenClaw can *query and update* ClawBoard through explicit tools (notes, task status, etc.).
 - **Visibility-safe retrieval**: context/search must respect Space-tag membership and Space visibility policy when a source space is known.
 - **Production-safe defaults**: no noisy auditing enabled by default; stable retention/rotation where logs are enabled.
 - **No retrieval pollution**: system metadata and injected context must not poison embeddings/search.
 
 #### Non-Goals (for this layer)
 
-- A full "agentic planner" inside Clawboard.
+- A full "agentic planner" inside ClawBoard.
 - Unlimited context windows (this design assumes context cost matters).
 - Provider-specific memory features beyond the OpenClaw plugin contract.
 

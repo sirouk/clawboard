@@ -10,7 +10,7 @@ Define who owns API behavior, which Next.js routes are compatibility-only, and h
 ## Assumptions
 - Frontend callsites continue to target same-origin `/api/*` routes.
 - `CLAWBOARD_SERVER_API_BASE` (or fallback `CLAWBOARD_PUBLIC_API_BASE`, then `NEXT_PUBLIC_CLAWBOARD_API_BASE`) points to a reachable FastAPI service.
-- Write endpoints still require `X-Clawboard-Token`; proxy routes inject a fallback token from server env when absent.
+- Write endpoints still require `X-ClawBoard-Token`; proxy routes inject a fallback token from server env when absent.
 
 ## Current Next.js API Surface
 
@@ -75,8 +75,8 @@ This includes `tests/scripts/api-ownership.test.mjs`, which enforces:
 
 ### Manual header verification
 ```bash
-curl -i -H "X-Clawboard-Token: $CLAWBOARD_TOKEN" http://localhost:3010/api/topics
-curl -i -X POST -H "X-Clawboard-Token: $CLAWBOARD_TOKEN" http://localhost:3010/api/topics/ensure
+curl -i -H "X-ClawBoard-Token: $CLAWBOARD_TOKEN" http://localhost:3010/api/topics
+curl -i -X POST -H "X-ClawBoard-Token: $CLAWBOARD_TOKEN" http://localhost:3010/api/topics/ensure
 ```
 Expected:
 - `/api/topics` includes `x-clawboard-api-owner: fastapi`

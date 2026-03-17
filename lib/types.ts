@@ -4,14 +4,12 @@ export type Topic = {
   id: string;
   name: string;
   description?: string;
-  parentId?: string | null;
   tags?: string[];
   color?: string;
   status?: string;
   priority?: string;
   dueDate?: string | null;
   snoozedUntil?: string | null;
-  pinned?: boolean;
   createdAt: string;
   updatedAt: string;
 };

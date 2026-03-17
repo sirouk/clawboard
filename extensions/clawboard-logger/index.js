@@ -101,7 +101,7 @@ export default function register(api) {
         if (rawDisable) {
             return !envBool("CLAWBOARD_LOGGER_DISABLE_OPENCLAW_MEMORY_SEARCH", true);
         }
-        // Default: keep OpenClaw memory search off and prefer Clawboard retrieval context.
+        // Default: keep OpenClaw memory search off and prefer ClawBoard retrieval context.
         return false;
     })();
     if (!enabled) {
@@ -329,7 +329,7 @@ export default function register(api) {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json",
-                        ...(token ? { "X-Clawboard-Token": token } : {}),
+                        ...(token ? { "X-ClawBoard-Token": token } : {}),
                     },
                     body: JSON.stringify({
                         id: topicId,
@@ -974,7 +974,7 @@ export default function register(api) {
             boardScope: undefined,
         };
     }
-    // When Clawboard isn't reachable (common during local dev restarts and during purge),
+    // When ClawBoard isn't reachable (common during local dev restarts and during purge),
     // Node's fetch throws (often: "TypeError: fetch failed"). Don't spam the logs.
     const SEND_WARN_INTERVAL_MS = 30_000;
     let lastSendWarnAt = 0;
@@ -1077,7 +1077,7 @@ export default function register(api) {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json",
-                        ...(token ? { "X-Clawboard-Token": token } : {}),
+                        ...(token ? { "X-ClawBoard-Token": token } : {}),
                         "X-Idempotency-Key": idempotencyKey,
                     },
                     signal: controller.signal,
@@ -1190,7 +1190,7 @@ export default function register(api) {
     flushQueue().catch(() => undefined);
     const apiHeaders = {
         "Content-Type": "application/json",
-        ...(token ? { "X-Clawboard-Token": token } : {}),
+        ...(token ? { "X-ClawBoard-Token": token } : {}),
     };
     async function getJson(pathname, params) {
         const controller = new AbortController();
@@ -1329,8 +1329,8 @@ export default function register(api) {
             const tools = [];
             tools.push({
                 name: "clawboard_search",
-                label: "Clawboard Search",
-                description: "Search Clawboard topics, logs, and curated notes (hybrid semantic + lexical).",
+                label: "ClawBoard Search",
+                description: "Search ClawBoard topics, logs, and curated notes (hybrid semantic + lexical).",
                 parameters: {
                     type: "object",
                     additionalProperties: false,
@@ -1455,8 +1455,8 @@ export default function register(api) {
             });
             tools.push({
                 name: "clawboard_context",
-                label: "Clawboard Context",
-                description: "Get a prompt-ready layered context block from Clawboard (working set + continuity + optional recall).",
+                label: "ClawBoard Context",
+                description: "Get a prompt-ready layered context block from ClawBoard (working set + continuity + optional recall).",
                 parameters: {
                     type: "object",
                     additionalProperties: false,
@@ -1496,8 +1496,8 @@ export default function register(api) {
             });
             tools.push({
                 name: "clawboard_get_topic",
-                label: "Get Clawboard Topic",
-                description: "Fetch a Clawboard topic by id.",
+                label: "Get ClawBoard Topic",
+                description: "Fetch a ClawBoard topic by id.",
                 parameters: {
                     type: "object",
                     additionalProperties: false,
@@ -1514,8 +1514,8 @@ export default function register(api) {
             });
             tools.push({
                 name: "clawboard_get_log",
-                label: "Get Clawboard Log",
-                description: "Fetch a Clawboard log entry by id (optionally including raw payload).",
+                label: "Get ClawBoard Log",
+                description: "Fetch a ClawBoard log entry by id (optionally including raw payload).",
                 parameters: {
                     type: "object",
                     additionalProperties: false,
@@ -1539,7 +1539,7 @@ export default function register(api) {
             });
             tools.push({
                 name: "clawboard_create_note",
-                label: "Create Clawboard Note",
+                label: "Create ClawBoard Note",
                 description: "Create a curated note attached to an existing log entry (high-weight retrieval signal).",
                 parameters: {
                     type: "object",
@@ -1583,7 +1583,7 @@ export default function register(api) {
             });
             tools.push({
                 name: "clawboard_update_topic",
-                label: "Update Clawboard Topic",
+                label: "Update ClawBoard Topic",
                 description: "Patch a topic (status/priority/due/pin/snooze/tags) without needing the full topic payload.",
                 parameters: {
                     type: "object",
@@ -1871,13 +1871,13 @@ export default function register(api) {
             return;
         const prependLines = [
             CLAWBOARD_CONTEXT_BEGIN,
-            "Clawboard continuity hook is active for this turn. The block below already comes from Clawboard retrieval. Do not claim Clawboard is unavailable unless this block explicitly says retrieval failed.",
+            "ClawBoard continuity hook is active for this turn. The block below already comes from ClawBoard retrieval. Do not claim ClawBoard is unavailable unless this block explicitly says retrieval failed.",
             enableOpenClawMemorySearch
-                ? "Use this Clawboard retrieval context merged with existing OpenClaw memory/turn context. Prioritize curated user notes when present."
-                : "Use this Clawboard retrieval context as the primary memory source for this turn. Do not run OpenClaw memory_search/memory_get unless the user explicitly asks for OpenClaw memory.",
+                ? "Use this ClawBoard retrieval context merged with existing OpenClaw memory/turn context. Prioritize curated user notes when present."
+                : "Use this ClawBoard retrieval context as the primary memory source for this turn. Do not run OpenClaw memory_search/memory_get unless the user explicitly asks for OpenClaw memory.",
         ];
         if (shouldSuppressReplyDirectivesForSession(sessionKeyForContext)) {
-            prependLines.push("This session is Clawboard UI-native. Reply in plain text and never emit [[reply_to_current]] or [[reply_to:<id>]] tags.");
+            prependLines.push("This session is ClawBoard UI-native. Reply in plain text and never emit [[reply_to_current]] or [[reply_to:<id>]] tags.");
         }
         prependLines.push(context, CLAWBOARD_CONTEXT_END);
         const prependContext = prependLines.join("\n");
@@ -2035,7 +2035,7 @@ export default function register(api) {
                 }
             }
             catch {
-                // Non-fatal fallback path when Clawboard API lookups fail transiently.
+                // Non-fatal fallback path when ClawBoard API lookups fail transiently.
             }
         }
         return explicitRequestId ?? params.requestId;
@@ -2326,7 +2326,7 @@ export default function register(api) {
         const inferredRequestId = inferRequestIdFromMessageId(messageId);
         if (channelId === "webchat" &&
             (requestId?.toLowerCase().startsWith(OPENCLAW_REQUEST_ID_PREFIX) || Boolean(inferredRequestId))) {
-            // Clawboard already persisted this user prompt via `/api/openclaw/chat`.
+            // ClawBoard already persisted this user prompt via `/api/openclaw/chat`.
             // WebChat can echo it back with a different messageId; skip to avoid duplicate user rows.
             return;
         }
@@ -2354,7 +2354,7 @@ export default function register(api) {
                     sessionKey: effectiveSessionKey,
                 });
             }
-            // Clawboard UI messages (board sessions) are already persisted immediately by the backend
+            // ClawBoard UI messages (board sessions) are already persisted immediately by the backend
             // (`/api/openclaw/chat`). Avoid double-logging if OpenClaw emits message_received for them.
             return;
         }
@@ -2997,7 +2997,7 @@ export default function register(api) {
                     raw: JSON.stringify(shape, null, 2),
                     createdAt,
                     agentId: "system",
-                    agentLabel: "Clawboard Logger",
+                    agentLabel: "ClawBoard Logger",
                     source: buildSourceMeta({
                         channel: inferredChannelId,
                         sessionKey: inferredSessionKey,

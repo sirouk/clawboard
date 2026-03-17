@@ -107,7 +107,7 @@ export function Input({ className, ...props }: ComponentProps<"input">) {
   return (
     <input
       className={cn(
-        "h-11 w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] transition focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)]",
+        "h-11 w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] transition focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:shadow-[0_0_0_2px_rgba(226,86,64,0.2)]",
         FORM_FIELD_TEXT_SIZE,
         FORM_FIELD_DISABLED,
         FORM_FIELD_PLACEHOLDER_HINT,
@@ -171,7 +171,7 @@ export function Select({ className, ...props }: ComponentProps<"select">) {
   return (
     <select
       className={cn(
-        "h-11 w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 text-[rgb(var(--claw-text))] transition focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)]",
+        "h-11 w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 text-[rgb(var(--claw-text))] transition focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:shadow-[0_0_0_2px_rgba(226,86,64,0.2)]",
         FORM_FIELD_TEXT_SIZE,
         FORM_FIELD_DISABLED,
         className
@@ -185,7 +185,7 @@ export function TextArea({ className, ...props }: ComponentProps<"textarea">) {
   return (
     <textarea
       className={cn(
-        "min-h-[120px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] transition focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.2)]",
+        "min-h-[120px] w-full rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] px-3 py-2 text-[rgb(var(--claw-text))] placeholder:text-[rgb(var(--claw-muted))] transition focus:border-[rgb(var(--claw-accent))] focus:outline-none focus:shadow-[0_0_0_2px_rgba(226,86,64,0.2)]",
         FORM_FIELD_TEXT_SIZE,
         FORM_FIELD_DISABLED,
         FORM_FIELD_PLACEHOLDER_HINT,
@@ -215,7 +215,7 @@ export function Switch({
       disabled={disabled}
       onClick={() => onCheckedChange(!checked)}
       className={cn(
-        "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-[rgba(226,86,64,0.4)] focus:ring-offset-2 focus:ring-offset-[rgb(var(--claw-panel))]",
+        "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:shadow-[0_0_0_2px_rgb(var(--claw-panel)),0_0_0_4px_rgba(226,86,64,0.4)]",
         checked ? "bg-[rgb(var(--claw-accent))]" : "bg-[rgb(var(--claw-panel-3))]",
         disabled && "cursor-not-allowed opacity-50",
         className

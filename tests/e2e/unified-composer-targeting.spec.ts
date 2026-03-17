@@ -696,7 +696,7 @@ test("unified stop button follows orchestration-active selected task and sends s
       summary: "Delegation started",
       classificationStatus: "classified",
       agentId: "system",
-      agentLabel: "Clawboard",
+      agentLabel: "ClawBoard",
       source: {
         channel: "clawboard",
         sessionKey: taskSession,

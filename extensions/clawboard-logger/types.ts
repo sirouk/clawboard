@@ -108,7 +108,7 @@ export type ActorFlow = {
   audienceLabel?: string;
 };
 
-export type ClawboardLoggerConfig = {
+export type ClawBoardLoggerConfig = {
   baseUrl: string;
   /** Optional fallback base URLs used when baseUrl has transient network failures. */
   baseUrlFallbacks?: string[];
@@ -131,10 +131,10 @@ export type ClawboardLoggerConfig = {
   extraHooks?: string[];
   /** When true (default), auto-create a topic per OpenClaw sessionKey and attach logs to it. */
   autoTopicBySession?: boolean;
-  /** When true (default), prepend retrieved Clawboard context before agent start. */
+  /** When true (default), prepend retrieved ClawBoard context before agent start. */
   contextAugment?: boolean;
   /**
-   * Context retrieval mode (passed to Clawboard `/api/context`):
+   * Context retrieval mode (passed to ClawBoard `/api/context`):
    * - auto: Layer A always, Layer B conditional
    * - cheap: Layer A only
    * - full: Layer A + Layer B
@@ -168,7 +168,7 @@ export type ClawboardLoggerConfig = {
   boardScopeCacheMaxEntries?: number;
   /**
    * When true, allow the agent to use OpenClaw memory_search/memory_get alongside
-   * Clawboard retrieval context/tools for recall.
+   * ClawBoard retrieval context/tools for recall.
    */
   enableOpenClawMemorySearch?: boolean;
   /**

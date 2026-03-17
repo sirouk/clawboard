@@ -291,11 +291,11 @@ from .attachments import (  # noqa: F401
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Clawboard API",
+    title="ClawBoard API",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
-    description="Clawboard API for topics, tasks, logs, and live updates.",
+    description="ClawBoard API for topics, tasks, logs, and live updates.",
 )
 
 
@@ -384,7 +384,7 @@ async def enforce_api_access_policy(request: Request, call_next):
         return JSONResponse(
             status_code=400,
             content={
-                "detail": "Do not pass token via query param. Use X-Clawboard-Token header."
+                "detail": "Do not pass token via query param. Use X-ClawBoard-Token header."
             },
         )
 
@@ -3554,7 +3554,7 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
             if inferred_topic and not source_scope_topic_id:
                 source_scope_topic_id = inferred_topic
 
-        # Clawboard routing: if a sender only provides source-scoped metadata (common for nested
+        # ClawBoard routing: if a sender only provides source-scoped metadata (common for nested
         # OpenClaw sessions), derive topic so thread affinity remains stable.
         if source_scope_topic_id and (scope_lock or not topic_id):
             topic_id = source_scope_topic_id
@@ -4043,7 +4043,7 @@ def _log_openclaw_chat_error(*, session_key: str, request_id: str, detail: str, 
             summary=_clip(detail, 160),
             raw=_clip(raw or "", 5000) if raw else None,
             agentId="system",
-            agentLabel="Clawboard",
+            agentLabel="ClawBoard",
             source={
                 "sessionKey": session_key,
                 "channel": "clawboard",
@@ -4070,7 +4070,7 @@ def _log_openclaw_chat_watchdog_warning(*, session_key: str, request_id: str, de
             summary=_clip(detail, 160),
             raw=None,
             agentId="system",
-            agentLabel="Clawboard",
+            agentLabel="ClawBoard",
             source={
                 "sessionKey": session_key,
                 "channel": "clawboard",
@@ -5523,7 +5523,7 @@ def _orchestration_recovery_follow_up_message(items: list["OrchestrationItem"]) 
         "[ORCHESTRATION_RECOVERY] One or more delegated attempts ended unsuccessfully. "
         f"Failed attempts: {joined}. "
         "Please run CLAWBOARD LEDGER RECOVERY: inspect sessions_list, use session_status(...) for any still-present "
-        "delegated session(s), rely on the failure details already captured in Clawboard, decide whether to respawn "
+        "delegated session(s), rely on the failure details already captured in ClawBoard, decide whether to respawn "
         "a specialist or finish the work yourself, and then update the user in this thread. Do not depend on "
         "legacy transcript-history reads for cross-agent recovery. If inference or tools are unavailable, tell the user "
         "explicitly."
@@ -6318,7 +6318,7 @@ def _orchestration_completed_subagent_follow_up_message(
             min_created_at=str(getattr(item, "startedAt", "") or getattr(item, "createdAt", "") or ""),
             max_chars=420,
         )
-        detail = result_excerpt or "(result already visible in the current topic thread; rely on injected Clawboard context)"
+        detail = result_excerpt or "(result already visible in the current topic thread; rely on injected ClawBoard context)"
         suffix = " ..." if result_truncated and result_excerpt else ""
         specialist_segments.append(f"{agent_id} ({item_session}): {detail}{suffix}")
     if len(ordered_items) > 3:
@@ -7378,7 +7378,7 @@ def _run_openclaw_chat(
 ) -> bool:
     """Dispatch a message to OpenClaw.
 
-    Clawboard is an external client of the OpenClaw Gateway.
+    ClawBoard is an external client of the OpenClaw Gateway.
     """
     dispatch_message = message
 
@@ -9204,8 +9204,8 @@ class _OpenClawAssistantLogWatchdog:
                 session_key=base_key,
                 request_id=request_id,
                 detail=(
-                    "OpenClaw gateway accepted the request, but no assistant output has been logged to Clawboard "
-                    f"for at least {int(idle_seconds)} seconds. The run may still be executing; Clawboard will keep "
+                    "OpenClaw gateway accepted the request, but no assistant output has been logged to ClawBoard "
+                    f"for at least {int(idle_seconds)} seconds. The run may still be executing; ClawBoard will keep "
                     f"monitoring and retry history backfill. requestId={request_id}"
                 ),
             )
@@ -9532,12 +9532,12 @@ def _log_openclaw_gateway_history_sync_failure(error_text: str, *, degraded: boo
     request_id = f"oc-history-sync-{bucket}-{digest}"
     if degraded:
         detail = (
-            "OpenClaw gateway history sync is degraded; fallback backfill into Clawboard is only partially healthy. "
+            "OpenClaw gateway history sync is degraded; fallback backfill into ClawBoard is only partially healthy. "
             f"error={error_text}"
         )
     else:
         detail = (
-            "OpenClaw gateway history sync is failing, so fallback backfill into Clawboard is degraded. "
+            "OpenClaw gateway history sync is failing, so fallback backfill into ClawBoard is degraded. "
             f"error={error_text}"
         )
     payload = LogAppend(
@@ -9546,7 +9546,7 @@ def _log_openclaw_gateway_history_sync_failure(error_text: str, *, degraded: boo
         summary=_clip(detail, 160),
         raw=None,
         agentId="system",
-        agentLabel="Clawboard",
+        agentLabel="ClawBoard",
         source={
             "sessionKey": _OPENCLAW_HISTORY_SYNC_STATUS_SESSION_KEY,
             "channel": "clawboard",
@@ -10100,7 +10100,7 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
             role = str(row.get("role") or "").strip().lower()
             if role == "assistant" and sanitized_text.strip().lower() in {"no_reply", "no reply"}:
                 # NO_REPLY is an internal no-op sentinel and should never be surfaced in
-                # Clawboard chat, even if it exists in OpenClaw transcript history.
+                # ClawBoard chat, even if it exists in OpenClaw transcript history.
                 max_safe_ms = max(max_safe_ms, timestamp_ms)
                 continue
             if role == "assistant":
@@ -10119,7 +10119,7 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 elif sanitized_text.startswith("[System Message]"):
                     # OpenClaw injects system notifications (subagent failures, etc.) as role=user
                     # into the board session transcript. Re-attribute them as system events so they
-                    # don't render as human messages in the Clawboard UI.
+                    # don't render as human messages in the ClawBoard UI.
                     entry_type = "system"
                     agent_id = "system"
                     agent_label = "OpenClaw"
@@ -10146,7 +10146,7 @@ def _ingest_openclaw_history_messages(*, session_key: str, messages: list[Any], 
                 # metadata). Persist these as explicit terminal system rows so the user sees the failure.
                 entry_type = "system"
                 agent_id = "system"
-                agent_label = "Clawboard"
+                agent_label = "ClawBoard"
                 normalized_text = _sanitize_log_text(terminal_error_detail)
                 summary_text = normalized_text
             if not normalized_text:
@@ -11310,7 +11310,7 @@ def openclaw_chat(payload: OpenClawChatRequest, _background_tasks: BackgroundTas
         raise
     except Exception as exc:
         # Fail closed: if we can't persist the user message, do not send it to OpenClaw.
-        # Otherwise Clawboard can show assistant replies/tool traces without the user prompt that triggered them.
+        # Otherwise ClawBoard can show assistant replies/tool traces without the user prompt that triggered them.
         raise HTTPException(status_code=503, detail="Failed to persist user message. Please retry.") from exc
 
     try:
@@ -11756,7 +11756,7 @@ def _build_openclaw_attachment_handoff_note(stage_info: dict[str, Any]) -> str:
         if isinstance(item, dict) and str(item.get("relativePath") or "").strip()
     ]
     lines = [
-        "[Clawboard attachment context]",
+        "[ClawBoard attachment context]",
         f"Staged path in every agent workspace: {stage_info.get('relativeDir')}",
         f"Manifest: {stage_info.get('manifestRelativePath')}",
         "If you need to inspect an image attachment directly, use the image tool on the exact workspace-relative file path below.",
@@ -12210,7 +12210,7 @@ def get_config():
         if not instance:
             instance = InstanceConfig(
                 id=1,
-                title="Clawboard",
+                title="ClawBoard",
                 integrationLevel="write",
                 updatedAt=now_iso(),
             )
@@ -12231,7 +12231,7 @@ def update_config(
         examples={
             "default": {
                 "summary": "Update instance config",
-                "value": {"title": "Clawboard Ops", "integrationLevel": "write"},
+                "value": {"title": "ClawBoard Ops", "integrationLevel": "write"},
             }
         },
     )
@@ -12242,7 +12242,7 @@ def update_config(
         if not instance:
             instance = InstanceConfig(
                 id=1,
-                title=payload.title or "Clawboard",
+                title=payload.title or "ClawBoard",
                 integrationLevel=payload.integrationLevel or "write",
                 updatedAt=now_iso(),
             )
@@ -12296,7 +12296,7 @@ def admin_start_fresh_replay(
         if not instance:
             instance = InstanceConfig(
                 id=1,
-                title="Clawboard",
+                title="ClawBoard",
                 integrationLevel=payload.integrationLevel,
                 updatedAt=timestamp,
             )
@@ -12920,7 +12920,7 @@ def upsert_topic(
                 "summary": "Upsert topic",
                 "value": {
                     "id": "topic-1",
-                    "name": "Clawboard",
+                    "name": "ClawBoard",
                     "description": "Product work.",
                     "priority": "high",
                     "status": "active",
@@ -12930,7 +12930,7 @@ def upsert_topic(
             }
         },
     ),
-    x_clawboard_actor: str | None = Header(default=None, alias="X-Clawboard-Actor"),
+    x_clawboard_actor: str | None = Header(default=None, alias="X-ClawBoard-Actor"),
 ):
     """Create or update a topic."""
     with get_session() as session:
@@ -16312,7 +16312,7 @@ def context(
     layers: list[str] = []
     lines: list[str] = []
 
-    lines.append("Clawboard context (layered):")
+    lines.append("ClawBoard context (layered):")
     if normalized_query:
         lines.append(f"Current user intent: {_clip(normalized_query, 180)}")
     if completion_event:
@@ -16481,7 +16481,7 @@ def context(
 
         working_topics = visible_topics[: max(0, min(12, workingSetLimit))]
 
-        # Board chat location: Clawboard Topic chat sessions carry a stable sessionKey that
+        # Board chat location: ClawBoard Topic chat sessions carry a stable sessionKey that
         # identifies the active Topic. Always surface that entity first so the model knows
         # "where the user is speaking from" even on vague turns like "resume" or "thoughts?".
         board_topic_id = _parse_board_session_key(sessionKey or "")

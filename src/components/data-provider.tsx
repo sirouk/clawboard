@@ -1123,7 +1123,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     void showPwaNotification(
       {
-        title: "Clawboard",
+        title: "ClawBoard",
         body: `${additions.length} topics unsnoozed.`,
         tag: UNSNOOZE_TOPICS_SUMMARY_TAG,
         url: "/u",
@@ -1225,7 +1225,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     void showPwaNotification(
       {
-        title: "Clawboard",
+        title: "ClawBoard",
         body: `${topicIds.size} topics need a look.`,
         tag: CHAT_SUMMARY_TAG,
         url: "/u",

@@ -35,7 +35,7 @@ class OpenClawWorkspaceEndpointTests(unittest.TestCase):
 
     @property
     def auth_headers(self) -> dict[str, str]:
-        return {"X-Clawboard-Token": "test-token"}
+        return {"X-ClawBoard-Token": "test-token"}
 
     def test_openclaw_workspaces_are_config_driven_and_generate_code_server_urls(self):
         with tempfile.TemporaryDirectory(prefix="clawboard-openclaw-home-") as openclaw_home:

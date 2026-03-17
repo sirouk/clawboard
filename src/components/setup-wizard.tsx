@@ -12,7 +12,7 @@ import { resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
 const STEPS = [
   { id: 1, title: "OpenClaw Skill", description: "Install the skill and connect your agent." },
   { id: 2, title: "Token", description: "Store the API token locally for authenticated access." },
-  { id: 3, title: "Instance", description: "Name your Clawboard and set integration depth." },
+  { id: 3, title: "Instance", description: "Name your ClawBoard and set integration depth." },
   { id: 4, title: "Spaces", description: "Control cross-space visibility for search, graph, and context." },
 ];
 
@@ -215,10 +215,10 @@ export function SetupWizard({ initialStep = 1 }: { initialStep?: number } = {}) 
   const connectionSnippet = useMemo(() => {
     const target = localApiBase || "<clawboard-api-url>";
     const safeToken = token && token.trim().length > 0 ? "<stored-local-token>" : "<required-token>";
-    const name = localTitle?.trim() || "Clawboard";
+    const name = localTitle?.trim() || "ClawBoard";
     const level = localIntegration || "write";
-    return `To connect OpenClaw to Clawboard, I need:
-1) Clawboard API base URL (FastAPI, local or Tailscale). -> ${target}
+    return `To connect OpenClaw to ClawBoard, I need:
+1) ClawBoard API base URL (FastAPI, local or Tailscale). -> ${target}
 2) Does the server require a write token? If yes, paste it. -> ${safeToken}
 3) Instance display name. -> ${name}
 4) Integration level: manual / write / full backfill. -> ${level}
@@ -372,7 +372,7 @@ cp -R "${"$"}CLAWBOARD_DIR/skills/clawboard" ~/.openclaw/skills/clawboard`;
     return `# Recommended: enable OpenResponses so attachments work (POST /v1/responses)
 openclaw config set gateway.http.endpoints.responses.enabled --json true
 
-# Install + enable the Clawboard logger plugin
+# Install + enable the ClawBoard logger plugin
 openclaw plugins install -l "${"$"}CLAWBOARD_DIR/extensions/clawboard-logger"
 openclaw plugins enable clawboard-logger
 
@@ -429,11 +429,11 @@ openclaw gateway restart`;
           <div className="space-y-4">
             <div>
               <h2 className="text-xl font-semibold">Instance Details</h2>
-              <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">Give this Clawboard a name and choose integration depth.</p>
+              <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">Give this ClawBoard a name and choose integration depth.</p>
             </div>
             <div>
               <label className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Instance Name</label>
-              <Input value={localTitle} onChange={(event) => setLocalTitle(event.target.value)} placeholder="Clawboard" />
+              <Input value={localTitle} onChange={(event) => setLocalTitle(event.target.value)} placeholder="ClawBoard" />
             </div>
             <div>
               <label className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--claw-muted))]">Integration Level</label>
@@ -646,7 +646,7 @@ openclaw gateway restart`;
             <div>
               <h2 className="text-xl font-semibold">OpenClaw Skill</h2>
               <p className="mt-2 text-sm text-[rgb(var(--claw-muted))]">
-                Install the Clawboard skill in your OpenClaw instance and point it to this server.
+                Install the ClawBoard skill in your OpenClaw instance and point it to this server.
               </p>
             </div>
 
@@ -681,7 +681,7 @@ openclaw gateway restart`;
               <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel-2))] p-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="text-sm font-semibold">Clawboard API base URL</div>
+                    <div className="text-sm font-semibold">ClawBoard API base URL</div>
                     <div className="text-xs text-[rgb(var(--claw-muted))]">FastAPI base URL used by OpenClaw.</div>
                   </div>
                   <Button size="sm" variant="secondary" onClick={() => copyToClipboard(localApiBase)}>
@@ -725,7 +725,7 @@ openclaw gateway restart`;
                     </Button>
                   </div>
                   <p className="mt-2 text-xs text-[rgb(var(--claw-muted))]">
-                    Clawboard can queue messages even if OpenClaw is misconfigured, but without the plugin you will not
+                    ClawBoard can queue messages even if OpenClaw is misconfigured, but without the plugin you will not
                     see assistant output and tool traces reliably.
                   </p>
                   <pre className="mt-3 whitespace-pre-wrap rounded-[var(--radius-sm)] bg-black/40 p-3 text-xs text-[rgb(var(--claw-text))]">

@@ -1,4 +1,4 @@
-# Clawboard SEED / Bootstrap Notes
+# ClawBoard SEED / Bootstrap Notes
 
 This repo ships two pieces:
 
@@ -9,7 +9,7 @@ This repo ships two pieces:
 
 If you set `CLAWBOARD_TOKEN`, **all write endpoints** require:
 
-- Header: `X-Clawboard-Token: <token>`
+- Header: `X-ClawBoard-Token: <token>`
 
 Read endpoints (e.g. `/api/health`, `/api/config` GET, list endpoints) remain open.
 
@@ -37,8 +37,8 @@ Set instance display name + integration level:
 ```bash
 curl -X POST 'http://localhost:8010/api/config' \
   -H 'Content-Type: application/json' \
-  -H 'X-Clawboard-Token: YOUR_TOKEN' \
-  -d '{"title":"Clawboard Instance","integrationLevel":"full"}'
+  -H 'X-ClawBoard-Token: YOUR_TOKEN' \
+  -d '{"title":"ClawBoard Instance","integrationLevel":"full"}'
 ```
 
 `integrationLevel` values:

@@ -1,4 +1,4 @@
-# Clawboard Classification and Routing Spec (Mission-Critical)
+# ClawBoard Classification and Routing Spec (Mission-Critical)
 
 Companion UML: `OPENCLAW_CLAWBOARD_UML.md`
 
@@ -7,13 +7,13 @@ This spec is code-accurate for the current repository and adds mission-grade ope
 ## 1) System Boundary
 
 - OpenClaw runtime produces user, assistant, and tool events.
-- `extensions/clawboard-logger` sanitizes events, resolves continuity/session scope, and writes logs to Clawboard.
-- Clawboard API (`backend/app/main.py`) persists state, publishes SSE, serves context/search, and bridges task chat to the OpenClaw gateway.
+- `extensions/clawboard-logger` sanitizes events, resolves continuity/session scope, and writes logs to ClawBoard.
+- ClawBoard API (`backend/app/main.py`) persists state, publishes SSE, serves context/search, and bridges task chat to the OpenClaw gateway.
 - Classifier worker (`classifier/classifier.py`) classifies pending conversation bundles into topic/task/summary assignments.
 - Embedding backends:
   - Search runtime: `backend/app/vector_search.py` (Qdrant-backed vectors in core runtime).
   - Classifier runtime: `classifier/embeddings_store.py` (Qdrant-backed vectors in core runtime).
-- Clawboard UI consumes SSE + `/api/changes`, queries `/api/search`, and sends task chat through `/api/openclaw/chat`.
+- ClawBoard UI consumes SSE + `/api/changes`, queries `/api/search`, and sends task chat through `/api/openclaw/chat`.
 
 ## 2) End-to-End Content Lifecycle
 

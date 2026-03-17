@@ -79,7 +79,7 @@ def _api_request(method: str, path: str, payload: dict[str, Any] | None = None) 
     url = f"{API_BASE}{path}"
     headers = {"Content-Type": "application/json"}
     if TOKEN:
-        headers["X-Clawboard-Token"] = TOKEN
+        headers["X-ClawBoard-Token"] = TOKEN
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     last_error: Exception | None = None
     for attempt in range(4):

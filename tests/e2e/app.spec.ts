@@ -93,7 +93,7 @@ test("board nav stays expanded and keeps the last selected task highlighted off-
 test("unified view expands topics and tasks", async ({ page }) => {
   await page.goto("/u");
   await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
-  await page.getByRole("button", { name: "Expand topic Clawboard", exact: true }).click();
+  await page.getByRole("button", { name: "Expand topic ClawBoard", exact: true }).click();
   await expect(page.getByText("Ship onboarding wizard")).toBeVisible();
   await page.getByRole("button", { name: "Expand task Ship onboarding wizard", exact: true }).click();
 
@@ -119,18 +119,18 @@ test("unified board uses freeform composer and hides top-level new topic button"
   await expect(page.getByRole("button", { name: "Attach files" }).first()).toBeVisible();
   await expect(composer).toHaveValue("Message stays in composer");
 
-  await composer.fill("Clawboard");
-  await expect(composer).toHaveValue("Clawboard");
+  await composer.fill("ClawBoard");
+  await expect(composer).toHaveValue("ClawBoard");
   const topicCard = page.locator("[data-topic-card-id='topic-1']").first();
   await expect(topicCard).toBeVisible();
   await expect(page.locator("[data-topic-card-id='topic-1'] > div[role='button']").first()).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByTestId("unified-composer-target-chip")).toContainText("Clawboard");
+  await expect(page.getByTestId("unified-composer-target-chip")).toContainText("ClawBoard");
   await expect(page.getByTestId("unified-composer-send")).toContainText("Continue");
 });
 
 test("topic tag editor preserves typed labels and supports repeated enter commits", async ({ page }) => {
   await page.goto("/u");
-  await page.getByRole("button", { name: "Expand topic Clawboard", exact: true }).click();
+  await page.getByRole("button", { name: "Expand topic ClawBoard", exact: true }).click();
   await page.getByTestId("rename-topic-topic-1").click();
 
   const topicTagInput = page.getByTestId("rename-topic-tags-topic-1");
@@ -163,11 +163,11 @@ test("topic tag editor preserves typed labels and supports repeated enter commit
 
 test("instance title updates live after config changes", async ({ page, request }) => {
   const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
-  const nextTitle = `Clawboard Live ${Date.now()}`;
+  const nextTitle = `ClawBoard Live ${Date.now()}`;
 
   await page.goto("/u");
   await page.getByRole("heading", { name: "Unified View" }).waitFor();
-  await expect(page.getByText("Clawboard").first()).toBeVisible();
+  await expect(page.getByText("ClawBoard").first()).toBeVisible();
 
   const response = await request.post(`${apiBase}/api/config`, {
     data: { title: nextTitle },

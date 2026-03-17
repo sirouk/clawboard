@@ -4,7 +4,7 @@ set -euo pipefail
 # purge-state.sh
 #
 # PURPOSE
-#   Purge local state for OpenClaw + Clawboard while keeping:
+#   Purge local state for OpenClaw + ClawBoard while keeping:
 #     - identity (you + me)
 #     - operating rules (SOUL/AGENTS/TOOLS/USER/etc.)
 #     - credentials / access keys you provided
@@ -41,7 +41,7 @@ set -euo pipefail
 # NOTES
 #   - Dry run prints every action plus where it would archive to.
 #   - Archive mode moves files into: <this-repo>/_purge-archive/<timestamp>/
-#   - Clawboard API health check can be overridden with: CLAWBOARD_HEALTH_URL=http://localhost:8010/api/health
+#   - ClawBoard API health check can be overridden with: CLAWBOARD_HEALTH_URL=http://localhost:8010/api/health
 #
 
 APPLY=0
@@ -136,7 +136,7 @@ have_clawboard_compose() {
 
 clawboard_down() {
   if ! command -v docker >/dev/null 2>&1; then
-    say "SKIP: docker not installed; cannot manage Clawboard containers"
+    say "SKIP: docker not installed; cannot manage ClawBoard containers"
     return 0
   fi
   if ! have_clawboard_compose; then
@@ -154,7 +154,7 @@ clawboard_down() {
 
 clawboard_up() {
   if ! command -v docker >/dev/null 2>&1; then
-    say "SKIP: docker not installed; cannot manage Clawboard containers"
+    say "SKIP: docker not installed; cannot manage ClawBoard containers"
     return 0
   fi
   if ! have_clawboard_compose; then
@@ -184,13 +184,13 @@ clawboard_up() {
           break
         fi
         if [[ "$(date +%s)" -ge "$deadline" ]]; then
-          say "WARN: Clawboard API not healthy yet ($url). Continuing."
+          say "WARN: ClawBoard API not healthy yet ($url). Continuing."
           break
         fi
         sleep 1
       done
     else
-      say "WARN: curl not found; cannot wait for Clawboard API health."
+      say "WARN: curl not found; cannot wait for ClawBoard API health."
     fi
   fi
 }
@@ -410,7 +410,7 @@ print_plan() {
     if is_web_hot_reload_enabled; then
       mode="dev (web-dev)"
     fi
-    say "Clawboard compose: $mode (env: $CLAWBOARD_ENV_FILE)"
+    say "ClawBoard compose: $mode (env: $CLAWBOARD_ENV_FILE)"
   fi
   say ""
 
@@ -424,7 +424,7 @@ print_plan() {
   say "  - $OPENCLAW_DIR/devices/"
   say "  - $OPENCLAW_DIR/extensions/"
   say ""
-  say "Clawboard config/source (this repo):"
+  say "ClawBoard config/source (this repo):"
   say "  - $CLAWBOARD_DIR/.env*"
   say "  - $CLAWBOARD_DIR/docker-compose.y*ml"
   say "  - $CLAWBOARD_DIR/Dockerfile*"
@@ -454,7 +454,7 @@ validate_environment() {
     if command -v docker >/dev/null 2>&1; then
       :
     else
-      say "WARN: docker not found; Clawboard docker purge steps would fail on apply."
+      say "WARN: docker not found; ClawBoard docker purge steps would fail on apply."
     fi
   fi
 
@@ -476,7 +476,7 @@ purge() {
   say "  - $OPENCLAW_DIR/logs, $OPENCLAW_DIR/subagents"
   say "OpenClaw (queues):"
   say "  - $OPENCLAW_DIR/clawboard-queue.sqlite*"
-  say "Clawboard (DB/vectors/indexes):"
+  say "ClawBoard (DB/vectors/indexes):"
   say "  - docker volumes (docker compose down -v)"
   say "  - $CLAWBOARD_DIR/data (qdrant storage, embeddings db, sqlite, etc.)"
   say "Main OpenClaw workspace (local archives from prior manual purges):"
@@ -487,7 +487,7 @@ purge() {
     confirm_yes "About to run purge. "
   fi
 
-  # Bring down Clawboard before touching OpenClaw state so we stop ingestion and release any locks.
+  # Bring down ClawBoard before touching OpenClaw state so we stop ingestion and release any locks.
   # (Also reduces chance of network/volume removal issues later.)
   clawboard_down
 
@@ -536,7 +536,7 @@ purge() {
   archive_or_delete "$OPENCLAW_DIR/clawboard-queue.sqlite-wal"
   archive_or_delete "$OPENCLAW_DIR/clawboard-queue.sqlite-shm"
 
-  # Clawboard data (host-mounted state)
+  # ClawBoard data (host-mounted state)
   archive_or_delete "$CLAWBOARD_DIR/data"
 
   # Main workspace archives from earlier manual purges
@@ -555,7 +555,7 @@ purge() {
 
   gateway_end
 
-  # Bring Clawboard back up last (after doctor may update gateway/service config).
+  # Bring ClawBoard back up last (after doctor may update gateway/service config).
   clawboard_up
 }
 
@@ -591,7 +591,7 @@ restore_from_archive() {
     say "DRY_RUN: restore will not execute without --apply"
   fi
 
-  # Bring down Clawboard first to avoid restoring into a live app and to release file/volume locks.
+  # Bring down ClawBoard first to avoid restoring into a live app and to release file/volume locks.
   clawboard_down
 
   gateway_begin
@@ -655,7 +655,7 @@ restore_from_archive() {
     run "mv \"$RESTORE_DIR/openclaw-memory\"/* \"$OPENCLAW_DIR/memory/\" 2>/dev/null || true"
   fi
 
-  # Restore Clawboard data dir
+  # Restore ClawBoard data dir
   restore_item "$RESTORE_DIR/data" "$CLAWBOARD_DIR/data"
 
   # Restore main workspace archives (optional)
@@ -667,7 +667,7 @@ restore_from_archive() {
 
   gateway_end
 
-  # Bring Clawboard back up last (after doctor may update gateway/service config).
+  # Bring ClawBoard back up last (after doctor may update gateway/service config).
   clawboard_up
 }
 

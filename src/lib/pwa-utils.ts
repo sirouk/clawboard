@@ -42,7 +42,7 @@ function normalizeBadgeCount(value: number) {
 function setDocumentTitleBadge(count: number) {
   if (typeof document === "undefined") return;
   const current = String(document.title || "").trim();
-  const base = (current.replace(TITLE_BADGE_PREFIX, "").trim() || "Clawboard");
+  const base = (current.replace(TITLE_BADGE_PREFIX, "").trim() || "ClawBoard");
   if (count > 0) {
     document.title = `(${count}) ${base}`;
     return;

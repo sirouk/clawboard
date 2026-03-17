@@ -86,7 +86,7 @@ class AccessPolicyTests(unittest.TestCase):
                 headers={
                     "Host": "localhost:8010",
                     "X-Forwarded-For": "203.0.113.9",
-                    "X-Clawboard-Token": "test-token",
+                    "X-ClawBoard-Token": "test-token",
                 },
             )
         finally:
@@ -108,7 +108,7 @@ class AccessPolicyTests(unittest.TestCase):
         self.assertEqual(res.status_code, 400, res.text)
         self.assertEqual(
             res.json().get("detail"),
-            "Do not pass token via query param. Use X-Clawboard-Token header.",
+            "Do not pass token via query param. Use X-ClawBoard-Token header.",
         )
 
     def test_query_token_is_rejected_for_remote_writes(self):
@@ -120,7 +120,7 @@ class AccessPolicyTests(unittest.TestCase):
                 headers={
                     "Host": "localhost:8010",
                     "X-Forwarded-For": "203.0.113.9",
-                    "X-Clawboard-Token": "test-token",
+                    "X-ClawBoard-Token": "test-token",
                 },
             )
         finally:
@@ -128,7 +128,7 @@ class AccessPolicyTests(unittest.TestCase):
         self.assertEqual(res.status_code, 400, res.text)
         self.assertEqual(
             res.json().get("detail"),
-            "Do not pass token via query param. Use X-Clawboard-Token header.",
+            "Do not pass token via query param. Use X-ClawBoard-Token header.",
         )
 
     def test_write_requires_token_even_on_localhost(self):
@@ -139,7 +139,7 @@ class AccessPolicyTests(unittest.TestCase):
         res_ok = self.client.post(
             "/api/topics",
             json=payload,
-            headers={"Host": "localhost:8010", "X-Clawboard-Token": "test-token"},
+            headers={"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"},
         )
         self.assertEqual(res_ok.status_code, 200, res_ok.text)
 

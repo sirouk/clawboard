@@ -2,7 +2,7 @@
 
 These files are kept only to preserve the old `ralphie.sh` autonomous-loop workflow.
 
-They are not part of the current Clawboard product/runtime documentation set, which is now:
+They are not part of the current ClawBoard product/runtime documentation set, which is now:
 
 - `README.md`
 - `ANATOMY.md`

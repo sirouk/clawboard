@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * UI Changes Testing Script for Clawboard Unified View
+ * UI Changes Testing Script for ClawBoard Unified View
  * 
  * This script tests the following changes:
  * 1. Smaller freeform textarea (min-height: 40px instead of 72px)

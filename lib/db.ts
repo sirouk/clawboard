@@ -153,14 +153,12 @@ const serializeTopic = (topic: {
   id: string;
   name: string;
   description: string | null;
-  parentId: string | null;
   tags: unknown;
   color: string | null;
   status: string | null;
   priority: string | null;
   dueDate: Date | null;
   snoozedUntil: Date | null;
-  pinned: boolean;
   createdAt: Date;
   updatedAt: Date;
 }): Topic => ({
@@ -168,13 +166,11 @@ const serializeTopic = (topic: {
   name: topic.name,
   color: topic.color ?? undefined,
   description: topic.description ?? undefined,
-  parentId: topic.parentId ?? null,
   tags: normalizeTags(topic.tags),
   status: topic.status ?? undefined,
   priority: topic.priority ?? undefined,
   dueDate: toIso(topic.dueDate) ?? null,
   snoozedUntil: toIso(topic.snoozedUntil) ?? null,
-  pinned: topic.pinned ?? false,
   createdAt: topic.createdAt.toISOString(),
   updatedAt: topic.updatedAt.toISOString()
 });
@@ -280,7 +276,6 @@ const migrateFromJsonIfNeeded = async () => {
       id: topic.id,
       name: topic.name,
       description: topic.description ?? null,
-      parentId: topic.parentId ?? null,
       tags: JSON.stringify(topic.tags ?? []),
       createdAt: parseDate(topic.createdAt) ?? new Date(),
       updatedAt: parseDate(topic.updatedAt) ?? new Date()
@@ -363,7 +358,6 @@ const ensureSeeded = async () => {
             id: topic.id,
             name: topic.name,
             description: topic.description ?? null,
-            parentId: topic.parentId ?? null,
             tags: JSON.stringify(topic.tags ?? []),
             createdAt: parseDate(topic.createdAt) ?? new Date(),
             updatedAt: parseDate(topic.updatedAt) ?? new Date()
@@ -412,14 +406,12 @@ export const getData = async (): Promise<PortalData> => {
 export const createTopic = async (input: {
   name: string;
   description?: string;
-  parentId?: string | null;
   tags?: string[];
   color?: string;
   status?: string;
   priority?: string;
   dueDate?: string | null;
   snoozedUntil?: string | null;
-  pinned?: boolean;
   id?: string;
 }) => {
   await ensureSeeded();
@@ -435,14 +427,12 @@ export const createTopic = async (input: {
       id,
       name: input.name,
       description: input.description ?? null,
-      parentId: input.parentId ?? null,
       tags: JSON.stringify(input.tags ?? []),
       color: pickedColor,
       status: input.status ?? null,
       priority: input.priority ?? null,
       dueDate: parseDate(input.dueDate) ?? null,
       snoozedUntil: parseDate(input.snoozedUntil) ?? null,
-      pinned: input.pinned ?? false,
       createdAt,
       updatedAt: createdAt
     }
@@ -454,14 +444,12 @@ export const ensureTopic = async (input: {
   id?: string;
   name: string;
   description?: string;
-  parentId?: string | null;
   tags?: string[];
   color?: string;
   status?: string;
   priority?: string;
   dueDate?: string | null;
   snoozedUntil?: string | null;
-  pinned?: boolean;
 }) => {
   await ensureSeeded();
   const match = input.id
@@ -474,7 +462,6 @@ export const ensureTopic = async (input: {
       data: {
         name: input.name ?? match.name,
         description: input.description ?? match.description,
-        parentId: input.parentId ?? match.parentId,
         tags: JSON.stringify(input.tags ?? normalizeTags(match.tags)),
         color: normalizeHexColor(input.color) ?? match.color,
         updatedAt: new Date()
@@ -488,7 +475,6 @@ export const ensureTopic = async (input: {
       id: input.id ?? `topic-${crypto.randomUUID()}`,
       name: input.name,
       description: input.description ?? null,
-      parentId: input.parentId ?? null,
       tags: JSON.stringify(input.tags ?? []),
       color: normalizeHexColor(input.color) ?? null,
       createdAt: new Date(),
@@ -501,7 +487,7 @@ export const ensureTopic = async (input: {
 
 export const patchTopic = async (
   id: string,
-  input: Partial<Pick<Topic, "name" | "description" | "parentId" | "tags" | "color" | "status" | "priority" | "dueDate" | "snoozedUntil" | "pinned">>
+  input: Partial<Pick<Topic, "name" | "description" | "tags" | "color" | "status" | "priority" | "dueDate" | "snoozedUntil">>
 ) => {
   await ensureSeeded();
   const existing = await prisma.topic.findUnique({ where: { id } });
@@ -512,14 +498,12 @@ export const patchTopic = async (
     data: {
       name: input.name ?? existing.name,
       description: input.description ?? existing.description,
-      parentId: input.parentId ?? existing.parentId,
       tags: JSON.stringify(input.tags ?? normalizeTags(existing.tags)),
       color: normalizeHexColor(input.color) ?? existing.color,
       status: input.status !== undefined ? input.status : existing.status,
       priority: input.priority !== undefined ? input.priority : existing.priority,
       dueDate: input.dueDate !== undefined ? parseDate(input.dueDate) ?? null : existing.dueDate,
       snoozedUntil: input.snoozedUntil !== undefined ? parseDate(input.snoozedUntil) ?? null : existing.snoozedUntil,
-      pinned: input.pinned !== undefined ? input.pinned : existing.pinned,
       updatedAt: new Date()
     }
   });

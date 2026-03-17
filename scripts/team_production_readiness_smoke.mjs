@@ -44,7 +44,7 @@ function firstNonEmpty(...values) {
 
 function authHeaders(token, extra = {}) {
   const headers = { ...extra };
-  if (token) headers["X-Clawboard-Token"] = token;
+  if (token) headers["X-ClawBoard-Token"] = token;
   return headers;
 }
 

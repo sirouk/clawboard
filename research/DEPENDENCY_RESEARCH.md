@@ -10,7 +10,7 @@
 | DB Driver | Psycopg 3 | `backend/requirements.txt`, `backend/app/db.py` | Postgres primary runtime with SQLite compatibility logic. |
 | Vector Retrieval | FastEmbed + Qdrant | `backend/app/vector_search.py`, `classifier/embeddings_store.py`, `docker-compose.yaml` | Dense/hybrid search and classifier embedding storage. |
 | Classifier Worker | Python requests + numpy + fastembed | `classifier/classifier.py`, `classifier/Dockerfile` | Poll/patch cycle for routing, summarization, and gating. |
-| Plugin Integration | OpenClaw plugin SDK | `extensions/clawboard-logger/index.ts` | Capture + context hook bridge into Clawboard API. |
+| Plugin Integration | OpenClaw plugin SDK | `extensions/clawboard-logger/index.ts` | Capture + context hook bridge into ClawBoard API. |
 | Test Stack | Playwright + unittest + node test | `playwright.config.ts`, `tests.sh`, `package.json` | Multi-layer regression coverage (UI, backend, classifier, scripts). |
 
 ## Viable Alternatives (Where Uncertainty Exists)

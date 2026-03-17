@@ -158,7 +158,7 @@ export function isRetryableFetchError(err) {
         message.includes("enotfound"));
 }
 const REPLY_DIRECTIVE_TAG_RE = /(?:\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]|\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\])\s*/gi;
-export function stripClawboardWrapperArtifacts(content) {
+export function stripClawBoardWrapperArtifacts(content) {
     let text = content ?? "";
     text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\]\s*/gi, "");
     text = text.replace(/\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
@@ -169,7 +169,7 @@ export function stripClawboardWrapperArtifacts(content) {
 }
 export function sanitizeRetrievedContextBlock(content) {
     let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
-    text = stripClawboardWrapperArtifacts(text);
+    text = stripClawBoardWrapperArtifacts(text);
     text = text.replace(/[ \t]{2,}/g, " ");
     text = text.replace(/\n{3,}/g, "\n\n");
     return text.trim();
@@ -177,8 +177,8 @@ export function sanitizeRetrievedContextBlock(content) {
 export function sanitizeMessageContent(content) {
     let text = (content ?? "").replace(/\r\n?/g, "\n").trim();
     text = text.replace(/\[CLAWBOARD_CONTEXT_BEGIN\][\s\S]*?\[CLAWBOARD_CONTEXT_END\]\s*/gi, "");
-    text = stripClawboardWrapperArtifacts(text);
-    text = text.replace(/Clawboard continuity hook is active for this turn\.[\s\S]*?Prioritize curated user notes when present\.\s*/gi, "");
+    text = stripClawBoardWrapperArtifacts(text);
+    text = text.replace(/ClawBoard continuity hook is active for this turn\.[\s\S]*?Prioritize curated user notes when present\.\s*/gi, "");
     text = text.replace(/^\s*summary\s*[:\-]\s*/gim, "");
     text = text.replace(/^\[Discord [^\]]+\]\s*/gim, "");
     // OpenClaw/CLI transcripts sometimes include a local-time prefix like:

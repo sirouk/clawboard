@@ -1,4 +1,4 @@
-# OpenClaw Visual Language for Clawboard
+# OpenClaw Visual Language for ClawBoard
 
 ## Palette
 - **Background**: Deep Navy (`#070A13`) - The primary canvas.

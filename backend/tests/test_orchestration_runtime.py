@@ -251,7 +251,7 @@ class OrchestrationRuntimeTests(unittest.TestCase):
         )
         self.assertTrue(
             main_module._orchestration_is_waiting_status_text(
-                "Task tagged in Clawboard. The coding specialist will auto-announce when complete - "
+                "Task tagged in ClawBoard. The coding specialist will auto-announce when complete - "
                 "I'll relay the `LATENCY_TEST_ALPHA` response back here immediately.",
                 None,
                 None,
@@ -837,7 +837,7 @@ class OrchestrationRuntimeTests(unittest.TestCase):
                 LogAppend(
                     type="conversation",
                     content=(
-                        "Task tagged in Clawboard. The coding specialist will auto-announce when complete - "
+                        "Task tagged in ClawBoard. The coding specialist will auto-announce when complete - "
                         "I'll relay the `LATENCY_TEST_ALPHA` response back here immediately."
                     ),
                     summary="Main waiting status",

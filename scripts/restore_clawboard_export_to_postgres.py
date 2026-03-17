@@ -260,7 +260,7 @@ def _derive_attachment_rows(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Restore Clawboard export JSON files into Postgres.",
+        description="Restore ClawBoard export JSON files into Postgres.",
     )
     parser.add_argument(
         "--export-dir",
@@ -286,7 +286,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--truncate-target",
         action="store_true",
-        help="Truncate known Clawboard tables in target before restore.",
+        help="Truncate known ClawBoard tables in target before restore.",
     )
     parser.add_argument(
         "--dry-run",

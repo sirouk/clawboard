@@ -27,7 +27,7 @@ import {
   sanitizeRetrievedContextBlock,
   shouldSuppressNonSemanticConversation,
   shouldSuppressReplyDirectivesForSession,
-  stripClawboardWrapperArtifacts,
+  stripClawBoardWrapperArtifacts,
   summarize,
   tokenSet,
   truncateRaw,
@@ -97,7 +97,7 @@ test("isRetryableFetchError recognizes common fetch failure shapes", () => {
 test("wrapper sanitizers strip board artifacts but keep meaningful text", () => {
   const raw =
     "[CLAWBOARD_CONTEXT_BEGIN]\nKeep this\n[[reply_to_current]]\nConversation info (untrusted metadata): {\"x\":1}\n[CLAWBOARD_CONTEXT_END]";
-  assert.equal(stripClawboardWrapperArtifacts(raw).trim(), "Keep this");
+  assert.equal(stripClawBoardWrapperArtifacts(raw).trim(), "Keep this");
   assert.equal(sanitizeRetrievedContextBlock(`${raw}\n\n\nSecond line`), "Keep this\n Second line");
   assert.equal(shouldSuppressReplyDirectivesForSession("clawboard:topic:topic-123"), true);
   assert.equal(shouldSuppressReplyDirectivesForSession("channel:discord"), false);

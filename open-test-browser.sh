@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Open Clawboard in the default browser for a quick manual smoke pass.
+# Open ClawBoard in the default browser for a quick manual smoke pass.
 # The detailed checklist now lives in TESTING.md.
 
 URL="http://localhost:3010/u"
 
-echo "Opening Clawboard Unified View for manual smoke testing..."
+echo "Opening ClawBoard Unified View for manual smoke testing..."
 echo ""
 echo "URL: $URL"
 echo ""

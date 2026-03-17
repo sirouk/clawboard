@@ -4,7 +4,7 @@
 
 Every delegated run must create three durable artifacts:
 1. A specialist session started with `sessions_spawn(...)`.
-2. A Clawboard topic state update when a board `topicId` is available:
+2. A ClawBoard topic state update when a board `topicId` is available:
    - `status: "doing"`
    - tags include `delegating`, `agent:<agentId>`, `session:<childSessionKey>`
    - when an explicit legacy `taskId` is also present, mirroring the same tags to the task is compatibility-only and optional
@@ -16,12 +16,12 @@ If any one of those rails is missing, the delegation is not durable enough.
 
 - Board chat sessions are topic-scoped first: `clawboard:topic:<topicId>`.
 - Legacy `clawboard:task:<topicId>:<taskId>` sessions are still supported for compatibility and replay, but they normalize back into the owning topic timeline.
-- The current `topicId` should already be present in injected Clawboard context.
+- The current `topicId` should already be present in injected ClawBoard context.
 - If the injected context is not enough, call `clawboard_context()` and read `boardSession.topicId` (plus `boardSession.taskId` only when a legacy task row is explicitly in scope).
 - If an exact `topicId` is still not explicit, skip `clawboard_update_topic()` instead of guessing from a topic title or digest snippet.
 - If an exact legacy `taskId` is not explicit, skip `clawboard_update_task()` instead of guessing from a task title or digest snippet.
 - Semantic recall from other topics/tasks is not enough to prove the current topic already has live delegated work. Only current-topic tags, explicit `session:<key>` markers, or an internal completion event count.
-- Non-board sessions can skip the Clawboard ledger write, but they still require the cron follow-up.
+- Non-board sessions can skip the ClawBoard ledger write, but they still require the cron follow-up.
 
 ## Follow-Up Algorithm
 
@@ -55,7 +55,7 @@ When a follow-up fires:
    - never extend beyond `1h`.
 5. If `session_status` cannot find the specialist session, or the run is terminal and no queued completion was relayed:
    - re-spawn the same specialist with the same task goal,
-   - update the Clawboard topic tags with the new `session:<childSessionKey>` (plus explicit compatibility task tags only when needed),
+   - update the ClawBoard topic tags with the new `session:<childSessionKey>` (plus explicit compatibility task tags only when needed),
    - reset the ladder back to `1m`.
 6. If the specialist failed terminally:
    - report the failure to the user,
@@ -73,7 +73,7 @@ Run the same recovery logic from three places:
 - heartbeat,
 - any watchdog or recovery wake-up event.
 
-Clawboard is the external ledger. If prior state seems missing, check Clawboard before saying context was lost.
+ClawBoard is the external ledger. If prior state seems missing, check ClawBoard before saying context was lost.
 
 ## User-Facing Rule
 

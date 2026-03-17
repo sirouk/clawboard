@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Clawboard bootstrap: deploy Clawboard + install OpenClaw skill + logger plugin.
+# ClawBoard bootstrap: deploy ClawBoard + install OpenClaw skill + logger plugin.
 # Usage: bash scripts/bootstrap_clawboard.sh
 
 USE_COLOR=true
@@ -990,7 +990,7 @@ install_clawboard_logger_plugin_transactional() {
   return 0
 }
 
-# Where to clone Clawboard.
+# Where to clone ClawBoard.
 #
 # Back-compat: if ~/clawboard already exists, we stick with it.
 # If the user has an OpenClaw workspace configured AND that workspace already uses a
@@ -1270,7 +1270,7 @@ WORKSPACE_IDE_FOLDER_CODING_VALUE="${CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING:-/wor
 WORKSPACE_IDE_PROVIDER_VALUE="${CLAWBOARD_WORKSPACE_IDE_PROVIDER:-code-server}"
 OPENCLAW_BASE_URL_VALUE="${OPENCLAW_BASE_URL:-}"
 TOKEN="${CLAWBOARD_TOKEN:-}"
-TITLE="${CLAWBOARD_TITLE:-Clawboard}"
+TITLE="${CLAWBOARD_TITLE:-ClawBoard}"
 INTEGRATION_LEVEL="${CLAWBOARD_INTEGRATION_LEVEL:-write}"
 INTEGRATION_LEVEL_EXPLICIT=false
 if [ -n "${CLAWBOARD_INTEGRATION_LEVEL:-}" ]; then
@@ -1493,7 +1493,7 @@ Environment overrides:
   CLAWBOARD_AGENTIC_TEAM_SETUP=<ask|always|never>
                               Offer/run specialist team enrollment during bootstrap (default: ask)
   CLAWBOARD_MEMORY_BACKUP_SETUP=<ask|always|never>
-                              Offer/run memory+Clawboard backup setup during bootstrap (default: ask)
+                              Offer/run memory+ClawBoard backup setup during bootstrap (default: ask)
   CLAWBOARD_OBSIDIAN_MEMORY_SETUP=<ask|always|never>
                               Offer/run Obsidian + memory tuning setup during bootstrap (default: ask)
   CLAWBOARD_OPENCLAW_HEAP_SETUP=<ask|always|never>
@@ -1508,9 +1508,9 @@ Environment overrides:
                               Reconcile AGENTS/docs roster from directives during bootstrap (default: 1)
   CLAWBOARD_ENV_WIZARD=<0|1>  Force disable/enable interactive .env connection wizard
   CLAWBOARD_OPENCLAW_GATEWAY_USE_DEVICE_AUTH=<0|1>
-                              Configure OPENCLAW_GATEWAY_USE_DEVICE_AUTH for Clawboard backend
-  --api-url <url>      Clawboard API base (default: http://localhost:8010)
-  --web-url <url>      Clawboard web URL (default: http://localhost:3010)
+                              Configure OPENCLAW_GATEWAY_USE_DEVICE_AUTH for ClawBoard backend
+  --api-url <url>      ClawBoard API base (default: http://localhost:8010)
+  --web-url <url>      ClawBoard web URL (default: http://localhost:3010)
   --public-api-base <url>
                        Browser-facing API base (used for web clients / NEXT_PUBLIC_CLAWBOARD_API_BASE)
   --public-web-url <url>
@@ -1522,7 +1522,7 @@ Environment overrides:
   --no-openclaw-gateway-device-auth
                        Set OPENCLAW_GATEWAY_USE_DEVICE_AUTH=0 for backend gateway RPC (recommended)
   --token <token>      Use a specific CLAWBOARD_TOKEN
-  --title <title>      Instance display name (default: Clawboard)
+  --title <title>      Instance display name (default: ClawBoard)
   --integration-level <manual|write|full>
                        Integration level for /api/config (default: write)
   --web-hot-reload     Enable dev web hot reload (sets CLAWBOARD_WEB_HOT_RELOAD=1)
@@ -1556,9 +1556,9 @@ Environment overrides:
   --skip-agentic-team-setup
                       Skip specialist enrollment prompt/setup
   --setup-memory-backup
-                      Run memory+Clawboard backup setup at the end of bootstrap (interactive)
+                      Run memory+ClawBoard backup setup at the end of bootstrap (interactive)
   --skip-memory-backup-setup
-                      Skip the memory+Clawboard backup setup prompt
+                      Skip the memory+ClawBoard backup setup prompt
   --setup-obsidian-memory
                       Run Obsidian + memory tuning setup at the end of bootstrap (interactive)
   --skip-obsidian-memory-setup
@@ -1917,7 +1917,7 @@ resolve_openclaw_gateway_device_auth_value() {
     if [ "$selected" = "1" ]; then
       prompt_default="2"
     fi
-    printf "\nOpenClaw backend device auth for Clawboard:\n" > /dev/tty
+    printf "\nOpenClaw backend device auth for ClawBoard:\n" > /dev/tty
     printf "  1) off (recommended): token auth only; avoids CLI/backend pairing metadata conflicts\n" > /dev/tty
     printf "  2) on  (advanced): requires a dedicated backend device identity paired once\n" > /dev/tty
     printf "Select [1-2] (default: %s): " "$prompt_default" > /dev/tty
@@ -2256,11 +2256,11 @@ run_env_connection_wizard() {
       ;;
     3)
       if [ "$PUBLIC_WEB_URL_EXPLICIT" = false ]; then
-        custom_web="$(prompt_with_default_tty "Public Clawboard Web URL" "$ACCESS_WEB_URL")"
+        custom_web="$(prompt_with_default_tty "Public ClawBoard Web URL" "$ACCESS_WEB_URL")"
         ACCESS_WEB_URL="$(normalize_http_url "$custom_web")"
       fi
       if [ "$PUBLIC_API_BASE_EXPLICIT" = false ]; then
-        custom_api="$(prompt_with_default_tty "Public Clawboard API base URL" "$ACCESS_API_URL")"
+        custom_api="$(prompt_with_default_tty "Public ClawBoard API base URL" "$ACCESS_API_URL")"
         ACCESS_API_URL="$(normalize_http_url "$custom_api")"
       fi
       ;;
@@ -2637,17 +2637,17 @@ wait_for_api_health() {
   while [ "$attempt" -le "$max_attempts" ]; do
     curl_args=(-fsS)
     if [ -n "$TOKEN" ]; then
-      curl_args+=(-H "X-Clawboard-Token: $TOKEN")
+      curl_args+=(-H "X-ClawBoard-Token: $TOKEN")
     fi
     curl_args+=("$health_url")
     if curl "${curl_args[@]}" >/dev/null 2>&1; then
-      log_success "Clawboard API is reachable at $health_url."
+      log_success "ClawBoard API is reachable at $health_url."
       return 0
     fi
     sleep 2
     attempt=$((attempt + 1))
   done
-  log_warn "Clawboard API did not become ready in time: $health_url"
+  log_warn "ClawBoard API did not become ready in time: $health_url"
   return 1
 }
 
@@ -2661,13 +2661,13 @@ wait_for_web_health() {
   fi
   while [ "$attempt" -le "$max_attempts" ]; do
     if curl -fsS "$web_url" >/dev/null 2>&1; then
-      log_success "Clawboard web is reachable at $web_url."
+      log_success "ClawBoard web is reachable at $web_url."
       return 0
     fi
     sleep 2
     attempt=$((attempt + 1))
   done
-  log_warn "Clawboard web did not become ready in time: $web_url"
+  log_warn "ClawBoard web did not become ready in time: $web_url"
   return 1
 }
 
@@ -2906,7 +2906,7 @@ resolve_local_memory_setup_script() {
   printf "%s" "$LOCAL_MEMORY_SETUP_SCRIPT"
 }
 
-# Deploy main agent templates (AGENTS.md, SOUL.md, HEARTBEAT.md, BOOTSTRAP.md) from the Clawboard repo.
+# Deploy main agent templates (AGENTS.md, SOUL.md, HEARTBEAT.md, BOOTSTRAP.md) from the ClawBoard repo.
 # Source of truth: INSTALL_DIR/agent-templates/main/ (repo). No policy text is hardcoded in this script.
 # Copies into the main agent workspace with atomic per-file updates only when content changed.
 # Call after skill/plugin install, before gateway restart.
@@ -3130,7 +3130,7 @@ PY
   done <<< "$audit_output"
 }
 
-# Copy canonical Clawboard contract docs into the main workspace so AGENTS.md references
+# Copy canonical ClawBoard contract docs into the main workspace so AGENTS.md references
 # (ANATOMY/CONTEXT/CLASSIFICATION) always resolve to the latest repo versions.
 # Deploy is idempotent and atomic per-file.
 maybe_deploy_contract_docs() {
@@ -3177,9 +3177,9 @@ maybe_deploy_contract_docs() {
     log_error "Contract doc deploy failed for $failed file(s)."
   fi
   if [ "$deployed" -gt 0 ]; then
-    log_success "Deployed/updated $deployed Clawboard contract doc(s) to main workspace."
+    log_success "Deployed/updated $deployed ClawBoard contract doc(s) to main workspace."
   elif [ "$unchanged" -gt 0 ]; then
-    log_success "Clawboard contract docs already up to date in main workspace."
+    log_success "ClawBoard contract docs already up to date in main workspace."
   fi
   if [ "$missing" -gt 0 ]; then
     log_warn "$missing contract doc(s) were missing in repository source and were not deployed."
@@ -3810,8 +3810,8 @@ maybe_offer_memory_backup_setup() {
       ;;
     always) should_run=true ;;
     ask)
-      printf "\nBackups are strongly recommended for continuity + Clawboard state safety.\n" > /dev/tty 2>/dev/null || true
-      if prompt_yes_no_tty "Set up automated continuity + Clawboard backups now?" "y"; then
+      printf "\nBackups are strongly recommended for continuity + ClawBoard state safety.\n" > /dev/tty 2>/dev/null || true
+      if prompt_yes_no_tty "Set up automated continuity + ClawBoard backups now?" "y"; then
         should_run=true
       else
         prompt_rc=$?
@@ -3849,13 +3849,13 @@ maybe_offer_memory_backup_setup() {
     return 0
   fi
 
-  log_info "Launching memory + Clawboard backup setup..."
+  log_info "Launching memory + ClawBoard backup setup..."
   if bash "$setup_script"; then
     MEMORY_BACKUP_SETUP_STATUS="configured"
-    log_success "Memory + Clawboard backup setup completed."
+    log_success "Memory + ClawBoard backup setup completed."
   else
     MEMORY_BACKUP_SETUP_STATUS="failed"
-    log_warn "Memory + Clawboard backup setup did not complete. You can rerun: bash $setup_script"
+    log_warn "Memory + ClawBoard backup setup did not complete. You can rerun: bash $setup_script"
   fi
 }
 
@@ -3865,7 +3865,7 @@ elif [ "$DIR_EXPLICIT" = false ] && [ -n "${INSTALL_DIR_REASON:-}" ]; then
   log_info "Auto-selected install dir ($INSTALL_DIR_REASON): $INSTALL_DIR"
 fi
 
-log_info "Preparing Clawboard checkout in: $INSTALL_DIR"
+log_info "Preparing ClawBoard checkout in: $INSTALL_DIR"
 if [ -d "$INSTALL_DIR/.git" ]; then
   if [ "$UPDATE_REPO" = true ]; then
     git -C "$INSTALL_DIR" pull
@@ -4101,7 +4101,7 @@ elif read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" >/d
 else
   if [ -t 0 ]; then
     echo ""
-    echo "Enable Clawboard web hot reload (dev web service)?"
+    echo "Enable ClawBoard web hot reload (dev web service)?"
     echo "  1) yes (recommended for local dev)"
     echo "  2) no  (production-style web service)"
     printf "Select [1-2] (default: 1): "
@@ -4311,7 +4311,7 @@ log_info "Writing CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE=$CONTEXT_USE_CAC
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE" "$CONTEXT_USE_CACHE_ON_FAILURE_VALUE"
 
 # Controls whether OpenClaw memory_search/memory_get is allowed during normal turns.
-# Default is off (0): prefer Clawboard retrieval context.
+# Default is off (0): prefer ClawBoard retrieval context.
 LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE=""
 if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH" >/dev/null 2>&1; then
   LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH" || true)"
@@ -4543,10 +4543,10 @@ if [ "$SKIP_DOCKER" = false ]; then
   fi
 
   # Match deploy.sh option 3 then 1: full tear-down + rebuild (fresh), then start.
-  log_info "Tearing down existing Clawboard stack (like deploy.sh fresh)..."
+  log_info "Tearing down existing ClawBoard stack (like deploy.sh fresh)..."
   (cd "$INSTALL_DIR" && $COMPOSE --profile dev down --remove-orphans 2>/dev/null || true)
   (cd "$INSTALL_DIR" && $COMPOSE down --remove-orphans 2>/dev/null || true)
-  log_info "Building and starting Clawboard via docker compose..."
+  log_info "Building and starting ClawBoard via docker compose..."
   WEB_HOT_RELOAD="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" || true)"
   case "$WEB_HOT_RELOAD" in
     1|true|TRUE|yes|YES)
@@ -4556,22 +4556,22 @@ if [ "$SKIP_DOCKER" = false ]; then
       (cd "$INSTALL_DIR" && $COMPOSE up -d --build --force-recreate)
       ;;
   esac
-  log_success "Clawboard services running."
+  log_success "ClawBoard services running."
   wait_for_web_health || log_warn "Check WEB_URL/CLAWBOARD_PUBLIC_WEB_URL in .env if the UI is not loading."
 fi
 
 if command -v curl >/dev/null 2>&1; then
   if wait_for_api_health; then
-    log_info "Configuring Clawboard instance..."
+    log_info "Configuring ClawBoard instance..."
     CONFIG_PAYLOAD=$(printf '{"title":"%s","integrationLevel":"%s"}' "$TITLE" "$INTEGRATION_LEVEL")
     CURL_ARGS=(-sS -X POST "$API_URL/api/config" -H "Content-Type: application/json" -d "$CONFIG_PAYLOAD")
     if [ -n "$TOKEN" ]; then
-      CURL_ARGS+=(-H "X-Clawboard-Token: $TOKEN")
+      CURL_ARGS+=(-H "X-ClawBoard-Token: $TOKEN")
     fi
     if ! curl "${CURL_ARGS[@]}" >/dev/null 2>&1; then
       log_warn "Unable to update /api/config (check API URL and token)."
     else
-      log_success "Clawboard config set: title=$TITLE, integrationLevel=$INTEGRATION_LEVEL."
+      log_success "ClawBoard config set: title=$TITLE, integrationLevel=$INTEGRATION_LEVEL."
     fi
   else
     log_warn "Skipping /api/config update until API is reachable."
@@ -4657,7 +4657,7 @@ if [ "$SKIP_OPENCLAW" = false ]; then
     openclaw_cfg_txn_commit
 
     if [ "$SKIP_SKILL" = false ]; then
-      log_info "Installing Clawboard skill (mode: $SKILL_INSTALL_MODE)..."
+      log_info "Installing ClawBoard skill (mode: $SKILL_INSTALL_MODE)..."
       SKILL_REPO_SRC="$INSTALL_DIR/skills/clawboard"
       SKILL_OPENCLAW_DST="$OPENCLAW_SKILLS_DIR/clawboard"
       LOGGER_SKILL_REPO_SRC="$INSTALL_DIR/skills/clawboard-logger"
@@ -4702,11 +4702,11 @@ if [ "$SKIP_OPENCLAW" = false ]; then
       fi
     fi
 
-    # Harden OpenClaw cron jobs created by the Clawboard skill so they don't inject "cron-event"
+    # Harden OpenClaw cron jobs created by the ClawBoard skill so they don't inject "cron-event"
     # messages into active chats (these messages can interrupt streaming and pollute routing).
     # Best-effort: patch any existing cron jobs that run the memory backup script.
     if command -v python3 >/dev/null 2>&1; then
-      log_info "Hardening OpenClaw cron delivery (disable announce for Clawboard memory backup jobs)..."
+      log_info "Hardening OpenClaw cron delivery (disable announce for ClawBoard memory backup jobs)..."
       CRON_PATCH_IDS="$(python3 - <<'PY'
 import json
 import subprocess
@@ -4762,7 +4762,7 @@ PY
     fi
 
     if [ "$SKIP_PLUGIN" = false ]; then
-      log_info "Installing Clawboard logger plugin..."
+      log_info "Installing ClawBoard logger plugin..."
       # Compile TypeScript source to index.js before installing so the plugin reflects the
       # latest source. Non-fatal: if tsc is unavailable the existing index.js is used as-is.
       if [ -f "$INSTALL_DIR/node_modules/.bin/tsc" ] && [ -f "$INSTALL_DIR/extensions/clawboard-logger/tsconfig.plugin.json" ]; then
@@ -4996,9 +4996,9 @@ maybe_offer_openclaw_heap_setup "$OPENCLAW_HEAP_SETUP_MODE"
 
 echo ""
 log_success "Bootstrap complete."
-echo "Clawboard UI (access):   $ACCESS_WEB_URL"
-echo "Clawboard API (access):  ${ACCESS_API_URL%/}/docs"
-echo "Clawboard API (internal): $API_URL"
+echo "ClawBoard UI (access):   $ACCESS_WEB_URL"
+echo "ClawBoard API (access):  ${ACCESS_API_URL%/}/docs"
+echo "ClawBoard API (internal): $API_URL"
 echo "Workspace IDE:  $WORKSPACE_IDE_BASE_URL_VALUE"
 echo "OpenClaw gateway (classifier): $OPENCLAW_BASE_URL_VALUE"
 MASKED_TOKEN="(not set)"
@@ -5155,12 +5155,12 @@ fi
 echo ""
 echo "If OpenClaw was not installed, run this later:"
 echo "  bash scripts/bootstrap_clawboard.sh --skip-docker --update"
-echo "Set up automated continuity + Clawboard backups:"
+echo "Set up automated continuity + ClawBoard backups:"
 echo "  bash $BACKUP_SETUP_HINT"
 echo "Set up Obsidian thinking vaults + memory tuning:"
 echo "  bash $OBSIDIAN_SETUP_HINT"
 echo "  bash $LOCAL_MEMORY_SETUP_HINT"
 echo "Tune OpenClaw launcher heap (idempotent patch helper via bootstrap):"
 echo "  bash scripts/bootstrap_clawboard.sh --setup-openclaw-heap --skip-docker --skip-skill --skip-plugin --skip-memory-backup-setup --skip-obsidian-memory-setup"
-echo "If you want Chutes before Clawboard skill wiring:"
+echo "If you want Chutes before ClawBoard skill wiring:"
 echo "  tmp=\$(mktemp -t add-chutes.sh.XXXXXX) && curl -fsSL $CHUTES_FAST_PATH_URL -o \"\$tmp\" && bash \"\$tmp\" && rm -f \"\$tmp\""

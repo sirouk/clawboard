@@ -28,9 +28,9 @@
 The clawboard-logger plugin’s **agent_end** handler walks the run’s transcript and logs conversation rows. For `role === "user"` it was logging them as `agentId: "user"`, `agentLabel: "User"` for **all** sessions. So:
 
 - Heartbeat runs have a user-role message (the prompt) in the transcript.
-- That was logged to Clawboard as a “User” message with `channel: heartbeat` (and possibly routed to a topic/task by `resolveRoutingScope` for `agent:main:main`), so logs showed “User -> OpenClaw · channel: heartbeat” and could pollute task threads.
+- That was logged to ClawBoard as a “User” message with `channel: heartbeat` (and possibly routed to a topic/task by `resolveRoutingScope` for `agent:main:main`), so logs showed “User -> OpenClaw · channel: heartbeat” and could pollute task threads.
 
-**Fix:** In the plugin’s **agent_end** loop, when the run’s channel is **heartbeat** and `role === "user"`, we **skip** logging that message. Those prompts are system-driven, not from the human user, and should not appear as “User” in Clawboard.
+**Fix:** In the plugin’s **agent_end** loop, when the run’s channel is **heartbeat** and `role === "user"`, we **skip** logging that message. Those prompts are system-driven, not from the human user, and should not appear as “User” in ClawBoard.
 
 **Files:** `extensions/clawboard-logger/index.ts` (agent_end: `if (role === "user" && ch === "heartbeat") continue` before building the log payload).
 
@@ -56,7 +56,7 @@ The clawboard-logger plugin’s **agent_end** handler walks the run’s transcri
 
 **Cause:** Same as §2. Heartbeat runs are implemented as agent turns whose “user” message is the heartbeat prompt. The plugin was logging every `role === "user"` from agent_end as “User”, so heartbeat showed as “User -> OpenClaw · channel: heartbeat”.
 
-**Fix:** Same as §2: skip logging user-role messages when the run’s channel is `heartbeat`, so heartbeat no longer appears as a user message in Clawboard.
+**Fix:** Same as §2: skip logging user-role messages when the run’s channel is `heartbeat`, so heartbeat no longer appears as a user message in ClawBoard.
 
 ---
 
@@ -74,7 +74,7 @@ The clawboard-logger plugin’s **agent_end** handler walks the run’s transcri
 
 - **Backend** `/api/openclaw/chat`: one user log per request with `idempotency_key = openclaw-chat:user:{request_id}`; duplicate *same* request_id would dedupe, but two requests ⇒ two request_ids ⇒ two entries.
 - **Dispatch queue**: dedupes by `requestId`; two different request_ids ⇒ two jobs ⇒ two `chat.send` calls.
-- **Plugin** `message_received`: board sessions are skipped (Clawboard already persisted the user message), so no double log from the gateway echo.
+- **Plugin** `message_received`: board sessions are skipped (ClawBoard already persisted the user message), so no double log from the gateway echo.
 - **Plugin** `agent_end`: board sessions already skip logging user-role messages; channel sessions skip user (handled by message_received); **heartbeat** user messages are skipped; **subagent** user-role messages (parent’s delegation prompt) are now skipped so they don’t appear as “User”.
 
 Rebuild the plugin after editing `index.ts` (e.g. `npm run build` in the extension or project root so `dist/` is updated).
@@ -111,7 +111,7 @@ Rebuild the plugin after editing `index.ts` (e.g. `npm run build` in the extensi
 - `role: "user"` = the **parent agent’s delegation prompt** (e.g. main’s instruction to coding),
 - `role: "assistant"` = the subagent’s reply.
 
-The plugin’s **agent_end** handler already skips logging `role === "user"` for **board** sessions (Clawboard UI already persisted the human’s message) and **channel** sessions (handled by message_received). It did **not** skip for **subagent** sessions. So when the run was a subagent, we logged that “user” message as `agentId: "user"`, `agentLabel: "User"`, and because scope is inherited from the parent’s board scope, the log was attached to the **same task**. Result: the parent’s delegation prompt showed in Memory check as a message from “User” (right side), with content that was never meant to be user-facing (hence odd/malformed markdown).
+The plugin’s **agent_end** handler already skips logging `role === "user"` for **board** sessions (ClawBoard UI already persisted the human’s message) and **channel** sessions (handled by message_received). It did **not** skip for **subagent** sessions. So when the run was a subagent, we logged that “user” message as `agentId: "user"`, `agentLabel: "User"`, and because scope is inherited from the parent’s board scope, the log was attached to the **same task**. Result: the parent’s delegation prompt showed in Memory check as a message from “User” (right side), with content that was never meant to be user-facing (hence odd/malformed markdown).
 
 **Fix:** In subagent sessions, treat `role === "user"` as **orchestrator → subagent delegation**, not human input. We keep the row visible as `type: conversation`, but attribute it to the owning agent (`agentId: coding/docs/...`, label `Agent ...`) so it renders on the left lane and not as “You”.
 
@@ -126,7 +126,7 @@ The plugin’s **agent_end** handler already skips logging `role === "user"` for
 
 ## 7. Duplicate user message from history ingest channel mismatch
 
-**Observed:** The human's opening message in a Task Chat appears twice in the Clawboard log — one copy at T+0 seconds (from the backend), another copy ~9 seconds later (from the history ingest background poll).
+**Observed:** The human's opening message in a Task Chat appears twice in the ClawBoard log — one copy at T+0 seconds (from the backend), another copy ~9 seconds later (from the history ingest background poll).
 
 **Cause:** Two code paths write the same message:
 1. **Backend `/api/openclaw/chat`** persists the user message immediately with `source.channel = "openclaw"` and `requestId = "occhat-..."`.

@@ -97,7 +97,7 @@ function shouldUseSameOriginApiProxy(path: string) {
     // Remote/Tailscale/browser-cross-origin API bases should still flow through the Next proxy.
     // That keeps browser traffic same-origin and avoids CORS failures during local dev.
     if (!isLoopbackHost(url.hostname)) return true;
-    // Product default: real Clawboard browser traffic should use the Next same-origin proxy
+    // Product default: real ClawBoard browser traffic should use the Next same-origin proxy
     // whenever the configured backend is the normal API service port. Nonstandard ports
     // (for example mock Playwright servers on 3051) stay direct.
     if (url.port === DEFAULT_API_PORT) return true;
@@ -165,7 +165,7 @@ export function getApiToken() {
 function withTokenHeader(headers: HeadersInit | undefined, token: string): Headers {
   const next = new Headers(headers);
   if (token) {
-    next.set("X-Clawboard-Token", token);
+    next.set("X-ClawBoard-Token", token);
   }
   return next;
 }

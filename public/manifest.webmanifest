@@ -1,6 +1,6 @@
 {
-  "name": "Clawboard",
-  "short_name": "Clawboard",
+  "name": "ClawBoard",
+  "short_name": "ClawBoard",
   "description": "OpenClaw companion for topics, tasks, and logs.",
   "start_url": "/",
   "scope": "/",

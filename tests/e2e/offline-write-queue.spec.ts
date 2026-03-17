@@ -27,7 +27,7 @@ async function setupWriteMode(page: import("@playwright/test").Page) {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        instance: { title: "Clawboard", integrationLevel: "write", updatedAt: "2026-01-01T00:00:00.000Z" },
+        instance: { title: "ClawBoard", integrationLevel: "write", updatedAt: "2026-01-01T00:00:00.000Z" },
         tokenRequired: true,
         tokenConfigured: true,
       }),

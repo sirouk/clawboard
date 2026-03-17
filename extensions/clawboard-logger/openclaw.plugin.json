@@ -1,7 +1,7 @@
 {
   "id": "clawboard-logger",
-  "name": "Clawboard Logger",
-  "description": "Always-on logging bridge from OpenClaw to Clawboard.",
+  "name": "ClawBoard Logger",
+  "description": "Always-on logging bridge from OpenClaw to ClawBoard.",
   "version": "0.1.0",
   "configSchema": {
     "type": "object",
@@ -35,12 +35,12 @@
     "required": ["baseUrl"]
   },
   "uiHints": {
-    "baseUrl": { "label": "Clawboard Base URL", "placeholder": "http://clawboard:8010" },
+    "baseUrl": { "label": "ClawBoard Base URL", "placeholder": "http://clawboard:8010" },
     "baseUrlFallbacks": {
       "label": "Fallback Base URLs",
       "placeholder": "[\"http://localhost:8010\",\"https://clawboard.example.test:8010\"]"
     },
-    "token": { "label": "Clawboard Token", "sensitive": true },
+    "token": { "label": "ClawBoard Token", "sensitive": true },
     "queuePath": { "label": "Queue file path" },
     "enabled": { "label": "Enabled" },
     "contextAugment": { "label": "Inject context before agent start" },

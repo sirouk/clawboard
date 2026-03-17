@@ -13,7 +13,7 @@ export const requireToken = (req: NextRequest) => {
 
   if (req.nextUrl.searchParams.has("token")) {
     return NextResponse.json(
-      { detail: "Do not pass token via query param. Use X-Clawboard-Token header." },
+      { detail: "Do not pass token via query param. Use X-ClawBoard-Token header." },
       { status: 400 }
     );
   }
@@ -26,7 +26,7 @@ export const requireToken = (req: NextRequest) => {
   const provided = req.headers.get("x-clawboard-token");
   if (!provided || provided !== token) {
     return NextResponse.json(
-      { detail: "Unauthorized: invalid or missing X-Clawboard-Token" },
+      { detail: "Unauthorized: invalid or missing X-ClawBoard-Token" },
       { status: 401 }
     );
   }

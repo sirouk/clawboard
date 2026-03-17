@@ -1332,7 +1332,7 @@ const LogRow = memo(function LogRow({
     const chatDetailsVisible = chatDetailsExpanded || chatHoverActive || chatFocusWithin || editOpen || noteOpen;
     const chatDetailToggleLabel = chatDetailsExpanded ? "Unpin message tools" : "Pin message tools";
     const chatSourceMetaInline = !editOpen && sourceMetaItems.length > 0 ? (
-      <div className="min-w-0 flex-1 overflow-x-auto overscroll-x-contain text-[10px] leading-4 text-[rgb(var(--claw-muted))]">
+      <div className="min-w-0 flex-1 overflow-x-auto overscroll-x-contain claw-scrollbar-none text-[10px] leading-4 text-[rgb(var(--claw-muted))]">
         <div className={`flex w-max min-w-full ${isUser ? "justify-end" : "justify-start"}`}>
           <div className="inline-flex min-w-max items-center gap-1.5 whitespace-nowrap">
             {sourceMetaItems.map((item) => (
@@ -1821,7 +1821,7 @@ const LogRow = memo(function LogRow({
                     </div>
 
                     {sourceMeta && (
-                      <div className="min-w-0 max-w-full overflow-x-auto pt-2 text-xs text-[rgb(var(--claw-muted))]">
+                      <div className="min-w-0 max-w-full overflow-x-auto claw-scrollbar-none pt-2 text-xs text-[rgb(var(--claw-muted))]">
                         <span className="inline-block whitespace-nowrap font-mono">{sourceMeta}</span>
                       </div>
                     )}

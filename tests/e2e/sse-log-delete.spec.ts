@@ -7,7 +7,7 @@ test("deleting a log emits SSE and removes it from other open clients", async ({
   const token = (process.env.PLAYWRIGHT_TOKEN ?? "").trim();
 
   const suffix = Date.now();
-  const headers = token ? { "X-Clawboard-Token": token } : undefined;
+  const headers = token ? { "X-ClawBoard-Token": token } : undefined;
 
   const topicId = `topic-sse-delete-${suffix}`;
   const topicName = `SSE Delete Topic ${suffix}`;

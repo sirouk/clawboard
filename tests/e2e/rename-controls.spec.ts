@@ -15,7 +15,7 @@ test("rename pencils are visible but disabled in read-only mode", async ({ page 
       contentType: "application/json",
       body: JSON.stringify({
         instance: {
-          title: "Clawboard",
+          title: "ClawBoard",
           integrationLevel: "manual",
           updatedAt: "2026-02-06T00:00:00.000Z",
         },
@@ -26,7 +26,7 @@ test("rename pencils are visible but disabled in read-only mode", async ({ page 
 
   await page.goto("/u");
   await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
-  await page.getByRole("button", { name: /Clawboard/ }).first().click();
+  await page.getByRole("button", { name: /ClawBoard/ }).first().click();
 
   await expect(page.locator("[data-testid^='rename-topic-']").first()).toBeDisabled();
   await expect(page.locator("[data-testid^='rename-task-']").first()).toBeDisabled();
@@ -47,7 +47,7 @@ test("rename pencils save topic/task names and queue reindex requests", async ({
       contentType: "application/json",
       body: JSON.stringify({
         instance: {
-          title: "Clawboard",
+          title: "ClawBoard",
           integrationLevel: "manual",
           updatedAt: "2026-02-06T00:00:00.000Z",
         },
@@ -107,9 +107,9 @@ test("rename pencils save topic/task names and queue reindex requests", async ({
 
   await page.goto("/u");
   await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
-  await page.getByRole("button", { name: /Clawboard/ }).first().click();
+  await page.getByRole("button", { name: /ClawBoard/ }).first().click();
 
-  const newTopicName = "Clawboard Renamed";
+  const newTopicName = "ClawBoard Renamed";
   const newTopicColor = "#2AA9A2";
   const topicRenameButton = page.locator("[data-testid^='rename-topic-']").first();
   const topicRenameId = await topicRenameButton.getAttribute("data-testid");
@@ -203,7 +203,7 @@ test("rename inputs accept spaces (no spacebar hotkeys)", async ({ page, request
       contentType: "application/json",
       body: JSON.stringify({
         instance: {
-          title: "Clawboard",
+          title: "ClawBoard",
           integrationLevel: "manual",
           updatedAt: "2026-02-06T00:00:00.000Z",
         },

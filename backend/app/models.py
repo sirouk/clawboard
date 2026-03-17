@@ -281,7 +281,7 @@ class IngestQueue(SQLModel, table=True):
 
 
 class OpenClawChatDispatchQueue(SQLModel, table=True):
-    """Durable outbound dispatch queue for Clawboard -> OpenClaw gateway sends."""
+    """Durable outbound dispatch queue for ClawBoard -> OpenClaw gateway sends."""
 
     id: Optional[int] = Field(default=None, primary_key=True)
     requestId: str = Field(description="Stable request identifier (occhat-...).")
@@ -377,7 +377,7 @@ class OrchestrationEvent(SQLModel, table=True):
 class OpenClawGatewayHistoryCursor(SQLModel, table=True):
     """Per-session cursor for gateway history sync fallback.
 
-    This lets Clawboard resume ingestion after restarts without reprocessing
+    This lets ClawBoard resume ingestion after restarts without reprocessing
     entire transcripts.
     """
 

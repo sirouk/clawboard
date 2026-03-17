@@ -4,7 +4,7 @@
   "type": "module",
   "main": "./index.js",
   "files": ["*.js", "openclaw.plugin.json", "package.json"],
-  "description": "Always-on logging bridge from OpenClaw to Clawboard.",
+  "description": "Always-on logging bridge from OpenClaw to ClawBoard.",
   "scripts": {
     "build": "tsc -p tsconfig.plugin.json"
   },

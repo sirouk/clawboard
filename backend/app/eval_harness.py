@@ -126,7 +126,7 @@ def _search_api(api_base: str, token: str | None, query: dict[str, Any]) -> dict
     url = f"{api_base.rstrip('/')}/api/search?{url_parse.urlencode(params)}"
     headers = {"Content-Type": "application/json"}
     if token:
-        headers["X-Clawboard-Token"] = token
+        headers["X-ClawBoard-Token"] = token
     req = url_request.Request(url, method="GET", headers=headers)
     with url_request.urlopen(req, timeout=12) as response:
         payload = response.read().decode("utf-8")
@@ -192,7 +192,7 @@ def run_eval(payload: dict[str, Any], api_base: str | None = None, token: str | 
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate Clawboard retrieval and dedupe metrics.")
+    parser = argparse.ArgumentParser(description="Evaluate ClawBoard retrieval and dedupe metrics.")
     parser.add_argument("--input", required=True, help="Path to eval dataset JSON.")
     parser.add_argument("--api-base", default=None, help="API base URL (optional, for live querying).")
     parser.add_argument("--token", default=None, help="API token for protected environments.")

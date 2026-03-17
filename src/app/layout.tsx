@@ -5,12 +5,12 @@ import { AppConfigProvider } from "@/components/providers";
 import { PwaRegister } from "@/components/pwa-register";
 
 export const metadata: Metadata = {
-  title: "Clawboard",
+  title: "ClawBoard",
   description: "OpenClaw companion for topics, conversations, and logs.",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
-    title: "Clawboard",
+    title: "ClawBoard",
     statusBarStyle: "black-translucent",
   },
   other: {

@@ -1,8 +1,8 @@
-# Clawboard API (current)
+# ClawBoard API (current)
 
 ## Auth
 
-- If `CLAWBOARD_TOKEN` is set on the server, send it as `X-Clawboard-Token` for all write requests.
+- If `CLAWBOARD_TOKEN` is set on the server, send it as `X-ClawBoard-Token` for all write requests.
 
 ## Endpoints
 

@@ -154,9 +154,9 @@ Commands:
   restart [services...]                Restart running services
   down                                 Stop services (keep data)
   nuke [--yes]                         Stop services + remove volumes
-  reset-data [--yes]                   Stop services and wipe local Clawboard data/* (OpenClaw untouched)
+  reset-data [--yes]                   Stop services and wipe local ClawBoard data/* (OpenClaw untouched)
   reset-openclaw-sessions [--yes]      Wipe OpenClaw agent session history; keeps memories + credentials
-  reset-all-fresh [--yes]              Wipe OpenClaw memories/sessions + Clawboard data; remove Clawboard OpenClaw cron jobs (preserves qmd indexes + workspace templates/rules)
+  reset-all-fresh [--yes]              Wipe OpenClaw memories/sessions + ClawBoard data; remove ClawBoard OpenClaw cron jobs (preserves qmd indexes + workspace templates/rules)
   factory-reset [--yes]                Full wipe to idle state: board data, vectors, gateway queue, sessions,
                                        memories, vault docs, QMD indexes, cron jobs. Preserves instanceconfig,
                                        credentials, contracts, QMD collection config, and Docker services.
@@ -305,6 +305,8 @@ rebuild() {
 
 fresh() {
   down
+  # Remove stale Next.js build cache so Docker COPY gets a clean context.
+  rm -rf .next .next.stale-* 2>/dev/null || true
   if is_web_hot_reload_enabled; then
     compose --profile dev up -d --build --force-recreate api classifier qdrant web-dev
     ensure_workspace_ide_services
@@ -702,7 +704,7 @@ _wipe_openclaw_agent_data() {
 }
 
 # ===========================================================================
-# cleanup_openclaw_cron_jobs — remove OpenClaw cron jobs tied to this Clawboard
+# cleanup_openclaw_cron_jobs — remove OpenClaw cron jobs tied to this ClawBoard
 # workspace (for a true fresh reset). Non-matching jobs are preserved.
 # ===========================================================================
 _cleanup_openclaw_cron_jobs() {
@@ -813,7 +815,7 @@ PY
 }
 
 # ===========================================================================
-# reset_data — wipe Clawboard's local data/ (Postgres + Qdrant).
+# reset_data — wipe ClawBoard's local data/ (Postgres + Qdrant).
 # OpenClaw data is never touched; the scope is $ROOT_DIR/data only.
 # ===========================================================================
 reset_data() {
@@ -826,11 +828,11 @@ reset_data() {
 
   local oc_home
   oc_home="$(_oc_home)"
-  echo "Clawboard data directory : $DATA_DIR"
+  echo "ClawBoard data directory : $DATA_DIR"
   echo "OpenClaw home (untouched): $oc_home"
   echo ""
 
-  confirm_or_abort "Delete Clawboard data under data/ (Postgres + Qdrant) and any legacy SQLite volume? OpenClaw data is NOT affected. Continue?" "$force"
+  confirm_or_abort "Delete ClawBoard data under data/ (Postgres + Qdrant) and any legacy SQLite volume? OpenClaw data is NOT affected. Continue?" "$force"
   down
 
   # Legacy cleanup: older deployments used a named SQLite volume for /db/clawboard.db.
@@ -842,7 +844,7 @@ reset_data() {
   # Scope is intentionally $DATA_DIR = $ROOT_DIR/data — never $oc_home.
   rm -rf "$DATA_DIR"
   mkdir -p "$DATA_DIR/qdrant" "$DATA_DIR/postgres"
-  echo "Clawboard data reset complete. OpenClaw config/credentials were not touched by this step."
+  echo "ClawBoard data reset complete. OpenClaw config/credentials were not touched by this step."
 }
 
 # ===========================================================================
@@ -934,19 +936,19 @@ reset_all_fresh() {
 
   oc_home="$(_oc_home)"
   echo "OpenClaw home : $oc_home"
-  echo "Clawboard dir : $ROOT_DIR"
+  echo "ClawBoard dir : $ROOT_DIR"
   if [ -d "$ROOT_DIR/data" ]; then
-    echo "Clawboard data: $ROOT_DIR/data"
+    echo "ClawBoard data: $ROOT_DIR/data"
   fi
   echo ""
   echo "Preserved:"
   echo "  - qmd index stores under agents/<id>/qmd/"
   echo "  - OpenClaw config/credentials in $oc_home (agents/*/agent)"
   echo "  - workspace rule files (AGENTS.md, SOUL.md, HEARTBEAT.md, etc.)"
-  echo "  - cron jobs not matching Clawboard workspace are preserved"
+  echo "  - cron jobs not matching ClawBoard workspace are preserved"
   echo ""
 
-  confirm_or_abort "This will wipe all Clawboard data + OpenClaw sessions/memory and remove Clawboard OpenClaw cron jobs. Continue?" "$force"
+  confirm_or_abort "This will wipe all ClawBoard data + OpenClaw sessions/memory and remove ClawBoard OpenClaw cron jobs. Continue?" "$force"
 
   echo "Stopping services..."
   down
@@ -957,10 +959,10 @@ reset_all_fresh() {
   echo "Cleaning OpenClaw cron jobs..."
   _cleanup_openclaw_cron_jobs
 
-  echo "Resetting Clawboard data..."
+  echo "Resetting ClawBoard data..."
   reset_data --yes
 
-  echo "OpenClaw sessions/memory were reset above; config/credentials and non-Clawboard cron jobs were preserved."
+  echo "OpenClaw sessions/memory were reset above; config/credentials and non-ClawBoard cron jobs were preserved."
 
   echo "Starting services..."
   up
@@ -1098,7 +1100,7 @@ _factory_reset_qmd_indexes() {
 #
 # Wiped:       board data (topics/logs/spaces/etc.), Qdrant vectors, gateway
 #              queue, agent sessions, workspace memories, obsidian vault docs,
-#              QMD vector indexes, and Clawboard-related cron jobs.
+#              QMD vector indexes, and ClawBoard-related cron jobs.
 #
 # Preserved:   instanceconfig (token, title, integration level),
 #              workspace contract files (AGENTS.md, ANATOMY.md, etc.),
@@ -1116,7 +1118,7 @@ factory_reset() {
   oc_home="$(_oc_home)"
 
   echo "Factory reset"
-  echo "  Clawboard dir : $ROOT_DIR"
+  echo "  ClawBoard dir : $ROOT_DIR"
   echo "  OpenClaw home : $oc_home"
   echo ""
   echo "Will WIPE:"
@@ -1127,7 +1129,7 @@ factory_reset() {
   echo "  - Workspace memory directories (<workspace>/memory)"
   echo "  - Obsidian vault documents (<workspace>/obsidian/*.md)"
   echo "  - QMD vector indexes ($oc_home/agents/*/qmd/xdg-cache/qmd/index.sqlite)"
-  echo "  - Clawboard-related OpenClaw cron jobs"
+  echo "  - ClawBoard-related OpenClaw cron jobs"
   echo ""
   echo "Will PRESERVE:"
   echo "  - instanceconfig row (token, title, integration level)"
@@ -1161,7 +1163,7 @@ factory_reset() {
   echo "[7/8] Clearing QMD vector indexes..."
   _factory_reset_qmd_indexes
 
-  echo "[8/8] Cleaning Clawboard cron jobs..."
+  echo "[8/8] Cleaning ClawBoard cron jobs..."
   _cleanup_openclaw_cron_jobs
 
   echo ""
@@ -2375,7 +2377,7 @@ bootstrap_openclaw() {
 }
 
 run_interactive() {
-  echo "Clawboard deploy menu"
+  echo "ClawBoard deploy menu"
   echo "1)  Up (start only, no build)"
   echo "2)  Rebuild (force recreate)"
   echo "3)  Fresh (tear down + rebuild all)"
@@ -2383,12 +2385,12 @@ run_interactive() {
   echo "5)  Status"
   echo "6)  Logs"
   echo "7)  Run tests"
-  echo "8)  Reset Clawboard data (wipes DB + vectors; OpenClaw untouched)"
+  echo "8)  Reset ClawBoard data (wipes DB + vectors; OpenClaw untouched)"
   echo "9)  Load demo data"
   echo "10) Clear demo data"
   echo "11) Ensure skill installed"
   echo "12) Reset OpenClaw sessions (clears agent session history, keeps memories)"
-  echo "13) Reset all fresh (Clawboard data + OpenClaw sessions/memories/crons; keeps qmd indexes)"
+  echo "13) Reset all fresh (ClawBoard data + OpenClaw sessions/memories/crons; keeps qmd indexes)"
   echo "14) Factory reset — full wipe to idle (instanceconfig + credentials + contracts preserved)"
   echo "15) Cleanup orphaned tool logs (control-plane noise)"
   echo "16) Reconcile allocation guardrails (control-plane + tool traces)"

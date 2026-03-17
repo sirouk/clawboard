@@ -1,13 +1,13 @@
 {
   "instance": {
-    "title": "Clawboard Ops",
+    "title": "ClawBoard Ops",
     "integrationLevel": "manual",
     "updatedAt": "2026-02-03T21:00:00.000Z"
   },
   "topics": [
     {
       "id": "topic-1",
-      "name": "Clawboard",
+      "name": "ClawBoard",
       "description": "Product and platform work.",
       "pinned": true,
       "createdAt": "2026-02-01T14:00:00.000Z",
@@ -22,7 +22,7 @@
     },
     {
       "id": "topic-2",
-      "name": "Clawboard \u00b7 Integration",
+      "name": "ClawBoard \u00b7 Integration",
       "description": "Hooks, plugin, and backfill.",
       "pinned": false,
       "createdAt": "2026-02-02T09:30:00.000Z",
@@ -239,7 +239,7 @@
       "id": "log-1",
       "topicId": "topic-1",
       "type": "system",
-      "content": "Clawboard instance seeded with default topics.",
+      "content": "ClawBoard instance seeded with default topics.",
       "summary": "Instance seeded with default topics.",
       "createdAt": "2026-02-01T14:00:00.000Z",
       "agentId": "system",
@@ -449,7 +449,7 @@
       "topicId": "topic-2",
       "taskId": "task-3",
       "type": "system",
-      "content": "Logger hook enabled and streaming to Clawboard.",
+      "content": "Logger hook enabled and streaming to ClawBoard.",
       "summary": "Logger hook enabled.",
       "createdAt": "2026-02-03T10:40:00.000Z",
       "agentId": "system",

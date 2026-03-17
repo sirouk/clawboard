@@ -80,7 +80,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
 
     @property
     def auth_headers(self) -> dict[str, str]:
-        return {"X-Clawboard-Token": "test-token"}
+        return {"X-ClawBoard-Token": "test-token"}
 
     def setUp(self):
         # Keep history-sync unit paths deterministic regardless of local .env defaults.
@@ -1110,9 +1110,9 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     "timestamp": artifact_ts,
                     "role": "assistant",
                     "text": (
-                        "Clawboard continuity hook is active for this turn.\n"
-                        "Use this Clawboard retrieval context to improve continuity.\n"
-                        "Clawboard Context (Layered):\n"
+                        "ClawBoard continuity hook is active for this turn.\n"
+                        "Use this ClawBoard retrieval context to improve continuity.\n"
+                        "ClawBoard Context (Layered):\n"
                         "- synthetic context payload"
                     ),
                 }
@@ -1559,7 +1559,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
         content = items[0].get("content") or []
         self.assertEqual(content[0].get("type"), "input_text")
         content_text = content[0].get("text") or ""
-        self.assertTrue(content_text.startswith("send with attachment\n\n[Clawboard attachment context]"))
+        self.assertTrue(content_text.startswith("send with attachment\n\n[ClawBoard attachment context]"))
         self.assertIn("Staged path in every agent workspace:", content_text)
         self.assertIn("Exact workspace-relative file paths:", content_text)
         self.assertIn("If you delegate this work", content_text)
@@ -2683,7 +2683,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     summary="already warned",
                     createdAt=now_iso(),
                     agentId="system",
-                    agentLabel="Clawboard",
+                    agentLabel="ClawBoard",
                     source={
                         "channel": "clawboard",
                         "sessionKey": "clawboard:task:topic-recover-012:task-recover-012",
@@ -2776,7 +2776,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     summary="still waiting",
                     createdAt=now_iso(),
                     agentId="system",
-                    agentLabel="Clawboard",
+                    agentLabel="ClawBoard",
                     source={
                         "channel": "clawboard",
                         "sessionKey": "clawboard:task:topic-recover-012b:task-recover-012b",
@@ -3464,7 +3464,7 @@ class OpenClawChatAndIngestTests(unittest.TestCase):
                     summary="terminal warning",
                     createdAt=now,
                     agentId="system",
-                    agentLabel="Clawboard",
+                    agentLabel="ClawBoard",
                     source={
                         "channel": "clawboard",
                         "sessionKey": terminal_session,

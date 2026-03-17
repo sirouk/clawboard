@@ -903,7 +903,7 @@ export const BoardChatComposer = forwardRef<BoardChatComposerHandle, BoardChatCo
             className={cn(
               "resize-none",
               variant === "seamless"
-                ? "rounded-[24px] border-[rgba(255,255,255,0.14)] bg-[rgba(9,11,15,0.72)] shadow-[0_12px_32px_rgba(0,0,0,0.18)] focus:border-[rgba(255,90,45,0.38)] focus:ring-[rgba(255,90,45,0.14)]"
+                ? "rounded-[24px] border-[rgba(255,255,255,0.14)] bg-[rgba(9,11,15,0.72)] shadow-[0_12px_32px_rgba(0,0,0,0.18)] focus:border-[rgba(255,90,45,0.38)] focus:shadow-[0_0_0_2px_rgba(255,90,45,0.14),0_12px_32px_rgba(0,0,0,0.18)]"
                 : "",
               dense
                 ? "min-h-[48px] max-md:max-h-[156px] max-md:pb-11 max-md:pr-24 md:min-h-[60px] md:pb-11 md:pr-24"

@@ -1,6 +1,6 @@
-# Clawboard Operator Runbook
+# ClawBoard Operator Runbook
 
-This runbook is for operators who need to run Clawboard safely without changing code.
+This runbook is for operators who need to run ClawBoard safely without changing code.
 
 ## Operating Goal
 
@@ -43,7 +43,7 @@ docker compose up -d --build
 5. Confirm no unexpected read-only state in normal operator sessions.
 6. Confirm API ownership telemetry is healthy for a legacy shim route:
 ```bash
-curl -sSI -H "X-Clawboard-Token: $CLAWBOARD_TOKEN" http://localhost:3010/api/topics | rg -i "x-clawboard-api-owner|x-clawboard-api-compat"
+curl -sSI -H "X-ClawBoard-Token: $CLAWBOARD_TOKEN" http://localhost:3010/api/topics | rg -i "x-clawboard-api-owner|x-clawboard-api-compat"
 ```
 Expected result includes `x-clawboard-api-owner: fastapi`.
 

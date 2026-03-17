@@ -2,9 +2,9 @@
 
 ## Goal
 
-Use hooks so every inbound and outbound message is logged to Clawboard with no gaps.
+Use hooks so every inbound and outbound message is logged to ClawBoard with no gaps.
 
-## Recommended: Clawboard logger plugin
+## Recommended: ClawBoard logger plugin
 
 This repo ships a plugin at `extensions/clawboard-logger` that registers agent-loop hooks
 for `message_received`, `message_sent`, `before_tool_call`, `after_tool_call`, and `agent_end`.
@@ -16,7 +16,7 @@ openclaw plugins install -l /path/to/clawboard/extensions/clawboard-logger
 openclaw plugins enable clawboard-logger
 ```
 
-Set config with the Clawboard base URL + token.
+Set config with the ClawBoard base URL + token.
 
 Implementation note (code path):
 - The plugin uses `api.on(<hookName>, handler)` to register hooks (see OpenClaw plugin SDK).
@@ -59,7 +59,7 @@ These run inside the agent loop and can emit log events for every turn.
 
 ## Logging policy
 
-For each event, post to Clawboard immediately:
+For each event, post to ClawBoard immediately:
 
 - `conversation` for message_received/message_sent
 - `action` for tool calls and agent_end summaries
@@ -70,4 +70,4 @@ Include:
 - `raw`: full prompt/response
 - `agentId`, `agentLabel`, `sessionKey`, `messageId` if available
 
-If Clawboard is unreachable, queue to disk and retry on the next event.
+If ClawBoard is unreachable, queue to disk and retry on the next event.

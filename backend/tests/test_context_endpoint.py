@@ -39,7 +39,7 @@ class ContextEndpointTests(unittest.TestCase):
         cls.client = TestClient(app)
 
     def test_context_cheap_includes_working_set_and_routing(self):
-        headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         session_key = "channel:testcontext"
 
         topic = self.client.post("/api/topics", json={"name": "ContextTest Topic", "pinned": True}, headers=headers).json()
@@ -104,7 +104,7 @@ class ContextEndpointTests(unittest.TestCase):
         self.assertIn("Session routing memory", payload.get("block", ""))
 
     def test_context_board_session_surfaces_active_topic(self):
-        headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
 
         other_topic = self.client.post("/api/topics", json={"name": "Other Topic (pinned)", "pinned": True}, headers=headers).json()
         board_topic = self.client.post("/api/topics", json={"name": "Board Topic Context"}, headers=headers).json()
@@ -146,7 +146,7 @@ class ContextEndpointTests(unittest.TestCase):
         self.assertNotIn(other_topic["name"], block)
 
     def test_context_board_topic_thread_includes_cross_session_specialist_output(self):
-        headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         topic = self.client.post("/api/topics", json={"name": "Board Thread Topic"}, headers=headers).json()
         sibling_topic = self.client.post("/api/topics", json={"name": "Sibling Topic"}, headers=headers).json()
 
@@ -209,7 +209,7 @@ class ContextEndpointTests(unittest.TestCase):
         self.assertNotIn("Sibling topic noise", block)
 
     def test_context_internal_completion_turn_hints_curation_and_skips_semantic_auto(self):
-        headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         topic = self.client.post("/api/topics", json={"name": "Completion Hint Topic"}, headers=headers).json()
         board_session_key = f"clawboard:topic:{topic['id']}"
 
@@ -308,7 +308,7 @@ If they are part of the same workflow, wait for the remaining results before sen
         search_mock.assert_not_called()
 
     def test_context_auto_low_signal_board_session_runs_semantic_layer(self):
-        headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
 
         topic = self.client.post("/api/topics", json={"name": "Board Auto Semantic Topic"}, headers=headers).json()
         board_session_key = f"clawboard:topic:{topic['id']}"
@@ -339,7 +339,7 @@ If they are part of the same workflow, wait for the remaining results before sen
         self.assertFalse(bool(kwargs.get("allow_deep_content_scan")))
 
     def test_context_filters_routing_memory_by_allowed_spaces(self):
-        headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         session_key = "channel:routing-space-filter"
 
         self.client.post(
@@ -410,7 +410,7 @@ If they are part of the same workflow, wait for the remaining results before sen
         self.assertNotIn("Routing Blocked Topic", block)
 
     def test_patch_topic_without_name(self):
-        headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         topic = self.client.post("/api/topics", json={"name": "ContextPatch Topic"}, headers=headers).json()
 
         res = self.client.patch(
@@ -423,7 +423,7 @@ If they are part of the same workflow, wait for the remaining results before sen
         self.assertEqual(patched.get("status"), "done")
 
     def test_patch_topic_digest_bumps_updated_at(self):
-        headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         topic = self.client.post("/api/topics", json={"name": "Digest Topic"}, headers=headers).json()
 
         before = self.client.get(f"/api/topics/{topic['id']}", headers={"Host": "localhost:8010"}).json()

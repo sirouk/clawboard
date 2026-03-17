@@ -84,7 +84,7 @@ export function middleware(request: NextRequest) {
   // Tighten surface: do not accept tokens in query params (leaks via logs/referrers).
   if (request.nextUrl.searchParams.has("token")) {
     return NextResponse.json(
-      { detail: "Do not pass token via query param. Use X-Clawboard-Token header." },
+      { detail: "Do not pass token via query param. Use X-ClawBoard-Token header." },
       { status: 400 }
     );
   }
@@ -101,7 +101,7 @@ export function middleware(request: NextRequest) {
   const provided = request.headers.get(HEADER);
   if (!provided || provided !== token) {
     return NextResponse.json(
-      { detail: "Unauthorized: invalid or missing X-Clawboard-Token" },
+      { detail: "Unauthorized: invalid or missing X-ClawBoard-Token" },
       { status: 401 }
     );
   }

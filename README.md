@@ -1,17 +1,17 @@
-# Clawboard
+# ClawBoard
 
-Clawboard is a memory and context layer for [OpenClaw](https://openclaw.ai/).
+ClawBoard is a memory and context layer for [OpenClaw](https://openclaw.ai/).
 It captures activity, organizes it into useful structure, and feeds the right context back at response time.
 
 OpenClaw stays the agent runtime.
-Clawboard adds durable memory, classification, retrieval, and operator-facing UI.
+ClawBoard adds durable memory, classification, retrieval, and operator-facing UI.
 
 Current board model: `Space -> Topic + Chat`.
 Legacy task rows and task-scoped session keys are still supported for compatibility and replay, but the primary operator workflow is topic-first.
 
 ## Documentation Contract
 
-- `README.md` is the short orchestration map: what Clawboard is, how it fits beside OpenClaw, and the main runtime flow.
+- `README.md` is the short orchestration map: what ClawBoard is, how it fits beside OpenClaw, and the main runtime flow.
 - `ANATOMY.md` is the exhaustive implementation reference: the qualified end-to-end detail, code-path map, invariants, recovery paths, and explicit unknowns/blockers.
 
 Read this file first for the gist.
@@ -26,7 +26,7 @@ Read `ANATOMY.md` when you need the full, checked system picture.
 
 ## How It Works
 
-Clawboard runs as a multi-stage pipeline:
+ClawBoard runs as a multi-stage pipeline:
 
 1. Stage 1: Capture
 - `clawboard-logger` plugin records user/assistant/subagent/tool events as durable logs.
@@ -41,7 +41,7 @@ Clawboard runs as a multi-stage pipeline:
 
 ## Plain-English Mental Model
 
-Think of Clawboard like a smart school binder for your AI:
+Think of ClawBoard like a smart school binder for your AI:
 
 - `Topic` = a class folder (example: "Website Launch")
 - `Task` = a legacy assignment row that can still hang off a topic when older flows or specialized views need it
@@ -57,14 +57,14 @@ Statuses are how the system tracks state:
 ### The self-improving loop
 
 1. You chat in OpenClaw.
-2. The logger plugin saves messages/tool activity into Clawboard.
+2. The logger plugin saves messages/tool activity into ClawBoard.
 3. The classifier reviews new `pending` logs and decides:
    - which Topic they belong to
    - which compatibility Task (if any) they belong to
    - a short summary chip
 4. It stores routing memory so short follow-ups like "ok continue" can still stay in the right place.
 5. Search/indexes update so relevant older work can be found quickly.
-6. Before the next model turn, Clawboard builds a compact context block via `/api/context`:
+6. Before the next model turn, ClawBoard builds a compact context block via `/api/context`:
    - active board location (where you are speaking from)
    - active working set (important topics plus compatibility task hints when relevant)
    - recent timeline
@@ -100,7 +100,7 @@ Statuses are how the system tracks state:
 - Board chat routing is main-mediated:
   - messages sent in board topic sessions go through main orchestration, which may delegate to specialists/subagents.
   - compatibility task sessions still route through the same main-agent orchestration lane rather than directly pinning ownership to a subagent.
-- `agentId` on `POST /api/openclaw/chat` is advisory metadata for Clawboard dispatch bookkeeping (queue/orchestration context), not an authoritative direct-route override.
+- `agentId` on `POST /api/openclaw/chat` is advisory metadata for ClawBoard dispatch bookkeeping (queue/orchestration context), not an authoritative direct-route override.
 - Only direct user-request lineage is allocatable into Topic/Task continuity.
 - Control-plane/background noise is filtered from conversational continuity:
   - heartbeat/control-plane, cron-event, subagent scaffold payloads, and unanchored tool traces are detached/terminal-filtered.
@@ -132,11 +132,11 @@ See `ANATOMY.md`, `CONTEXT.md`, and `CLASSIFICATION.md` for full contracts.
 
 ## OpenClaw Complement Model
 
-Clawboard is additive to OpenClaw, not a replacement.
+ClawBoard is additive to OpenClaw, not a replacement.
 
 - OpenClaw handles runtime orchestration and core memory behavior.
-- Clawboard contributes extra structured continuity through logger hooks + `/api/context`.
-- At response time, Clawboard can provide focused recall (topic continuity, weighted notes, timeline snippets, and compatibility task hints) to improve precision over long horizons.
+- ClawBoard contributes extra structured continuity through logger hooks + `/api/context`.
+- At response time, ClawBoard can provide focused recall (topic continuity, weighted notes, timeline snippets, and compatibility task hints) to improve precision over long horizons.
 
 ## Quick Start (Docker)
 
@@ -187,8 +187,8 @@ Bootstrap characteristics (current):
 - deploys main-agent templates (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`, `BOOTSTRAP.md`) into the resolved OpenClaw main workspace
 - provisions specialist workspaces (`coding`, `docs`, `web`, `social`) and, by default, asks to enroll them so main can delegate through a real team
 - supports non-interactive specialist enrollment with `--setup-agentic-team` or `CLAWBOARD_AGENTIC_TEAM_SETUP=always`
-- writes workspace-IDE defaults so Clawboard can open resolved agent workspaces in a separate code-server tab, with dark-mode and trusted-workspace defaults seeded on first bootstrap
-- deploys Clawboard contract docs (`ANATOMY.md`, `CONTEXT.md`, `CLASSIFICATION.md`, etc.) into the same workspace
+- writes workspace-IDE defaults so ClawBoard can open resolved agent workspaces in a separate code-server tab, with dark-mode and trusted-workspace defaults seeded on first bootstrap
+- deploys ClawBoard contract docs (`ANATOMY.md`, `CONTEXT.md`, `CLASSIFICATION.md`, etc.) into the same workspace
 - applies scope-aware directive reconciliation (`directives/all/*` + `directives/<agent-id>/*`) with in-place updates, stale-block pruning, and a locally regenerated team roster
 - keeps main-agent execution lanes (main-only direct, single-specialist, multi-specialist/huddle) aligned with repository contracts
 - syncs main `subagents.allowAgents` from configured non-main agents for elastic delegation pool growth without manual list drift
@@ -203,7 +203,7 @@ curl -fsSL https://raw.githubusercontent.com/sirouk/clawboard/main/inference-pro
 
 ## Security Model
 
-- All write endpoints require `X-Clawboard-Token`.
+- All write endpoints require `X-ClawBoard-Token`.
 - Non-localhost reads require token.
 - Localhost reads can be tokenless for local dev workflows.
 - DB/vector/cache services are kept on internal Docker network (not host-published in default compose profile).
@@ -271,7 +271,7 @@ curl -s http://localhost:8010/api/config
 Dispatch/watchdog visibility:
 
 ```bash
-curl -s -H "X-Clawboard-Token: $CLAWBOARD_TOKEN" http://localhost:8010/api/openclaw/chat-dispatch/status
+curl -s -H "X-ClawBoard-Token: $CLAWBOARD_TOKEN" http://localhost:8010/api/openclaw/chat-dispatch/status
 ```
 
 Legacy SQLite to Postgres migration helper (one-time, older installs only):
@@ -352,7 +352,7 @@ This check blocks common leaks in tracked files:
 
 ## Thanks
 
-Clawboard is built to complement [OpenClaw](https://openclaw.ai/).
+ClawBoard is built to complement [OpenClaw](https://openclaw.ai/).
 Thanks to Peter Steinberger for OpenClaw and the surrounding ecosystem work:
 
 - https://openclaw.ai/

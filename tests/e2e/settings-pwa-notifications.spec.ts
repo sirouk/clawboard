@@ -179,7 +179,7 @@ test("settings test button falls back to title badge when native badging is unav
       writable: true,
       value: MockNotification,
     });
-    document.title = "Clawboard";
+    document.title = "ClawBoard";
   });
 
   await page.goto("/settings");

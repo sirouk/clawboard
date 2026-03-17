@@ -1,6 +1,6 @@
-# OpenClaw <-> Clawboard Content System UML
+# OpenClaw <-> ClawBoard Content System UML
 
-This document models the full user-generated-content and LLM-content lifecycle between OpenClaw and Clawboard.
+This document models the full user-generated-content and LLM-content lifecycle between OpenClaw and ClawBoard.
 
 ## 1) Component Topology (UML Class/Component View)
 
@@ -15,7 +15,7 @@ classDiagram
       +before_agent_start
     }
 
-    class ClawboardLoggerPlugin {
+    class ClawBoardLoggerPlugin {
       +sanitizeMessageContent()
       +isClassifierPayloadText()
       +computeEffectiveSessionKey()
@@ -24,7 +24,7 @@ classDiagram
       +localDurableQueue(sqlite)
     }
 
-    class ClawboardAPI {
+    class ClawBoardAPI {
       +post_api_log()
       +post_api_ingest()
       +patch_api_log_by_id()
@@ -48,7 +48,7 @@ classDiagram
       +stream.ping
     }
 
-    class ClawboardDB {
+    class ClawBoardDB {
       +Space
       +Topic
       +Task
@@ -89,7 +89,7 @@ classDiagram
       +repair_pass()
     }
 
-    class ClawboardUI {
+    class ClawBoardUI {
       +BoardChatComposer
       +DataProvider
       +UnifiedView
@@ -97,16 +97,16 @@ classDiagram
       +useLiveUpdates
     }
 
-    OpenClawRuntime --> ClawboardLoggerPlugin : hook events
-    ClawboardLoggerPlugin --> ClawboardAPI : /api/log or /api/ingest
-    ClawboardAPI --> ClawboardDB : persistence + idempotency
-    ClawboardAPI --> EventHubSSE : publish live events
-    EventHubSSE --> ClawboardUI : SSE stream
-    ClawboardUI --> ClawboardAPI : /api/changes + /api/search + /api/context
-    ClassifierWorker --> ClawboardAPI : pending/read/patch/session-routing
+    OpenClawRuntime --> ClawBoardLoggerPlugin : hook events
+    ClawBoardLoggerPlugin --> ClawBoardAPI : /api/log or /api/ingest
+    ClawBoardAPI --> ClawBoardDB : persistence + idempotency
+    ClawBoardAPI --> EventHubSSE : publish live events
+    EventHubSSE --> ClawBoardUI : SSE stream
+    ClawBoardUI --> ClawBoardAPI : /api/changes + /api/search + /api/context
+    ClassifierWorker --> ClawBoardAPI : pending/read/patch/session-routing
     ClassifierWorker --> EmbeddingStore : candidate retrieval + reindex
-    ClawboardAPI --> OpenClawGatewayWS : openclaw chat dispatch
-    ClawboardAPI --> OpenClawLLMAPI : gateway-backed chat completion
+    ClawBoardAPI --> OpenClawGatewayWS : openclaw chat dispatch
+    ClawBoardAPI --> OpenClawLLMAPI : gateway-backed chat completion
     ClassifierWorker --> OpenClawLLMAPI : classify + gate + summary repair
 ```
 
@@ -118,13 +118,13 @@ sequenceDiagram
     participant U as User or External Channel
     participant OC as OpenClaw Runtime
     participant PL as clawboard-logger plugin
-    participant API as Clawboard API
-    participant DB as Clawboard DB
+    participant API as ClawBoard API
+    participant DB as ClawBoard DB
     participant EV as EventHub SSE
     participant CL as Classifier Worker
     participant ES as Embedding Store
     participant LLM as OpenClaw LLM API
-    participant UI as Clawboard UI
+    participant UI as ClawBoard UI
 
     U->>OC: inbound or outbound conversation/tool activity
     OC->>PL: message_received/message_sending/before_tool_call/after_tool_call/agent_end
@@ -180,9 +180,9 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    participant UI as Clawboard UI (BoardChatComposer)
-    participant API as Clawboard API
-    participant DB as Clawboard DB + attachments storage
+    participant UI as ClawBoard UI (BoardChatComposer)
+    participant API as ClawBoard API
+    participant DB as ClawBoard DB + attachments storage
     participant DQ as Durable dispatch queue/workers
     participant GW as OpenClaw Gateway WS RPC
     participant OC as OpenClaw Runtime
@@ -238,8 +238,8 @@ sequenceDiagram
     autonumber
     participant OC as OpenClaw Runtime
     participant PL as clawboard-logger before_agent_start
-    participant API as Clawboard API
-    participant DB as Clawboard DB
+    participant API as ClawBoard API
+    participant DB as ClawBoard DB
     participant SRCH as Search pipeline (_search_impl + semantic_search)
 
     OC->>PL: before_agent_start(prompt, messages)

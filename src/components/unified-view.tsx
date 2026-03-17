@@ -2057,9 +2057,11 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
   } = useUnifiedExpansionState(initialUrlState.topics, initialUrlState.tasks);
   const { expandedTopics, expandedTasks, mobileLayer, mobileChatTarget } = expansionState;
   const showTwoColumns = twoColumn && mdUp;
-  const [showRaw, setShowRaw] = useState(initialUrlState.raw);
+  const showFullMessagesRaw = useLocalStorageItem("clawboard.display.showFullMessages");
+  const showRaw = showFullMessagesRaw !== "false";
   const [messageDensity, setMessageDensity] = useState<MessageDensity>(initialUrlState.density);
-  const [showToolCalls, setShowToolCalls] = useState(initialUrlState.showToolCalls);
+  const showToolCallsRaw = useLocalStorageItem("clawboard.display.showToolCalls");
+  const showToolCalls = showToolCallsRaw === "true";
   const [showDone, setShowDone] = useState(initialUrlState.done);
   const [revealSelection, setRevealSelection] = useState(initialUrlState.reveal);
   const [revealedTopicIds, setRevealedTopicIds] = useState<string[]>(initialUrlState.topics);
@@ -2385,9 +2387,9 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     }
   }, [mdUp, mobileLayer]);
 
-  // Per-chat "oldest visible index" into that chat's log list.
-  // Keyed by topic-native chat scroller keys (e.g. `topic:${topicId}`).
-  const [chatHistoryStarts, setChatHistoryStarts] = useState<Record<string, number>>({});
+  // Per-chat "oldest visible index" — retained for loadOlderChat references but
+  // no longer used for default truncation (all messages are shown).
+  const [, setChatHistoryStarts] = useState<Record<string, number>>({});
   // Local "OpenClaw is responding" signal so the UI doesn't depend entirely on the gateway
   // returning a long-lived request for typing events.
   const [awaitingAssistant, setAwaitingAssistant] = useState<Record<string, { sentAt: string; requestId?: string }>>(
@@ -5895,17 +5897,6 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     pushUrl({ done: next ? "1" : "0", status: nextStatus, page: "1" });
   };
 
-  const toggleRawVisibility = () => {
-    const next = !showRaw;
-    setShowRaw(next);
-    pushUrl({ raw: next ? "1" : "0" });
-  };
-
-  const toggleToolCallsVisibility = () => {
-    const next = !showToolCalls;
-    setShowToolCalls(next);
-    pushUrl({ tools: next ? "1" : "0" });
-  };
 
   const updateStatusFilter = (nextValue: string) => {
     const nextStatus = isTaskStatusFilter(nextValue) ? nextValue : "all";
@@ -5985,9 +5976,13 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     const nextTasks = parsedState.tasks;
     const nextRevealSelection = parsedState.reveal;
 
-    setShowRaw((prev) => (prev === parsedState.raw ? prev : parsedState.raw));
+    if (url.searchParams.has("raw")) {
+      setLocalStorageItem("clawboard.display.showFullMessages", parsedState.raw ? "true" : "false");
+    }
     setMessageDensity((prev) => (prev === parsedState.density ? prev : parsedState.density));
-    setShowToolCalls((prev) => (prev === parsedState.showToolCalls ? prev : parsedState.showToolCalls));
+    if (url.searchParams.has("tools")) {
+      setLocalStorageItem("clawboard.display.showToolCalls", parsedState.showToolCalls ? "true" : "false");
+    }
     setStatusFilter((prev) => (prev === nextStatus ? prev : nextStatus));
     setShowDone((prev) => {
       const nextShowDone = parsedState.done || nextStatus === "done";
@@ -6594,8 +6589,6 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
   const displaySummary = [
     showDone ? "Done visible" : "Done hidden",
     showSnoozedTasks ? "Snoozed visible" : "Snoozed hidden",
-    showRaw ? "Full messages visible" : "Messages trimmed",
-    showToolCalls ? "Tool calls visible" : "Tool calls hidden",
     twoColumn ? "2-column board" : "1-column board",
   ].join(" · ");
   const unifiedComposerPlaceholder = mdUp
@@ -6645,22 +6638,6 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         }}
       >
         {showSnoozedTasks ? "Hide snoozed" : "Show snoozed"}
-      </Button>
-      <Button
-        variant="secondary"
-        size="sm"
-        className={cn(showRaw ? "border-[rgba(255,90,45,0.5)]" : "opacity-85", className)}
-        onClick={toggleRawVisibility}
-      >
-        {showRaw ? "Hide full messages" : "Show full messages"}
-      </Button>
-      <Button
-        variant="secondary"
-        size="sm"
-        className={cn(showToolCalls ? "border-[rgba(255,90,45,0.5)]" : "opacity-85", className)}
-        onClick={toggleToolCallsVisibility}
-      >
-        {showToolCalls ? "Hide tool calls" : "Show tool calls"}
       </Button>
     </>
   );
@@ -7057,18 +7034,8 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
             topicDisplayColors.get(topicId) ??
             normalizeHexColor(topic.color) ??
             colorFromSeed(`topic:${topic.id}:${topic.name}`, TOPIC_FALLBACK_COLORS);
-          const topicStart = normalizedSearch
-            ? 0
-            : computeChatStart(
-                chatHistoryStarts,
-                topicChatKey,
-                topicChatAllLogs.length,
-                TASK_TIMELINE_LIMIT,
-                topicChatAllLogs,
-                showToolCalls
-              );
-          const limitedTopicLogs = topicChatAllLogs.slice(topicStart);
-          const topicChatTruncated = !normalizedSearch && topicStart > 0;
+          const limitedTopicLogs = topicChatAllLogs;
+          const topicChatTruncated = false;
           const topicSpaceIdList = topicSpaceIds(topic).filter((id) => id !== "space-default");
           const visibleTopicTags = dedupeTagLabels(topic.tags ?? []);
           const primaryTopicSpaceId = (() => {
@@ -7606,7 +7573,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                         </span>
                         {topicResponding ? <TypingDots /> : null}
                         <span className="text-[rgba(var(--claw-muted),0.55)]">·</span>
-                        <div className="min-w-0 max-w-[52ch] overflow-x-auto whitespace-nowrap" title={topicChatBlurb.full}>
+                        <div className="min-w-0 max-w-[52ch] overflow-x-auto whitespace-nowrap claw-scrollbar-none" title={topicChatBlurb.full}>
                           {topicChatBlurb.clipped}
                         </div>
                       </div>
@@ -8075,18 +8042,8 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
 	                      const taskChatKey = chatKeyForTask(task.id);
                       const taskHiddenToolCallCount = hiddenToolCallCountForSession(taskChatSessionKey);
                       const taskSelectedForSend = topicSelectedForSend;
-                      const start = normalizedSearch
-                        ? 0
-                        : computeChatStart(
-                            chatHistoryStarts,
-                            taskChatKey,
-                            taskChatAllLogs.length,
-                            TASK_TIMELINE_LIMIT,
-                            taskChatAllLogs,
-                            showToolCalls
-                          );
-                      const limitedLogs = taskChatAllLogs.slice(start);
-                      const truncated = !normalizedSearch && start > 0;
+                      const limitedLogs = taskChatAllLogs;
+                      const truncated = false;
 	                      return (
                           <SwipeRevealRow
                             key={task.id}
@@ -8799,7 +8756,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                                 className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 text-[11px] text-[rgb(var(--claw-muted))]"
                                               >
                                                 <span className="shrink-0 uppercase tracking-[0.14em]">Topic</span>
-                                                <span className="inline-flex max-w-full overflow-x-auto whitespace-nowrap font-medium text-[rgb(var(--claw-text))]">
+                                                <span className="inline-flex max-w-full overflow-x-auto whitespace-nowrap claw-scrollbar-none font-medium text-[rgb(var(--claw-text))]">
                                                   {topic.name}
                                                 </span>
                                               </nav>
@@ -8837,7 +8794,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                               <>
                                                 <span className="text-xs text-[rgba(var(--claw-muted),0.55)]">·</span>
                                                 <div
-                                                  className="min-w-0 max-w-[56ch] overflow-x-auto whitespace-nowrap text-xs text-[rgba(var(--claw-muted),0.9)]"
+                                                  className="min-w-0 max-w-[56ch] overflow-x-auto whitespace-nowrap claw-scrollbar-none text-xs text-[rgba(var(--claw-muted),0.9)]"
                                                   title={taskChatBlurb.full}
                                                 >
                                                   {taskChatBlurb.clipped}
@@ -8887,7 +8844,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                       {taskWorkspaceAttention.hint}
                                     </div>
                                     <div
-                                      className="overflow-x-auto whitespace-nowrap text-[rgb(var(--claw-muted))]"
+                                      className="overflow-x-auto whitespace-nowrap claw-scrollbar-none text-[rgb(var(--claw-muted))]"
                                       title={taskWorkspaceAttention.workspace.workspaceDir}
                                     >
                                       {taskWorkspacePathLabel}

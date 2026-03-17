@@ -62,7 +62,7 @@ class StreamReplayTests(unittest.TestCase):
         self.assertEqual(replay_payload.get("data"), {"name": "bravo"})
 
     def test_reconnect_plus_changes_reconcile_recovers_topic_updates(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
 
         since = now_iso()
@@ -104,7 +104,7 @@ class StreamReplayTests(unittest.TestCase):
         self.assertEqual(replayed["eventId"], "11")
 
     def test_changes_reconcile_returns_topic_tombstones(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
         suffix = str(int(datetime.now(timezone.utc).timestamp() * 1000))
 
@@ -169,7 +169,7 @@ class StreamReplayTests(unittest.TestCase):
         self.assertGreaterEqual(str(payload.get("cursor") or ""), stamp)
 
     def test_log_chat_counts_exclude_internal_noise_and_cron_rows(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         read_headers = {"Host": "localhost:8010"}
         suffix = str(int(datetime.now(timezone.utc).timestamp() * 1000))
         topic_id = f"topic-chat-counts-{suffix}"
@@ -333,7 +333,7 @@ class StreamReplayTests(unittest.TestCase):
         self.assertEqual(rows, [])
 
     def test_history_sync_skips_board_scoped_assistant_duplicate_from_live_path(self):
-        write_headers = {"Host": "localhost:8010", "X-Clawboard-Token": "test-token"}
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         suffix = str(int(datetime.now(timezone.utc).timestamp() * 1000))
         topic_id = f"topic-history-dedupe-{suffix}"
         session_key = f"clawboard:topic:{topic_id}"
