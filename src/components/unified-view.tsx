@@ -1807,6 +1807,9 @@ function topicGlowStyle(color: string, index: number, expanded: boolean): CSSPro
   return {
     background: `linear-gradient(155deg, ${rgba(color, topAlpha)}, rgba(16,19,24,0.90) 48%, ${rgba(color, lowAlpha)})`,
     boxShadow: `0 0 0 1px ${rgba(color, expanded ? 0.28 : 0.2)}, 0 14px 34px ${rgba(color, expanded ? 0.15 : 0.1)}`,
+    // clip-path clips content to the card bounds (like overflow-hidden) without
+    // creating a new scroll container, so position:sticky still works on the header.
+    ...(expanded ? { clipPath: "inset(0 round var(--radius-lg))" } : undefined),
   };
 }
 
