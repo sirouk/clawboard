@@ -253,6 +253,8 @@ rebuild() {
 
   # Remove stale Next.js build cache so Docker COPY gets a clean context.
   rm -rf .next .next.stale-* 2>/dev/null || true
+  # Remove the Docker-managed .next cache volume used by web-dev.
+  docker volume rm -f clawboard_clawboard_web_next_cache >/dev/null 2>&1 || true
 
   if is_web_hot_reload_enabled; then
     if [ "${#args[@]}" -eq 0 ]; then
@@ -310,6 +312,8 @@ fresh() {
   down
   # Remove stale Next.js build cache so Docker COPY gets a clean context.
   rm -rf .next .next.stale-* 2>/dev/null || true
+  # Remove the Docker-managed .next cache volume used by web-dev.
+  docker volume rm -f clawboard_clawboard_web_next_cache >/dev/null 2>&1 || true
   if is_web_hot_reload_enabled; then
     compose --profile dev up -d --build --force-recreate api classifier qdrant web-dev
     ensure_workspace_ide_services

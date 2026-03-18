@@ -28,6 +28,8 @@ import type { Space, Topic } from "@/lib/types";
 import { buildLatestTopicTouchById, deriveAttentionTopicIds, topicAttentionActivityAt } from "@/lib/topic-attention";
 import { compareByBoardOrder } from "@/lib/topic-order";
 
+type MobileNavPane = "primary" | "secondary";
+
 const ICONS: Record<string, React.ReactElement> = {
   home: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
@@ -370,7 +372,7 @@ function HeaderRouteTabs({
               aria-current={active ? "page" : undefined}
               className={cn(
                 "rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] transition",
-                compact ? "min-w-[132px]" : "min-w-[156px]",
+                compact ? "min-w-[124px]" : "min-w-[156px]",
                 active
                   ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.28),rgba(255,90,45,0.12))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.3)]"
                   : "text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
@@ -663,9 +665,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const compactHeader = useLocalStorageItem(HEADER_COMPACT_KEY) === "true";
   const activeSpaceIdStored = (useLocalStorageItem(ACTIVE_SPACE_KEY) ?? "").trim();
   useLocalStorageItem("clawboard.apiBase");
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [mobileNavPane, setMobileNavPane] = useState<MobileNavPane>("primary");
   const [browserPathname, setBrowserPathname] = useState(pathname);
   const headerRef = useRef<HTMLElement | null>(null);
+  const mobileNavTouchStartRef = useRef<{ x: number; y: number } | null>(null);
   const topicBackedSpaceIds = useMemo(() => {
     const ids = new Set<string>();
     for (const topic of storeTopics) {
@@ -826,6 +829,45 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    const root = document.documentElement;
+    const navigatorWithStandalone = navigator as Navigator & { standalone?: boolean };
+    const mobileMq = window.matchMedia("(max-width: 1023px)");
+    const standaloneMq = window.matchMedia("(display-mode: standalone)");
+    const fullscreenMq = window.matchMedia("(display-mode: fullscreen)");
+    const apply = () => {
+      const immersive =
+        mobileMq.matches &&
+        (standaloneMq.matches || fullscreenMq.matches || navigatorWithStandalone.standalone === true);
+      root.setAttribute("data-claw-mobile-immersive", immersive ? "true" : "false");
+    };
+    const addChangeListener = (query: MediaQueryList) => {
+      if (typeof query.addEventListener === "function") {
+        query.addEventListener("change", apply);
+        return () => query.removeEventListener("change", apply);
+      }
+      query.addListener(apply);
+      return () => query.removeListener(apply);
+    };
+    apply();
+    const removeMobile = addChangeListener(mobileMq);
+    const removeStandalone = addChangeListener(standaloneMq);
+    const removeFullscreen = addChangeListener(fullscreenMq);
+    window.addEventListener("resize", apply, { passive: true });
+    window.addEventListener("orientationchange", apply);
+    window.visualViewport?.addEventListener("resize", apply);
+    return () => {
+      removeMobile();
+      removeStandalone();
+      removeFullscreen();
+      window.removeEventListener("resize", apply);
+      window.removeEventListener("orientationchange", apply);
+      window.visualViewport?.removeEventListener("resize", apply);
+      root.setAttribute("data-claw-mobile-immersive", "false");
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
     const syncPathname = () => setBrowserPathname(window.location.pathname);
     syncPathname();
     window.addEventListener("popstate", syncPathname);
@@ -900,8 +942,47 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const mobileSecondaryItems = NAV_ITEMS.filter((item) => item.id !== "home" && item.id !== "workspaces");
 
   useEffect(() => {
-    setMobileMenuOpen(false);
+    setMobileNavPane("primary");
   }, [pathname]);
+
+  const openMobileSecondaryNav = useCallback(() => {
+    setMobileNavPane("secondary");
+  }, []);
+
+  const closeMobileSecondaryNav = useCallback(() => {
+    setMobileNavPane("primary");
+  }, []);
+
+  const handleMobileNavTouchStart = useCallback((event: React.TouchEvent<HTMLElement>) => {
+    const touch = event.touches[0];
+    if (!touch) return;
+    mobileNavTouchStartRef.current = { x: touch.clientX, y: touch.clientY };
+  }, []);
+
+  const handleMobileNavTouchCancel = useCallback(() => {
+    mobileNavTouchStartRef.current = null;
+  }, []);
+
+  const handleMobileNavTouchEnd = useCallback(
+    (event: React.TouchEvent<HTMLElement>) => {
+      const start = mobileNavTouchStartRef.current;
+      mobileNavTouchStartRef.current = null;
+      if (!start) return;
+      const touch = event.changedTouches[0];
+      if (!touch) return;
+      const deltaX = touch.clientX - start.x;
+      const deltaY = touch.clientY - start.y;
+      if (Math.abs(deltaY) > 28 || Math.abs(deltaX) < 36) return;
+      if (deltaX < 0 && mobileNavPane === "primary") {
+        setMobileNavPane("secondary");
+        return;
+      }
+      if (deltaX > 0 && mobileNavPane === "secondary") {
+        setMobileNavPane("primary");
+      }
+    },
+    [mobileNavPane]
+  );
 
   const pageHeader = useMemo(() => {
     const cleanPath = pathname.split("?")[0] ?? "";
@@ -1254,7 +1335,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                  <aside
                     data-claw-shell-nav="1"
 				            className={cn(
-				              "relative z-[80] border-b border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] px-3 pt-[max(0.625rem,env(safe-area-inset-top))] pb-2.5 lg:z-auto lg:min-h-screen lg:h-screen lg:border-b-0 lg:border-r lg:px-4 lg:pt-6 lg:pb-6 transition-all lg:sticky lg:top-0 lg:self-start lg:flex lg:flex-col lg:overflow-visible",
+				              "relative z-[80] border-b border-[rgb(var(--claw-border))] bg-[rgb(var(--claw-panel))] px-3 pt-[calc(var(--claw-mobile-safe-top,0px)+0.625rem)] pb-2.5 lg:z-auto lg:min-h-screen lg:h-screen lg:border-b-0 lg:border-r lg:px-4 lg:pt-6 lg:pb-6 transition-all lg:sticky lg:top-0 lg:self-start lg:flex lg:flex-col lg:overflow-visible",
 				              collapsed ? "lg:w-20" : "lg:w-64"
 				            )}
 				          >
@@ -1325,63 +1406,78 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			              </div>
               {/* Mobile nav: primary toggle (centered) + caret + secondary strip */}
               <nav className="mt-1.5 lg:hidden" aria-label="Mobile navigation">
-                <div className="flex items-center">
-                  <div className="flex flex-1 justify-center">
-                    <HeaderRouteTabs
-                      activeView={boardWorkspaceActiveView ?? "board"}
-                      boardHref={boardNavHref}
-                      workspaceHref={workspaceNavHref}
-                      compact
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setMobileMenuOpen((prev) => !prev)}
-                    className={cn(
-                      "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition",
-                      mobileMenuOpen
-                        ? "text-[rgb(var(--claw-text))]"
-                        : "text-[rgb(var(--claw-muted))]"
-                    )}
-                    aria-expanded={mobileMenuOpen}
-                    aria-label={mobileMenuOpen ? "Hide navigation" : "More navigation"}
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={cn("h-3.5 w-3.5 transition-transform duration-200", mobileMenuOpen ? "rotate-180" : "")}>
-                      <path d="m6 9 6 6 6-6"/>
-                    </svg>
-                  </button>
-                </div>
                 <div
-                  className={cn(
-                    "claw-scrollbar-none mt-1.5 flex justify-center gap-1.5 overflow-x-auto overscroll-x-contain scroll-smooth transition-all duration-200",
-                    mobileMenuOpen
-                      ? "max-h-12 py-0.5 opacity-100"
-                      : "pointer-events-none max-h-0 opacity-0"
-                  )}
+                  className="overflow-hidden"
+                  onTouchStart={handleMobileNavTouchStart}
+                  onTouchEnd={handleMobileNavTouchEnd}
+                  onTouchCancel={handleMobileNavTouchCancel}
                 >
-                  {mobileSecondaryItems.map((item) => {
-                    const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
-                    const active = isItemActive(item.href);
-                    return (
-                      <Link
-                        key={item.href}
-                        href={resolvedHref}
-                        onClick={() => setMobileMenuOpen(false)}
-                        className={cn(
-                          "flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium transition",
-                          active
-                            ? "border-[rgba(255,90,45,0.3)] bg-[rgba(255,90,45,0.12)] text-[rgb(var(--claw-text))]"
-                            : "border-transparent text-[rgb(var(--claw-muted))]"
-                        )}
-                        aria-current={active ? "page" : undefined}
+                  <div
+                    className={cn(
+                      "flex w-[200%] transition-transform duration-200 ease-out",
+                      mobileNavPane === "secondary" ? "-translate-x-1/2" : "translate-x-0"
+                    )}
+                  >
+                    <div className="relative w-1/2 shrink-0 px-8">
+                      <div className="flex justify-center">
+                        <HeaderRouteTabs
+                          activeView={boardWorkspaceActiveView ?? "board"}
+                          boardHref={boardNavHref}
+                          workspaceHref={workspaceNavHref}
+                          compact
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={openMobileSecondaryNav}
+                        className="absolute right-0 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-[rgb(var(--claw-muted))] transition hover:text-[rgb(var(--claw-text))]"
+                        aria-label="More navigation"
+                        title="More navigation"
                       >
-                        <span className="flex h-3 w-3 items-center justify-center text-current opacity-70">
-                          {ICONS[item.id]}
-                        </span>
-                        <span>{item.label}</span>
-                      </Link>
-                    );
-                  })}
+                        <span className="text-[15px] leading-none tracking-[0.28em]">...</span>
+                      </button>
+                    </div>
+                    <div className="relative w-1/2 shrink-0 px-8">
+                      <button
+                        type="button"
+                        onClick={closeMobileSecondaryNav}
+                        className="absolute left-0 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-[rgb(var(--claw-muted))] transition hover:text-[rgb(var(--claw-text))]"
+                        aria-label="Primary navigation"
+                        title="Primary navigation"
+                      >
+                        <span className="text-[15px] leading-none tracking-[0.28em]">...</span>
+                      </button>
+                      <div className="claw-scrollbar-none flex min-h-[42px] items-center justify-center gap-1.5 overflow-x-auto overscroll-x-contain px-0.5">
+                        {mobileSecondaryItems.map((item) => {
+                          const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
+                          const active = isItemActive(item.href);
+                          return (
+                            <Link
+                              key={item.href}
+                              href={resolvedHref}
+                              onClick={closeMobileSecondaryNav}
+                              className={cn(
+                                "flex min-w-[3.25rem] shrink-0 flex-col items-center gap-1 rounded-[14px] border px-2 py-1.5 text-center transition",
+                                active
+                                  ? "border-[rgba(255,90,45,0.3)] bg-[rgba(255,90,45,0.12)] text-[rgb(var(--claw-text))]"
+                                  : "border-transparent text-[rgb(var(--claw-muted))]"
+                              )}
+                              aria-current={active ? "page" : undefined}
+                              aria-label={item.label}
+                              title={item.label}
+                            >
+                              <span className="flex h-3.5 w-3.5 items-center justify-center text-current opacity-80">
+                                {ICONS[item.id]}
+                              </span>
+                              <span className="max-w-[3.4rem] text-[8px] font-semibold uppercase leading-[1.05] tracking-[0.12em]">
+                                {item.label}
+                              </span>
+                            </Link>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </nav>
               {!collapsed && (

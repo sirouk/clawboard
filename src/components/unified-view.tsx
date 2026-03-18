@@ -1316,6 +1316,7 @@ function SwipeRevealRow({
   anchorLabel,
   children,
   disabled = false,
+  surfaceTint,
 }: {
   rowId: string;
   openId: string | null;
@@ -1324,6 +1325,7 @@ function SwipeRevealRow({
   anchorLabel?: string;
   children: ReactNode;
   disabled?: boolean;
+  surfaceTint?: string | null;
 }) {
   const allowSwipe = !disabled;
   const isOpen = allowSwipe && openId === rowId;
@@ -1351,6 +1353,8 @@ function SwipeRevealRow({
   const showActions = allowSwipe && actionsOpacity > 0.01;
   const showAnchorLabel =
     allowSwipe && Boolean((anchorLabel ?? "").trim()) && (isOpen || swiping || effectiveOffset > 8);
+  const rowContentOpacity = !allowSwipe ? 1 : clamp(1 - effectiveOffset / (TOPIC_ACTION_REVEAL_PX * 0.62), 0, 1);
+  const swipeBackdropStyle = swipeRevealBackdropStyle(surfaceTint);
 
   const scheduleOffset = (next: number) => {
     dragOffsetRef.current = next;
@@ -1527,13 +1531,24 @@ function SwipeRevealRow({
     >
       {showActions ? (
         <div
-          className="absolute inset-0 flex items-stretch gap-2 bg-[rgba(10,12,16,0.18)] p-1 transition-opacity"
-          style={{ opacity: actionsOpacity }}
+          className="absolute inset-0 flex items-stretch gap-2 p-1 transition-opacity"
+          style={{ opacity: actionsOpacity, ...swipeBackdropStyle }}
         >
           {showAnchorLabel ? (
             <div className="pointer-events-none flex min-w-0 flex-1 items-center">
-              <div className="max-w-full rounded-[var(--radius-md)] border border-[rgba(255,255,255,0.14)] bg-[rgba(9,11,15,0.72)] px-2.5 py-1.5 text-[11px] font-semibold leading-tight text-[rgb(var(--claw-text))] shadow-[0_8px_18px_rgba(0,0,0,0.26)] backdrop-blur">
-                <span className="block whitespace-normal break-words">{anchorLabel}</span>
+              <div
+                className="max-w-[min(42vw,12rem)] rounded-full border border-[rgba(255,255,255,0.14)] bg-[rgba(9,11,15,0.72)] px-3 py-1.5 text-[11px] font-semibold tracking-[0.02em] text-[rgb(var(--claw-text))] shadow-[0_8px_18px_rgba(0,0,0,0.26)] backdrop-blur"
+                style={
+                  surfaceTint
+                    ? {
+                        backgroundImage: `linear-gradient(135deg, ${rgba(surfaceTint, 0.18)} 0%, rgba(9,11,15,0.78) 72%)`,
+                        borderColor: rgba(surfaceTint, 0.18),
+                      }
+                    : undefined
+                }
+                title={anchorLabel}
+              >
+                <span className="block truncate whitespace-nowrap">{anchorLabel}</span>
               </div>
             </div>
           ) : null}
@@ -1596,10 +1611,11 @@ function SwipeRevealRow({
           "relative",
           allowSwipe && (swiping || effectiveOffset > 0) ? "will-change-transform" : "",
           allowSwipe && (swiping || isOpen) ? "z-20" : "",
-          allowSwipe && swiping ? "" : "transition-transform duration-200 ease-out"
+          allowSwipe && swiping ? "" : "transition-[transform,opacity] duration-200 ease-out"
         )}
         style={{
           ...(effectiveOffset > 0 ? { transform: `translate3d(-${effectiveOffset}px,0,0)` } : {}),
+          opacity: rowContentOpacity,
           touchAction: allowSwipe ? "pan-y" : "auto",
         }}
       >
@@ -1821,11 +1837,28 @@ function mobileOverlaySurfaceStyle(color: string): CSSProperties {
   };
 }
 
+function swipeRevealBackdropStyle(color?: string | null): CSSProperties | undefined {
+  const normalized = normalizeHexColor(color);
+  if (!normalized) return undefined;
+  return {
+    backgroundColor: "rgb(10,12,16)",
+    backgroundImage: [
+      `radial-gradient(circle at 14% 50%, ${rgba(normalized, 0.18)} 0%, transparent 52%)`,
+      `linear-gradient(148deg, ${rgba(normalized, 0.22)} 0%, rgba(12,14,18,0.84) 42%, ${rgba(normalized, 0.1)} 100%)`,
+    ].join(", "),
+    boxShadow: `inset 0 0 0 1px ${rgba(normalized, 0.1)}`,
+  };
+}
+
 function stickyTaskHeaderStyle(color: string, index: number): CSSProperties {
   const band = index % 2 === 0;
+  const base = band ? "rgb(12,15,19)" : "rgb(14,17,22)";
+  const topAlpha = band ? 0.25 : 0.19;
+  const lowAlpha = band ? 0.13 : 0.09;
   return {
-    backgroundColor: band ? "rgb(12, 15, 19)" : "rgb(14, 17, 22)",
-    borderBottom: `1px solid ${rgba(color, 0.08)}`,
+    backgroundColor: base,
+    backgroundImage: `linear-gradient(155deg, ${rgba(color, topAlpha)}, transparent 48%, ${rgba(color, lowAlpha)})`,
+    borderBottom: `1px solid ${rgba(color, 0.12)}`,
   };
 }
 
@@ -2388,9 +2421,8 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     }
   }, [mdUp, mobileLayer]);
 
-  // Per-chat "oldest visible index" — retained for loadOlderChat references but
-  // no longer used for default truncation (all messages are shown).
-  const [, setChatHistoryStarts] = useState<Record<string, number>>({});
+  // Per-chat "oldest visible index" for progressive history reveal.
+  const [chatHistoryStarts, setChatHistoryStarts] = useState<Record<string, number>>({});
   // Local "OpenClaw is responding" signal so the UI doesn't depend entirely on the gateway
   // returning a long-lived request for typing events.
   const [awaitingAssistant, setAwaitingAssistant] = useState<Record<string, { sentAt: string; requestId?: string }>>(
@@ -2946,6 +2978,16 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
   ) => {
     const all = logs ?? [];
     if (all.length === 0) return 0;
+
+    // Resume from the latest user turn so refresh lands on the current exchange
+    // rather than replaying the full topic transcript.
+    for (let i = all.length - 1; i >= 0; i -= 1) {
+      const entry = all[i];
+      const eType = String(entry.type ?? "").trim().toLowerCase();
+      const eAgent = String(entry.agentId ?? "").trim().toLowerCase();
+      if (eType === "conversation" && eAgent === "user") return i;
+    }
+
     let fallback = Math.max(0, all.length - initialLimit);
     if (!showToolCallsInChat) {
       let visibleCount = 0;
@@ -7035,8 +7077,16 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
             topicDisplayColors.get(topicId) ??
             normalizeHexColor(topic.color) ??
             colorFromSeed(`topic:${topic.id}:${topic.name}`, TOPIC_FALLBACK_COLORS);
-          const limitedTopicLogs = topicChatAllLogs;
-          const topicChatTruncated = false;
+          const topicChatStart = computeChatStart(
+            chatHistoryStarts,
+            topicChatKey,
+            topicChatAllLogs.length,
+            TASK_TIMELINE_LIMIT,
+            topicChatAllLogs,
+            showToolCalls
+          );
+          const limitedTopicLogs = topicChatAllLogs.slice(topicChatStart);
+          const topicChatTruncated = topicChatStart > 0;
           const topicSpaceIdList = topicSpaceIds(topic).filter((id) => id !== "space-default");
           const visibleTopicTags = dedupeTagLabels(topic.tags ?? []);
           const primaryTopicSpaceId = (() => {
@@ -7154,7 +7204,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
               }}
               data-topic-card-id={topicId}
               className={cn(
-                "relative rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] transition-colors duration-300",
+                "relative isolate rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] transition-colors duration-300",
                 isExpanded ? "p-0" : "overflow-hidden p-4 md:p-5",
                 draggingTopicId && topicDropTargetId === topicId ? "ring-2 ring-[rgba(255,90,45,0.55)]" : "",
                 topicSelectedForSend ? "ring-2 ring-[rgba(77,171,158,0.55)]" : ""
@@ -7165,12 +7215,12 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                 role="button"
                 tabIndex={0}
                 className={cn(
-                  "flex min-h-[92px] flex-col justify-center text-left",
+                  "flex flex-col justify-center text-left",
                   isExpanded
-                    ? "sticky top-0 z-20 cursor-pointer rounded-t-[var(--radius-lg)] px-4 py-3 md:px-5"
-                    : "cursor-pointer"
+                    ? "sticky top-0 z-20 cursor-pointer rounded-t-[var(--radius-lg)] px-4 pt-[max(0.5rem,var(--claw-mobile-safe-top,0px))] pb-2 md:px-5"
+                    : "min-h-[92px] cursor-pointer"
                 )}
-                style={isExpanded ? { top: "env(safe-area-inset-top, 0px)", ...stickyTaskHeaderStyle(topicColor, topicIndex) } : undefined}
+                style={isExpanded ? stickyTaskHeaderStyle(topicColor, topicIndex) : undefined}
                 onClick={(event) => {
                   if (!allowToggle(event.target as HTMLElement)) return;
                   toggleTopicExpanded(topicId);
@@ -7213,7 +7263,8 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                 }}
                 aria-expanded={isExpanded}
               >
-                <div className="min-w-0">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="min-w-0 flex-1">
 	                  <div className="flex min-w-0 items-center gap-2">
 	                    <button
 	                      type="button"
@@ -7563,7 +7614,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
 		                  </div>
                   <div
                     className={cn(
-                      "mt-2 flex flex-wrap items-center justify-between gap-2",
+                      "mt-2 flex min-w-0 flex-wrap items-center gap-2",
                       topicSwipeOpen ? "opacity-0 pointer-events-none" : ""
                     )}
                   >
@@ -7587,6 +7638,14 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                         ) : null}
                       </div>
                     )}
+                  </div>
+	                </div>
+                  <div
+                    className={cn(
+                      "flex shrink-0 self-stretch items-center",
+                      topicSwipeOpen ? "opacity-0 pointer-events-none" : ""
+                    )}
+                  >
                     <div className="flex items-center gap-2">
                       <div className="relative" data-topic-status-menu>
                         <button
@@ -7707,7 +7766,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                       </button>
                     </div>
                   </div>
-	                </div>
+                </div>
 		              </div>
 	
 		              {isExpanded && (
@@ -7722,7 +7781,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                             else taskChatShellRefs.current.delete(topicId);
                           }}
                           data-testid={`topic-chat-shell-${topicId}`}
-                          className="pt-1"
+                          className="flex flex-col pt-1"
                         >
                           <div className="mb-2 flex flex-nowrap items-center justify-end gap-2">
                             <span
@@ -7738,6 +7797,21 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                             <p className="mb-3 text-sm text-[rgb(var(--claw-muted))]">No messages yet.</p>
                           ) : null}
                           <div className="relative">
+                            {topicChatTruncated ? (
+                              <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center px-3">
+                                <div
+                                  className={cn(
+                                    "inline-flex max-w-full items-center gap-2 rounded-full border px-3 py-1.5",
+                                    "border-[rgba(255,255,255,0.08)] bg-[rgba(14,17,22,0.76)] text-[10px]",
+                                    "font-semibold uppercase tracking-[0.18em] text-[rgba(191,211,232,0.9)]",
+                                    "shadow-[0_10px_24px_rgba(0,0,0,0.24)] backdrop-blur"
+                                  )}
+                                >
+                                  <span className="text-[rgba(255,90,45,0.85)]">↑</span>
+                                  <span className="truncate">Scroll up for older messages</span>
+                                </div>
+                              </div>
+                            ) : null}
                             {chatJumpToBottom[topicChatKey] ? (
                               <button
                                 type="button"
@@ -7888,11 +7962,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                             }}
                             sessionKey={topicChatSessionKey}
                             spaceId={selectedSpaceId || undefined}
-                            className={
-                              activeComposer?.taskId === topicId || autoFocusTask?.taskId === topicId
-                                ? "sticky bottom-0 z-20 mt-3 pb-2 pt-3"
-                                : "mt-4"
-                            }
+                            className="mt-3 shrink-0 pb-2 pt-3"
                             variant="seamless"
                             placeholder={`Message ${topic.name}…`}
                             onFocus={() => {
@@ -8054,11 +8124,12 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                             actions={taskSwipeActions}
                             anchorLabel={task.title}
                             disabled={!mdUp && mobileLayer === "chat"}
+                            surfaceTint={taskColor}
                           >
 		                        <div
                               data-task-card-id={task.id}
 		                          className={cn(
-		                            "border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300 md:p-5",
+		                            "isolate border border-[rgb(var(--claw-border))] p-4 transition-colors duration-300 md:p-5",
                                 taskChatFullscreen
                                   ? "fixed inset-0 z-[1400] m-0 flex h-[var(--claw-mobile-vh)] flex-col overflow-hidden rounded-none border-0 bg-[rgb(10,12,16)] p-0"
                                   : "relative rounded-[var(--radius-lg)]",
@@ -8678,7 +8749,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                 taskChatFullscreen
                                   ? {
                                       ...mobileOverlaySurfaceStyle(taskColor),
-                                      paddingTop: "calc(env(safe-area-inset-top) + 2.7rem)",
+                                      paddingTop: "calc(var(--claw-mobile-safe-top, 0px) + 3.25rem)",
                                       paddingBottom: "calc(env(safe-area-inset-bottom) + 1rem)",
                                     }
                                   : undefined
@@ -8687,7 +8758,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                               {taskChatFullscreen ? (
                                 <div
                                   className="absolute left-3 z-20 flex items-center gap-2"
-                                  style={{ top: "calc(env(safe-area-inset-top) + 0.5rem)" }}
+                                  style={{ top: "calc(var(--claw-mobile-safe-top, 0px) + 0.65rem)" }}
                                 >
                                   <button
                                     type="button"
@@ -9098,6 +9169,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
               actions={swipeActions}
               anchorLabel={topic.name}
               disabled={!mdUp && mobileLayer === "chat"}
+              surfaceTint={topicColor}
             >
               {card}
             </SwipeRevealRow>
