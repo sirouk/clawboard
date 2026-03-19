@@ -3,7 +3,15 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
-import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { createPortal } from "react-dom";
 import { SearchInput, Select } from "@/components/ui";
 import { useAppConfig, useOpenClawWorkspaces } from "@/components/providers";
@@ -326,11 +334,11 @@ function HeaderRouteTabs({
   workspaceHref: string;
   compact?: boolean;
 }) {
+  const router = useRouter();
   const items = [
-    { href: boardHref, label: "Unified View", id: "board" as const },
+    { href: boardHref, label: "Board View", id: "board" as const },
     { href: workspaceHref, label: "Code Workspace", id: "workspaces" as const },
   ];
-  const router = useRouter();
 
   useEffect(() => {
     router.prefetch(boardHref);
@@ -338,7 +346,7 @@ function HeaderRouteTabs({
   }, [boardHref, router, workspaceHref]);
 
   const handleSelect = useCallback(
-    (href: string) => (event: React.MouseEvent<HTMLAnchorElement>) => {
+    (href: string) => (event: ReactMouseEvent<HTMLAnchorElement>) => {
       event.preventDefault();
       if (href.startsWith("/workspaces")) {
         setLocalStorageItem(WORKSPACE_LAST_URL_KEY, href);
@@ -385,6 +393,23 @@ function HeaderRouteTabs({
       </div>
     </nav>
   );
+}
+
+function handleShellViewSelect(params: {
+  event: ReactMouseEvent<HTMLAnchorElement>;
+  href: string;
+  router: ReturnType<typeof useRouter>;
+}) {
+  const { event, href, router } = params;
+  event.preventDefault();
+  if (href.startsWith("/workspaces")) {
+    setLocalStorageItem(WORKSPACE_LAST_URL_KEY, href);
+  } else if (href.startsWith("/u")) {
+    setLocalStorageItem(BOARD_LAST_URL_KEY, href);
+  }
+  startTransition(() => {
+    router.push(href, { scroll: false });
+  });
 }
 
 const NAV_COLOR_PALETTE = [
@@ -550,8 +575,9 @@ function TopicNavRow({
       <button
         type="button"
         onClick={onGo}
+        title={topic.name}
         className={cn(
-          "flex w-full items-stretch gap-2 bg-transparent px-3 py-2 text-left text-xs",
+          "flex w-full items-stretch gap-1.5 bg-transparent px-3 py-2 text-left text-xs",
           selected
             ? "bg-[rgba(255,90,45,0.12)] text-[rgb(var(--claw-text))]"
             : "text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
@@ -561,7 +587,7 @@ function TopicNavRow({
           <span
             title={`${attentionCount} topic needs a look`}
             aria-label={`${attentionCount} topic needs a look`}
-            className="flex w-7 shrink-0 items-center justify-center"
+            className="flex w-6 shrink-0 items-center justify-center"
           >
             <span className="inline-flex min-w-[1.4rem] items-center justify-center rounded-full border border-[rgba(255,90,45,0.42)] bg-[rgba(255,90,45,0.16)] px-1.5 py-0.5 text-[10px] font-semibold text-[rgb(var(--claw-text))]">
               {attentionCount}
@@ -598,7 +624,7 @@ function TopicNavRow({
               });
             }}
             className={cn(
-              "flex w-7 shrink-0 items-center justify-center",
+              "flex w-6 shrink-0 items-center justify-center",
               reorderEnabled ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"
             )}
           >
@@ -611,7 +637,9 @@ function TopicNavRow({
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <div className="truncate font-semibold">{topic.name}</div>
+              <div className="truncate font-semibold" title={topic.name}>
+                {topic.name}
+              </div>
             </div>
           </div>
           <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-[rgba(148,163,184,0.9)]">
@@ -988,7 +1016,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     const cleanPath = pathname.split("?")[0] ?? "";
     if (cleanPath.startsWith("/u")) {
       return {
-        title: "Unified View",
+        title: "Board View",
         subtitle: "Topics and messages in a single, expandable view.",
       };
     }
@@ -1449,7 +1477,12 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                       </button>
                       <div className="claw-scrollbar-none flex min-h-[42px] items-center justify-center gap-1.5 overflow-x-auto overscroll-x-contain px-0.5">
                         {mobileSecondaryItems.map((item) => {
-                          const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
+                          const resolvedHref =
+                            item.href === "/u"
+                              ? boardNavHref
+                              : item.href === "/workspaces"
+                                ? workspaceNavHref
+                                : item.href;
                           const active = isItemActive(item.href);
                           return (
                             <Link
@@ -1588,7 +1621,12 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
               )}
 		              <nav className="mt-6 hidden gap-3 lg:flex lg:flex-col">
 		                {NAV_ITEMS.map((item) => {
-                      const resolvedHref = item.href === "/u" ? boardNavHref : item.href;
+                      const resolvedHref =
+                        item.href === "/u"
+                          ? boardNavHref
+                          : item.href === "/workspaces"
+                            ? workspaceNavHref
+                            : item.href;
 		                  const active = isItemActive(item.href);
 		                  const isBoardItem = item.href === "/u";
                       const isWorkspaceItem = item.href === "/workspaces";
@@ -1600,11 +1638,14 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                      key={item.href}
 	                      href={resolvedHref}
 		                      onClick={(event) => {
-		                        if (!isBoardItem) return;
-		                        if (!active) return;
-		                        if (collapsed) return;
-		                        event.preventDefault();
-		                        setLocalStorageItem(BOARD_TOPICS_EXPANDED_KEY, showBoardTopics ? "false" : "true");
+		                        if (isBoardItem && active && !collapsed) {
+		                          event.preventDefault();
+		                          setLocalStorageItem(BOARD_TOPICS_EXPANDED_KEY, showBoardTopics ? "false" : "true");
+                              return;
+                            }
+                            if (isBoardItem || isWorkspaceItem) {
+                              handleShellViewSelect({ event, href: resolvedHref, router });
+                            }
 		                      }}
                       title={collapsed ? item.label : undefined}
                       className={cn(

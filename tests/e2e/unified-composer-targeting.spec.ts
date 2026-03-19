@@ -86,7 +86,7 @@ test("unified composer auto-grows and routes continuation to explicit selected t
   });
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
   await expect(textarea).toBeVisible();
@@ -170,7 +170,7 @@ test("keyboard send in unified composer uses new topic when no target and select
   });
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
   await expect(textarea).toBeVisible();
@@ -239,7 +239,7 @@ test("persisted unified draft does not activate board search until the user enga
   }, persistedDraft);
 
   await page.goto(`/u/topic/${revealedTopicId}/task/${revealedTaskId}?reveal=1`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
   await expect(textarea).toHaveValue(persistedDraft);
@@ -343,7 +343,7 @@ test("typing search orders topics and tasks by relevance instead of saved board 
   expect(createWeakerLog.ok()).toBeTruthy();
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
   await expect(textarea).toBeVisible();
@@ -457,7 +457,7 @@ test("typed /stop in unified composer cancels selected target run without postin
   });
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
   const targetChip = page.getByTestId("unified-composer-target-chip");
@@ -538,7 +538,7 @@ test("typed /stop in unified composer without selected target does not post a ne
   });
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
 
   await textarea.fill("/stop");
@@ -596,7 +596,7 @@ test("unified stop button stays hidden for an unrelated in-flight board run with
   });
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   await expect(page.locator('[data-testid="unified-composer-stop"]:visible')).toHaveCount(0);
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
@@ -654,7 +654,7 @@ test("unified stop button scopes to the revealed task route without an explicit 
   });
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const stop = page.locator('[data-testid="unified-composer-stop"]:visible').first();
   await expect(stop).toBeVisible();
@@ -727,7 +727,7 @@ test("unified stop button follows orchestration-active selected task and sends s
   });
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
   await textarea.fill(taskTitle);
   const topicHeader = page.locator(`[data-topic-card-id="${topicId}"] > div[role="button"]`).first();
@@ -756,7 +756,7 @@ test("unified composer shows image preview and allows removing a specific attach
   const imageName = `preview-${Date.now()}.png`;
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
   const composerBox = textarea.locator("xpath=ancestor::div[contains(@class,'relative')][1]");
@@ -766,6 +766,12 @@ test("unified composer shows image preview and allows removing a specific attach
 
   const imagePreview = page.locator(`img[alt="${imageName}"]`);
   await expect(imagePreview).toBeVisible();
+
+  await page.getByRole("button", { name: `Preview ${imageName}` }).click();
+  await expect(page.getByTestId("attachment-preview-dialog")).toBeVisible();
+  await expect(page.getByTestId("attachment-preview-dialog").getByText(imageName)).toBeVisible();
+  await page.getByRole("button", { name: "Close attachment preview" }).click();
+  await expect(page.getByTestId("attachment-preview-dialog")).toHaveCount(0);
 
   const removeButton = page.getByRole("button", { name: `Remove ${imageName}` });
   await expect(removeButton).toBeVisible();
@@ -825,7 +831,7 @@ test("unified attachment upload uses multipart and preserves draft/attachment on
   });
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const textarea = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
   await textarea.fill(message);
@@ -844,4 +850,34 @@ test("unified attachment upload uses multipart and preserves draft/attachment on
   await expect(page.getByText("Upload failed in test.")).toBeVisible();
   await expect(textarea).toHaveValue(message);
   await expect(page.getByText(fileName)).toBeVisible();
+});
+
+test("typing indicator waits for authoritative work signal before animating", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-authoritative-typing-${suffix}`;
+  const topicName = `Authoritative Typing ${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  await page.route("**/api/openclaw/chat", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: "{}",
+    });
+  });
+
+  await page.goto(`/u/topic/${topicId}`);
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
+
+  const composer = page.getByTestId(`topic-chat-composer-${topicId}`);
+  await composer.getByPlaceholder(`Message ${topicName}…`).fill(`Need a response ${suffix}`);
+  await composer.getByRole("button", { name: /send/i }).click();
+
+  await expect(page.getByText(`Need a response ${suffix}`)).toBeVisible();
+  await expect(page.locator('[title="OpenClaw responding"]')).toHaveCount(0);
 });

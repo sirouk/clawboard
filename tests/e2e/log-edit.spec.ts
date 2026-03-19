@@ -47,7 +47,7 @@ test("messages can be edited and reallocated without impossible topic/task combi
   const log = await logRes.json();
 
   await page.goto(`/u/topic/${topicAId}/task/${taskAId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const row = page.locator(`[data-log-id="${log.id}"]`);
   await expect(row).toBeVisible();
@@ -94,7 +94,7 @@ test("messages can be edited and reallocated without impossible topic/task combi
 
   // Expand the new destination and confirm the edited message is present.
   await page.goto(`/u/topic/${topicBId}/task/${taskBId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   const movedRow = page.locator(`[data-log-id="${log.id}"]`);
   await expect(movedRow).toBeVisible();
   await expect(movedRow.getByTestId(`message-bubble-${log.id}`)).toContainText(updatedMessage);

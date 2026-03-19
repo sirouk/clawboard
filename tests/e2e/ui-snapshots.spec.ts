@@ -2,7 +2,7 @@ import { test } from "@playwright/test";
 
 test("ui snapshots pass", async ({ page }, testInfo) => {
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   await page.screenshot({ path: testInfo.outputPath("home-unified.png"), fullPage: true });
 
   await page.goto("/dashboard");

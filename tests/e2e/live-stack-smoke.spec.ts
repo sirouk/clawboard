@@ -141,7 +141,7 @@ test.describe("live stack smoke", () => {
 
     await waitForLiveWebReady(request, baseUrl);
     await page.goto(`${baseUrl}/u/topic/${topicId}/task/${taskId}`);
-    await page.getByRole("heading", { name: "Unified View" }).waitFor();
+    await page.getByRole("heading", { name: "Board View" }).waitFor();
 
     const taskComposer = page.getByTestId(`task-chat-composer-${taskId}`);
     await expect(taskComposer).toBeVisible();
@@ -174,11 +174,11 @@ test.describe("live stack smoke", () => {
       .toBeTruthy();
 
     await page.goto(`${baseUrl}/u`);
-    await page.getByRole("heading", { name: "Unified View" }).waitFor();
+    await page.getByRole("heading", { name: "Board View" }).waitFor();
     await expect(page.locator('[data-testid="unified-composer-stop"]:visible')).toHaveCount(0);
 
     await page.goto(`${baseUrl}/u/topic/${topicId}/task/${taskId}?reveal=1`);
-    await page.getByRole("heading", { name: "Unified View" }).waitFor();
+    await page.getByRole("heading", { name: "Board View" }).waitFor();
     await expect(page.getByTestId(`task-status-trigger-${taskId}`)).toContainText("Doing");
     await expect(page.locator('[data-testid="unified-composer-stop"]:visible')).toHaveCount(1);
 

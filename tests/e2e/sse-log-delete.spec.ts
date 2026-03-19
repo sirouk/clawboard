@@ -80,8 +80,8 @@ test("deleting a log emits SSE and removes it from other open clients", async ({
   await pageA.goto(`${baseURL}/u/topic/${topicId}/task/${taskId}`);
   await pageB.goto(`${baseURL}/u/topic/${topicId}/task/${taskId}`);
 
-  await pageA.getByRole("heading", { name: "Unified View" }).waitFor();
-  await pageB.getByRole("heading", { name: "Unified View" }).waitFor();
+  await pageA.getByRole("heading", { name: "Board View" }).waitFor();
+  await pageB.getByRole("heading", { name: "Board View" }).waitFor();
 
   const rowA = pageA.locator(`[data-log-id="${log.id}"]`);
   const rowB = pageB.locator(`[data-log-id="${log.id}"]`);

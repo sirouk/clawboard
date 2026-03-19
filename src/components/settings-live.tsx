@@ -12,6 +12,7 @@ import { setPwaBadge, showPwaNotification, usePwaNotifications, usePwaBadging } 
 import type { IntegrationLevel, Space, Topic } from "@/lib/types";
 
 const TEST_PWA_DELAY_MS = 3000;
+const FOCUS_COMPOSER_ON_TOPIC_EXPAND_KEY = "clawboard.unified.focusComposerOnTopicExpand";
 
 function deriveSpaceName(spaceId: string) {
   const normalized = String(spaceId || "").trim();
@@ -183,6 +184,8 @@ export function SettingsLive() {
   const showFullMessages = showFullMessagesRaw !== "false";
   const showToolCallsRaw = useLocalStorageItem("clawboard.display.showToolCalls");
   const showToolCallsSetting = showToolCallsRaw === "true";
+  const focusComposerOnTopicExpandRaw = useLocalStorageItem(FOCUS_COMPOSER_ON_TOPIC_EXPAND_KEY);
+  const focusComposerOnTopicExpand = focusComposerOnTopicExpandRaw !== "false";
 
   useEffect(() => setLocalTitle(instanceTitle), [instanceTitle]);
   useEffect(() => setLocalIntegration(integrationLevel), [integrationLevel]);
@@ -662,6 +665,35 @@ export function SettingsLive() {
                 checked={showToolCallsSetting}
                 onCheckedChange={(checked) =>
                   setLocalStorageItem("clawboard.display.showToolCalls", checked ? "true" : "false")
+                }
+              />
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div>
+            <h2 className="text-lg font-semibold">Board Behavior</h2>
+            <p className="mt-1 text-sm text-[rgb(var(--claw-muted))]">
+              Tune how the board responds when you open topics and conversations.
+            </p>
+          </div>
+        </CardHeader>
+        <div className="space-y-6">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold">Focus Composer On Topic Expand</h3>
+              <p className="mt-1 text-xs text-[rgb(var(--claw-muted))]">
+                When you expand a topic, jump straight into its topic chat message box. This matches the left-nav topic open flow.
+              </p>
+            </div>
+            <div className="flex flex-none items-center">
+              <Switch
+                checked={focusComposerOnTopicExpand}
+                onCheckedChange={(checked) =>
+                  setLocalStorageItem(FOCUS_COMPOSER_ON_TOPIC_EXPAND_KEY, checked ? "true" : "false")
                 }
               />
             </div>

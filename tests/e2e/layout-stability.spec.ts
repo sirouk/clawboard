@@ -45,9 +45,14 @@ test.describe("layout stability — Cumulative Layout Shift", () => {
       await topicExpand.click();
     }
 
-    // Navigate to Workspaces via the header tab.
-    const workspacesLink = page.getByRole("link", { name: "Code Workspace" }).first();
+    // Navigate to Workspaces via the left nav item and confirm it uses the same
+    // smart target as the header toggle.
+    const headerWorkspaceLink = page.getByRole("link", { name: "Code Workspace" }).first();
+    const workspacesLink = page.getByRole("link", { name: "Workspace" }).first();
+    const expectedWorkspaceHref = await headerWorkspaceLink.getAttribute("href");
     await expect(workspacesLink).toBeVisible({ timeout: 10_000 });
+    expect(expectedWorkspaceHref).toBeTruthy();
+    await expect(workspacesLink).toHaveAttribute("href", expectedWorkspaceHref ?? "");
     await workspacesLink.click();
 
     // The board panel must remain mounted (just hidden) so state is preserved.
@@ -59,7 +64,7 @@ test.describe("layout stability — Cumulative Layout Shift", () => {
     await expect(workspacePanel).toBeVisible({ timeout: 10_000 });
 
     // Navigate back to Board.
-    const boardLink = page.getByRole("link", { name: "Unified View" }).first();
+    const boardLink = page.getByRole("link", { name: "Board View" }).first();
     await boardLink.click();
 
     // Both panels still in DOM.
@@ -106,9 +111,9 @@ test.describe("layout stability — Cumulative Layout Shift", () => {
     await expect(page.getByTestId("workspace-ide-frame")).toBeVisible({ timeout: 15_000 });
 
     // Navigate to board and back; this triggers a re-fetch that will fail.
-    const boardLink = page.getByRole("link", { name: "Unified View" }).first();
+    const boardLink = page.getByRole("link", { name: "Board View" }).first();
     await boardLink.click();
-    await page.getByRole("heading", { name: "Unified View" }).waitFor({ timeout: 10_000 });
+    await page.getByRole("heading", { name: "Board View" }).waitFor({ timeout: 10_000 });
 
     const workspacesLink = page.getByRole("link", { name: "Code Workspace" }).first();
     await workspacesLink.click();

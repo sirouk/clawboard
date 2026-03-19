@@ -82,7 +82,7 @@ test("unified view task chat uses task=2 load increment", async ({ page, request
   }
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const topicButton = page.getByRole("button", { name: new RegExp(topicName) }).first();
   await topicButton.click();
@@ -138,7 +138,7 @@ test("unified view does not auto-load older history on initial render", async ({
   }
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const topicButton = page.getByRole("button", { name: new RegExp(topicName) }).first();
   await topicButton.click();
@@ -208,7 +208,7 @@ test("unified view keeps visible task history expanded while new messages arrive
   }
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   await page.getByRole("button", { name: new RegExp(topicName) }).first().click();
   await page.getByRole("button", { name: new RegExp(taskTitle) }).first().click();
@@ -288,7 +288,7 @@ test("unified view fresh task expansion shows last user prompt and following mes
   }
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   await page.getByRole("button", { name: new RegExp(topicName) }).first().click();
   await page.getByRole("button", { name: new RegExp(taskTitle) }).first().click();

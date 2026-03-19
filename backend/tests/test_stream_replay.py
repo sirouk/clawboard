@@ -63,7 +63,7 @@ class StreamReplayTests(unittest.TestCase):
 
     def test_reconnect_plus_changes_reconcile_recovers_topic_updates(self):
         write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
-        read_headers = {"Host": "localhost:8010"}
+        read_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
 
         since = now_iso()
         prior = event_hub.publish({"type": "log.appended", "data": {"id": "seed"}})
@@ -105,7 +105,7 @@ class StreamReplayTests(unittest.TestCase):
 
     def test_changes_reconcile_returns_topic_tombstones(self):
         write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
-        read_headers = {"Host": "localhost:8010"}
+        read_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         suffix = str(int(datetime.now(timezone.utc).timestamp() * 1000))
 
         topic_res = self.client.post(
@@ -129,8 +129,8 @@ class StreamReplayTests(unittest.TestCase):
         self.assertTrue(any(str(item.get("id") or "") == str(topic["id"]) for item in deleted_topics))
         self.assertTrue(str(payload.get("cursor") or "").strip())
 
-    def test_changes_reconcile_returns_active_openclaw_signal_snapshots(self):
-        read_headers = {"Host": "localhost:8010"}
+    def test_changes_reconcile_returns_authoritative_openclaw_work_snapshots_without_fake_typing(self):
+        read_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         session_key = "clawboard:task:topic-signal-sync:task-signal-sync"
         request_id = "occhat-signal-sync"
         stamp = now_iso()
@@ -162,9 +162,8 @@ class StreamReplayTests(unittest.TestCase):
 
         typing = payload.get("openclawTyping") or []
         thread_work = payload.get("openclawThreadWork") or []
-        self.assertTrue(any(str(item.get("sessionKey") or "") == session_key for item in typing))
+        self.assertFalse(any(str(item.get("sessionKey") or "") == session_key for item in typing))
         self.assertTrue(any(str(item.get("sessionKey") or "") == session_key for item in thread_work))
-        self.assertTrue(any(str(item.get("requestId") or "") == request_id for item in typing))
         self.assertTrue(any(str(item.get("requestId") or "") == request_id for item in thread_work))
         self.assertGreaterEqual(str(payload.get("cursor") or ""), stamp)
 

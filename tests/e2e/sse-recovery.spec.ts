@@ -19,7 +19,7 @@ test("changes reconcile removes deleted task/topic after SSE disconnect", async 
   expect(createTask.ok()).toBeTruthy();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   await expect(page.locator(`[data-topic-card-id="${topicId}"]`).first()).toBeVisible();
   await expect(page.locator(`[data-task-card-id="${taskId}"]`).first()).toBeVisible();
 
@@ -56,7 +56,7 @@ test("changes reconcile clears stale responding state after missed terminal SSE"
   expect(createTask.ok()).toBeTruthy();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const sendRes = await request.post(`${apiBase}/api/openclaw/chat`, {
     data: { sessionKey, message: `signal recovery ${suffix}`, agentId: "main" },
@@ -101,7 +101,7 @@ test("terminal request log triggers authoritative replay when task status SSE wa
   expect(createTask.ok()).toBeTruthy();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const sendRes = await request.post(`${apiBase}/api/openclaw/chat`, {
     data: { sessionKey, message: `terminal replay ${suffix}`, agentId: "main" },

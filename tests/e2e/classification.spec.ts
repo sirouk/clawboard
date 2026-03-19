@@ -35,7 +35,7 @@ test("classification patches move logs between topics without refresh", async ({
   const taskB = await taskBRes.json();
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   await expect(page.getByRole("button", { name: new RegExp(topicAName) }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: new RegExp(topicBName) }).first()).toBeVisible();
@@ -70,7 +70,7 @@ test("classification patches move logs between topics without refresh", async ({
   expect(classify.ok()).toBeTruthy();
 
   await page.goto(`/u/topic/${topicAId}/task/${taskA.id}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   await expect(messageLocator).toBeVisible();
 
   const move = await request.patch(`${apiBase}/api/log/${entry.id}`, {
@@ -84,7 +84,7 @@ test("classification patches move logs between topics without refresh", async ({
 
   await expect(messageLocator).toHaveCount(0);
   await page.goto(`/u/topic/${topicBId}/task/${taskB.id}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   await expect(messageLocator).toBeVisible();
 });
 
@@ -124,11 +124,11 @@ test("raw=1 shows pending logs that default unified view hides", async ({ page, 
   const entry = await logRes.json();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   const messageLocator = page.getByTestId(`message-bubble-${entry.id}`).getByText(pendingMessage, { exact: true });
   await expect(messageLocator).toHaveCount(0);
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}?raw=1`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   await expect(messageLocator).toBeVisible();
 });

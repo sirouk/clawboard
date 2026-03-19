@@ -1563,7 +1563,7 @@ def _is_low_signal_summary(summary: str, source_text: str) -> bool:
     if any(normalized_summary.startswith(prefix) for prefix in LOW_SIGNAL_SUMMARY_PREFIXES):
         return True
     normalized_source = _normalize_text(source_text)
-    if normalized_source and normalized_source.startswith(normalized_summary) and len(normalized_summary.split()) <= 5:
+    if normalized_source and normalized_source.startswith(normalized_summary) and len(normalized_summary.split()) <= 6:
         return True
     return False
 
@@ -5032,8 +5032,9 @@ def classify_session(session_key: str):
         sid = e.get("id")
         if not sid or sid in summary_updates:
             continue
-        concise = _concise_summary((e.get("summary") or e.get("content") or e.get("raw") or "").strip())
-        if concise:
+        source_text = str(e.get("content") or e.get("summary") or e.get("raw") or "")
+        concise = _concise_summary(source_text.strip())
+        if concise and not _is_low_signal_summary(concise, source_text):
             summary_updates[sid] = concise
 
     # Optional: write a compact audit record for tuning/debugging classifier policies.

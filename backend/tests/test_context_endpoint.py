@@ -422,11 +422,11 @@ If they are part of the same workflow, wait for the remaining results before sen
         patched = res.json()
         self.assertEqual(patched.get("status"), "done")
 
-    def test_patch_topic_digest_bumps_updated_at(self):
+    def test_patch_topic_digest_preserves_updated_at(self):
         headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
         topic = self.client.post("/api/topics", json={"name": "Digest Topic"}, headers=headers).json()
 
-        before = self.client.get(f"/api/topics/{topic['id']}", headers={"Host": "localhost:8010"}).json()
+        before = self.client.get(f"/api/topics/{topic['id']}", headers=headers).json()
         before_updated = before.get("updatedAt")
 
         res = self.client.patch(
@@ -437,7 +437,32 @@ If they are part of the same workflow, wait for the remaining results before sen
         self.assertEqual(res.status_code, 200, res.text)
         after = res.json()
         self.assertEqual(after.get("digest"), "Digest: hello")
-        self.assertNotEqual(after.get("updatedAt"), before_updated)
+        self.assertIsNotNone(after.get("digestUpdatedAt"))
+        self.assertEqual(after.get("updatedAt"), before_updated)
+
+    def test_patch_topic_preserves_manual_board_order(self):
+        headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
+        first = self.client.post("/api/topics", json={"name": "First Topic"}, headers=headers).json()
+        second = self.client.post("/api/topics", json={"name": "Second Topic"}, headers=headers).json()
+
+        reorder = self.client.post(
+            "/api/topics/reorder",
+            json={"orderedIds": [first["id"], second["id"]]},
+            headers=headers,
+        )
+        self.assertEqual(reorder.status_code, 200, reorder.text)
+
+        patch_res = self.client.patch(
+            f"/api/topics/{second['id']}",
+            json={"status": "doing"},
+            headers=headers,
+        )
+        self.assertEqual(patch_res.status_code, 200, patch_res.text)
+
+        listed = self.client.get("/api/topics", headers=headers).json()
+        ordered_ids = [str(item.get("id") or "") for item in listed]
+        self.assertGreaterEqual(len(ordered_ids), 2)
+        self.assertEqual(ordered_ids[:2], [first["id"], second["id"]])
 
 
 if __name__ == "__main__":

@@ -64,7 +64,7 @@ test("unified chat renders natural bubbles for task chat entries", async ({ page
   const userLog = await userLogRes.json();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const assistantBubble = page.getByTestId(`message-bubble-${assistantLog.id}`);
   const userBubble = page.getByTestId(`message-bubble-${userLog.id}`);
@@ -120,7 +120,7 @@ test("task chat surfaces the coding workspace when coding activity lands in the 
   expect(codingLog.ok()).toBeTruthy();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const workspaceLink = page.getByTestId(`task-chat-workspace-link-${taskId}`);
   await expect(workspaceLink).toBeVisible();
@@ -184,7 +184,7 @@ test("board controls can show hidden tool/system chat rows", async ({ page, requ
   const systemLogEntry = await systemLog.json();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   await ensureBoardOptionsVisible(page);
   const toolCallsToggle = page.getByRole("button", { name: /Show tool calls|Hide tool calls/i }).first();
@@ -317,7 +317,7 @@ test("chat hides transport noise while still surfacing meaningful tool rows and 
   });
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   await expect(page.getByText(`assistant-${suffix}`)).toBeVisible();
   await expect(page.getByText("HEARTBEAT_OK", { exact: false })).toHaveCount(0);
@@ -681,7 +681,7 @@ test("chat hides orchestration admin chatter while keeping curated agent answers
   });
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   await expect(page.getByText("Dispatching to coding specialist", { exact: false })).toBeVisible();
   await expect(page.getByText("Cron check complete: 2 active jobs remain scheduled and enabled.", { exact: false })).toBeVisible();
@@ -755,7 +755,7 @@ test("chat markdown keeps long non-wrapping content horizontally scrollable", as
   });
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   await expect(page.locator("code").filter({ hasText: longToken }).first()).toBeVisible();
 
@@ -810,7 +810,7 @@ test("chat metadata keeps long session details horizontally scrollable", async (
   });
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const meta = page.locator("span.font-mono").filter({ hasText: `session: ${longSessionKey}` }).first();
   await expect(meta).toBeVisible();
@@ -876,7 +876,7 @@ test("active task chat shows pending assistant and tool rows before classificati
   expect(pendingAction.ok()).toBeTruthy();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   await expect(page.getByTestId(`message-bubble-${pendingAssistantEntry.id}`)).toContainText(assistantText);
   await expect(page.getByText(actionText, { exact: false })).toHaveCount(0);
@@ -919,7 +919,7 @@ test("responding tasks project live doing state into task pills and topic counts
   expect(queueRun.ok()).toBeTruthy();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const topicCard = page.locator(`[data-topic-card-id="${topicId}"]`);
   await expect(topicCard.getByText("1 doing")).toBeVisible();
@@ -978,7 +978,7 @@ test("terminal system failures stay visible when tool/system rows are hidden", a
   const terminalSystemEntry = await terminalSystem.json();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const regularRow = page.locator(`[data-log-id="${regularSystemEntry.id}"]`);
   const terminalRow = page.locator(`[data-log-id="${terminalSystemEntry.id}"]`);
@@ -1115,7 +1115,7 @@ test("agent message exposes in-between tool call count and can reveal hidden row
   const assistantLog = await assistantLogRes.json();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const actionRow = page.locator(`[data-log-id="${actionLogEntry.id}"]`);
   const systemRow = page.locator(`[data-log-id="${systemLogEntry.id}"]`);
@@ -1224,7 +1224,7 @@ test("topic and task labels include scoped tool/system call totals", async ({ pa
   expect(taskBAction.ok()).toBeTruthy();
 
   await page.goto(`/u/topic/${topicId}/task/${taskAId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const topicCard = page.locator(`[data-topic-card-id="${topicId}"]`).first();
   const taskACard = page.locator(`[data-task-card-id="${taskAId}"]`).first();
@@ -1308,7 +1308,7 @@ test("typing indicator shows live hidden tool call count while awaiting agent re
   expect(systemLog.ok()).toBeTruthy();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const hiddenCount = page.getByTestId(`task-chat-hidden-tool-count-${taskId}`);
   await expect(hiddenCount).toBeVisible();

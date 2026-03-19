@@ -93,6 +93,7 @@ const TOPIC_VIEW_KEY = "clawboard.unified.topicView";
 const SHOW_SNOOZED_TASKS_KEY = "clawboard.unified.showSnoozedTasks";
 const FILTERS_DRAWER_OPEN_KEY = "clawboard.unified.filtersDrawerOpen";
 const FILTERS_DRAWER_OPEN_DEFAULT = false;
+const FOCUS_COMPOSER_ON_TOPIC_EXPAND_KEY = "clawboard.unified.focusComposerOnTopicExpand";
 const ACTIVE_SPACE_KEY = "clawboard.space.active";
 const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
 const WORKSPACE_ATTENTION_SEEN_KEY = "clawboard.unified.workspaceAttentionSeenAt";
@@ -720,6 +721,60 @@ function resolveThreadWorkSignal(
   return signal.active;
 }
 
+function resolveAuthoritativeSessionWorkState(params: {
+  nowMs: number;
+  typing: { typing?: boolean; requestId?: string; updatedAt?: string } | undefined;
+  threadWorkSignal: SessionThreadWorkSignal | undefined;
+  orchestrationWork: SessionOrchestrationWork | undefined;
+  recentNonUserActivity: SessionNonUserActivity | undefined;
+}) {
+  const { nowMs, typing, threadWorkSignal, orchestrationWork, recentNonUserActivity } = params;
+  const orchestrationWorkMs = parseIsoMs(orchestrationWork?.updatedAt);
+  const hasFreshOrchestrationWork =
+    Boolean(orchestrationWork?.active) &&
+    Number.isFinite(orchestrationWorkMs) &&
+    nowMs - orchestrationWorkMs >= 0 &&
+    nowMs - orchestrationWorkMs <= OPENCLAW_ORCHESTRATION_ACTIVE_TTL_MS;
+  const recentNonUserActivityMs = parseIsoMs(recentNonUserActivity?.updatedAt);
+  const hasRecentNonUserActivity =
+    Number.isFinite(recentNonUserActivityMs) &&
+    nowMs - recentNonUserActivityMs >= 0 &&
+    nowMs - recentNonUserActivityMs <= OPENCLAW_NON_USER_ACTIVITY_TTL_MS;
+  const threadWorkSignalMs = parseIsoMs(threadWorkSignal?.updatedAt);
+  const latestOtherSignalMs = Math.max(
+    parseIsoMs(typing?.updatedAt),
+    hasFreshOrchestrationWork ? orchestrationWorkMs : Number.NaN,
+    recentNonUserActivityMs
+  );
+  const directThreadSignal = resolveThreadWorkSignal(threadWorkSignal, {
+    latestOtherSignalMs,
+    nowMs,
+  });
+  const newerActivityAfterStopSignal =
+    hasRecentNonUserActivity &&
+    Number.isFinite(threadWorkSignalMs) &&
+    Number.isFinite(recentNonUserActivityMs) &&
+    recentNonUserActivityMs > threadWorkSignalMs;
+
+  if (directThreadSignal === false) {
+    const stopRequestId = normalizeOpenClawRequestId(threadWorkSignal?.requestId);
+    const activeRequestId =
+      normalizeOpenClawRequestId(typing?.requestId) ||
+      normalizeOpenClawRequestId(hasFreshOrchestrationWork ? orchestrationWork?.requestId : "") ||
+      normalizeOpenClawRequestId(recentNonUserActivity?.requestId);
+    if (
+      (!stopRequestId || !activeRequestId || stopRequestId === activeRequestId) &&
+      !newerActivityAfterStopSignal
+    ) {
+      return false;
+    }
+  }
+  if (directThreadSignal === true) return true;
+  if (typing?.typing) return true;
+  if (hasFreshOrchestrationWork) return true;
+  return false;
+}
+
 function isTerminalSystemRequestEvent(entry: LogEntry) {
   const agentId = String(entry.agentId ?? "").trim().toLowerCase();
   if (agentId !== "system") return false;
@@ -1184,6 +1239,41 @@ function truncateText(value: string, limit: number) {
   return `${value.slice(0, limit - 3).trim()}...`;
 }
 
+function formatChatHeaderBlurb(value: string) {
+  return { full: value, clipped: truncateText(value, CHAT_HEADER_BLURB_LIMIT) };
+}
+
+function isUsableTopicActivitySummary(entry: LogEntry) {
+  const summary = normalizeInlineText(entry.summary);
+  if (!summary) return false;
+  const source = normalizeInlineText(entry.content) || normalizeInlineText(entry.raw);
+  if (!source) return true;
+  const normalizedSummary = summary.toLowerCase();
+  const normalizedSource = source.toLowerCase();
+  if (!normalizedSummary) return false;
+  if (normalizedSummary === normalizedSource) return false;
+  if (normalizedSource.startsWith(normalizedSummary) && normalizedSummary.split(/\s+/).length <= 6) return false;
+  return true;
+}
+
+function normalizeDigestHeadline(value: string | undefined | null) {
+  const lines = stripTransportNoise(value ?? "")
+    .split("\n")
+    .map((line) => line.replace(/^\s*[-*•]\s*/, "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const normalized = line.trim();
+    if (!normalized) continue;
+    const lower = normalized.toLowerCase();
+    if (lower.startsWith("topic:")) continue;
+    if (lower === "active tasks:" || lower === "recent:") continue;
+    return normalized;
+  }
+
+  return "";
+}
+
 function deriveChatHeaderBlurb(entries: LogEntry[]) {
   const pickText = (entry: LogEntry) => {
     if (entry.type === "conversation") {
@@ -1198,7 +1288,7 @@ function deriveChatHeaderBlurb(entries: LogEntry[]) {
       if (!predicate(entry)) continue;
       const full = pickText(entry);
       if (!full) continue;
-      return { full, clipped: truncateText(full, CHAT_HEADER_BLURB_LIMIT) };
+      return formatChatHeaderBlurb(full);
     }
     return null;
   };
@@ -1215,6 +1305,28 @@ function deriveChatHeaderBlurb(entries: LogEntry[]) {
     pick((entry) => entry.type === "conversation" && status(entry) !== "failed") ??
     pick((entry) => entry.type === "note") ??
     null
+  );
+}
+
+function deriveTopicHeaderBlurb(topic: Topic, entries: LogEntry[]) {
+  const status = (entry: LogEntry) => entry.classificationStatus ?? "pending";
+  const pickSummary = (predicate: (entry: LogEntry) => boolean) => {
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      const entry = entries[i];
+      if (!predicate(entry)) continue;
+      if (!isUsableTopicActivitySummary(entry)) continue;
+      const full = normalizeInlineText(entry.summary);
+      return formatChatHeaderBlurb(full);
+    }
+    return null;
+  };
+
+  const digestHeadline = normalizeDigestHeadline(topic.digest);
+
+  return (
+    pickSummary((entry) => (entry.type === "conversation" || entry.type === "note") && status(entry) === "classified") ??
+    pickSummary((entry) => (entry.type === "conversation" || entry.type === "note") && status(entry) !== "failed") ??
+    (digestHeadline ? formatChatHeaderBlurb(digestHeadline) : null)
   );
 }
 
@@ -1317,6 +1429,12 @@ function SwipeRevealRow({
   children,
   disabled = false,
   surfaceTint,
+  wrapperTestId,
+  wrapperClassName,
+  wrapperStyle,
+  backdropTinted = true,
+  anchorRowClassName,
+  anchorPillClassName,
 }: {
   rowId: string;
   openId: string | null;
@@ -1326,6 +1444,12 @@ function SwipeRevealRow({
   children: ReactNode;
   disabled?: boolean;
   surfaceTint?: string | null;
+  wrapperTestId?: string;
+  wrapperClassName?: string;
+  wrapperStyle?: CSSProperties;
+  backdropTinted?: boolean;
+  anchorRowClassName?: string;
+  anchorPillClassName?: string;
 }) {
   const allowSwipe = !disabled;
   const isOpen = allowSwipe && openId === rowId;
@@ -1492,7 +1616,8 @@ function SwipeRevealRow({
 
   return (
     <div
-      className="relative overflow-x-clip rounded-[var(--radius-lg)]"
+      data-testid={wrapperTestId}
+      className={cn("relative overflow-x-clip rounded-[var(--radius-lg)]", wrapperClassName)}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
@@ -1527,17 +1652,20 @@ function SwipeRevealRow({
             }
           : undefined
       }
-      style={{ touchAction: allowSwipe ? "pan-y" : "auto" }}
+      style={{ touchAction: allowSwipe ? "pan-y" : "auto", ...wrapperStyle }}
     >
       {showActions ? (
         <div
           className="absolute inset-0 flex items-stretch gap-2 p-1 transition-opacity"
-          style={{ opacity: actionsOpacity, ...swipeBackdropStyle }}
+          style={{ opacity: actionsOpacity, ...(backdropTinted ? swipeBackdropStyle : undefined) }}
         >
           {showAnchorLabel ? (
-            <div className="pointer-events-none flex min-w-0 flex-1 items-center">
+            <div className={cn("pointer-events-none flex min-w-0 flex-1 items-center", anchorRowClassName)}>
               <div
-                className="max-w-[min(42vw,12rem)] rounded-full border border-[rgba(255,255,255,0.14)] bg-[rgba(9,11,15,0.72)] px-3 py-1.5 text-[11px] font-semibold tracking-[0.02em] text-[rgb(var(--claw-text))] shadow-[0_8px_18px_rgba(0,0,0,0.26)] backdrop-blur"
+                className={cn(
+                  "max-w-[min(42vw,12rem)] rounded-full border border-[rgba(255,255,255,0.14)] bg-[rgba(9,11,15,0.72)] px-3 py-1.5 text-[11px] font-semibold tracking-[0.02em] text-[rgb(var(--claw-text))] shadow-[0_8px_18px_rgba(0,0,0,0.26)] backdrop-blur",
+                  anchorPillClassName
+                )}
                 style={
                   surfaceTint
                     ? {
@@ -2093,6 +2221,8 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
   const showTwoColumns = twoColumn && mdUp;
   const showFullMessagesRaw = useLocalStorageItem("clawboard.display.showFullMessages");
   const showRaw = showFullMessagesRaw !== "false";
+  const focusComposerOnTopicExpandRaw = useLocalStorageItem(FOCUS_COMPOSER_ON_TOPIC_EXPAND_KEY);
+  const focusComposerOnTopicExpand = focusComposerOnTopicExpandRaw !== "false";
   const [messageDensity, setMessageDensity] = useState<MessageDensity>(initialUrlState.density);
   const showToolCallsRaw = useLocalStorageItem("clawboard.display.showToolCalls");
   const showToolCalls = showToolCallsRaw === "true";
@@ -2616,7 +2746,6 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
   const [deleteInFlightKey, setDeleteInFlightKey] = useState<string | null>(null);
   const [renameErrors, setRenameErrors] = useState<Record<string, string>>({});
   const [page, setPage] = useState(initialUrlState.page);
-  const [topicBumpAt, setTopicBumpAt] = useState<Record<string, number>>({});
   const [taskBumpAt, setTaskBumpAt] = useState<Record<string, number>>({});
   const bumpTimers = useRef<Map<string, number>>(new Map());
   const mobileDoneCollapseTaskIdRef = useRef<string | null>(null);
@@ -2696,11 +2825,17 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
   const [chatTopFade, setChatTopFade] = useState<Record<string, boolean>>({});
   const [chatJumpToBottom, setChatJumpToBottom] = useState<Record<string, boolean>>({});
   const chatLastScrollTopRef = useRef<Map<string, number>>(new Map());
+  const chatTouchStartYRef = useRef<Map<string, number>>(new Map());
+  const chatScrollLockTouchYRef = useRef<Map<string, number>>(new Map());
   const taskLogHydratedRef = useRef<Set<string>>(new Set());
   const taskLogHydratingRef = useRef<Set<string>>(new Set());
   const chatHistoryLoadingOlderRef = useRef<Set<string>>(new Set());
+  const chatHistoryLastOlderLoadAtRef = useRef<Map<string, number>>(new Map());
 
   const CHAT_AUTO_SCROLL_THRESHOLD_PX = 24;
+  const CHAT_LOAD_OLDER_TRIGGER_PX = 24;
+  const CHAT_LOAD_OLDER_PRESSURE_TRIGGER_PX = 96;
+  const CHAT_LOAD_OLDER_PRESSURE_GRACE_MS = 2_500;
   const CHAT_STICKY_PIN_INTERVAL_MS = 140;
   const topicAutosaveTimerRef = useRef<number | null>(null);
   const taskAutosaveTimerRef = useRef<number | null>(null);
@@ -3067,6 +3202,9 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         changed = true;
         return { ...prev, [key]: nextStart };
       });
+      if (changed) {
+        chatHistoryLastOlderLoadAtRef.current.set(key, Date.now());
+      }
 
       // Release the debounce guard after a frame so the browser's overflow-anchor
       // has finished adjusting scroll position before we allow the next load.
@@ -3080,6 +3218,52 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
       });
     },
     [computeChatStart, computeOlderChatStart, setChatHistoryStarts]
+  );
+
+  const maybeLoadOlderChat = useCallback(
+    (
+      chatKey: string,
+      node: HTMLElement,
+      logs: LogEntry[] | undefined,
+      initialLimit: number,
+      isTruncated: boolean,
+      pressureDirection: "up" | "neutral" = "neutral"
+    ) => {
+      if (!isTruncated) return;
+      const key = (chatKey ?? "").trim();
+      if (!key) return;
+      const underUpwardPressure = pressureDirection === "up";
+      const recentLoadAt = chatHistoryLastOlderLoadAtRef.current.get(key) ?? 0;
+      const withinPressureGrace =
+        underUpwardPressure && recentLoadAt > 0 && Date.now() - recentLoadAt <= CHAT_LOAD_OLDER_PRESSURE_GRACE_MS;
+      const topThreshold = underUpwardPressure ? CHAT_LOAD_OLDER_PRESSURE_TRIGGER_PX : CHAT_LOAD_OLDER_TRIGGER_PX;
+      if (!withinPressureGrace && node.scrollTop > topThreshold) return;
+      loadOlderChat(key, 1, logs, initialLimit);
+    },
+    [loadOlderChat]
+  );
+
+  const routeUpwardScrollIntoChat = useCallback(
+    (
+      chatKey: string,
+      deltaY: number,
+      logs: LogEntry[] | undefined,
+      initialLimit: number,
+      isTruncated: boolean
+    ) => {
+      const key = (chatKey ?? "").trim();
+      if (!key || !(deltaY < 0)) return false;
+      const scroller = chatScrollers.current.get(key);
+      if (!scroller) return false;
+
+      const canConsumeUpward = scroller.scrollTop > 0.5 || isTruncated;
+      if (!canConsumeUpward) return false;
+
+      scroller.scrollTop = Math.max(0, scroller.scrollTop + deltaY);
+      maybeLoadOlderChat(key, scroller, logs, initialLimit, isTruncated, "up");
+      return true;
+    },
+    [maybeLoadOlderChat]
   );
 
   const derivedAwaitingAssistant = useMemo<Record<string, { sentAt: string; requestId?: string }>>(() => {
@@ -3176,6 +3360,45 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
   const recentNonUserActivityBySession = useMemo(
     () => buildRecentNonUserActivityIndex(logs),
     [logs]
+  );
+
+  const hasAuthoritativeSessionWork = useCallback(
+    (sessionKey: string) => {
+      const key = normalizeBoardSessionKey(sessionKey);
+      if (!key) return false;
+      const nowMs = Date.now();
+      const directResponding = resolveAuthoritativeSessionWorkState({
+        nowMs,
+        typing: openclawTyping[key],
+        threadWorkSignal: openclawThreadWork[key],
+        orchestrationWork: orchestrationThreadWorkBySession[key],
+        recentNonUserActivity: recentNonUserActivityBySession[key],
+      });
+      if (directResponding) return true;
+
+      const alias = typingAliasRef.current.get(key);
+      if (!alias) return false;
+      const sourceKey = alias.sourceSessionKey;
+      const sourceResponding = resolveAuthoritativeSessionWorkState({
+        nowMs,
+        typing: openclawTyping[sourceKey],
+        threadWorkSignal: openclawThreadWork[sourceKey],
+        orchestrationWork: orchestrationThreadWorkBySession[sourceKey],
+        recentNonUserActivity: recentNonUserActivityBySession[sourceKey],
+      });
+      if (sourceResponding) return true;
+
+      if (Date.now() - alias.createdAt > OPENCLAW_TYPING_ALIAS_INACTIVE_RETENTION_MS) {
+        typingAliasRef.current.delete(key);
+      }
+      return false;
+    },
+    [
+      openclawTyping,
+      openclawThreadWork,
+      orchestrationThreadWorkBySession,
+      recentNonUserActivityBySession,
+    ]
   );
 
   const isSessionResponding = useCallback(
@@ -3420,6 +3643,8 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     }
     chatScrollers.current.delete(key);
     chatAtBottomRef.current.delete(key);
+    chatTouchStartYRef.current.delete(key);
+    chatHistoryLastOlderLoadAtRef.current.delete(key);
     setChatJumpToBottom((prev) => {
       if (!Object.prototype.hasOwnProperty.call(prev, key)) return prev;
       const next = { ...prev };
@@ -3551,6 +3776,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
 
   const markBumped = useCallback(
     (kind: "topic" | "task", id: string) => {
+      if (kind === "topic") return;
       const now = Date.now();
       const key = bumpKey(kind, id);
 
@@ -3559,46 +3785,23 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         bumpTimers.current.delete(key);
       }
 
-      if (kind === "topic") {
-        setTopicBumpAt((prev) => ({ ...prev, [id]: now }));
-      } else {
-        setTaskBumpAt((prev) => ({ ...prev, [id]: now }));
-      }
+      setTaskBumpAt((prev) => ({ ...prev, [id]: now }));
 
       const timer = window.setTimeout(() => {
         bumpTimers.current.delete(key);
-        if (kind === "topic") {
-          setTopicBumpAt((prev) => {
-            if (!prev[id]) return prev;
-            const next = { ...prev };
-            delete next[id];
-            return next;
-          });
-        } else {
-          setTaskBumpAt((prev) => {
-            if (!prev[id]) return prev;
-            const next = { ...prev };
-            delete next[id];
-            return next;
-          });
-        }
+        setTaskBumpAt((prev) => {
+          if (!prev[id]) return prev;
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
       }, NEW_ITEM_BUMP_MS);
       bumpTimers.current.set(key, timer);
     },
     []
   );
 
-  const prevUnsnoozedTopicIdsRef = useRef<Set<string>>(new Set());
   const prevUnsnoozedTaskIdsRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    const prev = prevUnsnoozedTopicIdsRef.current;
-    const next = new Set(Object.keys(unsnoozedTopicBadges));
-    for (const topicId of next) {
-      if (!prev.has(topicId)) markBumped("topic", topicId);
-    }
-    prevUnsnoozedTopicIdsRef.current = next;
-  }, [markBumped, unsnoozedTopicBadges]);
 
   useEffect(() => {
     const prev = prevUnsnoozedTaskIdsRef.current;
@@ -3928,14 +4131,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         }
         if (taskId) {
           const optimisticTs = new Date().toISOString();
-          setTopics((prev) => {
-            const nextSortIndex = optimisticTopSortIndex(prev, taskId);
-            return prev.map((row) =>
-              row.id === taskId
-                ? { ...row, updatedAt: optimisticTs, sortIndex: nextSortIndex }
-                : row
-            );
-          });
+          setTopics((prev) => prev.map((row) => (row.id === taskId ? { ...row, updatedAt: optimisticTs } : row)));
           markBumped("topic", taskId);
         }
         setAwaitingAssistant((prev) => ({
@@ -4620,7 +4816,6 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
   });
 
   const orderedTopics = useMemo(() => {
-    const now = Date.now();
     const scopedTopics =
       !normalizedSearch && selectedSpaceId
         ? topics.filter((topic) => topicMatchesSelectedSpace(topic, selectedSpaceId))
@@ -4644,16 +4839,6 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
           );
         }
 
-        const aBump = topicBumpAt[a.id] ?? 0;
-        const bBump = topicBumpAt[b.id] ?? 0;
-        const aBoosted = aBump > 0 && now - aBump < NEW_ITEM_BUMP_MS;
-        const bBoosted = bBump > 0 && now - bBump < NEW_ITEM_BUMP_MS;
-        if (aBoosted !== bBoosted) return aBoosted ? -1 : 1;
-        if (aBoosted && bBoosted && aBump !== bBump) return bBump - aBump;
-
-        if (a.lastTouchedAt !== b.lastTouchedAt) {
-          return String(b.lastTouchedAt ?? "").localeCompare(String(a.lastTouchedAt ?? ""));
-        }
         return compareByBoardOrder(a, b);
       });
 
@@ -4729,7 +4914,6 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     return deduped;
   }, [
     topics,
-    topicBumpAt,
     logsByTopic,
     latestTopicTouchById,
     matchesLogText,
@@ -4928,18 +5112,17 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     (topicId: string, patch: Partial<Topic>, options?: { promote?: boolean }) => {
       const promote = Boolean(options?.promote);
       const optimisticTs = new Date().toISOString();
-      setTopics((prev) => {
-        const nextSortIndex = promote ? optimisticTopSortIndex(prev, topicId) : undefined;
-        return prev.map((row) =>
+      setTopics((prev) =>
+        prev.map((row) =>
           row.id === topicId
             ? {
                 ...row,
                 ...patch,
-                ...(promote ? { updatedAt: optimisticTs, sortIndex: nextSortIndex } : {}),
+                ...(promote ? { updatedAt: optimisticTs } : {}),
               }
             : row
-        );
-      });
+        )
+      );
       if (promote) markBumped("topic", topicId);
       return optimisticTs;
     },
@@ -5814,6 +5997,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
   const toggleTopicExpanded = (topicId: string) => {
     const next = new Set(expandedTopicsSafe);
     let nextTasks = new Set(expandedTasksSafe);
+    let opening = false;
     if (next.has(topicId)) {
       next.delete(topicId);
       setChatMetaCollapseEpoch((prev) => prev + 1);
@@ -5824,9 +6008,18 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
       }
     } else {
       next.add(topicId);
+      opening = true;
     }
     setExpandedTopics(next);
     setExpandedTasks(nextTasks);
+    if (opening && focusComposerOnTopicExpand) {
+      setActiveComposer({ kind: "task", topicId, taskId: topicId });
+      setAutoFocusTask({ topicId, taskId: topicId });
+      if (!mdUp) {
+        setMobileLayer("chat");
+        setMobileChatTarget({ topicId, taskId: topicId });
+      }
+    }
     pushUrl({ topics: Array.from(next), tasks: Array.from(nextTasks) });
   };
 
@@ -5966,7 +6159,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
 
   const allowToggle = (target: HTMLElement | null) => {
     if (!target) return true;
-    return !target.closest("a, button, input, select, textarea, option");
+    return !target.closest("a, button, input, select, textarea, option, [data-disable-topic-toggle='true']");
   };
 
   const resolveTopicId = useCallback(
@@ -6852,7 +7045,9 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                     >
                       {unifiedComposerIntent.badge}
                     </span>
-                    <span className="truncate">{unifiedComposerIntent.chipLabel}</span>
+                    <span className="truncate" title={unifiedComposerIntent.chipLabel}>
+                      {unifiedComposerIntent.chipLabel}
+                    </span>
                     {selectedComposerTarget ? (
                       <button
                         type="button"
@@ -7036,12 +7231,13 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
           const topicToolingOrSystemCallCount = countToolingOrSystemChatLogEntries(topicChatAllLogs);
           const topicToolingOrSystemCallCountLabel = formatToolingOrSystemCallCountLabel(topicToolingOrSystemCallCount);
           const topicChatMetricsLabel = `${topicChatEntryCountLabel} · ${topicToolingOrSystemCallCountLabel}`;
-          const topicChatBlurb = deriveChatHeaderBlurb(topicChatAllLogs);
+          const topicChatBlurb = deriveTopicHeaderBlurb(topic, topicChatAllLogs);
           const topicChatKey = chatKeyForTask(topicId);
           const topicChatSessionKey = topicSessionKey(topicId);
 
           const topicHiddenToolCallCount = hiddenToolCallCountForSession(topicChatSessionKey);
           const topicResponding = isSessionResponding(topicChatSessionKey);
+          const topicTypingVisible = hasAuthoritativeSessionWork(topicChatSessionKey);
           const normalizedTopicStatus = String(topic.status ?? "active").trim().toLowerCase();
           const topicStatusTone: "muted" | "accent" | "accent2" | "warning" | "success" = topicResponding
             ? "accent"
@@ -7205,22 +7401,81 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
               data-topic-card-id={topicId}
               className={cn(
                 "relative isolate rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] transition-colors duration-300",
-                isExpanded ? "p-0" : "overflow-hidden p-4 md:p-5",
+                isExpanded ? "p-0" : "overflow-hidden p-0 md:p-5",
                 draggingTopicId && topicDropTargetId === topicId ? "ring-2 ring-[rgba(255,90,45,0.55)]" : "",
                 topicSelectedForSend ? "ring-2 ring-[rgba(77,171,158,0.55)]" : ""
               )}
               style={topicGlowStyle(topicColor, topicIndex, isExpanded)}
+              onWheelCapture={(event) => {
+                if (!isExpanded || isUnassigned) return;
+                const target = event.target as HTMLElement | null;
+                if (target?.closest("input, textarea, select, [role='listbox'], [role='menu']")) return;
+                if (
+                  !routeUpwardScrollIntoChat(
+                    topicChatKey,
+                    event.deltaY,
+                    topicChatAllLogs,
+                    TASK_TIMELINE_LIMIT,
+                    topicChatTruncated
+                  )
+                ) {
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              onTouchStartCapture={(event) => {
+                if (!isExpanded || isUnassigned) return;
+                const touch = event.touches[0];
+                if (!touch) return;
+                chatScrollLockTouchYRef.current.set(topicChatKey, touch.clientY);
+              }}
+              onTouchMoveCapture={(event) => {
+                if (!isExpanded || isUnassigned) return;
+                const target = event.target as HTMLElement | null;
+                if (target?.closest("input, textarea, select, [role='listbox'], [role='menu']")) return;
+                const touch = event.touches[0];
+                if (!touch) return;
+                const previousY = chatScrollLockTouchYRef.current.get(topicChatKey) ?? touch.clientY;
+                chatScrollLockTouchYRef.current.set(topicChatKey, touch.clientY);
+                const deltaY = previousY - touch.clientY;
+                if (!routeUpwardScrollIntoChat(topicChatKey, deltaY, topicChatAllLogs, TASK_TIMELINE_LIMIT, topicChatTruncated)) {
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              onTouchEndCapture={() => {
+                chatScrollLockTouchYRef.current.delete(topicChatKey);
+              }}
+              onTouchCancelCapture={() => {
+                chatScrollLockTouchYRef.current.delete(topicChatKey);
+              }}
             >
-              <div
+              <SwipeRevealRow
+                rowId={topicId}
+                openId={topicSwipeOpenId}
+                setOpenId={setTopicSwipeOpenId}
+                actions={swipeActions}
+                anchorLabel={topic.name}
+                disabled={!mdUp && mobileLayer === "chat"}
+                surfaceTint={topicColor}
+                wrapperTestId={`topic-swipe-row-${topic.id}`}
+                wrapperClassName={isExpanded ? "sticky top-0 z-20 rounded-t-[var(--radius-lg)]" : undefined}
+                wrapperStyle={isExpanded ? stickyTaskHeaderStyle(topicColor, topicIndex) : undefined}
+                backdropTinted={false}
+                anchorRowClassName={isExpanded ? "pl-3 md:pl-4" : undefined}
+                anchorPillClassName={isExpanded ? "max-w-[min(52vw,18rem)] md:max-w-[min(32vw,20rem)]" : undefined}
+              >
+                <div
                 role="button"
                 tabIndex={0}
                 className={cn(
                   "flex flex-col justify-center text-left",
                   isExpanded
-                    ? "sticky top-0 z-20 cursor-pointer rounded-t-[var(--radius-lg)] px-4 pt-[max(0.5rem,var(--claw-mobile-safe-top,0px))] pb-2 md:px-5"
-                    : "min-h-[92px] cursor-pointer"
+                    ? "cursor-pointer px-4 pt-[max(0.5rem,var(--claw-mobile-safe-top,0px))] pb-2 md:min-h-[92px] md:px-5 md:py-4"
+                    : "cursor-pointer px-4 py-2.5 md:min-h-[92px] md:px-0 md:py-0"
                 )}
-                style={isExpanded ? stickyTaskHeaderStyle(topicColor, topicIndex) : undefined}
                 onClick={(event) => {
                   if (!allowToggle(event.target as HTMLElement)) return;
                   toggleTopicExpanded(topicId);
@@ -7315,6 +7570,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                         <button
                           type="button"
                           data-testid={`topic-color-trigger-${topic.id}`}
+                          data-disable-topic-toggle="true"
                           aria-label={`Change color for ${topic.name}`}
                           title="Double click or long press to change color"
                           className="h-3.5 w-3.5 rounded-full border border-[rgba(255,255,255,0.18)] shadow-[0_0_0_1px_rgba(0,0,0,0.18)]"
@@ -7431,6 +7687,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                         ) : (
                       <>
                         <h2
+                          data-disable-topic-toggle="true"
                           className="truncate text-base font-semibold md:text-lg"
                           title={topic.name}
                           {...topicNameEditHandlers}
@@ -7461,6 +7718,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                   <div
                     className={cn(
                       "mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-[rgb(var(--claw-muted))] sm:text-xs",
+                      !isExpanded ? "md:min-h-[1.5rem] md:flex-nowrap md:overflow-hidden" : "",
                       topicSwipeOpen ? "opacity-0 pointer-events-none" : ""
                     )}
                   >
@@ -7587,6 +7845,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                         {(visibleTopicTags.length > 0 ? visibleTopicTags : [""]).map((tag, tagIndex) => (
                           <span
                             key={`topic-tag-${topic.id}-${tag || "empty"}-${tagIndex}`}
+                            data-disable-topic-toggle="true"
                             className={cn(
                               "inline-flex min-h-6 items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-[0.08em] transition",
                               tag
@@ -7601,8 +7860,12 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                         ))}
                       </>
                     )}
-	                    <span>{topicChatMetricsLabel}</span>
-                    {lastTouchedAt ? <span>Last touch {formatRelativeTime(lastTouchedAt)}</span> : null}
+	                    <span className={cn(!isExpanded ? "md:shrink md:truncate md:whitespace-nowrap" : "")}>{topicChatMetricsLabel}</span>
+                    {lastTouchedAt ? (
+                      <span className={cn(!isExpanded ? "md:shrink-0 md:whitespace-nowrap" : "")}>
+                        Last touch {formatRelativeTime(lastTouchedAt)}
+                      </span>
+                    ) : null}
 		                    {topicNeedsAttention ? (
 		                      <span
                           title="Topic needs a look"
@@ -7615,23 +7878,30 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                   <div
                     className={cn(
                       "mt-2 flex min-w-0 flex-wrap items-center gap-2",
+                      !isExpanded ? "md:min-h-[1.5rem] md:flex-nowrap md:overflow-hidden" : "",
                       topicSwipeOpen ? "opacity-0 pointer-events-none" : ""
                     )}
                   >
                     {!(editingTopicId === topic.id && topicEditMode === "name") && topicChatBlurb ? (
-                      <div className="flex min-w-0 flex-1 items-center gap-2 text-xs text-[rgba(var(--claw-muted),0.9)]">
+                      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden text-xs text-[rgba(var(--claw-muted),0.9)]">
                         <span className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
                           Topic chat
                         </span>
-                        {topicResponding ? <TypingDots /> : null}
+                        {topicTypingVisible ? <TypingDots /> : null}
                         <span className="text-[rgba(var(--claw-muted),0.55)]">·</span>
-                        <div className="min-w-0 max-w-[52ch] overflow-x-auto whitespace-nowrap claw-scrollbar-none" title={topicChatBlurb.full}>
+                        <div
+                          className={cn(
+                            "min-w-0 max-w-[52ch] whitespace-nowrap",
+                            !isExpanded ? "overflow-hidden text-ellipsis" : "overflow-x-auto claw-scrollbar-none"
+                          )}
+                          title={topicChatBlurb.full}
+                        >
                           {topicChatBlurb.clipped}
                         </div>
                       </div>
                     ) : (
                       <div className="flex min-w-0 flex-1 items-center gap-2">
-                        {!isExpanded && topicResponding ? (
+                        {!isExpanded && topicTypingVisible ? (
                           <span title="OpenClaw responding" className="inline-flex items-center">
                             <TypingDots />
                           </span>
@@ -7768,6 +8038,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                   </div>
                 </div>
 		              </div>
+              </SwipeRevealRow>
 	
 		              {isExpanded && (
 		                <div
@@ -7783,35 +8054,30 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                           data-testid={`topic-chat-shell-${topicId}`}
                           className="flex flex-col pt-1"
                         >
-                          <div className="mb-2 flex flex-nowrap items-center justify-end gap-2">
+                          <div className="mb-2 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-center">
                             <span
                               data-testid={`topic-chat-entries-${topic.id}`}
-                              className="shrink-0 whitespace-nowrap text-xs text-[rgb(var(--claw-muted))]"
+                              className="shrink-0 whitespace-nowrap text-[11px] text-[rgba(var(--claw-muted),0.84)]"
                             >
                               {topicChatMetricsLabel}
                             </span>
+                            {topicChatTruncated ? (
+                              <span
+                                data-testid={`topic-chat-history-hint-${topic.id}`}
+                                aria-label="Older messages are available above"
+                                className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[10px] text-[rgba(var(--claw-muted),0.58)]"
+                              >
+                                <span aria-hidden="true">↑</span>
+                                <span>older above</span>
+                              </span>
+                            ) : null}
                           </div>
                           {topicChatAllLogs.length === 0 &&
                           findPendingMessagesBySession(topicChatSessionKey).length === 0 &&
-                          !isSessionResponding(topicChatSessionKey) ? (
+                          !topicTypingVisible ? (
                             <p className="mb-3 text-sm text-[rgb(var(--claw-muted))]">No messages yet.</p>
                           ) : null}
                           <div className="relative">
-                            {topicChatTruncated ? (
-                              <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center px-3">
-                                <div
-                                  className={cn(
-                                    "inline-flex max-w-full items-center gap-2 rounded-full border px-3 py-1.5",
-                                    "border-[rgba(255,255,255,0.08)] bg-[rgba(14,17,22,0.76)] text-[10px]",
-                                    "font-semibold uppercase tracking-[0.18em] text-[rgba(191,211,232,0.9)]",
-                                    "shadow-[0_10px_24px_rgba(0,0,0,0.24)] backdrop-blur"
-                                  )}
-                                >
-                                  <span className="text-[rgba(255,90,45,0.85)]">↑</span>
-                                  <span className="truncate">Scroll up for older messages</span>
-                                </div>
-                              </div>
-                            ) : null}
                             {chatJumpToBottom[topicChatKey] ? (
                               <button
                                 type="button"
@@ -7841,9 +8107,13 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                 const key = topicChatKey;
                                 const node = event.currentTarget;
                                 const showTop = node.scrollTop > 2;
-                                if (topicChatTruncated && node.scrollTop <= 24) {
-                                  loadOlderChat(topicChatKey, 1, topicChatAllLogs, TASK_TIMELINE_LIMIT);
-                                }
+                                maybeLoadOlderChat(
+                                  topicChatKey,
+                                  node,
+                                  topicChatAllLogs,
+                                  TASK_TIMELINE_LIMIT,
+                                  topicChatTruncated
+                                );
                                 const remaining = node.scrollHeight - (node.scrollTop + node.clientHeight);
                                 const atBottom = remaining <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
                                 chatAtBottomRef.current.set(key, atBottom);
@@ -7859,6 +8129,43 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                   prev[key] === showTop ? prev : { ...prev, [key]: showTop }
                                 );
                                 if (activeChatKeyRef.current === key) updateActiveChatAtBottom();
+                              }}
+                              onWheel={(event) => {
+                                if (event.deltaY >= 0) return;
+                                maybeLoadOlderChat(
+                                  topicChatKey,
+                                  event.currentTarget,
+                                  topicChatAllLogs,
+                                  TASK_TIMELINE_LIMIT,
+                                  topicChatTruncated,
+                                  "up"
+                                );
+                              }}
+                              onTouchStart={(event) => {
+                                const touch = event.touches[0];
+                                if (!touch) return;
+                                chatTouchStartYRef.current.set(topicChatKey, touch.clientY);
+                              }}
+                              onTouchMove={(event) => {
+                                const touch = event.touches[0];
+                                if (!touch) return;
+                                const previousY = chatTouchStartYRef.current.get(topicChatKey) ?? touch.clientY;
+                                chatTouchStartYRef.current.set(topicChatKey, touch.clientY);
+                                if (touch.clientY <= previousY) return;
+                                maybeLoadOlderChat(
+                                  topicChatKey,
+                                  event.currentTarget,
+                                  topicChatAllLogs,
+                                  TASK_TIMELINE_LIMIT,
+                                  topicChatTruncated,
+                                  "up"
+                                );
+                              }}
+                              onTouchEnd={() => {
+                                chatTouchStartYRef.current.delete(topicChatKey);
+                              }}
+                              onTouchCancel={() => {
+                                chatTouchStartYRef.current.delete(topicChatKey);
                               }}
                               className="overflow-y-auto"
                               style={{
@@ -7935,7 +8242,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                     </div>
                                   </div>
                                 ))}
-                              {isSessionResponding(topicChatSessionKey) ? (
+                              {topicTypingVisible ? (
                                 <div className="py-1">
                                   <div className="flex justify-start">
                                     <div className="w-full max-w-[78%] px-4 py-2" title="OpenClaw responding">
@@ -8112,6 +8419,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                         : "";
 	                      const taskChatKey = chatKeyForTask(task.id);
                       const taskHiddenToolCallCount = hiddenToolCallCountForSession(taskChatSessionKey);
+                      const taskTypingVisible = hasAuthoritativeSessionWork(taskChatSessionKey);
                       const taskSelectedForSend = topicSelectedForSend;
                       const limitedLogs = taskChatAllLogs;
                       const truncated = false;
@@ -8606,7 +8914,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
 	                            </div>
 	                          </div>
 	                          <div className="flex items-center gap-2">
-	                            {isTaskResponding(task) ? (
+	                            {taskTypingVisible ? (
 	                              <span title="OpenClaw responding" className="inline-flex items-center">
 	                                <TypingDots />
 	                              </span>
@@ -8820,7 +9128,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                                 <div className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
                                                   CHAT
                                                 </div>
-                                                {isTaskResponding(task) ? <TypingDots /> : null}
+                                                {taskTypingVisible ? <TypingDots /> : null}
                                               </div>
                                               <nav
                                                 aria-label="Topic chat context"
@@ -8861,7 +9169,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                             <div className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgb(var(--claw-muted))]">
                                               TASK CHAT
                                             </div>
-                                            {isTaskResponding(task) ? <TypingDots /> : null}
+                                            {taskTypingVisible ? <TypingDots /> : null}
                                             {taskChatBlurb ? (
                                               <>
                                                 <span className="text-xs text-[rgba(var(--claw-muted),0.55)]">·</span>
@@ -9072,7 +9380,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                               </div>
                                             ))
                                         : null}
-                                      {!isUnassigned && isSessionResponding(taskChatSessionKey) ? (
+                                      {!isUnassigned && taskTypingVisible ? (
                                         <div className="py-1">
                                           <div className="flex justify-start">
                                             <div className="w-full max-w-[78%] px-4 py-2" title="OpenClaw responding">
@@ -9160,20 +9468,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
 	            </div>
 	          );
 
-          return (
-            <SwipeRevealRow
-              key={topicId}
-              rowId={topicId}
-              openId={topicSwipeOpenId}
-              setOpenId={setTopicSwipeOpenId}
-              actions={swipeActions}
-              anchorLabel={topic.name}
-              disabled={!mdUp && mobileLayer === "chat"}
-              surfaceTint={topicColor}
-            >
-              {card}
-            </SwipeRevealRow>
-          );
+          return card;
 	        });
 
           if (!showTwoColumns) {

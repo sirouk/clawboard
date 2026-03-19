@@ -16,19 +16,19 @@ test("app routes redirect and deep-links resolve into unified view", async ({ pa
 
   await page.goto("/");
   await expect(page).toHaveURL(/\/u$/);
-  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Board View" })).toBeVisible();
 
   await page.goto("/unified");
   await expect(page).toHaveURL(/\/u$/);
 
   await page.goto(`/topics/${encodeURIComponent(topicId)}`);
   await expect(page).toHaveURL(new RegExp(`/u/topic/${topicId}`));
-  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Board View" })).toBeVisible();
   await expect(page.getByText(topicName)).toBeVisible();
 
   await page.goto(`/tasks/${encodeURIComponent(taskId)}`);
   await expect(page).toHaveURL(new RegExp(`/u/task/${taskId}`));
-  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Board View" })).toBeVisible();
 
   await page.goto("/chat");
   await expect(page).toHaveURL(/\/u$/);

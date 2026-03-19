@@ -38,7 +38,7 @@ test.describe("topic chat scroll stability after sending a message", () => {
     });
 
     await page.goto("/u");
-    await page.getByRole("heading", { name: "Unified View" }).waitFor();
+    await page.getByRole("heading", { name: "Board View" }).waitFor();
 
     // Wait for all topic cards to appear.
     const targetCard = page.locator(`[data-topic-card-id='${targetTopicId}']`);
@@ -150,7 +150,7 @@ test.describe("topic chat scroll stability after sending a message", () => {
     });
 
     await page.goto("/u");
-    await page.getByRole("heading", { name: "Unified View" }).waitFor();
+    await page.getByRole("heading", { name: "Board View" }).waitFor();
 
     const targetCard = page.locator(`[data-topic-card-id='${targetTopicId}']`);
     await expect(targetCard).toBeVisible({ timeout: 30_000 });

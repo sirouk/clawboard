@@ -31,7 +31,7 @@ test("topic-first shell loads and the centered header tabs switch views", async 
   await page.goto("/u");
   await waitForUnifiedViewReady(page);
 
-  const unifiedTab = page.getByRole("link", { name: "Unified View" });
+  const unifiedTab = page.getByRole("link", { name: "Board View" });
   const workspaceTab = page.getByRole("link", { name: "Code Workspace" });
 
   await expect(unifiedTab).toHaveAttribute("aria-current", "page");
@@ -42,7 +42,7 @@ test("topic-first shell loads and the centered header tabs switch views", async 
   await clickPrimaryTabUntilUrl(page, "Code Workspace", /\/workspaces/);
   await expect(page.getByTestId("workspace-ide-frame")).toBeVisible();
 
-  await clickPrimaryTabUntilUrl(page, "Unified View", /\/u/);
+  await clickPrimaryTabUntilUrl(page, "Board View", /\/u/);
   await expect(page.locator("[data-topic-card-id='topic-1']")).toBeVisible();
 });
 

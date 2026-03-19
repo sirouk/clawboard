@@ -13,7 +13,16 @@ export function DashboardLive() {
   const { logs, topics } = useDataStore();
 
   const sortedLogs = useMemo(() => [...logs].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)), [logs]);
-  const sortedTopics = useMemo(() => [...topics].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1)), [topics]);
+  const sortedTopics = useMemo(
+    () =>
+      [...topics].sort((a, b) => {
+        const sortDelta = Number(a.sortIndex ?? 0) - Number(b.sortIndex ?? 0);
+        if (sortDelta !== 0) return sortDelta;
+        if (a.updatedAt !== b.updatedAt) return a.updatedAt < b.updatedAt ? 1 : -1;
+        return String(a.id ?? "").localeCompare(String(b.id ?? ""));
+      }),
+    [topics]
+  );
 
   const openTopics = topics.filter((topic) => topic.status !== "done" && topic.status !== "archived");
   const doingTopics = topics.filter((topic) => topic.status === "doing");

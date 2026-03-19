@@ -19,7 +19,7 @@ test("task status selector updates and persists", async ({ page, request }) => {
   expect(createTask.ok()).toBeTruthy();
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   await page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true }).click();
 
   const statusUpdate = page.waitForRequest((apiRequest) => {
@@ -70,7 +70,7 @@ test("collapsed task status dropdown is visible and keyboard navigable", async (
 
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   await page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true }).click();
 
   const taskCard = page.locator(`[data-task-card-id='${taskId}']`);
@@ -135,7 +135,7 @@ test("mobile task status dropdown remains usable", async ({ page, request }) => 
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/u");
-  await page.getByText("Unified View").first().waitFor();
+  await page.getByText("Board View").first().waitFor();
   await page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true }).click();
 
   const trigger = page.getByTestId(`task-status-trigger-${taskId}`);

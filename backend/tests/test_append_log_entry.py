@@ -523,6 +523,169 @@ class AppendLogEntryTests(unittest.TestCase):
         payload = child_res.json()
         self.assertEqual(payload.get("topicId"), "topic-a")
         self.assertEqual(payload.get("taskId"), "task-a")
+
+    def test_append_log_assistant_request_attribution_skips_already_settled_request_ids(self):
+        older_ts = datetime.now(timezone.utc) - timedelta(days=2)
+        settled_user_ts = older_ts.isoformat()
+        settled_assistant_ts = (older_ts + timedelta(seconds=2)).isoformat()
+        later_assistant_ts = datetime.now(timezone.utc).isoformat()
+        session_key = "clawboard:topic:topic-a"
+        settled_request_id = "occhat-settled-1"
+
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=settled_user_ts,
+                    updatedAt=settled_user_ts,
+                )
+            )
+            session.commit()
+
+            main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    topicId="topic-a",
+                    content="Original user prompt",
+                    summary="Original user prompt",
+                    createdAt=settled_user_ts,
+                    agentId="user",
+                    agentLabel="User",
+                    source={
+                        "channel": "openclaw",
+                        "sessionKey": session_key,
+                        "requestId": settled_request_id,
+                        "messageId": settled_request_id,
+                        "boardScopeTopicId": "topic-a",
+                        "boardScopeKind": "topic",
+                        "boardScopeLock": True,
+                    },
+                ),
+            )
+            main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    topicId="topic-a",
+                    content="Original settled assistant reply",
+                    summary="Original settled assistant reply",
+                    createdAt=settled_assistant_ts,
+                    agentId="assistant",
+                    agentLabel="Assistant",
+                    source={
+                        "channel": "clawboard",
+                        "sessionKey": session_key,
+                        "requestId": settled_request_id,
+                        "boardScopeTopicId": "topic-a",
+                        "boardScopeKind": "topic",
+                        "boardScopeLock": True,
+                    },
+                ),
+            )
+            session.commit()
+
+            later = main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    topicId="topic-a",
+                    content="Reminder follow-up answer without native request id",
+                    summary="Reminder follow-up answer without native request id",
+                    createdAt=later_assistant_ts,
+                    agentId="assistant",
+                    agentLabel="Assistant",
+                    source={
+                        "channel": "clawboard",
+                        "sessionKey": session_key,
+                        "boardScopeTopicId": "topic-a",
+                        "boardScopeKind": "topic",
+                        "boardScopeLock": True,
+                    },
+                ),
+            )
+            session.commit()
+            source = later.source if isinstance(later.source, dict) else {}
+            self.assertEqual(str(source.get("requestId") or "").strip(), "")
+
+    def test_append_log_assistant_request_attribution_keeps_unresolved_request_ids(self):
+        older_ts = datetime.now(timezone.utc) - timedelta(minutes=5)
+        unresolved_user_ts = older_ts.isoformat()
+        later_assistant_ts = datetime.now(timezone.utc).isoformat()
+        session_key = "clawboard:topic:topic-a"
+        unresolved_request_id = "occhat-unresolved-1"
+
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-a",
+                    name="Topic A",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=unresolved_user_ts,
+                    updatedAt=unresolved_user_ts,
+                )
+            )
+            session.commit()
+
+            main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    topicId="topic-a",
+                    content="Fresh user prompt awaiting answer",
+                    summary="Fresh user prompt awaiting answer",
+                    createdAt=unresolved_user_ts,
+                    agentId="user",
+                    agentLabel="User",
+                    source={
+                        "channel": "openclaw",
+                        "sessionKey": session_key,
+                        "requestId": unresolved_request_id,
+                        "messageId": unresolved_request_id,
+                        "boardScopeTopicId": "topic-a",
+                        "boardScopeKind": "topic",
+                        "boardScopeLock": True,
+                    },
+                ),
+            )
+            session.commit()
+
+            later = main_module.append_log_entry(
+                session,
+                LogAppend(
+                    type="conversation",
+                    topicId="topic-a",
+                    content="Assistant answer without request id but same live session",
+                    summary="Assistant answer without request id but same live session",
+                    createdAt=later_assistant_ts,
+                    agentId="assistant",
+                    agentLabel="Assistant",
+                    source={
+                        "channel": "clawboard",
+                        "sessionKey": session_key,
+                        "boardScopeTopicId": "topic-a",
+                        "boardScopeKind": "topic",
+                        "boardScopeLock": True,
+                    },
+                ),
+            )
+            session.commit()
+            source = later.source if isinstance(later.source, dict) else {}
+            self.assertEqual(str(source.get("requestId") or "").strip(), unresolved_request_id)
         self.assertEqual(payload.get("classificationStatus"), "classified")
         self.assertEqual(payload.get("classificationError"), "filtered_tool_activity")
         source = payload.get("source") or {}

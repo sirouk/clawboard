@@ -60,7 +60,7 @@ test.describe("session continuity — Board ↔ Workspaces keep-alive", () => {
     await expect(boardPanel).toBeAttached();
 
     // Navigate back to Board.
-    const boardLink = page.getByRole("link", { name: "Unified View" }).first();
+    const boardLink = page.getByRole("link", { name: "Board View" }).first();
     await boardLink.click();
     await expect(boardPanel).toBeVisible({ timeout: 5_000 });
 
@@ -105,7 +105,7 @@ test.describe("session continuity — Board ↔ Workspaces keep-alive", () => {
     await expect(page.getByTestId("workspace-hub-panel")).toBeVisible({ timeout: 10_000 });
 
     // Navigate back to Board.
-    const boardLink = page.getByRole("link", { name: "Unified View" }).first();
+    const boardLink = page.getByRole("link", { name: "Board View" }).first();
     await boardLink.click();
     await expect(page.getByTestId("board-hub-panel")).toBeVisible({ timeout: 5_000 });
 
@@ -115,7 +115,7 @@ test.describe("session continuity — Board ↔ Workspaces keep-alive", () => {
 
   test("workspace hub panel stays mounted once activated", async ({ page }) => {
     await page.goto("/u");
-    await page.getByRole("heading", { name: "Unified View" }).waitFor({ timeout: 20_000 });
+    await page.getByRole("heading", { name: "Board View" }).waitFor({ timeout: 20_000 });
 
     // Workspace panel should not exist yet (demand-mount).
     const workspacePanel = page.getByTestId("workspace-hub-panel");
@@ -128,7 +128,7 @@ test.describe("session continuity — Board ↔ Workspaces keep-alive", () => {
     await expect(workspacePanel).toBeAttached({ timeout: 10_000 });
 
     // Navigate back to Board — panel stays mounted but hidden.
-    await page.getByRole("link", { name: "Unified View" }).first().click();
+    await page.getByRole("link", { name: "Board View" }).first().click();
     await expect(page.getByTestId("board-hub-panel")).toBeVisible({ timeout: 5_000 });
     await expect(workspacePanel).toBeAttached();
     await expect(workspacePanel).toHaveClass(/hidden/, { timeout: 3_000 });

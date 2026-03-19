@@ -818,13 +818,6 @@ def _build_openclaw_live_signal_snapshots(session: Any) -> tuple[list[dict[str, 
         if not session_key:
             continue
         _signal_snapshot_upsert(
-            typing_by_session,
-            session_keys=[session_key],
-            updated_at=stamp,
-            request_id=request_id,
-            typing=True,
-        )
-        _signal_snapshot_upsert(
             thread_work_by_session,
             session_keys=[session_key],
             updated_at=stamp,
@@ -3227,7 +3220,6 @@ def _maybe_attach_openclaw_request_id(
         query = query.where(source_channel_expr.in_(["", "openclaw", "clawboard", "webchat"]))
 
     candidates = session.exec(query.order_by(LogEntry.createdAt.desc()).limit(max_candidates)).all()
-    resolved_request_id: str | None = None
     for candidate in candidates:
         source = candidate.source if isinstance(candidate.source, dict) else {}
         request_id = str(source.get("requestId") or "").strip()
@@ -3236,13 +3228,8 @@ def _maybe_attach_openclaw_request_id(
         if _openclaw_watchdog_has_terminal_system_log(session, request_id):
             continue
         if _openclaw_watchdog_has_assistant_by_request(session, request_id, candidate.createdAt):
-            if not resolved_request_id:
-                resolved_request_id = request_id
             continue
         source_meta["requestId"] = request_id
-        return
-    if resolved_request_id:
-        source_meta["requestId"] = resolved_request_id
         return
 
 
@@ -12637,7 +12624,7 @@ def _topic_order_key(topic: Topic) -> tuple[int, float, str]:
     )
 
 
-def _touch_topic_activity(session: Any, topic: Topic, *, stamp: str | None = None, promote: bool = True) -> str:
+def _touch_topic_activity(session: Any, topic: Topic, *, stamp: str | None = None, promote: bool = False) -> str:
     resolved_stamp = str(stamp or now_iso())
     topic.updatedAt = resolved_stamp
     if promote:
@@ -12793,16 +12780,16 @@ def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
             reindex_needed = True
             touched = True
 
-        # Digest updates are system touches and should keep the topic fresh in the board order.
+        # Digest refreshes are system-maintained metadata and should not reorder topics.
         if "digest" in fields:
             topic.digest = payload.digest
-            touched = True
         if "digestUpdatedAt" in fields:
             topic.digestUpdatedAt = payload.digestUpdatedAt
-            touched = True
+        event_ts = stamp
 
         if touched:
             _touch_topic_activity(session, topic, stamp=stamp)
+            event_ts = topic.updatedAt
 
         space_changed = _space_id_for_topic(topic) != prior_space_id
 
@@ -12814,7 +12801,7 @@ def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
             session.commit()
             session.refresh(topic)
         _publish_space_upserted(session.get(Space, _space_id_for_topic(topic)))
-        publish_live_event({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": topic.updatedAt})
+        publish_live_event({"type": "topic.upserted", "data": topic.model_dump(), "eventTs": event_ts})
 
         if reindex_needed:
             topic_text = " ".join(

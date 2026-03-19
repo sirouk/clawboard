@@ -47,6 +47,7 @@ export function AttachmentStrip({
 }) {
   const safeAttachments = useMemo(() => attachments ?? [], [attachments]);
   const [blobUrls, setBlobUrls] = useState<Record<string, string>>({});
+  const [previewImage, setPreviewImage] = useState<{ src: string; fileName: string; mimeType: string; downloadHref?: string } | null>(null);
   const blobUrlsRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
@@ -61,6 +62,15 @@ export function AttachmentStrip({
       blobUrlsRef.current = {};
     };
   }, []);
+
+  useEffect(() => {
+    if (!previewImage) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPreviewImage(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [previewImage]);
 
   const attachmentSignature = useMemo(
     () =>
@@ -130,14 +140,17 @@ export function AttachmentStrip({
         const image = isImageAttachment(att);
         const fetchedUrl = att.id ? blobUrls[att.id] : "";
         const previewSrc = att.previewUrl || fetchedUrl || "";
-        const href = fetchedUrl || "";
+        const href = fetchedUrl || att.previewUrl || "";
         const title = `${att.fileName || "attachment"} (${att.mimeType || "unknown"})`;
+        const canPreviewImage = image && Boolean(previewSrc);
 
         return (
           <div
             key={`${att.id ?? "local"}:${idx}:${att.fileName}`}
             className="relative overflow-hidden rounded-[14px] border border-[rgba(255,255,255,0.12)] bg-[rgba(10,12,16,0.35)]"
             title={title}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
           >
             {onRemove ? (
               <button
@@ -151,14 +164,30 @@ export function AttachmentStrip({
             ) : null}
 
             {image ? (
-              previewSrc ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={previewSrc}
-                  alt={att.fileName || "attachment"}
-                  className="h-24 w-24 object-cover"
-                  draggable={false}
-                />
+              canPreviewImage ? (
+                <button
+                  type="button"
+                  aria-label={`Preview ${att.fileName || "attachment"}`}
+                  className="block transition hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(77,171,158,0.42)]"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setPreviewImage({
+                      src: previewSrc,
+                      fileName: att.fileName || "attachment",
+                      mimeType: att.mimeType || "image",
+                      downloadHref: href || undefined,
+                    });
+                  }}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={previewSrc}
+                    alt={att.fileName || "attachment"}
+                    className="h-24 w-24 object-cover"
+                    draggable={false}
+                  />
+                </button>
               ) : (
                 <div className="flex h-24 w-24 items-center justify-center text-xs text-[rgb(var(--claw-muted))]">
                   Image
@@ -175,6 +204,7 @@ export function AttachmentStrip({
                   href ? "hover:bg-[rgba(255,255,255,0.04)]" : ""
                 )}
                 onClick={(event) => {
+                  event.stopPropagation();
                   if (!href) event.preventDefault();
                 }}
               >
@@ -189,6 +219,56 @@ export function AttachmentStrip({
           </div>
         );
       })}
+
+      {previewImage ? (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-[rgba(4,6,10,0.82)] p-4 backdrop-blur-md"
+          data-testid="attachment-preview-dialog"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setPreviewImage(null);
+          }}
+        >
+          <div className="w-full max-w-5xl overflow-hidden rounded-[28px] border border-[rgba(255,255,255,0.14)] bg-[linear-gradient(180deg,rgba(16,19,25,0.98),rgba(8,10,14,0.96))] shadow-[0_28px_100px_rgba(0,0,0,0.55)]">
+            <div className="flex items-start justify-between gap-3 border-b border-[rgba(255,255,255,0.08)] px-4 py-4 sm:px-5">
+              <div className="min-w-0">
+                <div className="truncate text-base font-semibold text-[rgb(var(--claw-text))]">{previewImage.fileName}</div>
+                <div className="mt-1 text-xs uppercase tracking-[0.18em] text-[rgba(148,163,184,0.8)]">{previewImage.mimeType}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                {previewImage.downloadHref ? (
+                  <a
+                    href={previewImage.downloadHref}
+                    download={previewImage.fileName}
+                    className="inline-flex h-10 items-center justify-center rounded-full border border-[rgba(255,255,255,0.14)] px-4 text-sm font-medium text-[rgb(var(--claw-text))] transition hover:border-[rgba(77,171,158,0.32)] hover:text-[rgb(var(--claw-accent-2))]"
+                  >
+                    Download
+                  </a>
+                ) : null}
+                <button
+                  type="button"
+                  aria-label="Close attachment preview"
+                  className="flex h-10 w-10 items-center justify-center rounded-full border border-[rgba(255,255,255,0.14)] text-[rgb(var(--claw-muted))] transition hover:border-[rgba(255,90,45,0.35)] hover:text-[rgb(var(--claw-text))]"
+                  onClick={() => setPreviewImage(null)}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                    <path d="M18 6 6 18" />
+                    <path d="m6 6 12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div className="flex max-h-[calc(100vh-9rem)] items-center justify-center p-3 sm:p-5">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={previewImage.src}
+                alt={previewImage.fileName}
+                className="max-h-[calc(100vh-13rem)] w-auto max-w-full rounded-[20px] object-contain"
+                draggable={false}
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

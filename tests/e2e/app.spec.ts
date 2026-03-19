@@ -19,7 +19,11 @@ async function ensureBoardOptionsVisible(page: Page) {
 
 test("home loads unified view", async ({ page }) => {
   await page.goto("/u");
-  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+  await expect(
+    page.getByRole("textbox", {
+      name: "Type a message. Pick a topic if you want to continue a conversation. Enter sends. Shift+Enter adds a newline.",
+    })
+  ).toBeVisible();
   await ensureBoardOptionsVisible(page);
   await expect(page.getByRole("button", { name: /Show full messages|Hide full messages/i })).toBeVisible();
 });
@@ -34,11 +38,11 @@ test("dashboard route loads legacy dashboard widgets", async ({ page }) => {
 test("legacy routes redirect to unified view", async ({ page }) => {
   await page.goto("/topics");
   await expect(page).toHaveURL(/\/u$/);
-  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Board View" })).toBeVisible();
 
   await page.goto("/tasks");
   await expect(page).toHaveURL(/\/u$/);
-  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Board View" })).toBeVisible();
 });
 
 test("logs route loads raw log hopper", async ({ page }) => {
@@ -92,9 +96,16 @@ test("board nav stays expanded and keeps the last selected task highlighted off-
 
 test("unified view expands topics and tasks", async ({ page }) => {
   await page.goto("/u");
-  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+  await expect(
+    page.getByRole("textbox", {
+      name: "Type a message. Pick a topic if you want to continue a conversation. Enter sends. Shift+Enter adds a newline.",
+    })
+  ).toBeVisible();
   await page.getByRole("button", { name: "Expand topic ClawBoard", exact: true }).click();
   await expect(page.getByText("Ship onboarding wizard")).toBeVisible();
+  const topicComposer = page.getByTestId("topic-chat-composer-topic-1");
+  await expect(topicComposer).toBeVisible();
+  await expect(topicComposer.getByRole("textbox")).toBeFocused();
   await page.getByRole("button", { name: "Expand task Ship onboarding wizard", exact: true }).click();
 
   await ensureBoardOptionsVisible(page);
@@ -105,6 +116,174 @@ test("unified view expands topics and tasks", async ({ page }) => {
   }
 
   await expect(page.getByText("Scaffolded onboarding wizard layout", { exact: false })).toBeVisible();
+});
+
+test("topic expand focus setting can disable composer autofocus", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("clawboard.unified.focusComposerOnTopicExpand", "false");
+  });
+
+  await page.goto("/u");
+  await expect(
+    page.getByRole("textbox", {
+      name: "Type a message. Pick a topic if you want to continue a conversation. Enter sends. Shift+Enter adds a newline.",
+    })
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Expand topic ClawBoard", exact: true }).click();
+
+  const topicComposer = page.getByTestId("topic-chat-composer-topic-1");
+  await expect(topicComposer).toBeVisible();
+  await expect(topicComposer.getByRole("textbox")).not.toBeFocused();
+});
+
+test("topic cards use classifier summary text instead of literal chat content", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-summary-chip-${suffix}`;
+  const topicName = `Summary Topic ${suffix}`;
+  const digestText = "Checked wheel reports; compare safer rim options";
+  const literalOlderContent = `literal older content ${suffix} should not render in the topic subtitle`;
+  const literalLatestContent = `literal latest content ${suffix} should not render in the topic subtitle either`;
+  const conciseSummary = "Compared safer rim options; warranty follow-up next";
+  const base = Date.now() - 5_000;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const patchTopic = await request.patch(`${apiBase}/api/topics/${topicId}`, {
+    data: { digest: digestText, digestUpdatedAt: new Date(base).toISOString() },
+  });
+  expect(patchTopic.ok()).toBeTruthy();
+
+  const olderLog = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      type: "conversation",
+      agentId: "assistant",
+      classificationStatus: "classified",
+      content: literalOlderContent,
+      createdAt: new Date(base + 1_000).toISOString(),
+    },
+  });
+  expect(olderLog.ok()).toBeTruthy();
+
+  const latestLog = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      type: "conversation",
+      agentId: "assistant",
+      classificationStatus: "classified",
+      content: literalLatestContent,
+      summary: conciseSummary,
+      createdAt: new Date(base + 2_000).toISOString(),
+    },
+  });
+  expect(latestLog.ok()).toBeTruthy();
+
+  await page.goto("/u");
+  await expect(
+    page.getByRole("textbox", {
+      name: "Type a message. Pick a topic if you want to continue a conversation. Enter sends. Shift+Enter adds a newline.",
+    })
+  ).toBeVisible();
+
+  const topicCard = page.locator(`[data-topic-card-id='${topicId}']`).first();
+  await expect(topicCard).toBeVisible();
+  await expect(topicCard.getByText(conciseSummary, { exact: false })).toBeVisible();
+  await expect(topicCard.getByText(literalOlderContent, { exact: false })).toHaveCount(0);
+  await expect(topicCard.getByText(literalLatestContent, { exact: false })).toHaveCount(0);
+  await expect(topicCard.getByText(digestText, { exact: false })).toHaveCount(0);
+});
+
+test("topic cards fall back to topic digest when recent chat lacks a classifier summary", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-digest-chip-${suffix}`;
+  const topicName = `Digest Topic ${suffix}`;
+  const digestText = "Classifier digest: checked latest state; next verify fitment";
+  const literalContent = `literal pending body ${suffix} should not become the subtitle`;
+  const base = Date.now() - 5_000;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const patchTopic = await request.patch(`${apiBase}/api/topics/${topicId}`, {
+    data: { digest: digestText, digestUpdatedAt: new Date(base).toISOString() },
+  });
+  expect(patchTopic.ok()).toBeTruthy();
+
+  const logResponse = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      type: "conversation",
+      agentId: "user",
+      classificationStatus: "classified",
+      content: literalContent,
+      createdAt: new Date(base + 1_000).toISOString(),
+    },
+  });
+  expect(logResponse.ok()).toBeTruthy();
+
+  await page.goto("/u");
+  await expect(
+    page.getByRole("textbox", {
+      name: "Type a message. Pick a topic if you want to continue a conversation. Enter sends. Shift+Enter adds a newline.",
+    })
+  ).toBeVisible();
+
+  const topicCard = page.locator(`[data-topic-card-id='${topicId}']`).first();
+  await expect(topicCard).toBeVisible();
+  await expect(topicCard).toContainText("Classifier digest: checked latest state; next verify");
+  await expect(topicCard.getByText(literalContent, { exact: false })).toHaveCount(0);
+});
+
+test("topic cards ignore low-signal summaries that just repeat the raw message", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-ignore-low-signal-${suffix}`;
+  const topicName = `Ignore Low Signal ${suffix}`;
+  const digestText = "Verified Expo recovery; waiting on browser confirmation";
+  const rawText = "I will give it a try";
+  const base = Date.now() - 5_000;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  const patchTopic = await request.patch(`${apiBase}/api/topics/${topicId}`, {
+    data: { digest: digestText, digestUpdatedAt: new Date(base).toISOString() },
+  });
+  expect(patchTopic.ok()).toBeTruthy();
+
+  const logResponse = await request.post(`${apiBase}/api/log`, {
+    data: {
+      topicId,
+      type: "conversation",
+      agentId: "user",
+      classificationStatus: "classified",
+      content: rawText,
+      summary: rawText,
+      createdAt: new Date(base + 1_000).toISOString(),
+    },
+  });
+  expect(logResponse.ok()).toBeTruthy();
+
+  await page.goto("/u");
+  await expect(
+    page.getByRole("textbox", {
+      name: "Type a message. Pick a topic if you want to continue a conversation. Enter sends. Shift+Enter adds a newline.",
+    })
+  ).toBeVisible();
+
+  const topicCard = page.locator(`[data-topic-card-id='${topicId}']`).first();
+  await expect(topicCard).toBeVisible();
+  await expect(topicCard).toContainText("Verified Expo recovery; waiting on browser confirmation");
+  await expect(topicCard.getByText(rawText, { exact: false })).toHaveCount(0);
 });
 
 test("unified board uses freeform composer and hides top-level new topic button", async ({ page }) => {
@@ -166,7 +345,7 @@ test("instance title updates live after config changes", async ({ page, request 
   const nextTitle = `ClawBoard Live ${Date.now()}`;
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   await expect(page.getByText("ClawBoard").first()).toBeVisible();
 
   const response = await request.post(`${apiBase}/api/config`, {
@@ -221,7 +400,7 @@ test("browser API calls use the configured mock API base by default in Playwrigh
   });
 
   await page.goto(`http://localhost:3050/u/topic/${topicId}/task/${taskId}?reveal=1`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   const composer = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
   await expect(composer).toBeVisible();
@@ -276,7 +455,7 @@ test("explicit local loopback api base still uses same-origin proxy for browser 
   });
 
   await page.goto(`${webOrigin}/u`);
-  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Board View" })).toBeVisible();
 
   await expect
     .poll(() => sameOriginConfigHits)

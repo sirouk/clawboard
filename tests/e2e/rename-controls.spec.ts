@@ -25,7 +25,7 @@ test("rename pencils are visible but disabled in read-only mode", async ({ page 
   });
 
   await page.goto("/u");
-  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Board View" })).toBeVisible();
   await page.getByRole("button", { name: /ClawBoard/ }).first().click();
 
   await expect(page.locator("[data-testid^='rename-topic-']").first()).toBeDisabled();
@@ -106,7 +106,7 @@ test("rename pencils save topic/task names and queue reindex requests", async ({
   });
 
   await page.goto("/u");
-  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Board View" })).toBeVisible();
   await page.getByRole("button", { name: /ClawBoard/ }).first().click();
 
   const newTopicName = "ClawBoard Renamed";
@@ -213,7 +213,7 @@ test("rename inputs accept spaces (no spacebar hotkeys)", async ({ page, request
   });
 
   await page.goto(`/u/topic/${topicId}`);
-  await expect(page.getByRole("heading", { name: "Unified View" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Board View" })).toBeVisible();
 
   const typeWithRetries = async (testId: string, value: string) => {
     for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -237,4 +237,36 @@ test("rename inputs accept spaces (no spacebar hotkeys)", async ({ page, request
   // Task rename input should accept spaces via real key events.
   await page.getByTestId(`rename-task-${taskId}`).click();
   await typeWithRetries(`rename-task-input-${taskId}`, "Task With Space");
+});
+
+test("topic inline edit targets do not toggle topic expansion on click", async ({ page, request }) => {
+  const apiBase = process.env.PLAYWRIGHT_API_BASE ?? "http://localhost:3051";
+  const suffix = Date.now();
+  const topicId = `topic-inline-toggle-${suffix}`;
+  const topicName = `Inline Toggle ${suffix}`;
+
+  const createTopic = await request.post(`${apiBase}/api/topics`, {
+    data: { id: topicId, name: topicName, pinned: false, tags: ["space-product", "ux"] },
+  });
+  expect(createTopic.ok()).toBeTruthy();
+
+  await page.goto("/u");
+
+  const topicCard = page.locator(`[data-topic-card-id="${topicId}"]`).first();
+  const expandedBody = page.getByTestId(`topic-expanded-body-${topicId}`);
+  await expect(topicCard).toBeVisible();
+  await expect(expandedBody).toHaveCount(0);
+
+  await topicCard.getByTitle(topicName).click();
+  await expect(expandedBody).toHaveCount(0);
+
+  await page.getByTestId(`topic-color-trigger-${topicId}`).click();
+  await expect(expandedBody).toHaveCount(0);
+
+  await topicCard.getByTitle("Double click to edit tags").first().click();
+  await expect(expandedBody).toHaveCount(0);
+
+  await topicCard.getByTitle(topicName).dblclick();
+  await expect(page.getByTestId(`rename-topic-input-${topicId}`)).toBeVisible();
+  await expect(expandedBody).toHaveCount(0);
 });

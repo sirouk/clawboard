@@ -10,7 +10,7 @@ test("stale topic upsert does not resurrect a deleted topic", async ({ page, req
   const topic = (await createTopic.json()) as { id: string; name: string; updatedAt?: string; createdAt?: string };
 
   await page.goto("/u");
-  await page.getByRole("link", { name: "Unified View" }).waitFor();
+  await page.getByRole("link", { name: "Board View" }).waitFor();
   const topicCard = page.locator(`[data-topic-card-id="${topic.id}"]`).first();
   await expect(topicCard).toBeVisible();
 

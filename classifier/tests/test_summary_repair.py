@@ -134,7 +134,60 @@ class SummaryRepairTests(unittest.TestCase):
         # The proposed task id is not in valid_task_ids, so it must not be applied.
         self.assertIsNone(patched[0][1].get("taskId"))
 
+    def test_classify_session_skips_low_signal_fallback_summary(self):
+        session_key = "channel:classifier-tests:low-signal-fallback"
+        logs = [
+            {
+                "id": "log-1",
+                "type": "conversation",
+                "agentId": "user",
+                "content": "I will give it a try",
+                "classificationStatus": "pending",
+                "classificationAttempts": 0,
+                "createdAt": "2099-01-01T00:00:00.000Z",
+                "source": {"sessionKey": session_key},
+            }
+        ]
+
+        patched: list[tuple[str, dict]] = []
+
+        def fake_list_logs_by_session(_sk: str, **kwargs):
+            self.assertEqual(_sk, session_key)
+            if kwargs.get("classificationStatus") == "pending":
+                return logs
+            return logs
+
+        def fake_patch_log(log_id: str, patch_payload: dict):
+            patched.append((log_id, patch_payload))
+
+        def fake_call_classifier(_window, _pending_ids, *_args, **_kwargs):
+            return {
+                "topic": {"id": "topic-1", "name": "White screen check", "create": False},
+                "task": None,
+                "summaries": [],
+            }
+
+        with (
+            patch.object(c, "list_logs_by_session", side_effect=fake_list_logs_by_session),
+            patch.object(c, "patch_log", side_effect=fake_patch_log),
+            patch.object(c, "_llm_enabled", return_value=True),
+            patch.object(c, "call_classifier", side_effect=fake_call_classifier),
+            patch.object(c, "call_summary_repair", return_value={}),
+            patch.object(c, "build_notes_index", return_value={}),
+            patch.object(c, "memory_snippets", return_value=[]),
+            patch.object(c, "ensure_topic_index_seeded", return_value=None),
+            patch.object(c, "topic_candidates", return_value=[]),
+            patch.object(c, "task_candidates", return_value=[]),
+            patch.object(c, "list_topics", return_value=[]),
+            patch.object(c, "upsert_topic", return_value={"id": "topic-1", "name": "White screen check"}),
+            patch.object(c, "list_tasks", return_value=[]),
+            patch.object(c, "ensure_task_index_seeded", return_value=None),
+        ):
+            c.classify_session(session_key)
+
+        self.assertTrue(patched)
+        self.assertNotIn("summary", patched[0][1])
+
 
 if __name__ == "__main__":
     unittest.main()
-

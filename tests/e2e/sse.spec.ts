@@ -20,7 +20,7 @@ test("sse updates render without refresh", async ({ page, request }) => {
   expect(createTask.ok()).toBeTruthy();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   await page.getByTestId("unified-composer-textarea").first().waitFor();
   await expect(page.locator(`[data-task-card-id="${taskId}"]`).first()).toBeVisible();
   const topicExpand = page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true });
@@ -77,7 +77,7 @@ test("sse patches update log content without refresh", async ({ page, request })
   expect(createTask.ok()).toBeTruthy();
 
   await page.goto(`/u/topic/${topicId}/task/${taskId}`);
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
   await page.getByTestId("unified-composer-textarea").first().waitFor();
   await expect(page.locator(`[data-task-card-id="${taskId}"]`).first()).toBeVisible();
   const topicExpand = page.getByRole("button", { name: `Expand topic ${topicName}`, exact: true });

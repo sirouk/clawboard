@@ -35,7 +35,7 @@ test("messages can be deleted and disappear immediately in the UI", async ({ pag
   const log = await logRes.json();
 
   await page.goto("/u");
-  await page.getByRole("heading", { name: "Unified View" }).waitFor();
+  await page.getByRole("heading", { name: "Board View" }).waitFor();
 
   await page.locator("div[role='button']").filter({ hasText: topicName }).first().click();
   await page.locator("div[role='button']").filter({ hasText: taskName }).first().click();

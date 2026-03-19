@@ -22,7 +22,7 @@ test.describe("Real Chat E2E", () => {
     expect(createTask.ok()).toBeTruthy();
 
     await page.goto(`/u/topic/${topicId}/task/${taskId}?reveal=1`);
-    await page.getByRole("heading", { name: "Unified View" }).waitFor();
+    await page.getByRole("heading", { name: "Board View" }).waitFor();
 
     const composer = page.locator('[data-testid="unified-composer-textarea"]:visible').first();
     await expect(composer).toBeVisible();

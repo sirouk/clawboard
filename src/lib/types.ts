@@ -15,6 +15,8 @@ export type Topic = {
   dueDate?: string | null;
   snoozedUntil?: string | null;
   tags?: string[];
+  digest?: string | null;
+  digestUpdatedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 };
