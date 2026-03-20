@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Create specialist agent workspaces (workspace-coding, workspace-docs, workspace-web, workspace-social)
+# Create worker agent workspaces (for example workspace-worker)
 # and deploy minimal AGENTS.md / SOUL.md from agent-templates. Idempotent. Does not touch LLM config.
+# Worker agents keep separate workspace roots; shared repo access should come from
+# explicit delegated paths, not a workspace-local projects symlink.
 # Usage: OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}" [INSTALL_DIR=<clawboard-repo>] bash scripts/setup_specialist_agents.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,7 +14,7 @@ OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-$OPENCLAW_HOME/openclaw.json}"
 
 TEMPLATES_BASE="$INSTALL_DIR/agent-templates"
-SPECIALISTS="coding docs web social"
+SPECIALISTS="worker"
 
 log_info() { echo -e "\033[0;34minfo:\033[0m $1"; }
 log_success() { echo -e "\033[0;32msuccess:\033[0m $1"; }
@@ -149,30 +151,6 @@ for name in $SPECIALISTS; do
   fi
   mkdir -p "$ws_dir"
   mkdir -p "$ws_dir/memory" "$ws_dir/obsidian"
-
-  # Shared projects directory: all agents share the main workspace's projects/
-  # folder via symlink. This way every specialist can access the same code
-  # checkouts while keeping its own memory, obsidian, and identity files separate.
-  main_ws="$(resolve_workspace_for_agent "main" 2>/dev/null || true)"
-  main_ws="${main_ws:-$OPENCLAW_HOME/workspace}"
-  main_projects="$main_ws/projects"
-  agent_projects="$ws_dir/projects"
-  if [ -d "$main_projects" ] && [ ! -e "$agent_projects" ]; then
-    # Use a relative symlink so the setup stays portable across machines.
-    local rel_target=""
-    if command -v python3 >/dev/null 2>&1; then
-      rel_target="$(python3 -c "import os; print(os.path.relpath('$main_projects', '$ws_dir'))" 2>/dev/null || true)"
-    fi
-    if [ -n "$rel_target" ]; then
-      ln -s "$rel_target" "$agent_projects"
-      log_info "Linked $name projects -> $rel_target (shared code workspace)."
-    else
-      ln -s "$main_projects" "$agent_projects"
-      log_info "Linked $name projects -> $main_projects (shared code workspace)."
-    fi
-  elif [ -L "$agent_projects" ]; then
-    log_info "$name projects symlink already present."
-  fi
 
   deployed=0
   unchanged=0

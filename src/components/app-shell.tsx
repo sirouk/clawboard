@@ -1707,7 +1707,19 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                                  : `${filteredTopics.length} topics`
 	                                : `${filteredTopics.length} topics`}
 	                            </span>
-	                            {normalizedTopicSearch.length > 0 && topicSemanticSearch.error ? <span>Search failed</span> : null}
+	                            <div className="flex items-center gap-2">
+	                              {normalizedTopicSearch.length > 0 && topicSemanticSearch.error ? <span>Search failed</span> : null}
+	                              <button
+	                                type="button"
+	                                className="text-[11px] text-[rgb(var(--claw-muted))] transition hover:text-[rgb(var(--claw-text))]"
+	                                onClick={() => {
+	                                  const el = document.querySelector<HTMLTextAreaElement>("[data-testid='unified-composer-textarea']");
+	                                  if (el) { el.scrollIntoView({ block: "nearest" }); el.focus(); }
+	                                }}
+	                              >
+	                                + New
+	                              </button>
+	                            </div>
 	                          </div>
 
 			                          <div className="mt-3 max-h-[52vh] space-y-1 overflow-y-auto overscroll-contain pr-1">

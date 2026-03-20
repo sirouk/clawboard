@@ -6828,8 +6828,8 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     twoColumn ? "2-column board" : "1-column board",
   ].join(" · ");
   const unifiedComposerPlaceholder = mdUp
-    ? "Type a message. Pick a topic if you want to continue a conversation.\nEnter sends. Shift+Enter adds a newline."
-    : "Type a message or pick a target.\nEnter sends. Shift+Enter adds a newline.";
+    ? "Type a new message or search topics…\nEnter sends. Shift+Enter adds a new line."
+    : "Type a new message or search topics…\nEnter sends. Shift+Enter adds a new line.";
   const renderTopicViewSelect = (className = "w-full") => (
     <Select
       value={topicView}

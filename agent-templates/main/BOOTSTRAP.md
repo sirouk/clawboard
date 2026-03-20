@@ -3,7 +3,7 @@
 ## Delegation Rails
 
 Every delegated run must create three durable artifacts:
-1. A specialist session started with `sessions_spawn(...)`.
+1. A worker session started with `sessions_spawn(...)`.
 2. A ClawBoard topic state update when a board `topicId` is available:
    - `status: "doing"`
    - tags include `delegating`, `agent:<agentId>`, `session:<childSessionKey>`
@@ -41,27 +41,27 @@ When a follow-up fires:
    - read the injected current-topic thread before any extra tool call or ledger write,
    - treat that wake-up as internal supervision, not a fresh user request,
    - if the result is already visible there, do not restate or paraphrase the full body,
-   - if sibling specialists from the same workflow are still active, keep partial results internal unless they change the user's next decision or the user has gone `>5m` without a visible update,
+   - if sibling worker runs from the same workflow are still active, keep partial results internal unless they change the user's next decision or the user has gone `>5m` without a visible update,
    - when keeping a partial result internal, do not emit a user-facing "checking the others" or "awaiting the rest" bookkeeping reply,
    - do not use `sessions_send(...)` as a routine result-polling shortcut when the result should already surface in-thread,
-   - do not re-dispatch specialists that already spawned or completed for the same topic workflow unless the run is clearly lost,
+   - do not re-dispatch worker runs that already spawned or completed for the same topic workflow unless the run is clearly lost,
    - close the loop by validating the work, adding only the key delta/caveats, and stating whether the request is satisfied or what decision remains,
    - clear the topic delegation tags (and any explicit compatibility task tags),
    - mark the topic done when appropriate,
    - stop scheduling follow-ups.
-4. If the specialist is still running:
+4. If the worker is still running:
    - send a progress update when elapsed time is greater than 5 minutes,
    - schedule the next rung on the ladder,
    - never extend beyond `1h`.
-5. If `session_status` cannot find the specialist session, or the run is terminal and no queued completion was relayed:
-   - re-spawn the same specialist with the same task goal,
+5. If `session_status` cannot find the worker session, or the run is terminal and no queued completion was relayed:
+   - re-spawn the same worker with the same task goal,
    - update the ClawBoard topic tags with the new `session:<childSessionKey>` (plus explicit compatibility task tags only when needed),
    - reset the ladder back to `1m`.
-6. If the specialist failed terminally:
+6. If the worker failed terminally:
    - report the failure to the user,
    - clear delegation tags on the topic (and any explicit compatibility task mirror),
    - do not silently retry forever.
-7. If the specialist is blocked on a real user decision:
+7. If the worker is blocked on a real user decision:
    - surface the blocker immediately,
    - present the smallest decision needed next,
    - keep ownership of the follow-up after the user answers.
@@ -80,5 +80,5 @@ ClawBoard is the external ledger. If prior state seems missing, check ClawBoard 
 The user must always receive a text reply.
 - Delegated now: say who owns it and when the next checkpoint will happen.
 - Still running: say what is running and the next check ETA.
-- Completed: curate and deliver. If the specialist result is already visible in the thread, do not mirror the whole body back.
+- Completed: curate and deliver. If the worker result is already visible in the thread, do not mirror the whole body back.
 - Failed: say what failed and what happens next.

@@ -130,6 +130,8 @@ declare -a OPENCLAW_CFG_TXN_KEYS=()
 declare -a OPENCLAW_CFG_TXN_EXPECTED=()
 declare -a OPENCLAW_CFG_TXN_REQUIRED=()
 OPENCLAW_DOCTOR_FIX_ATTEMPTED=false
+OPENCLAW_CONFIG_CHANGED_THIS_RUN=false
+OPENCLAW_MEMORY_INDEX_NEEDED=false
 
 openclaw_doctor_fix_safe() {
   if openclaw doctor --fix --non-interactive --yes >/dev/null 2>&1; then
@@ -280,6 +282,13 @@ openclaw_cfg_txn_commit() {
   if [ "$OPENCLAW_CFG_TXN_ACTIVE" != true ]; then
     return 0
   fi
+  local changed=false
+  if [ -n "$OPENCLAW_CFG_TXN_SNAPSHOT" ] && [ -f "$OPENCLAW_CFG_TXN_SNAPSHOT" ]; then
+    if ! cmp -s "$OPENCLAW_CFG_TXN_SNAPSHOT" "$OPENCLAW_CONFIG_PATH"; then
+      changed=true
+      OPENCLAW_CONFIG_CHANGED_THIS_RUN=true
+    fi
+  fi
   OPENCLAW_CFG_TXN_ACTIVE=false
   if [ -n "$OPENCLAW_CFG_TXN_SNAPSHOT" ] && [ -f "$OPENCLAW_CFG_TXN_SNAPSHOT" ]; then
     rm -f "$OPENCLAW_CFG_TXN_SNAPSHOT"
@@ -288,7 +297,11 @@ openclaw_cfg_txn_commit() {
   OPENCLAW_CFG_TXN_KEYS=()
   OPENCLAW_CFG_TXN_EXPECTED=()
   OPENCLAW_CFG_TXN_REQUIRED=()
-  log_success "Committed OpenClaw bootstrap config transaction."
+  if [ "$changed" = true ]; then
+    log_success "Committed OpenClaw bootstrap config transaction."
+  else
+    log_info "OpenClaw bootstrap config already matched the desired state."
+  fi
 }
 
 openclaw_cfg_parse_json() {
@@ -905,17 +918,70 @@ discard_backup_path() {
   rm -rf "$backup" >/dev/null 2>&1 || true
 }
 
+directory_trees_match() {
+  local src="$1"
+  local dst="$2"
+  [ -d "$src" ] || return 1
+  [ -d "$dst" ] || return 1
+
+  if command -v diff >/dev/null 2>&1; then
+    diff -qr "$src" "$dst" >/dev/null 2>&1
+    return $?
+  fi
+
+  python3 - "$src" "$dst" <<'PY' >/dev/null 2>&1
+import filecmp
+import sys
+
+def same_tree(left, right):
+    cmp = filecmp.dircmp(left, right)
+    if cmp.left_only or cmp.right_only or cmp.funny_files:
+        return False
+    (_, mismatch, errors) = filecmp.cmpfiles(left, right, cmp.common_files, shallow=False)
+    if mismatch or errors:
+        return False
+    for name in cmp.common_dirs:
+        if not same_tree(f"{left}/{name}", f"{right}/{name}"):
+            return False
+    return True
+
+raise SystemExit(0 if same_tree(sys.argv[1], sys.argv[2]) else 1)
+PY
+}
+
+normalized_json_payloads_match() {
+  local actual_raw="${1:-}"
+  local expected_raw="${2:-}"
+  local actual_norm expected_norm
+
+  actual_norm="$(openclaw_cfg_parse_json "$actual_raw" 2>/dev/null || true)"
+  expected_norm="$(openclaw_cfg_parse_json "$expected_raw" 2>/dev/null || true)"
+  [ -n "$actual_norm" ] && [ -n "$expected_norm" ] && [ "$actual_norm" = "$expected_norm" ]
+}
+
 install_clawboard_logger_plugin_transactional() {
   local plugin_src="$1"
   local plugin_ext_dir="$2"
   local plugin_config_json="${3:-}"
   local plugin_enabled_json="${4:-false}"
   local cfg_snapshot ext_backup stage_root staged_dir preview
+  local current_plugin_config current_plugin_enabled
 
   cfg_snapshot=""
   ext_backup=""
   stage_root=""
   staged_dir=""
+  current_plugin_config=""
+  current_plugin_enabled=""
+
+  if [ -d "$plugin_ext_dir" ] && directory_trees_match "$plugin_src" "$plugin_ext_dir"; then
+    current_plugin_config="$(openclaw_cfg_get_json plugins.entries.clawboard-logger.config)"
+    current_plugin_enabled="$(openclaw_cfg_get_json plugins.entries.clawboard-logger.enabled)"
+    if { [ -z "$plugin_config_json" ] || normalized_json_payloads_match "$current_plugin_config" "$plugin_config_json"; } \
+      && normalized_json_payloads_match "$current_plugin_enabled" "$plugin_enabled_json"; then
+      return 10
+    fi
+  fi
 
   ensure_openclaw_config_file || return 1
   cfg_snapshot="$(snapshot_existing_file "$OPENCLAW_CONFIG_PATH")" || return 1
@@ -928,7 +994,7 @@ install_clawboard_logger_plugin_transactional() {
     log_info "Staged existing logger plugin payload at $ext_backup."
   fi
 
-  sanitize_clawboard_logger_stale_refs
+  sanitize_clawboard_logger_stale_refs >/dev/null 2>&1 || true
 
   # OpenClaw validates discovered plugins against their config schema on CLI startup.
   # Seed a valid config entry before the plugin directory becomes visible so later
@@ -1317,6 +1383,16 @@ CONTEXT_CACHE_MAX_ENTRIES_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_CACHE_MAX_ENTRIES
 CONTEXT_USE_CACHE_ON_FAILURE_OVERRIDE="${CLAWBOARD_LOGGER_CONTEXT_USE_CACHE_ON_FAILURE:-}"
 SEARCH_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="${CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS:-}"
 VECTOR_INCLUDE_TOOL_CALL_LOGS_OVERRIDE="${CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS:-}"
+WEB_SEARCH_PROVIDER_VALUE="${CLAWBOARD_WEB_SEARCH_PROVIDER:-}"
+SEARXNG_BASE_URL_VALUE="${SEARXNG_BASE_URL:-http://localhost:8888}"
+BRAVE_API_KEY_VALUE="${BRAVE_API_KEY:-}"
+WEB_SEARCH_PROVIDER_STATUS="not-run"
+BLUESKY_HANDLE_VALUE="${BLUESKY_HANDLE:-}"
+BLUESKY_APP_PASSWORD_VALUE="${BLUESKY_APP_PASSWORD:-}"
+BLUESKY_SETUP_STATUS="not-run"
+MASTODON_INSTANCE_URL_VALUE="${MASTODON_INSTANCE_URL:-}"
+MASTODON_ACCESS_TOKEN_VALUE="${MASTODON_ACCESS_TOKEN:-}"
+MASTODON_SETUP_STATUS="not-run"
 SKILL_INSTALL_MODE="${CLAWBOARD_SKILL_INSTALL_MODE:-symlink}"
 AGENTIC_TEAM_SETUP_MODE="${CLAWBOARD_AGENTIC_TEAM_SETUP:-ask}"
 AGENTIC_TEAM_SETUP_STATUS="not-run"
@@ -1391,6 +1467,34 @@ while [ $# -gt 0 ]; do
     --openclaw-base-url)
       [ $# -ge 2 ] || log_error "--openclaw-base-url requires a value"
       OPENCLAW_BASE_URL_VALUE="$2"; OPENCLAW_BASE_URL_EXPLICIT=true; shift 2
+      ;;
+    --search-provider)
+      [ $# -ge 2 ] || log_error "--search-provider requires a value"
+      WEB_SEARCH_PROVIDER_VALUE="$2"; shift 2
+      ;;
+    --searxng-base-url)
+      [ $# -ge 2 ] || log_error "--searxng-base-url requires a value"
+      SEARXNG_BASE_URL_VALUE="$2"; shift 2
+      ;;
+    --brave-api-key)
+      [ $# -ge 2 ] || log_error "--brave-api-key requires a value"
+      BRAVE_API_KEY_VALUE="$2"; shift 2
+      ;;
+    --bluesky-handle)
+      [ $# -ge 2 ] || log_error "--bluesky-handle requires a value"
+      BLUESKY_HANDLE_VALUE="$2"; shift 2
+      ;;
+    --bluesky-app-password)
+      [ $# -ge 2 ] || log_error "--bluesky-app-password requires a value"
+      BLUESKY_APP_PASSWORD_VALUE="$2"; shift 2
+      ;;
+    --mastodon-instance-url)
+      [ $# -ge 2 ] || log_error "--mastodon-instance-url requires a value"
+      MASTODON_INSTANCE_URL_VALUE="$2"; shift 2
+      ;;
+    --mastodon-access-token)
+      [ $# -ge 2 ] || log_error "--mastodon-access-token requires a value"
+      MASTODON_ACCESS_TOKEN_VALUE="$2"; shift 2
       ;;
     --openclaw-gateway-device-auth) OPENCLAW_GATEWAY_DEVICE_AUTH_OVERRIDE="1"; shift ;;
     --no-openclaw-gateway-device-auth) OPENCLAW_GATEWAY_DEVICE_AUTH_OVERRIDE="0"; shift ;;
@@ -1488,10 +1592,18 @@ Environment overrides:
   CLAWBOARD_DIR=<path>        Install directory (overrides everything)
   CLAWBOARD_PARENT_DIR=<path> Install parent directory (repo goes in <path>/clawboard)
   OPENCLAW_HOME=<path>        OpenClaw home directory (default: ~/.openclaw)
+  CLAWBOARD_WEB_SEARCH_PROVIDER=<ask|searxng|brave|skip>
+                              Bootstrap preference for worker web search wiring (default: ask)
+  SEARXNG_BASE_URL=<url>      Base URL for local SearXNG API (default: http://localhost:8888)
+  BRAVE_API_KEY=<key>         Brave Search API key for bootstrap wiring
+  BLUESKY_HANDLE=<handle>     Optional Bluesky handle for worker social API tasks
+  BLUESKY_APP_PASSWORD=<pw>   Optional Bluesky app password for worker social API tasks
+  MASTODON_INSTANCE_URL=<url> Optional Mastodon instance URL for worker social API tasks
+  MASTODON_ACCESS_TOKEN=<key> Optional Mastodon access token for worker social API tasks
   CLAWBOARD_SKILL_INSTALL_MODE=<copy|symlink>
                               Skill install strategy for \$OPENCLAW_HOME/skills (default: symlink)
   CLAWBOARD_AGENTIC_TEAM_SETUP=<ask|always|never>
-                              Offer/run specialist team enrollment during bootstrap (default: ask)
+                              Offer/run worker-agent enrollment during bootstrap (default: ask)
   CLAWBOARD_MEMORY_BACKUP_SETUP=<ask|always|never>
                               Offer/run memory+ClawBoard backup setup during bootstrap (default: ask)
   CLAWBOARD_OBSIDIAN_MEMORY_SETUP=<ask|always|never>
@@ -1517,6 +1629,20 @@ Environment overrides:
                        Browser-facing UI URL shown in output summary
   --openclaw-base-url <url>
                        OpenClaw gateway URL used by classifier (writes OPENCLAW_BASE_URL)
+  --search-provider <searxng|brave|skip>
+                       Preferred worker web search provider wiring during bootstrap
+  --searxng-base-url <url>
+                       SearXNG base URL written to .env when provider=searxng
+  --brave-api-key <key>
+                       Brave Search API key written to .env when provider=brave
+  --bluesky-handle <handle>
+                       Optional Bluesky handle written to .env for worker API usage
+  --bluesky-app-password <pw>
+                       Optional Bluesky app password written to .env for worker API usage
+  --mastodon-instance-url <url>
+                       Optional Mastodon instance URL written to .env for worker API usage
+  --mastodon-access-token <key>
+                       Optional Mastodon access token written to .env for worker API usage
   --openclaw-gateway-device-auth
                        Enable OPENCLAW_GATEWAY_USE_DEVICE_AUTH=1 for backend gateway RPC (advanced)
   --no-openclaw-gateway-device-auth
@@ -1552,9 +1678,9 @@ Environment overrides:
                        Exclude tool call/result/error action logs from semantic indexing + retrieval
                        (writes CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS=0; default)
   --setup-agentic-team
-                      Enroll coding/docs/web/social specialists during bootstrap
+                      Enroll the worker agent during bootstrap
   --skip-agentic-team-setup
-                      Skip specialist enrollment prompt/setup
+                      Skip worker-agent enrollment prompt/setup
   --setup-memory-backup
                       Run memory+ClawBoard backup setup at the end of bootstrap (interactive)
   --skip-memory-backup-setup
@@ -1855,6 +1981,184 @@ prompt_yes_no_tty() {
   [ "$input" = "y" ]
 }
 
+prompt_secret_tty() {
+  local prompt="$1"
+  local default_value="${2:-}"
+  local input=""
+
+  if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    printf "%s" "$default_value"
+    return
+  fi
+
+  if [ -n "$default_value" ]; then
+    printf "%s [press Enter to keep current]: " "$prompt" > /dev/tty
+  else
+    printf "%s: " "$prompt" > /dev/tty
+  fi
+
+  stty -echo < /dev/tty 2>/dev/null || true
+  read -r input < /dev/tty || input=""
+  stty echo < /dev/tty 2>/dev/null || true
+  printf "\n" > /dev/tty
+
+  input="$(trim_whitespace "$input")"
+  if [ -z "$input" ]; then
+    input="$default_value"
+  fi
+  printf "%s" "$input"
+}
+
+configure_worker_search_provider() {
+  local env_file="$INSTALL_DIR/.env"
+  local selection=""
+  local prompt_choice=""
+  local prompt_default="1"
+
+  if [ -z "$WEB_SEARCH_PROVIDER_VALUE" ] && read_env_value_from_file "$env_file" "CLAWBOARD_WEB_SEARCH_PROVIDER" >/dev/null 2>&1; then
+    WEB_SEARCH_PROVIDER_VALUE="$(read_env_value_from_file "$env_file" "CLAWBOARD_WEB_SEARCH_PROVIDER" || true)"
+  fi
+  if read_env_value_from_file "$env_file" "SEARXNG_BASE_URL" >/dev/null 2>&1 && [ -z "${SEARXNG_BASE_URL_VALUE:-}" ]; then
+    SEARXNG_BASE_URL_VALUE="$(read_env_value_from_file "$env_file" "SEARXNG_BASE_URL" || true)"
+  fi
+  if read_env_value_from_file "$env_file" "BRAVE_API_KEY" >/dev/null 2>&1 && [ -z "${BRAVE_API_KEY_VALUE:-}" ]; then
+    BRAVE_API_KEY_VALUE="$(read_env_value_from_file "$env_file" "BRAVE_API_KEY" || true)"
+  fi
+
+  selection="$(printf "%s" "${WEB_SEARCH_PROVIDER_VALUE:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$selection" in
+    ask)
+      selection=""
+      ;;
+    searxng|brave|skip) ;;
+    "")
+      if [ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        if [ -n "${BRAVE_API_KEY_VALUE:-}" ]; then
+          prompt_default="2"
+        fi
+        printf "\nWorker web search provider:\n" > /dev/tty
+        printf "  1) SearXNG (self-hosted, free)\n" > /dev/tty
+        printf "  2) Brave (API key required)\n" > /dev/tty
+        printf "  3) Skip for now\n" > /dev/tty
+        printf "Select [1-3] (default: %s): " "$prompt_default" > /dev/tty
+        read -r prompt_choice < /dev/tty || prompt_choice=""
+        prompt_choice="$(trim_whitespace "$prompt_choice")"
+        if [ -z "$prompt_choice" ]; then
+          prompt_choice="$prompt_default"
+        fi
+        case "$prompt_choice" in
+          1) selection="searxng" ;;
+          2) selection="brave" ;;
+          3) selection="skip" ;;
+          *)
+            log_warn "Unrecognized search provider choice. Using default."
+            selection="searxng"
+            ;;
+        esac
+      else
+        selection="skip"
+      fi
+      ;;
+    *)
+      log_warn "Invalid CLAWBOARD_WEB_SEARCH_PROVIDER=$WEB_SEARCH_PROVIDER_VALUE (expected ask|searxng|brave|skip). Using skip."
+      selection="skip"
+      ;;
+  esac
+
+  case "$selection" in
+    searxng)
+      SEARXNG_BASE_URL_VALUE="$(normalize_http_url "${SEARXNG_BASE_URL_VALUE:-http://localhost:8888}")"
+      if [ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        SEARXNG_BASE_URL_VALUE="$(normalize_http_url "$(prompt_with_default_tty "SearXNG base URL" "$SEARXNG_BASE_URL_VALUE")")"
+      fi
+      WEB_SEARCH_PROVIDER_VALUE="searxng"
+      log_info "Writing CLAWBOARD_WEB_SEARCH_PROVIDER=searxng in $env_file..."
+      upsert_env_value "$env_file" "CLAWBOARD_WEB_SEARCH_PROVIDER" "searxng"
+      log_info "Writing SEARXNG_BASE_URL in $env_file..."
+      upsert_env_value "$env_file" "SEARXNG_BASE_URL" "$SEARXNG_BASE_URL_VALUE"
+      WEB_SEARCH_PROVIDER_STATUS="configured-searxng"
+      ;;
+    brave)
+      if [ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        BRAVE_API_KEY_VALUE="$(prompt_secret_tty "Brave Search API key" "$BRAVE_API_KEY_VALUE")"
+      fi
+      if [ -z "${BRAVE_API_KEY_VALUE:-}" ]; then
+        log_warn "Brave selected, but BRAVE_API_KEY is empty. Leaving worker web search provider unconfigured."
+        WEB_SEARCH_PROVIDER_STATUS="blocked-brave-key"
+        return 0
+      fi
+      WEB_SEARCH_PROVIDER_VALUE="brave"
+      log_info "Writing CLAWBOARD_WEB_SEARCH_PROVIDER=brave in $env_file..."
+      upsert_env_value "$env_file" "CLAWBOARD_WEB_SEARCH_PROVIDER" "brave"
+      log_info "Writing BRAVE_API_KEY in $env_file..."
+      upsert_env_value "$env_file" "BRAVE_API_KEY" "$BRAVE_API_KEY_VALUE"
+      WEB_SEARCH_PROVIDER_STATUS="configured-brave"
+      ;;
+    *)
+      WEB_SEARCH_PROVIDER_VALUE="skip"
+      log_info "Writing CLAWBOARD_WEB_SEARCH_PROVIDER=skip in $env_file..."
+      upsert_env_value "$env_file" "CLAWBOARD_WEB_SEARCH_PROVIDER" "skip"
+      WEB_SEARCH_PROVIDER_STATUS="skipped"
+      ;;
+  esac
+}
+
+configure_worker_social_credentials() {
+  local env_file="$INSTALL_DIR/.env"
+
+  if [ -z "$BLUESKY_HANDLE_VALUE" ] && read_env_value_from_file "$env_file" "BLUESKY_HANDLE" >/dev/null 2>&1; then
+    BLUESKY_HANDLE_VALUE="$(read_env_value_from_file "$env_file" "BLUESKY_HANDLE" || true)"
+  fi
+  if [ -z "$BLUESKY_APP_PASSWORD_VALUE" ] && read_env_value_from_file "$env_file" "BLUESKY_APP_PASSWORD" >/dev/null 2>&1; then
+    BLUESKY_APP_PASSWORD_VALUE="$(read_env_value_from_file "$env_file" "BLUESKY_APP_PASSWORD" || true)"
+  fi
+  if [ -z "$MASTODON_INSTANCE_URL_VALUE" ] && read_env_value_from_file "$env_file" "MASTODON_INSTANCE_URL" >/dev/null 2>&1; then
+    MASTODON_INSTANCE_URL_VALUE="$(read_env_value_from_file "$env_file" "MASTODON_INSTANCE_URL" || true)"
+  fi
+  if [ -z "$MASTODON_ACCESS_TOKEN_VALUE" ] && read_env_value_from_file "$env_file" "MASTODON_ACCESS_TOKEN" >/dev/null 2>&1; then
+    MASTODON_ACCESS_TOKEN_VALUE="$(read_env_value_from_file "$env_file" "MASTODON_ACCESS_TOKEN" || true)"
+  fi
+
+  if [ -z "$BLUESKY_HANDLE_VALUE" ] && [ -z "$BLUESKY_APP_PASSWORD_VALUE" ] && [ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    if prompt_yes_no_tty "Configure Bluesky credentials for worker API tasks?" "n"; then
+      BLUESKY_HANDLE_VALUE="$(prompt_with_default_tty "Bluesky handle" "$BLUESKY_HANDLE_VALUE")"
+      BLUESKY_APP_PASSWORD_VALUE="$(prompt_secret_tty "Bluesky app password" "$BLUESKY_APP_PASSWORD_VALUE")"
+    fi
+  fi
+  if [ -n "$BLUESKY_HANDLE_VALUE" ] && [ -n "$BLUESKY_APP_PASSWORD_VALUE" ]; then
+    log_info "Writing BLUESKY_HANDLE in $env_file..."
+    upsert_env_value "$env_file" "BLUESKY_HANDLE" "$BLUESKY_HANDLE_VALUE"
+    log_info "Writing BLUESKY_APP_PASSWORD in $env_file..."
+    upsert_env_value "$env_file" "BLUESKY_APP_PASSWORD" "$BLUESKY_APP_PASSWORD_VALUE"
+    BLUESKY_SETUP_STATUS="configured"
+  elif [ -n "$BLUESKY_HANDLE_VALUE" ] || [ -n "$BLUESKY_APP_PASSWORD_VALUE" ]; then
+    log_warn "Bluesky credentials are incomplete; leaving worker Bluesky API wiring partially configured."
+    BLUESKY_SETUP_STATUS="incomplete"
+  else
+    BLUESKY_SETUP_STATUS="skipped"
+  fi
+
+  if [ -z "$MASTODON_INSTANCE_URL_VALUE" ] && [ -z "$MASTODON_ACCESS_TOKEN_VALUE" ] && [ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    if prompt_yes_no_tty "Configure Mastodon credentials for worker API tasks?" "n"; then
+      MASTODON_INSTANCE_URL_VALUE="$(normalize_http_url "$(prompt_with_default_tty "Mastodon instance URL" "$MASTODON_INSTANCE_URL_VALUE")")"
+      MASTODON_ACCESS_TOKEN_VALUE="$(prompt_secret_tty "Mastodon access token" "$MASTODON_ACCESS_TOKEN_VALUE")"
+    fi
+  fi
+  if [ -n "$MASTODON_INSTANCE_URL_VALUE" ] && [ -n "$MASTODON_ACCESS_TOKEN_VALUE" ]; then
+    MASTODON_INSTANCE_URL_VALUE="$(normalize_http_url "$MASTODON_INSTANCE_URL_VALUE")"
+    log_info "Writing MASTODON_INSTANCE_URL in $env_file..."
+    upsert_env_value "$env_file" "MASTODON_INSTANCE_URL" "$MASTODON_INSTANCE_URL_VALUE"
+    log_info "Writing MASTODON_ACCESS_TOKEN in $env_file..."
+    upsert_env_value "$env_file" "MASTODON_ACCESS_TOKEN" "$MASTODON_ACCESS_TOKEN_VALUE"
+    MASTODON_SETUP_STATUS="configured"
+  elif [ -n "$MASTODON_INSTANCE_URL_VALUE" ] || [ -n "$MASTODON_ACCESS_TOKEN_VALUE" ]; then
+    log_warn "Mastodon credentials are incomplete; leaving worker Mastodon API wiring partially configured."
+    MASTODON_SETUP_STATUS="incomplete"
+  else
+    MASTODON_SETUP_STATUS="skipped"
+  fi
+}
+
 ensure_env_file() {
   local repo_dir="$1"
   local env_file="$repo_dir/.env"
@@ -1941,16 +2245,19 @@ resolve_openclaw_gateway_device_auth_value() {
 
 # Idempotent: ensure clawboard-logger is in plugins.allow (append only, never replace the list).
 ensure_clawboard_logger_in_allow() {
-  [ -f "$OPENCLAW_CONFIG_PATH" ] || return 0
-  command -v python3 >/dev/null 2>&1 || return 0
-  python3 - "$OPENCLAW_CONFIG_PATH" <<'PY' 2>/dev/null || true
+  [ -f "$OPENCLAW_CONFIG_PATH" ] || return 10
+  command -v python3 >/dev/null 2>&1 || return 10
+  local changed=""
+  changed="$(
+    python3 - "$OPENCLAW_CONFIG_PATH" <<'PY' 2>/dev/null || true
 import json, sys
 path = sys.argv[1]
 try:
   with open(path, "r", encoding="utf-8") as f:
     data = json.load(f)
 except Exception:
-  sys.exit(0)
+  print("0")
+  raise SystemExit(0)
 plug = data.get("plugins") or {}
 allow = list(plug.get("allow") or []) if isinstance(plug.get("allow"), list) else []
 if "clawboard-logger" not in allow:
@@ -1959,14 +2266,23 @@ if "clawboard-logger" not in allow:
   data["plugins"] = plug
   with open(path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
+    f.write("\n")
+  print("1")
+else:
+  print("0")
 PY
+  )"
+  if [ "${changed:-0}" = "1" ]; then
+    return 0
+  fi
+  return 10
 }
 
 sanitize_clawboard_logger_stale_refs() {
   local plugin_ext_dir="$OPENCLAW_HOME/extensions/clawboard-logger"
-  [ -e "$plugin_ext_dir" ] && return 0
-  [ -f "$OPENCLAW_CONFIG_PATH" ] || return 0
-  command -v python3 >/dev/null 2>&1 || return 0
+  [ -e "$plugin_ext_dir" ] && return 10
+  [ -f "$OPENCLAW_CONFIG_PATH" ] || return 10
+  command -v python3 >/dev/null 2>&1 || return 10
 
   local changed=""
   changed="$(
@@ -2023,7 +2339,9 @@ PY
 
   if [ "${changed:-0}" = "1" ]; then
     log_warn "Removed stale clawboard-logger config references before OpenClaw bootstrap."
+    return 0
   fi
+  return 10
 }
 
 reconcile_openclaw_gateway_launchagent_token() {
@@ -3220,10 +3538,10 @@ verify_agent_contract_alignment() {
   }
 
   verify_marker "$agents_path" "main-only direct|trivial and faster than delegation|only execute directly" "main direct lane"
-  verify_marker "$agents_path" "single-specialist|single specialist" "single-specialist lane"
-  verify_marker "$agents_path" "multi-specialist|huddle|federated" "multi-specialist lane"
+  verify_marker "$agents_path" "single-worker|single worker|single-specialist|single specialist" "single-worker lane"
+  verify_marker "$agents_path" "multi-worker|multi worker|multi-specialist|huddle|federated" "multi-worker lane"
   verify_marker "$agents_path" "ECOSYSTEM MODEL|operating surface" "ecosystem model"
-  verify_marker "$agents_path" "SPECIALIST CAPABILITY MAP|specialist map" "specialist capability map"
+  verify_marker "$agents_path" "WORKER CAPABILITY MAP|worker map|SPECIALIST CAPABILITY MAP|specialist map" "worker capability map"
   verify_marker "$agents_path" "(1m[[:space:]]*(->|=>|-|=)>?[[:space:]]*3m[[:space:]]*(->|=>|-|=)>?[[:space:]]*10m[[:space:]]*(->|=>|-|=)>?[[:space:]]*15m[[:space:]]*(->|=>|-|=)>?[[:space:]]*30m[[:space:]]*(->|=>|-|=)>?[[:space:]]*1h|\[[[:space:]]*1m[[:space:]]*,[[:space:]]*3m[[:space:]]*,[[:space:]]*10m[[:space:]]*,[[:space:]]*15m[[:space:]]*,[[:space:]]*30m[[:space:]]*,[[:space:]]*1h[[:space:]]*\])" "delegation ladder"
   verify_marker "$soul_path" "sessions_spawn" "sessions_spawn contract"
   verify_marker "$soul_path" "OpenClaw is the runtime|OpenClaw is where sessions" "runtime/ledger model"
@@ -3244,11 +3562,12 @@ verify_agent_contract_alignment() {
   fi
 }
 
-# Provision specialist agent workspaces (workspace-coding, workspace-docs, workspace-web, workspace-social).
-# Runs scripts/setup_specialist_agents.sh when present. Idempotent.
+# Provision worker agent workspaces (for example workspace-worker).
+# Runs scripts/setup_specialist_agents.sh when present. Idempotent. Worker agents keep
+# their own workspace roots; shared repo work should use explicit delegated paths.
 setup_specialist_agents() {
   if [ ! -f "$INSTALL_DIR/scripts/setup_specialist_agents.sh" ]; then
-    log_warn "setup_specialist_agents.sh not found; skipping specialist workspace provisioning."
+    log_warn "setup_specialist_agents.sh not found; skipping worker workspace provisioning."
     return 0
   fi
   OPENCLAW_HOME="$OPENCLAW_HOME" \
@@ -3258,7 +3577,7 @@ setup_specialist_agents() {
   bash "$INSTALL_DIR/scripts/setup_specialist_agents.sh"
 }
 
-# Optionally add specialist agents (coding, docs, web, social) to openclaw.json
+# Optionally add the worker agent to openclaw.json
 # so the main agent can delegate. Uses `openclaw agents add` when enabled. Idempotent.
 maybe_offer_agentic_team_setup() {
   local mode="${1:-ask}"
@@ -3269,7 +3588,7 @@ maybe_offer_agentic_team_setup() {
   local added=0
   local missing_workspaces=0
   local prompt_rc=0
-  local specialist_ids="coding docs web social"
+  local worker_ids="worker"
 
   if ! command -v openclaw >/dev/null 2>&1; then
     AGENTIC_TEAM_SETUP_STATUS="openclaw-missing"
@@ -3284,19 +3603,19 @@ maybe_offer_agentic_team_setup() {
       ;;
     always) ;;
     ask)
-      if prompt_yes_no_tty "Set up the agentic team (main + coding, docs, web, social) so the main agent can delegate to specialists?" "y"; then
+      if prompt_yes_no_tty "Set up the agentic team (main + worker) so the main agent can delegate execution work?" "y"; then
         :
       else
         prompt_rc=$?
         case "$prompt_rc" in
           2)
             AGENTIC_TEAM_SETUP_STATUS="skipped-no-tty"
-            log_info "No interactive TTY available for the agentic team prompt. Re-run with --setup-agentic-team or CLAWBOARD_AGENTIC_TEAM_SETUP=always to enroll specialists automatically."
+            log_info "No interactive TTY available for the agentic team prompt. Re-run with --setup-agentic-team or CLAWBOARD_AGENTIC_TEAM_SETUP=always to enroll the worker automatically."
             return 0
             ;;
           *)
             AGENTIC_TEAM_SETUP_STATUS="skipped-by-user"
-            log_info "Skipped agentic team setup. Add specialists later with: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"
+            log_info "Skipped agentic team setup. Add the worker later with: openclaw agents add worker --workspace <resolved-workspace> --non-interactive"
             return 0
             ;;
         esac
@@ -3317,7 +3636,7 @@ maybe_offer_agentic_team_setup() {
   fi
   existing_ids=" ${existing_ids} "
 
-  for id in $specialist_ids; do
+  for id in $worker_ids; do
     case "$existing_ids" in *" $id "*) continue ;; *) ;; esac
     ws_path="$(resolve_agent_workspace_path "$id" 2>/dev/null || true)"
     ws_path="${ws_path//$'\r'/}"
@@ -3327,7 +3646,7 @@ maybe_offer_agentic_team_setup() {
     fi
     if [ ! -d "$ws_path" ]; then
       missing_workspaces=$((missing_workspaces + 1))
-      log_warn "Workspace $ws_path missing; run setup_specialist_agents first. Skipping agent $id."
+      log_warn "Workspace $ws_path missing; run setup_specialist_agents first. Skipping worker $id."
       continue
     fi
     log_info "Adding agent: $id (workspace: $ws_path)"
@@ -3341,13 +3660,13 @@ maybe_offer_agentic_team_setup() {
   if [ "$added" -gt 0 ]; then
     AGENTIC_TEAM_SETUP_STATUS="configured"
     OPENCLAW_GATEWAY_RESTART_NEEDED=true
-    log_success "Added $added specialist agent(s) to config. Gateway will restart to apply."
+    log_success "Added $added worker agent(s) to config. Gateway will restart to apply."
     return 0
   fi
 
   if [ "$missing_workspaces" -gt 0 ]; then
     AGENTIC_TEAM_SETUP_STATUS="incomplete"
-    log_warn "Agentic team setup could not enroll every specialist because $missing_workspaces workspace(s) were missing."
+    log_warn "Agentic team setup could not enroll every worker because $missing_workspaces workspace(s) were missing."
     return 0
   fi
 
@@ -3433,7 +3752,7 @@ PY
   if command -v openclaw >/dev/null 2>&1; then
     current_allow="$(openclaw_cfg_get_scalar_normalized "agents.list.${main_idx}.subagents.allowAgents" || true)"
     if [ "$current_allow" = "$allow_agents_json" ]; then
-      log_success "Main subagents.allowAgents already aligned with configured specialists (${AGENTIC_TEAM_AGENT_IDS})."
+      log_success "Main subagents.allowAgents already aligned with configured worker agents (${AGENTIC_TEAM_AGENT_IDS})."
       return 0
     fi
   fi
@@ -3442,10 +3761,10 @@ PY
   if openclaw_cfg_set_txn "agents.list.${main_idx}.subagents.allowAgents" "$allow_agents_json" json false true; then
     openclaw_cfg_txn_commit
     OPENCLAW_GATEWAY_RESTART_NEEDED=true
-    log_success "Synced main subagents.allowAgents to configured specialists (${AGENTIC_TEAM_AGENT_IDS})."
+    log_success "Synced main subagents.allowAgents to configured worker agents (${AGENTIC_TEAM_AGENT_IDS})."
   else
     openclaw_cfg_txn_rollback
-    log_warn "Failed syncing main subagents.allowAgents from configured specialists."
+    log_warn "Failed syncing main subagents.allowAgents from configured worker agents."
   fi
 }
 
@@ -3482,6 +3801,8 @@ maybe_apply_agent_directives() {
 # so the overall flow only does one QMD refresh pass. Handles missing openclaw/script gracefully.
 maybe_run_local_memory_setup() {
   local script_path=""
+  local cfg_snapshot=""
+  local config_changed=false
   if [ "$SKIP_LOCAL_MEMORY_SETUP" = true ]; then
     log_info "Skipping local memory setup by configuration."
     return 0
@@ -3494,10 +3815,27 @@ maybe_run_local_memory_setup() {
     log_warn "openclaw not installed; skipping local memory setup. Run later: bash $script_path"
     return 0
   fi
+  cfg_snapshot="$(snapshot_existing_file "$OPENCLAW_CONFIG_PATH" || true)"
   log_info "Running local memory setup (tool allow list, heartbeat, watchdog)..."
   if OPENCLAW_MEMORY_SKIP_INDEX=true bash "$script_path"; then
-    log_success "Local memory setup completed."
+    if [ -n "$cfg_snapshot" ] && [ -f "$cfg_snapshot" ] && [ -f "$OPENCLAW_CONFIG_PATH" ]; then
+      if ! cmp -s "$cfg_snapshot" "$OPENCLAW_CONFIG_PATH"; then
+        config_changed=true
+      fi
+    elif [ -z "$cfg_snapshot" ] && [ -f "$OPENCLAW_CONFIG_PATH" ]; then
+      config_changed=true
+    fi
+    cleanup_file_snapshot "$cfg_snapshot"
+    if [ "$config_changed" = true ]; then
+      OPENCLAW_CONFIG_CHANGED_THIS_RUN=true
+      OPENCLAW_GATEWAY_RESTART_NEEDED=true
+      OPENCLAW_MEMORY_INDEX_NEEDED=true
+      log_success "Local memory setup completed and updated OpenClaw memory config."
+    else
+      log_success "Local memory setup already matched the desired OpenClaw memory config."
+    fi
   else
+    cleanup_file_snapshot "$cfg_snapshot"
     log_error "setup-openclaw-local-memory.sh failed. Bootstrap aborted to avoid partial agent/memory configuration. Re-run: bash $script_path"
   fi
 }
@@ -4071,6 +4409,10 @@ log_info "Writing CLAWBOARD_SERVER_API_BASE in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_SERVER_API_BASE" "$SERVER_API_BASE_VALUE"
 log_info "Writing OPENCLAW_BASE_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "OPENCLAW_BASE_URL" "$OPENCLAW_BASE_URL_VALUE"
+
+configure_worker_search_provider
+configure_worker_social_credentials
+
 OPENCLAW_CHAT_TRANSPORT_VALUE=""
 if [ -n "${OPENCLAW_CHAT_TRANSPORT:-}" ]; then
   OPENCLAW_CHAT_TRANSPORT_VALUE="$OPENCLAW_CHAT_TRANSPORT"
@@ -4542,18 +4884,14 @@ if [ "$SKIP_DOCKER" = false ]; then
     log_error "Docker Compose not found. Install docker compose v2 or docker-compose."
   fi
 
-  # Match deploy.sh option 3 then 1: full tear-down + rebuild (fresh), then start.
-  log_info "Tearing down existing ClawBoard stack (like deploy.sh fresh)..."
-  (cd "$INSTALL_DIR" && $COMPOSE --profile dev down --remove-orphans 2>/dev/null || true)
-  (cd "$INSTALL_DIR" && $COMPOSE down --remove-orphans 2>/dev/null || true)
-  log_info "Building and starting ClawBoard via docker compose..."
+  log_info "Building and starting ClawBoard via docker compose (rerun-safe; no pre-emptive teardown)..."
   WEB_HOT_RELOAD="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" || true)"
   case "$WEB_HOT_RELOAD" in
     1|true|TRUE|yes|YES)
-      (cd "$INSTALL_DIR" && $COMPOSE --profile dev up -d --build --force-recreate api classifier qdrant web-dev)
+      (cd "$INSTALL_DIR" && $COMPOSE --profile dev up -d --build api classifier qdrant web-dev)
       ;;
     *)
-      (cd "$INSTALL_DIR" && $COMPOSE up -d --build --force-recreate)
+      (cd "$INSTALL_DIR" && $COMPOSE up -d --build)
       ;;
   esac
   log_success "ClawBoard services running."
@@ -4591,8 +4929,15 @@ if [ "$SKIP_OPENCLAW" = false ]; then
   else
     OPENCLAW_GATEWAY_RESTART_NEEDED=false
     report_openclaw_pending_device_approvals
-    sanitize_clawboard_logger_stale_refs
-    openclaw_doctor_fix_once || true
+    if sanitize_clawboard_logger_stale_refs; then
+      OPENCLAW_CONFIG_CHANGED_THIS_RUN=true
+      OPENCLAW_GATEWAY_RESTART_NEEDED=true
+    else
+      rc=$?
+      if [ "$rc" -ne 10 ]; then
+        log_warn "Unable to reconcile stale clawboard-logger config references automatically."
+      fi
+    fi
 
     openclaw_cfg_txn_begin
 
@@ -4801,12 +5146,29 @@ PY
       else
         CONFIG_JSON=$(printf '{"baseUrl":"%s","enabled":true,"contextMode":"%s","contextFetchTimeoutMs":%s,"contextFetchRetries":%s,"contextFallbackModes":%s,"contextMaxChars":%s,"contextCacheTtlMs":%s,"contextCacheMaxEntries":%s,"contextUseCacheOnFailure":%s,"enableOpenClawMemorySearch":%s,"baseUrlFallbacks":["%s","%s"]}' "$API_URL" "$CONTEXT_MODE_VALUE" "$CONTEXT_FETCH_TIMEOUT_MS_VALUE" "$CONTEXT_FETCH_RETRIES_VALUE" "$CONTEXT_FALLBACK_MODES_JSON" "$CONTEXT_MAX_CHARS_VALUE" "$CONTEXT_CACHE_TTL_MS_VALUE" "$CONTEXT_CACHE_MAX_ENTRIES_VALUE" "$CONTEXT_USE_CACHE_ON_FAILURE_JSON" "$LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH_JSON" "$_LOGGER_FALLBACK_1" "$_LOGGER_FALLBACK_2")
       fi
-      if ! install_clawboard_logger_plugin_transactional "$INSTALL_DIR/extensions/clawboard-logger" "$PLUGIN_EXT_DIR" "$CONFIG_JSON" true; then
-        log_error "Failed installing clawboard-logger plugin atomically."
+      if install_clawboard_logger_plugin_transactional "$INSTALL_DIR/extensions/clawboard-logger" "$PLUGIN_EXT_DIR" "$CONFIG_JSON" true; then
+        OPENCLAW_GATEWAY_RESTART_NEEDED=true
+        log_success "Logger plugin installed and enabled."
+      else
+        rc=$?
+        if [ "$rc" -eq 10 ]; then
+          log_success "Logger plugin already up to date and enabled."
+        else
+          log_error "Failed installing clawboard-logger plugin atomically."
+        fi
       fi
 
       log_info "Configuring logger plugin..."
-      ensure_clawboard_logger_in_allow
+      if ensure_clawboard_logger_in_allow; then
+        OPENCLAW_CONFIG_CHANGED_THIS_RUN=true
+        OPENCLAW_GATEWAY_RESTART_NEEDED=true
+        log_success "Ensured clawboard-logger is listed in plugins.allow."
+      else
+        rc=$?
+        if [ "$rc" -ne 10 ]; then
+          log_warn "Unable to ensure clawboard-logger is listed in plugins.allow."
+        fi
+      fi
       _LOGGER_CFG_BASEURL="$(openclaw_cfg_get_scalar_normalized plugins.entries.clawboard-logger.config.baseUrl || true)"
       if [ -z "$_LOGGER_CFG_BASEURL" ] || [ "$_LOGGER_CFG_BASEURL" = "null" ]; then
         _LOGGER_CFG_BASEURL="$(openclaw_cfg_get_scalar_from_file plugins.entries.clawboard-logger.config.baseUrl || true)"
@@ -4814,8 +5176,6 @@ PY
       if [ -z "$_LOGGER_CFG_BASEURL" ] || [ "$_LOGGER_CFG_BASEURL" = "null" ]; then
         log_error "Logger plugin config missing required baseUrl after configuration write."
       fi
-      OPENCLAW_GATEWAY_RESTART_NEEDED=true
-      log_success "Logger plugin installed and enabled."
     fi
 
     maybe_deploy_agent_templates
@@ -4835,36 +5195,9 @@ PY
     CURRENT_MEMORY_BACKEND="$(openclaw_cfg_get_scalar_normalized memory.backend | tr '[:upper:]' '[:lower:]')"
     if [ "$CURRENT_MEMORY_BACKEND" = "qmd" ]; then
       openclaw_cfg_txn_begin
-      # The skill script's configure_qmd_memory_boost() may write QMD config values;
-      # this block runs last and guarantees the correct values are always applied.
-      log_info "Enforcing QMD memory search settings (sessions off, memorySearch sources=memory, maxResults=20, timeoutMs=8000)..."
-      CURRENT_QMD_SESSIONS_ENABLED="$(openclaw_cfg_get_scalar_normalized memory.qmd.sessions.enabled)"
-      if [ "$CURRENT_QMD_SESSIONS_ENABLED" != "false" ]; then
-        openclaw_cfg_set_txn memory.qmd.sessions.enabled false json true
-        OPENCLAW_GATEWAY_RESTART_NEEDED=true
-        log_success "Disabled QMD session indexing (memory.qmd.sessions.enabled=false)."
-      else
-        log_success "QMD session indexing already disabled."
-      fi
-
-      CURRENT_MEMORY_SOURCES="$(openclaw_cfg_get_scalar_normalized agents.defaults.memorySearch.sources)"
-      if [ "$CURRENT_MEMORY_SOURCES" != '["memory"]' ]; then
-        openclaw_cfg_set_txn agents.defaults.memorySearch.sources '["memory"]' json true
-        OPENCLAW_GATEWAY_RESTART_NEEDED=true
-        log_success "Aligned memorySearch sources for QMD backend (agents.defaults.memorySearch.sources=[\"memory\"])."
-      else
-        log_success "memorySearch sources already aligned for QMD backend."
-      fi
-
-      CURRENT_SESSION_MEMORY_FLAG="$(openclaw_cfg_get_scalar_normalized agents.defaults.memorySearch.experimental.sessionMemory)"
-      if [ "$CURRENT_SESSION_MEMORY_FLAG" != "false" ]; then
-        openclaw_cfg_set_txn agents.defaults.memorySearch.experimental.sessionMemory false json true
-        OPENCLAW_GATEWAY_RESTART_NEEDED=true
-        log_success "Disabled memorySearch.experimental.sessionMemory under QMD backend."
-      else
-        log_success "sessionMemory flag already disabled for QMD backend."
-      fi
-
+      # The local-memory helper owns the session/source preference. Bootstrap only
+      # enforces minimum QMD capacity values so reruns do not override user intent.
+      log_info "Ensuring QMD lower-bound tuning (respecting existing session/source preferences; maxResults>=20, timeoutMs>=8000)..."
       CURRENT_QMD_MAX_RESULTS="$(openclaw_cfg_get_scalar_normalized memory.qmd.limits.maxResults)"
       if [ -z "$CURRENT_QMD_MAX_RESULTS" ] || { [ -n "$CURRENT_QMD_MAX_RESULTS" ] && [ "$CURRENT_QMD_MAX_RESULTS" -lt 20 ] 2>/dev/null; }; then
         openclaw_cfg_set_txn memory.qmd.limits.maxResults 20 json true
@@ -4887,11 +5220,15 @@ PY
       log_info "Skipping QMD enforcement; memory.backend=${CURRENT_MEMORY_BACKEND:-unset}."
     fi
 
-    log_info "Running openclaw doctor --fix to remove any config keys unrecognized by the current gateway version..."
-    if openclaw_doctor_fix_safe; then
-      log_success "openclaw doctor --fix completed."
+    if [ "$OPENCLAW_DOCTOR_FIX_ATTEMPTED" = true ]; then
+      log_info "Running openclaw doctor --fix once more after schema-repair attempts..."
+      if openclaw_doctor_fix_safe; then
+        log_success "openclaw doctor --fix completed."
+      else
+        log_warn "openclaw doctor --fix returned non-zero after earlier schema-repair attempts (may be safe to ignore)."
+      fi
     else
-      log_warn "openclaw doctor --fix returned non-zero (may be safe to ignore)."
+      log_info "Skipping openclaw doctor --fix; no schema-repair attempt was needed during this bootstrap run."
     fi
 
     reconcile_openclaw_gateway_launchagent_token
@@ -4910,6 +5247,8 @@ PY
       log_info "Skipping bootstrap QMD refresh because setup_obsidian_brain.sh already refreshed indexes."
     elif [ "$SKIP_LOCAL_MEMORY_SETUP" = true ]; then
       log_info "Skipping bootstrap memory index refresh because local memory setup was skipped."
+    elif [ "$OPENCLAW_MEMORY_INDEX_NEEDED" != true ]; then
+      log_info "Skipping bootstrap memory index refresh because OpenClaw memory config is already converged."
     elif command -v openclaw >/dev/null 2>&1; then
       log_info "Refreshing QMD memory indexes for all configured agents..."
       _idx_timeout_s="${OPENCLAW_MEMORY_INDEX_TIMEOUT_SEC:-180}"
@@ -4972,7 +5311,11 @@ PY
     fi
 
     if [ "$OBSIDIAN_MEMORY_SETUP_STATUS" = "configured" ]; then
-      ensure_clawboard_logger_in_allow
+      if ensure_clawboard_logger_in_allow; then
+        OPENCLAW_CONFIG_CHANGED_THIS_RUN=true
+        OPENCLAW_GATEWAY_RESTART_NEEDED=true
+        log_success "Ensured clawboard-logger remains listed in plugins.allow after Obsidian setup."
+      fi
     fi
     if [ "$OPENCLAW_GATEWAY_RESTART_NEEDED" = true ] || [ "$OBSIDIAN_MEMORY_SETUP_STATUS" = "configured" ]; then
       if [ "$OBSIDIAN_MEMORY_SETUP_STATUS" = "configured" ]; then
@@ -4988,7 +5331,7 @@ PY
         log_warn "Unable to restart OpenClaw gateway automatically. Run: openclaw gateway restart"
       fi
     fi
-    ensure_clawboard_logger_in_allow
+    ensure_clawboard_logger_in_allow >/dev/null 2>&1 || true
   fi
 fi
 
@@ -5017,32 +5360,72 @@ case "$AGENTIC_TEAM_SETUP_STATUS" in
     echo "Agentic team:  configured (${AGENTIC_TEAM_AGENT_IDS:-none})"
     ;;
   incomplete)
-    echo "Agentic team:  setup attempted but some specialist workspaces were missing"
+    echo "Agentic team:  setup attempted but some worker workspaces were missing"
     echo "               Current delegation pool: ${AGENTIC_TEAM_AGENT_IDS:-none}"
     echo "               Re-run: bash $INSTALL_DIR/scripts/setup_specialist_agents.sh"
     ;;
   openclaw-missing)
     echo "Agentic team:  openclaw not found on PATH during bootstrap"
-    echo "               Add later: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"
+    echo "               Add later: openclaw agents add worker --workspace <resolved-workspace> --non-interactive"
     ;;
   skipped-mode-never|skipped-by-user|skipped-no-tty|skipped-invalid-mode|not-run)
     if [ -n "${AGENTIC_TEAM_AGENT_IDS:-}" ] && [ "$AGENTIC_TEAM_AGENT_IDS" != "none" ]; then
       echo "Agentic team:  current delegation pool = ${AGENTIC_TEAM_AGENT_IDS}"
     else
       echo "Agentic team:  not configured in this run"
-      echo "               Use --setup-agentic-team or CLAWBOARD_AGENTIC_TEAM_SETUP=always to enroll specialists"
+      echo "               Use --setup-agentic-team or CLAWBOARD_AGENTIC_TEAM_SETUP=always to enroll the worker"
     fi
     ;;
 esac
-# Shared workspace notice
+# Canonical repo notice
 main_ws_resolved="$(resolve_agent_workspace_path "main" 2>/dev/null || true)"
 main_ws_resolved="${main_ws_resolved:-$OPENCLAW_HOME/workspace}"
 main_ws_resolved="${main_ws_resolved/#\~/$HOME}"
 if [ -d "$main_ws_resolved/projects" ]; then
-  echo "Shared code:   $main_ws_resolved/projects/"
-  echo "               All specialist agents share this directory via symlink."
-  echo "               Each agent keeps separate memory/ and obsidian/ in its own workspace."
+  echo "Canonical repo: $main_ws_resolved/projects/clawboard"
+  echo "                Delegate the worker with this exact path when you want shared edits/builds."
+  echo "                Each agent keeps separate memory/ and obsidian/ in its own workspace."
 fi
+
+case "$WEB_SEARCH_PROVIDER_STATUS" in
+  configured-searxng)
+    echo "Worker search: local SearXNG scaffold written to .env (${SEARXNG_BASE_URL_VALUE})"
+    echo "               OpenClaw runtime provider support still needs to be enabled separately."
+    ;;
+  configured-brave)
+    echo "Worker search: Brave credentials written to .env"
+    ;;
+  blocked-brave-key)
+    echo "Worker search: Brave selected, but BRAVE_API_KEY is still missing"
+    ;;
+  skipped|not-run)
+    echo "Worker search: skipped"
+    ;;
+esac
+
+case "$BLUESKY_SETUP_STATUS" in
+  configured)
+    echo "Bluesky API:   credentials written to .env for worker use"
+    ;;
+  incomplete)
+    echo "Bluesky API:   configuration incomplete; set BLUESKY_HANDLE + BLUESKY_APP_PASSWORD"
+    ;;
+  skipped|not-run)
+    echo "Bluesky API:   skipped"
+    ;;
+esac
+
+case "$MASTODON_SETUP_STATUS" in
+  configured)
+    echo "Mastodon API:  credentials written to .env for worker use"
+    ;;
+  incomplete)
+    echo "Mastodon API:  configuration incomplete; set MASTODON_INSTANCE_URL + MASTODON_ACCESS_TOKEN"
+    ;;
+  skipped|not-run)
+    echo "Mastodon API:  skipped"
+    ;;
+esac
 
 BACKUP_SETUP_HINT="$OPENCLAW_SKILLS_DIR/clawboard/scripts/setup-openclaw-memory-backup.sh"
 if backup_setup_path="$(resolve_memory_backup_setup_script 2>/dev/null)"; then

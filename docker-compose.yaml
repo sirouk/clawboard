@@ -71,6 +71,17 @@ services:
       - edge
       - core
 
+  searxng:
+    image: searxng/searxng:latest
+    container_name: clawboard-searxng
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    ports:
+      - "8888:8080"
+    restart: unless-stopped
+    networks:
+      - edge
+
   web:
     build:
       context: .

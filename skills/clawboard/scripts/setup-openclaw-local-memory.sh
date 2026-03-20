@@ -780,15 +780,18 @@ configure_memory_search() {
   set_cfg agents.defaults.memorySearch.fallback "$MEMORY_FALLBACK" string false
   set_cfg agents.defaults.memorySearch.local.modelPath "$model_path" string true
 
-  if [[ "$MEMORY_ENABLE_SESSIONS" == "true" && "$backend" != "qmd" ]]; then
+  if [[ "$MEMORY_ENABLE_SESSIONS" == "true" ]]; then
     set_cfg agents.defaults.memorySearch.sources '["memory","sessions"]' json true
-    set_cfg agents.defaults.memorySearch.experimental.sessionMemory true json true
+    if [[ "$backend" == "qmd" ]]; then
+      # QMD owns session transcript ingestion when enabled. Keep the native sessions
+      # source visible without forcing the legacy experimental path on top of it.
+      set_cfg agents.defaults.memorySearch.experimental.sessionMemory false json true
+    else
+      set_cfg agents.defaults.memorySearch.experimental.sessionMemory true json true
+    fi
   else
     set_cfg agents.defaults.memorySearch.sources '["memory"]' json true
     set_cfg agents.defaults.memorySearch.experimental.sessionMemory false json true
-    if [[ "$MEMORY_ENABLE_SESSIONS" == "true" && "$backend" == "qmd" ]]; then
-      log_warn "Requested session memory source, but memory.backend=qmd is active; using memory-only source to match effective runtime behavior."
-    fi
   fi
 
   # Background sync + cache/vector acceleration.
@@ -816,10 +819,9 @@ configure_qmd_memory_boost() {
 
   log_info "Detected memory.backend=qmd; applying qmd-side tuning."
   set_cfg memory.qmd.includeDefaultMemory true json true
-  # Keep session transcripts out of QMD. We intentionally route continuity/state recovery
-  # through ClawBoard context/search, while QMD remains documentation/thinking-vault focused.
-  # This avoids session transcript chunks crowding out documentation recall.
-  set_cfg memory.qmd.sessions.enabled false json true
+  # Honor the session-memory preference under QMD too. When enabled, session transcript
+  # exports become available as first-class QMD memory sources alongside vault content.
+  set_cfg memory.qmd.sessions.enabled "$MEMORY_ENABLE_SESSIONS" json true
   set_cfg memory.qmd.update.interval "5m" string false
   set_cfg memory.qmd.update.debounceMs 15000 json false
   # Run the embed pass on the same cadence as the update pass so new files get
@@ -1050,7 +1052,7 @@ PY
   run_cfg_set "agents.defaults.sandbox.sessionToolsVisibility" "all" string true
 
   # Keep main delegation targets aligned with actual configured agents.
-  # This allows an elastic specialist pool without hardcoding ids in this script.
+  # This allows an elastic worker pool without hardcoding ids in this script.
   allow_agents_json="$(
     python3 - "$MAIN_AGENT_ID" "${AGENT_IDS[@]}" <<'PY'
 import json
@@ -1115,7 +1117,7 @@ PY
   run_cfg_set "${base}.heartbeat.every" "5m" string true
   run_cfg_set "${base}.heartbeat.target" "last" string true
   run_cfg_set "${base}.heartbeat.prompt" \
-    "Heartbeat: (1) read the ClawBoard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call clawboard_search(\"delegating\") as a backup sweep; (3) for each tagged child session key, call session_status(sessionKey=<childSessionKey>); (4) enforce follow-up ladder 1m->3m->10m->15m->30m->1h (cap 1h): each in-flight delegation must have a one-shot cron follow-up and the next wait must come from this ladder; (5) if any queued sub-agent completion message is present, treat it as an internal supervision wake-up, read the current task thread first, and if the result is already visible there, do not restate or paraphrase the full body or re-dispatch the same specialists; if sibling specialists from the same workflow are still active, keep partial results internal unless they change the user's next decision or the user has gone >5m without a visible update; do not send a user-facing message that only says you are checking or waiting on the remaining specialists; close the loop with validation, key delta/caveats, and a clear satisfied-or-blocked status; (6) if any tagged run is missing or terminal without a relayed result: re-spawn and reset follow-up to +1m; (7) if any run is still active beyond 5 minutes, send the user a brief status update with next check ETA; if nothing materially changed and the last visible status is newer than 5 minutes, do not send another status-only update. If nothing needs attention, reply HEARTBEAT_OK." \
+    "Heartbeat: (1) read the ClawBoard context already injected at the top of this prompt — if any task has status 'doing' and a tag like 'session:<key>', that's an in-flight delegation; (2) call clawboard_search(\"delegating\") as a backup sweep; (3) for each tagged child session key, call session_status(sessionKey=<childSessionKey>); (4) enforce follow-up ladder 1m->3m->10m->15m->30m->1h (cap 1h): each in-flight delegation must have a one-shot cron follow-up and the next wait must come from this ladder; (5) if any queued sub-agent completion message is present, treat it as an internal supervision wake-up, read the current task thread first, and if the result is already visible there, do not restate or paraphrase the full body or re-dispatch the same worker runs; if sibling worker runs from the same workflow are still active, keep partial results internal unless they change the user's next decision or the user has gone >5m without a visible update; do not send a user-facing message that only says you are checking or waiting on the remaining worker runs; close the loop with validation, key delta/caveats, and a clear satisfied-or-blocked status; (6) if any tagged run is missing or terminal without a relayed result: re-spawn and reset follow-up to +1m; (7) if any run is still active beyond 5 minutes, send the user a brief status update with next check ETA; if nothing materially changed and the last visible status is newer than 5 minutes, do not send another status-only update. If nothing needs attention, reply HEARTBEAT_OK." \
     string true
   run_cfg_set "${base}.heartbeat.ackMaxChars" 300 json true
 
@@ -1161,12 +1163,12 @@ watchdog_text = (
     "1. Call clawboard_search(\"delegating\") to find all topics tagged \"delegating\" in ClawBoard.\n"
     "2. For each ClawBoard topic with status \"doing\": extract childSessionKey from tag starting with \"session:\", "
     "extract agentId from tag starting with \"agent:\". Call session_status(childSessionKey). "
-    "COMPLETE (queued sub-agent result already arrived): treat this as an internal supervision wake-up, not a fresh user request; read the current topic thread before any extra tool call or ledger write; if the result is already visible there, do not restate or paraphrase the full body or re-dispatch the same specialists; validate the work, add only the key delta/caveats, clawboard_update_topic(topicId, { status: \"done\", tags: [] }), and close the loop with the user. "
+    "COMPLETE (queued sub-agent result already arrived): treat this as an internal supervision wake-up, not a fresh user request; read the current topic thread before any extra tool call or ledger write; if the result is already visible there, do not restate or paraphrase the full body or re-dispatch the same worker runs; validate the work, add only the key delta/caveats, clawboard_update_topic(topicId, { status: \"done\", tags: [] }), and close the loop with the user. "
     "STILL RUNNING: send brief status if >5 minutes and include next check ETA from ladder [1,3,10,15,30,60] minutes. "
     "LOST (session missing or terminal without relayed output): sessions_spawn(agentId, originalTask), "
     "clawboard_update_topic(topicId, { tags: [\"delegating\",\"agent:<agentId>\",\"session:<newKey>\"] }), "
     "cron.add new follow-up at +1 minute and continue ladder progression.\n"
-    "3. If a queued sub-agent completion message is present at wake-up, treat it as internal supervision rather than a fresh user request; read the current topic thread first; if the result is already visible there, do not parrot it back or re-dispatch the same specialists; if sibling specialists from the same workflow are still active, keep partial results internal unless they change the user's next decision or the user has gone >5m without a visible update; do not send a user-facing message that only says you are checking or waiting on the rest; add only the supervisor delta, clear delegation tags, and close the loop.\n"
+    "3. If a queued sub-agent completion message is present at wake-up, treat it as internal supervision rather than a fresh user request; read the current topic thread first; if the result is already visible there, do not parrot it back or re-dispatch the same worker runs; if sibling worker runs from the same workflow are still active, keep partial results internal unless they change the user's next decision or the user has gone >5m without a visible update; do not send a user-facing message that only says you are checking or waiting on the rest; add only the supervisor delta, clear delegation tags, and close the loop.\n"
     "If nothing needs attention, reply HEARTBEAT_OK."
   )
 jobs.append({
@@ -1231,7 +1233,7 @@ main() {
   echo "Model path: $model_path"
   echo "Session memory source requested: $MEMORY_ENABLE_SESSIONS"
   if [[ "$backend" == "qmd" ]]; then
-    echo "Session memory source effective: false (memory.backend=qmd + memory.qmd.sessions.enabled=false)"
+    echo "Session memory source effective: $MEMORY_ENABLE_SESSIONS (memory.backend=qmd + memory.qmd.sessions.enabled=$MEMORY_ENABLE_SESSIONS)"
   else
     echo "Session memory source effective: $MEMORY_ENABLE_SESSIONS"
   fi

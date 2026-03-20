@@ -98,7 +98,7 @@ Statuses are how the system tracks state:
   - SSE persists durable `eventTs` / `sinceSeq` cursors in local storage.
   - cached board snapshots persist their replay cursor too, so reloads can resume incrementally instead of forcing a full cold snapshot.
 - Board chat routing is main-mediated:
-  - messages sent in board topic sessions go through main orchestration, which may delegate to specialists/subagents.
+  - messages sent in board topic sessions go through main orchestration, which may delegate to the worker subagent lane.
   - compatibility task sessions still route through the same main-agent orchestration lane rather than directly pinning ownership to a subagent.
 - `agentId` on `POST /api/openclaw/chat` is advisory metadata for ClawBoard dispatch bookkeeping (queue/orchestration context), not an authoritative direct-route override.
 - Only direct user-request lineage is allocatable into Topic/Task continuity.
@@ -185,12 +185,13 @@ Bootstrap characteristics (current):
 - idempotent reruns (safe to run repeatedly)
 - atomic per-file deployment of shipped docs/templates plus atomic skill/plugin swaps during OpenClaw install
 - deploys main-agent templates (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`, `BOOTSTRAP.md`) into the resolved OpenClaw main workspace
-- provisions specialist workspaces (`coding`, `docs`, `web`, `social`) and, by default, asks to enroll them so main can delegate through a real team
-- supports non-interactive specialist enrollment with `--setup-agentic-team` or `CLAWBOARD_AGENTIC_TEAM_SETUP=always`
+- provisions the worker workspace (`worker`) and, by default, asks to enroll it so main can delegate through a real team
+- supports non-interactive worker enrollment with `--setup-agentic-team` or `CLAWBOARD_AGENTIC_TEAM_SETUP=always`
+- optionally writes worker web-search and social API environment wiring (`CLAWBOARD_WEB_SEARCH_PROVIDER`, `SEARXNG_BASE_URL`, `BRAVE_API_KEY`, `BLUESKY_*`, `MASTODON_*`)
 - writes workspace-IDE defaults so ClawBoard can open resolved agent workspaces in a separate code-server tab, with dark-mode and trusted-workspace defaults seeded on first bootstrap
 - deploys ClawBoard contract docs (`ANATOMY.md`, `CONTEXT.md`, `CLASSIFICATION.md`, etc.) into the same workspace
 - applies scope-aware directive reconciliation (`directives/all/*` + `directives/<agent-id>/*`) with in-place updates, stale-block pruning, and a locally regenerated team roster
-- keeps main-agent execution lanes (main-only direct, single-specialist, multi-specialist/huddle) aligned with repository contracts
+- keeps main-agent execution lanes (main-only direct, single-worker, multi-worker/huddle) aligned with repository contracts
 - syncs main `subagents.allowAgents` from configured non-main agents for elastic delegation pool growth without manual list drift
 - audits injected bootstrap file sizes against OpenClaw `bootstrapMaxChars` / `bootstrapTotalMaxChars` limits and fails fast before prompt truncation
 - migrates legacy `CLAWBOARD_LOGGER_DISABLE_OPENCLAW_MEMORY_SEARCH` to `CLAWBOARD_LOGGER_ENABLE_OPENCLAW_MEMORY_SEARCH`

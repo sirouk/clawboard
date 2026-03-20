@@ -139,6 +139,7 @@ with open(cfg_path, "w", encoding="utf-8") as f:
 PY
 
 if [[ "$#" -ge 2 && "$1" == "doctor" && "$2" == "--fix" ]]; then
+  log_stub_call "$*"
   exit 0
 fi
 
@@ -366,6 +367,7 @@ if [[ "$#" -ge 2 && "$1" == "plugins" ]]; then
 fi
 
 if [[ "$#" -ge 2 && "$1" == "gateway" ]]; then
+  log_stub_call "$*"
   exit 0
 fi
 
@@ -522,7 +524,7 @@ async function seedBootstrapInstallTree(installDir, { includePlugin = true, incl
       path.join(process.cwd(), "scripts", "setup_specialist_agents.sh"),
       path.join(installDir, "scripts", "setup_specialist_agents.sh")
     );
-    for (const agentId of ["coding", "docs", "web", "social"]) {
+    for (const agentId of ["worker"]) {
       const templateDir = path.join(installDir, "agent-templates", agentId);
       await mkdir(templateDir, { recursive: true });
       await writeFile(path.join(templateDir, "AGENTS.md"), `# ${agentId} AGENTS\n`);
@@ -564,6 +566,13 @@ test("bootstrap_clawboard.sh: unknown option fails fast", async () => {
   assert.match(`${res.stdout}\n${res.stderr}`, /Unknown option: --definitely-not-a-real-flag/);
 });
 
+test("bootstrap_clawboard.sh: docker compose reruns avoid forced recreate and teardown churn", async () => {
+  const bootstrapText = await readFile(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), "utf8");
+  assert.match(bootstrapText, /docker compose/i);
+  assert.doesNotMatch(bootstrapText, /up -d --build --force-recreate/);
+  assert.doesNotMatch(bootstrapText, /down --remove-orphans/);
+});
+
 test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set and stays idempotent on rerun", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-"));
   const repoRoot = path.join(tmp, "repo");
@@ -571,6 +580,7 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   const homeDir = path.join(tmp, "home");
   const openclawHome = path.join(tmp, "custom-openclaw-home");
   const binDir = path.join(tmp, "bin");
+  const openclawLogPath = path.join(tmp, "openclaw.log");
 
   await mkdir(repoRoot, { recursive: true });
   await mkdir(installDir, { recursive: true });
@@ -591,6 +601,7 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
     ...process.env,
     HOME: homeDir,
     OPENCLAW_HOME: openclawHome,
+    OPENCLAW_STUB_LOG_FILE: openclawLogPath,
     PATH: `${binDir}:${process.env.PATH ?? ""}`,
     CLAWBOARD_TOKEN: "test-token",
   };
@@ -693,6 +704,14 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING=\/workspace$/m);
   assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_PASSWORD=test-token$/m);
 
+  const openclawLog = await readFile(openclawLogPath, "utf8");
+  const memoryIndexCount = (openclawLog.match(/^memory index --agent .* --force$/gm) || []).length;
+  const gatewayRestartCount = (openclawLog.match(/^gateway restart$/gm) || []).length;
+  const doctorFixCount = (openclawLog.match(/^doctor --fix(?: .*)?$/gm) || []).length;
+  assert.ok(memoryIndexCount <= 1, `expected bootstrap reruns to avoid duplicate memory index churn, found ${memoryIndexCount}`);
+  assert.ok(gatewayRestartCount <= 1, `expected bootstrap reruns to avoid duplicate gateway restarts, found ${gatewayRestartCount}`);
+  assert.equal(doctorFixCount, 0);
+
   const codeServerSettingsPath = path.join(installDir, "data", "code-server", "local", "User", "settings.json");
   const codeServerSettings = JSON.parse(await readFile(codeServerSettingsPath, "utf8"));
   const codingCodeServerSettingsPath = path.join(installDir, "data", "code-server-coding", "local", "User", "settings.json");
@@ -711,6 +730,60 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   assert.equal(codeServerSettings["window.autoDetectColorScheme"], false);
   assert.equal(codeServerSettings["security.workspace.trust.enabled"], false);
   assert.deepEqual(codingCodeServerSettings, codeServerSettings);
+});
+
+test("setup_specialist_agents.sh: worker workspace provisioning is idempotent on rerun", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-setup-worker-"));
+  const installDir = path.join(tmp, "install");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const configPath = path.join(openclawHome, "openclaw.json");
+  const workerWorkspace = path.join(openclawHome, "workspace-worker");
+
+  await mkdir(path.join(installDir, "scripts"), { recursive: true });
+  await mkdir(path.join(installDir, "agent-templates", "worker"), { recursive: true });
+  await mkdir(openclawHome, { recursive: true });
+  await cp(
+    path.join(process.cwd(), "scripts", "setup_specialist_agents.sh"),
+    path.join(installDir, "scripts", "setup_specialist_agents.sh")
+  );
+  await writeFile(path.join(installDir, "agent-templates", "worker", "AGENTS.md"), "# worker AGENTS\n");
+  await writeFile(path.join(installDir, "agent-templates", "worker", "SOUL.md"), "# worker SOUL\n");
+  await writeFile(
+    configPath,
+    `${JSON.stringify(
+      {
+        agents: {
+          defaults: { workspace: path.join(openclawHome, "workspace") },
+          list: [
+            { id: "main", default: true, workspace: path.join(openclawHome, "workspace") },
+            { id: "worker", workspace: workerWorkspace },
+          ],
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  const env = {
+    ...process.env,
+    OPENCLAW_HOME: openclawHome,
+    OPENCLAW_CONFIG_PATH: configPath,
+    INSTALL_DIR: installDir,
+  };
+
+  const scriptPath = path.join(installDir, "scripts", "setup_specialist_agents.sh");
+  const firstRun = await run(["bash", scriptPath], { cwd: installDir, env });
+  assert.equal(firstRun.code, 0, `exit=${firstRun.code}\nstdout:\n${firstRun.stdout}\nstderr:\n${firstRun.stderr}`);
+
+  const secondRun = await run(["bash", scriptPath], { cwd: installDir, env });
+  assert.equal(secondRun.code, 0, `exit=${secondRun.code}\nstdout:\n${secondRun.stdout}\nstderr:\n${secondRun.stderr}`);
+
+  assert.equal(await readFile(path.join(workerWorkspace, "AGENTS.md"), "utf8"), "# worker AGENTS\n");
+  assert.equal(await readFile(path.join(workerWorkspace, "SOUL.md"), "utf8"), "# worker SOUL\n");
+  await access(path.join(workerWorkspace, "memory"));
+  await access(path.join(workerWorkspace, "obsidian"));
+  assert.match(secondRun.stdout, /already aligned|unchanged/i);
 });
 
 test("bootstrap_clawboard.sh: prefers Tailscale MagicDNS host for public access URLs", async () => {
@@ -936,6 +1009,15 @@ test("bootstrap_clawboard.sh: does not report memory index success when qmd/sqli
   await mkdir(binDir, { recursive: true });
   await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
   await seedBootstrapInstallTree(installDir, { includePlugin: false });
+  await mkdir(path.join(installDir, "skills", "clawboard", "scripts"), { recursive: true });
+  await writeFile(
+    path.join(installDir, "skills", "clawboard", "scripts", "setup-openclaw-local-memory.sh"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+openclaw config set memory.qmd.limits.maxResults 21 --json
+`,
+    { mode: 0o755 }
+  );
 
   await makeOpenClawStub(binDir);
   await makeStub(binDir, "curl", "exit 0");
@@ -1234,7 +1316,7 @@ printf '%s\\n' "local-memory-ran" >> "\${LOCAL_MEMORY_SETUP_LOG_FILE}"
   assert.doesNotMatch(openclawLog, /memory index --agent/);
 });
 
-test("bootstrap_clawboard.sh: setup-agentic-team enrolls specialists and syncs main allowAgents without local-memory setup", async () => {
+test("bootstrap_clawboard.sh: setup-agentic-team enrolls worker and syncs main allowAgents without local-memory setup", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-agentic-team-"));
   const repoRoot = path.join(tmp, "repo");
   const installDir = path.join(tmp, "install");
@@ -1269,51 +1351,146 @@ test("bootstrap_clawboard.sh: setup-agentic-team enrolls specialists and syncs m
     CLAWBOARD_TOKEN: "agentic-team-token",
   };
 
-  const res = await run(
-    [
-      "bash",
-      path.join(bootstrapPath, "bootstrap_clawboard.sh"),
-      "--dir",
-      installDir,
-      "--skip-docker",
-      "--skip-plugin",
-      "--skip-local-memory-setup",
-      "--skip-memory-backup-setup",
-      "--skip-obsidian-memory-setup",
-      "--skip-openclaw-heap-setup",
-      "--skip-agent-directives",
-      "--setup-agentic-team",
-      "--no-access-url-prompt",
-      "--no-color",
-      "--integration-level",
-      "write",
-    ],
-    { cwd: repoRoot, env }
-  );
+  const bootstrapArgs = [
+    "bash",
+    path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+    "--dir",
+    installDir,
+    "--skip-docker",
+    "--skip-plugin",
+    "--skip-local-memory-setup",
+    "--skip-memory-backup-setup",
+    "--skip-obsidian-memory-setup",
+    "--skip-openclaw-heap-setup",
+    "--skip-agent-directives",
+    "--setup-agentic-team",
+    "--no-access-url-prompt",
+    "--no-color",
+    "--integration-level",
+    "write",
+  ];
+
+  const res = await run(bootstrapArgs, { cwd: repoRoot, env });
 
   assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
-  assert.match(res.stdout, /Added 4 specialist agent\(s\) to config/);
-  assert.match(res.stdout, /Synced main subagents\.allowAgents to configured specialists \(coding, docs, web, social\)\./);
-  assert.match(res.stdout, /Agentic team:\s+configured \(coding, docs, web, social\)/);
+  assert.match(res.stdout, /Added 1 worker agent\(s\) to config/);
+  assert.match(res.stdout, /Synced main subagents\.allowAgents to configured worker agents \(worker\)\./);
+  assert.match(res.stdout, /Agentic team:\s+configured \(worker\)/);
+
+  const secondRun = await run(bootstrapArgs, { cwd: repoRoot, env });
+  assert.equal(secondRun.code, 0, `exit=${secondRun.code}\nstdout:\n${secondRun.stdout}\nstderr:\n${secondRun.stderr}`);
+  assert.match(secondRun.stdout, /Agentic team already present in OpenClaw config|current delegation pool = worker|configured \(worker\)/);
 
   const config = JSON.parse(await readFile(configPath, "utf8"));
   const agentIds = config.agents.list.map((entry) => entry.id);
-  assert.deepEqual(agentIds, ["main", "coding", "docs", "web", "social"]);
-  assert.deepEqual(config.agents.list[0].subagents.allowAgents, ["coding", "docs", "web", "social"]);
+  assert.deepEqual(agentIds, ["main", "worker"]);
+  assert.deepEqual(config.agents.list[0].subagents.allowAgents, ["worker"]);
 
-  for (const agentId of ["coding", "docs", "web", "social"]) {
+  for (const agentId of ["worker"]) {
     const workspacePath = path.join(openclawHome, `workspace-${agentId}`);
     const agentsText = await readFile(path.join(workspacePath, "AGENTS.md"), "utf8");
     const soulText = await readFile(path.join(workspacePath, "SOUL.md"), "utf8");
     assert.equal(agentsText, `# ${agentId} AGENTS\n`);
     assert.equal(soulText, `# ${agentId} SOUL\n`);
   }
-
   const openclawLog = await readFile(openclawLogPath, "utf8");
-  assert.match(openclawLog, /agents add coding --workspace/);
-  assert.match(openclawLog, /agents add docs --workspace/);
-  assert.match(openclawLog, /agents add web --workspace/);
-  assert.match(openclawLog, /agents add social --workspace/);
+  const addWorkerCount = (openclawLog.match(/agents add worker --workspace/g) || []).length;
+  assert.equal(addWorkerCount, 1, `expected worker enrollment once across reruns, found ${addWorkerCount}`);
+});
+
+test("bootstrap_clawboard.sh: writes worker search and social env wiring when flags are provided and keeps single entries on rerun", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-worker-wiring-"));
+  const repoRoot = path.join(tmp, "repo");
+  const installDir = path.join(tmp, "install");
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const binDir = path.join(tmp, "bin");
+  const configPath = path.join(openclawHome, "openclaw.json");
+
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await mkdir(path.join(openclawHome, "workspace"), { recursive: true });
+  await seedBootstrapInstallTree(installDir, { includePlugin: false });
+
+  await makeOpenClawStub(binDir);
+  await makeStub(binDir, "curl", "exit 0");
+
+  const bootstrapPath = path.join(repoRoot, "scripts");
+  await mkdir(bootstrapPath, { recursive: true });
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), path.join(bootstrapPath, "bootstrap_clawboard.sh"));
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_openclaw.sh"), path.join(bootstrapPath, "bootstrap_openclaw.sh"));
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    OPENCLAW_CONFIG_PATH: configPath,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    CLAWBOARD_TOKEN: "worker-wiring-token",
+  };
+
+  const bootstrapArgs = [
+    "bash",
+    path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+    "--dir",
+    installDir,
+    "--skip-docker",
+    "--skip-plugin",
+    "--skip-local-memory-setup",
+    "--skip-memory-backup-setup",
+    "--skip-obsidian-memory-setup",
+    "--skip-openclaw-heap-setup",
+    "--skip-agent-directives",
+    "--skip-agentic-team-setup",
+    "--no-access-url-prompt",
+    "--no-color",
+    "--integration-level",
+    "write",
+    "--search-provider",
+    "searxng",
+    "--searxng-base-url",
+    "http://localhost:8888",
+    "--bluesky-handle",
+    "alice.bsky.social",
+    "--bluesky-app-password",
+    "app-password-1234",
+    "--mastodon-instance-url",
+    "https://mastodon.social",
+    "--mastodon-access-token",
+    "mastodon-token-5678",
+  ];
+
+  const res = await run(bootstrapArgs, { cwd: repoRoot, env });
+
+  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  const secondRun = await run(bootstrapArgs, { cwd: repoRoot, env });
+  assert.equal(secondRun.code, 0, `exit=${secondRun.code}\nstdout:\n${secondRun.stdout}\nstderr:\n${secondRun.stderr}`);
+
+  const envText = await readFile(path.join(installDir, ".env"), "utf8");
+  assert.match(envText, /^CLAWBOARD_WEB_SEARCH_PROVIDER=searxng$/m);
+  assert.match(envText, /^SEARXNG_BASE_URL=http:\/\/localhost:8888$/m);
+  assert.match(envText, /^BLUESKY_HANDLE=alice\.bsky\.social$/m);
+  assert.match(envText, /^BLUESKY_APP_PASSWORD=app-password-1234$/m);
+  assert.match(envText, /^MASTODON_INSTANCE_URL=https:\/\/mastodon\.social$/m);
+  assert.match(envText, /^MASTODON_ACCESS_TOKEN=mastodon-token-5678$/m);
+
+  for (const key of [
+    "CLAWBOARD_WEB_SEARCH_PROVIDER",
+    "SEARXNG_BASE_URL",
+    "BLUESKY_HANDLE",
+    "BLUESKY_APP_PASSWORD",
+    "MASTODON_INSTANCE_URL",
+    "MASTODON_ACCESS_TOKEN",
+  ]) {
+    const count = envText.split(/\r?\n/).filter((line) => line.startsWith(`${key}=`)).length;
+    assert.equal(count, 1, `expected ${key} to be written once across reruns, found ${count}`);
+  }
+
+  assert.match(secondRun.stdout, /Worker search:\s+local SearXNG scaffold written to \.env/i);
+  assert.match(secondRun.stdout, /Bluesky API:\s+credentials written to \.env/i);
+  assert.match(secondRun.stdout, /Mastodon API:\s+credentials written to \.env/i);
 });
 
 test("bootstrap_clawboard.sh: writes cross-agent session visibility config", async () => {
@@ -1572,6 +1749,68 @@ test("setup-openclaw-local-memory.sh: rolls back config snapshot on required wri
   assert.equal(finalText, baselineText, "expected config to be rolled back to baseline snapshot after failure");
 });
 
+test("setup-openclaw-local-memory.sh: honors qmd session enablement instead of forcing it off", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-memory-qmd-sessions-"));
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "custom-openclaw-home");
+  const binDir = path.join(tmp, "bin");
+  const workspaceDir = path.join(openclawHome, "workspace");
+  const configPath = path.join(openclawHome, "openclaw.json");
+  const modelPath = path.join(tmp, "embeddinggemma-300M-Q8_0.gguf");
+
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(openclawHome, { recursive: true });
+  await mkdir(workspaceDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await writeFile(modelPath, "stub-model");
+  await makeOpenClawStub(binDir);
+
+  await writeFile(
+    configPath,
+    `${JSON.stringify(
+      {
+        agents: {
+          defaults: { workspace: workspaceDir },
+          list: [{ id: "main", default: true, workspace: workspaceDir }],
+        },
+        memory: {
+          backend: "qmd",
+          qmd: {
+            includeDefaultMemory: false,
+            sessions: { enabled: false },
+            limits: { maxResults: 4, timeoutMs: 1200 },
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    OPENCLAW_CONFIG_PATH: configPath,
+    OPENCLAW_MEMORY_MODEL_PATH: modelPath,
+    OPENCLAW_MEMORY_ENABLE_SESSIONS: "true",
+    OPENCLAW_MEMORY_SKIP_INDEX: "true",
+    OPENCLAW_MEMORY_INDEX_SCOPE: "main",
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+  };
+
+  const scriptPath = path.join(process.cwd(), "skills", "clawboard", "scripts", "setup-openclaw-local-memory.sh");
+  const res = await run(["bash", scriptPath], { cwd: process.cwd(), env });
+
+  assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  assert.match(res.stdout, /Session memory source effective: true \(memory\.backend=qmd \+ memory\.qmd\.sessions\.enabled=true\)/);
+
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(config.memory?.qmd?.sessions?.enabled, true);
+  assert.deepEqual(config.agents?.defaults?.memorySearch?.sources, ["memory", "sessions"]);
+  assert.equal(config.agents?.defaults?.memorySearch?.experimental?.sessionMemory, false);
+});
+
 test("delegation supervision cadence stays aligned across templates and setup script", async () => {
   const root = process.cwd();
   const agentsPath = path.join(root, "agent-templates", "main", "AGENTS.md");
@@ -1616,14 +1855,17 @@ test("delegation supervision cadence stays aligned across templates and setup sc
   assert.doesNotMatch(setupText, /"group:nodes","group:messaging","image"/i);
   assert.match(setupText, /Delegation tools: sessions_spawn, session_status, sessions_list, sessions_send, cron/i);
   assert.match(setupText, /memoryFlush\.enabled true json false/i);
-  assert.match(setupText, /memory\.backend=qmd.*memory-only source/i);
-  assert.match(setupText, /memory\.qmd\.sessions\.enabled false json true/i);
+  assert.match(setupText, /memory\.qmd\.sessions\.enabled "\$MEMORY_ENABLE_SESSIONS" json true/i);
+  assert.doesNotMatch(setupText, /memory\.backend=qmd.*memory-only source/i);
+  assert.doesNotMatch(setupText, /memory\.qmd\.sessions\.enabled false json true/i);
   assert.match(agentsText, />5m|5 minutes/i);
   assert.match(heartbeatText, />5m|5 minutes/i);
   assert.match(agentsText, /do not send repetitive status-only messages|do not keep posting/i);
   assert.match(heartbeatText, /do not send another status-only update|nothing materially changed/i);
-  assert.match(bootstrapText, /openclaw_cfg_set_txn agents\.defaults\.memorySearch\.sources '\["memory"\]' json true/i);
-  assert.match(bootstrapText, /openclaw_cfg_set_txn agents\.defaults\.memorySearch\.experimental\.sessionMemory false json true/i);
+  assert.doesNotMatch(bootstrapText, /openclaw_cfg_set_txn memory\.qmd\.sessions\.enabled false json true/i);
+  assert.doesNotMatch(bootstrapText, /openclaw_cfg_set_txn agents\.defaults\.memorySearch\.sources '\["memory"\]' json true/i);
+  assert.doesNotMatch(bootstrapText, /openclaw_cfg_set_txn agents\.defaults\.memorySearch\.experimental\.sessionMemory false json true/i);
+  assert.match(bootstrapText, /respecting existing session\/source preferences/i);
 
   assert.match(anatomyText, ladderPattern);
   assert.match(contextText, ladderPattern);
@@ -1649,9 +1891,9 @@ test("main-agent execution lanes stay aligned across template, soul, and directi
   assert.match(agentsText, /main-only direct|trivial and faster than delegation/i);
   assert.match(soulText, /direct lane|trivial/i);
 
-  // Must preserve single-specialist and multi-specialist/huddle lanes.
-  assert.match(agentsText, /single-specialist|single specialist/i);
-  assert.match(agentsText, /multi-specialist|huddle|federated/i);
+  // Must preserve single-worker and multi-worker/huddle lanes.
+  assert.match(agentsText, /single-worker|single worker/i);
+  assert.match(agentsText, /multi-worker|huddle|federated/i);
   assert.match(directiveText, /delegate by default/i);
   assert.match(directiveText, /huddle|federated/i);
 
@@ -1678,11 +1920,11 @@ test("specialist contracts document dynamic clawboard repo resolution", async ()
       readFile(mainAgentPath, "utf8"),
     ]);
 
-  // AGENTS.md templates use simplified shared-workspace language (symlink).
+  // AGENTS.md templates should point specialists at explicit repo paths, not workspace symlinks.
   for (const text of [codingAgentText, docsAgentText]) {
     assert.match(text, /projects\/clawboard/i);
     assert.match(text, /Do not assume .*OPENCLAW_HOME.* set|Do not assume .*OPENCLAW_HOME.* exported/i);
-    assert.match(text, /share.*projects.*symlink|symlink.*projects/i);
+    assert.match(text, /Do not rely on a workspace-local .*projects\/.*symlink/i);
   }
   // Directive files retain detailed dynamic resolution instructions.
   for (const text of [codingDirectiveText, docsDirectiveText]) {
@@ -1700,7 +1942,7 @@ test("specialist contracts document dynamic clawboard repo resolution", async ()
   assert.match(mainAgentText, /canonical repo root|exact file path/i);
 });
 
-test("main-agent orchestration contract documents runtime model, specialist map, and decision escalation", async () => {
+test("main-agent orchestration contract documents runtime model, worker map, and decision escalation", async () => {
   const root = process.cwd();
   const agentsPath = path.join(root, "agent-templates", "main", "AGENTS.md");
   const soulPath = path.join(root, "agent-templates", "main", "SOUL.md");
@@ -1722,13 +1964,13 @@ test("main-agent orchestration contract documents runtime model, specialist map,
 
   assert.match(agentsText, /OpenClaw.*runtime/i);
   assert.match(agentsText, /ClawBoard.*durable ledger/i);
-  assert.match(agentsText, /coding.*docs.*web.*social/is);
+  assert.match(agentsText, /worker/i);
   assert.match(agentsText, /user decision|missing constraints|blocked/i);
   assert.match(agentsText, /session_status/i);
   assert.match(agentsText, /queued auto-announces|queued completion/i);
   assert.match(agentsText, /do not restate or paraphrase the full body/i);
-  assert.match(agentsText, /sibling specialists.*still active|partial results internal/i);
-  assert.match(agentsText, /checking the other specialists|awaiting the rest|no new user-facing text/i);
+  assert.match(agentsText, /sibling worker runs?.*still active|partial results internal/i);
+  assert.match(agentsText, /checking the other worker runs|awaiting the rest|no new user-facing text/i);
   assert.match(agentsText, /current-(topic|task) thread|current (topic|task) thread/i);
   assert.match(agentsText, /skip the (ledger|task) write instead of guessing from the title/i);
   assert.match(agentsText, /Do not call `session_status` in the same turn you just spawned/i);
@@ -1736,7 +1978,7 @@ test("main-agent orchestration contract documents runtime model, specialist map,
 
   assert.match(soulText, /OpenClaw.*sessions.*cron/i);
   assert.match(soulText, /ClawBoard.*durable external ledger/i);
-  assert.match(soulText, /coding.*docs.*web.*social/is);
+  assert.match(soulText, /worker/i);
   assert.match(soulText, /blocker requires a user decision/i);
   assert.match(soulText, /do not parrot|do not repeat the full body/i);
   assert.match(soulText, /do not burn an extra turn polling `session_status` immediately after `sessions_spawn`/i);
@@ -1746,8 +1988,8 @@ test("main-agent orchestration contract documents runtime model, specialist map,
   assert.match(heartbeatText, /session_status/i);
   assert.match(heartbeatText, /queued subagent completion|queued completion/i);
   assert.match(heartbeatText, /do not restate the full body|do not parrot it back/i);
-  assert.match(heartbeatText, /sibling specialists.*still active|partial results internal/i);
-  assert.match(heartbeatText, /checking or waiting on the other specialists|preferred next action is no user-facing text/i);
+  assert.match(heartbeatText, /sibling worker runs?.*still active|partial results internal/i);
+  assert.match(heartbeatText, /checking or waiting on the other worker runs|preferred next action is no user-facing text/i);
   assert.match(heartbeatText, /before any extra tool call or (task|ledger) write/i);
   assert.match(bootstrapText, /blocked on a real user decision/i);
   assert.match(bootstrapText, /session_status/i);
@@ -1755,19 +1997,19 @@ test("main-agent orchestration contract documents runtime model, specialist map,
   assert.match(bootstrapText, /Do not call `session_status\(childSessionKey\)` in that same post-spawn turn/i);
   assert.match(bootstrapText, /next action must be a plain-text dispatch update to the user immediately/i);
   assert.match(bootstrapText, /do not restate or paraphrase the full body/i);
-  assert.match(bootstrapText, /sibling specialists.*still active|partial results internal/i);
+  assert.match(bootstrapText, /sibling worker runs?.*still active|partial results internal/i);
   assert.match(bootstrapText, /checking the others|awaiting the rest/i);
   assert.match(bootstrapText, /before any extra tool call or (task|ledger) write/i);
   assert.match(directiveText, /OpenClaw is the runtime/i);
   assert.match(directiveText, /ClawBoard is the durable ledger/i);
   assert.match(directiveText, /user decision/i);
   assert.match(directiveText, /do not parrot the full body back/i);
-  assert.match(directiveText, /sibling specialists.*still active|partial completions internal/i);
+  assert.match(directiveText, /sibling worker runs?.*still active|partial completions internal/i);
   assert.match(directiveText, /checking the others|awaiting the rest|no new visible text/i);
   assert.match(setupText, /current (topic|task) thread/i);
   assert.match(setupText, /do not restate or paraphrase the full body|do not parrot it back/i);
-  assert.match(setupText, /sibling specialists.*still active|partial results internal/i);
-  assert.match(setupText, /checking or waiting on the remaining specialists|checking or waiting on the rest/i);
+  assert.match(setupText, /sibling worker runs?.*still active|partial results internal/i);
+  assert.match(setupText, /checking or waiting on the remaining worker runs|checking or waiting on the rest/i);
   assert.match(readmeText, /setup-agentic-team/i);
   assert.match(readmeText, /CLAWBOARD_AGENTIC_TEAM_SETUP=always/i);
 });

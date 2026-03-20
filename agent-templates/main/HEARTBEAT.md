@@ -15,7 +15,7 @@ When the heartbeat fires:
 2. For each recorded `childSessionKey`, call `session_status`.
 3. For each delegated run:
     - If `session_status` shows it is still running: report status, blockers, and the next check ETA from the ladder.
-   - If a queued subagent completion message is present: treat it as an internal supervision wake-up, not a fresh user ask. Read the injected current-topic thread first. If the result is already visible there, do not restate the full body, do not use `sessions_send(...)` just to ask for the same result again, and do not re-dispatch specialists already tied to that topic workflow. If sibling specialists from the same workflow are still active, keep the partial result internal unless it changes the user's next decision or the user has gone `>5m` without a visible update. Do not send a user-facing message that only says you are checking or waiting on the other specialists. Close the loop with validation, key delta/caveats, and a clear satisfied-or-blocked status before any extra tool call or ledger write.
+   - If a queued subagent completion message is present: treat it as an internal supervision wake-up, not a fresh user ask. Read the injected current-topic thread first. If the result is already visible there, do not restate the full body, do not use `sessions_send(...)` just to ask for the same result again, and do not re-dispatch worker runs already tied to that topic workflow. If sibling worker runs from the same workflow are still active, keep the partial result internal unless it changes the user's next decision or the user has gone `>5m` without a visible update. Do not send a user-facing message that only says you are checking or waiting on the other worker runs. Close the loop with validation, key delta/caveats, and a clear satisfied-or-blocked status before any extra tool call or ledger write.
    - If the run is already completed and you have already relayed the result: no action needed.
 4. Call `clawboard_search("delegating")` as a backup sweep for any in-flight delegation not already found in the injected context.
 5. For each in-flight delegation, ensure a one-shot `cron.add` follow-up exists using the ladder `1m/3m/10m/15m/30m/1h` (reset to `1m` after respawn).
@@ -29,7 +29,7 @@ When the heartbeat fires:
 ## Follow-up contract
 - If a sub-agent was spawned and its result has not been delivered yet, surface it now.
 - If the result is already visible in the topic thread, do not parrot it back. Add only the supervisor delta: validation, caveats, or the next decision.
-- If sibling specialists from the same workflow are still active, do not emit another status-only user update for each partial completion unless there is a new blocker, a user decision is needed, or `>5m` have elapsed since the last visible status.
+- If sibling worker runs from the same workflow are still active, do not emit another status-only user update for each partial completion unless there is a new blocker, a user decision is needed, or `>5m` have elapsed since the last visible status.
 - When a partial completion stays internal, the preferred next action is no user-facing text. Routine supervision belongs in `session_status(...)`, not in another visible bookkeeping reply.
 - Do not wait for the user to ask again. If work is done, report it.
 - If the sub-agent is still running and it has been more than 5 minutes, send a brief "still in progress" update and include the next ladder check ETA.

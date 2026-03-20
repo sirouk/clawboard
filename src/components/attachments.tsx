@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { apiFetch } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
@@ -220,7 +221,7 @@ export function AttachmentStrip({
         );
       })}
 
-      {previewImage ? (
+      {previewImage ? createPortal(
         <div
           className="fixed inset-0 z-[120] flex items-center justify-center bg-[rgba(4,6,10,0.82)] p-4 backdrop-blur-md"
           data-testid="attachment-preview-dialog"
@@ -267,7 +268,8 @@ export function AttachmentStrip({
               />
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       ) : null}
     </div>
   );
