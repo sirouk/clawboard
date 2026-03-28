@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { extractNestedText } from "./hook-text.js";
 import { isBoardSessionKey } from "./session-key.js";
 export function envInt(name, fallback, min, max) {
     const raw = (process.env[name] ?? "").trim();
@@ -273,28 +274,7 @@ export function lexicalSimilarity(a, b) {
     return inter / union;
 }
 export function extractTextLoose(value, depth = 0) {
-    if (!value || depth > 4)
-        return undefined;
-    if (typeof value === "string")
-        return value;
-    if (Array.isArray(value)) {
-        const parts = value
-            .map((entry) => extractTextLoose(entry, depth + 1))
-            .filter((entry) => Boolean(entry));
-        return parts.length ? parts.join("\n") : undefined;
-    }
-    if (typeof value === "object") {
-        const obj = value;
-        const keys = ["text", "content", "value", "message", "output_text", "input_text"];
-        const parts = [];
-        for (const key of keys) {
-            const extracted = extractTextLoose(obj[key], depth + 1);
-            if (extracted)
-                parts.push(extracted);
-        }
-        return parts.length ? parts.join("\n") : undefined;
-    }
-    return undefined;
+    return extractNestedText(value, depth);
 }
 export function latestUserInput(prompt, messages) {
     if (Array.isArray(messages)) {

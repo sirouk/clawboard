@@ -1,7 +1,11 @@
 import crypto from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
 import { boardSessionRouteToSessionKeys, computeEffectiveSessionKey, isBoardSessionKey, parseBoardSessionKey, } from "./session-key.js";
 import { shouldIgnoreSessionKey } from "./ignore-session.js";
+import { extractNestedText } from "./hook-text.js";
+import { boardScopeFromSessionKey, inferRequestIdFromMessageId, normalizeId, normalizeRequestId, parseAgentSessionOwner, parseSubagentSession, requestSessionKeys, resolveAgentLabel, shortId, } from "./routing.js";
+import { createContextCache } from "./context.js";
+import { createDedupeState, outgoingMessageIdDedupeKey, } from "./dedupe.js";
+import { createDurableQueueRuntime } from "./queue.js";
 import { BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS, CLAWBOARD_CONTEXT_BEGIN, CLAWBOARD_CONTEXT_END, CLAWBOARD_LOGGER_REGISTERED_SYMBOL, DEFAULT_BOARD_SCOPE_CACHE_MAX_ENTRIES, DEFAULT_BOARD_SCOPE_CACHE_TTL_MS, DEFAULT_CONTEXT_CACHE_FRESH_MS, DEFAULT_CONTEXT_CACHE_MAX_ENTRIES, DEFAULT_CONTEXT_CACHE_TTL_MS, DEFAULT_CONTEXT_FETCH_RETRIES, DEFAULT_CONTEXT_FETCH_TIMEOUT_MS, DEFAULT_CONTEXT_LOG_LIMIT, DEFAULT_CONTEXT_MAX_CHARS, DEFAULT_CONTEXT_TOPIC_LIMIT, DEFAULT_POST_TIMEOUT_MS, DEFAULT_QUEUE, IGNORE_SESSION_PREFIXES, OPENCLAW_REQUEST_ID_MAX_ENTRIES, OPENCLAW_REQUEST_ID_PREFIX, OPENCLAW_REQUEST_ID_TTL_MS, } from "./constants.js";
 import { buildBaseUrlCandidates, clip, dedupeFingerprint, ensureDir, envBool, envInt, isClassifierPayloadText, isContextMode, isRetryableFetchError, latestUserInput, lexicalSimilarity, normalizeBaseUrl, normalizeBaseUrlCandidate, normalizeWhitespace, parseBaseUrlList, parseContextModes, parseHookNameList, redact, sanitizeMessageContent, sanitizeRetrievedContextBlock, isHeartbeatControlPlaneText, isSubagentScaffoldText, shouldSuppressNonSemanticConversation, shouldSuppressReplyDirectivesForSession, summarize, truncateRaw, } from "./strings.js";
 export function resolveBoardTaskPatchId(taskId, sessionKey) {
@@ -117,8 +121,6 @@ export default function register(api) {
         return;
     }
     registrationState[CLAWBOARD_LOGGER_REGISTERED_SYMBOL] = true;
-    let flushing = false;
-    let flushTimer;
     const topicCache = new Map();
     function nowMs() {
         return Date.now();
@@ -134,146 +136,15 @@ export default function register(api) {
         const base = Math.min(capMs, Math.floor(250 * Math.pow(2, Math.max(0, attempt - 1))));
         return Math.max(50, jitter(base));
     }
-    class SqliteQueue {
-        db;
-        insertStmt;
-        selectStmt;
-        deleteStmt;
-        failStmt;
-        scopeInsertStmt;
-        scopeSelectByAgentStmt;
-        constructor(filePath) {
-            this.db = new DatabaseSync(filePath);
-            // Reasonable durability without being too slow.
-            this.db.exec("PRAGMA journal_mode=WAL;");
-            this.db.exec("PRAGMA synchronous=NORMAL;");
-            this.db.exec(`
-        CREATE TABLE IF NOT EXISTS clawboard_queue (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          created_at_ms INTEGER NOT NULL,
-          next_attempt_at_ms INTEGER NOT NULL,
-          attempts INTEGER NOT NULL DEFAULT 0,
-          idempotency_key TEXT NOT NULL UNIQUE,
-          payload_json TEXT NOT NULL,
-          last_error TEXT
-        );
-      `);
-            this.db.exec("CREATE INDEX IF NOT EXISTS idx_clawboard_queue_next_attempt ON clawboard_queue(next_attempt_at_ms);");
-            this.insertStmt = this.db.prepare(`
-        INSERT OR IGNORE INTO clawboard_queue
-          (created_at_ms, next_attempt_at_ms, attempts, idempotency_key, payload_json, last_error)
-        VALUES
-          (?1, ?2, ?3, ?4, ?5, ?6);
-      `);
-            this.selectStmt = this.db.prepare(`
-        SELECT id, idempotency_key as idempotencyKey, payload_json as payloadJson, attempts
-        FROM clawboard_queue
-        WHERE next_attempt_at_ms <= ?1
-        ORDER BY id ASC
-        LIMIT ?2;
-      `);
-            this.deleteStmt = this.db.prepare("DELETE FROM clawboard_queue WHERE id = ?1;");
-            this.failStmt = this.db.prepare(`
-        UPDATE clawboard_queue
-        SET attempts = ?2, next_attempt_at_ms = ?3, last_error = ?4
-        WHERE id = ?1;
-      `);
-            this.db.exec(`
-        CREATE TABLE IF NOT EXISTS board_scope_cache (
-          agent_id TEXT PRIMARY KEY,
-          topic_id TEXT NOT NULL,
-          task_id TEXT,
-          kind TEXT NOT NULL,
-          session_key TEXT,
-          updated_at_ms INTEGER NOT NULL
-        );
-      `);
-            this.scopeInsertStmt = this.db.prepare(`
-        INSERT OR REPLACE INTO board_scope_cache (agent_id, topic_id, task_id, kind, session_key, updated_at_ms)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6);
-      `);
-            this.scopeSelectByAgentStmt = this.db.prepare(`
-        SELECT topic_id as topicId, task_id as taskId, kind, session_key as sessionKey, updated_at_ms as updatedAt
-        FROM board_scope_cache
-        WHERE agent_id = ?1 AND updated_at_ms >= ?2
-        ORDER BY updated_at_ms DESC
-        LIMIT 1;
-      `);
-        }
-        enqueue(idempotencyKey, payload, error) {
-            const ts = nowMs();
-            this.insertStmt.run(ts, ts, 0, idempotencyKey, JSON.stringify(payload), error.slice(0, 1200));
-        }
-        pickDue(limit) {
-            const rows = this.selectStmt.all(nowMs(), Math.max(1, Math.min(200, limit)));
-            return rows ?? [];
-        }
-        markSent(id) {
-            this.deleteStmt.run(id);
-        }
-        markFailed(id, attempts, nextAttemptAtMs, error) {
-            this.failStmt.run(id, attempts, nextAttemptAtMs, error.slice(0, 1200));
-        }
-        saveBoardScope(agentId, scope) {
-            this.scopeInsertStmt.run(agentId, scope.topicId, scope.kind === "task" ? scope.taskId : null, scope.kind, scope.sessionKey ?? null, scope.updatedAt);
-        }
-        saveBoardScopeForSession(sessionKey, scope) {
-            const key = normalizeId(sessionKey);
-            if (!key)
-                return;
-            this.saveBoardScope(`session:${key}`, scope);
-        }
-        getFreshBoardScopeForAgent(agentId, cutoffMs) {
-            const key = normalizeId(agentId);
-            if (!key)
-                return undefined;
-            const rows = this.scopeSelectByAgentStmt.all(key, cutoffMs);
-            const row = rows?.[0];
-            if (!row)
-                return undefined;
-            if (row.kind === "task" && row.taskId) {
-                return {
-                    topicId: row.topicId,
-                    taskId: row.taskId,
-                    kind: "task",
-                    sessionKey: row.sessionKey ?? "",
-                    inherited: true,
-                    updatedAt: row.updatedAt,
-                };
-            }
-            return {
-                topicId: row.topicId,
-                kind: "topic",
-                sessionKey: row.sessionKey ?? "",
-                inherited: true,
-                updatedAt: row.updatedAt,
-            };
-        }
-        getFreshBoardScopeForSession(sessionKey, cutoffMs) {
-            const key = normalizeId(sessionKey);
-            if (!key)
-                return undefined;
-            return this.getFreshBoardScopeForAgent(`session:${key}`, cutoffMs);
-        }
-    }
-    let queueDb;
-    let queueDbPromise;
-    async function getQueueDb() {
-        if (queueDb)
-            return queueDb;
-        if (queueDbPromise)
-            return queueDbPromise;
-        queueDbPromise = (async () => {
-            await ensureDir(queuePath);
-            const db = new SqliteQueue(queuePath);
-            queueDb = db;
-            return db;
-        })().catch((err) => {
-            queueDbPromise = undefined;
-            throw err;
-        });
-        return queueDbPromise;
-    }
+    const inferOpenclawRequestIdFromMessageId = (value) => inferRequestIdFromMessageId(value, OPENCLAW_REQUEST_ID_PREFIX);
+    const requestSessionKeysFor = (sessionKey) => requestSessionKeys(sessionKey, {
+        parseBoardSessionKey,
+        boardSessionRouteToSessionKeys,
+    });
+    const boardScopeFromCurrentSessionKey = (sessionKey) => boardScopeFromSessionKey(sessionKey, {
+        parseBoardSessionKey,
+        nowMs,
+    });
     function ensureIdempotencyKey(payload) {
         const existing = payload.idempotencyKey;
         if (typeof existing === "string" && existing.trim().length > 0)
@@ -363,19 +234,6 @@ export default function register(api) {
         topicCache.set(sessionKey, topicId);
         return topicId;
     }
-    function resolveAgentLabel(agentId, sessionKey) {
-        const fromCtx = agentId && agentId !== "agent" ? agentId : undefined;
-        let fromSession;
-        if (!fromCtx && sessionKey && sessionKey.startsWith("agent:")) {
-            const parts = sessionKey.split(":");
-            if (parts.length >= 2)
-                fromSession = parts[1];
-        }
-        const resolved = fromCtx ?? fromSession;
-        if (!resolved || resolved === "main")
-            return "OpenClaw";
-        return `Agent ${resolved}`;
-    }
     const boardScopeBySession = new Map();
     const boardScopeByAgent = new Map();
     function pruneBoardScopeMap(cache, now = nowMs()) {
@@ -413,77 +271,6 @@ export default function register(api) {
             return undefined;
         }
         return entry;
-    }
-    function normalizeId(value) {
-        const text = typeof value === "string" ? value.trim() : "";
-        return text || undefined;
-    }
-    function normalizeRequestId(value) {
-        return normalizeId(typeof value === "string" ? value : undefined);
-    }
-    function inferRequestIdFromMessageId(value) {
-        const candidate = normalizeId(typeof value === "string" ? value : undefined);
-        if (!candidate)
-            return undefined;
-        return candidate.toLowerCase().startsWith(OPENCLAW_REQUEST_ID_PREFIX) ? candidate : undefined;
-    }
-    function requestSessionKeys(sessionKey) {
-        const normalized = normalizeId(sessionKey);
-        if (!normalized)
-            return [];
-        const keys = new Set();
-        keys.add(normalized);
-        const base = normalized.split("|", 1)[0]?.trim() || normalized;
-        if (base)
-            keys.add(base);
-        const boardRoute = parseBoardSessionKey(normalized);
-        if (boardRoute) {
-            for (const canonical of boardSessionRouteToSessionKeys(boardRoute)) {
-                keys.add(canonical);
-            }
-        }
-        return Array.from(keys);
-    }
-    function shortId(value, length = 8) {
-        const clean = value.replace(/[^a-zA-Z0-9]+/g, "");
-        return clean.slice(0, length) || value.slice(0, length);
-    }
-    function parseSubagentSession(sessionKey) {
-        const key = normalizeId(sessionKey);
-        if (!key || !key.startsWith("agent:"))
-            return null;
-        const parts = key.split(":");
-        if (parts.length < 4)
-            return null;
-        const ownerAgentId = normalizeId(parts[1]);
-        const subagentIdx = parts.indexOf("subagent");
-        if (!ownerAgentId || subagentIdx < 0 || subagentIdx + 1 >= parts.length)
-            return null;
-        const subagentId = normalizeId(parts[subagentIdx + 1]);
-        if (!subagentId)
-            return null;
-        return { ownerAgentId, subagentId };
-    }
-    function parseAgentSessionOwner(sessionKey) {
-        const key = normalizeId(sessionKey);
-        if (!key || !key.startsWith("agent:"))
-            return undefined;
-        const parts = key.split(":");
-        return normalizeId(parts[1]);
-    }
-    function boardScopeFromSessionKey(sessionKey) {
-        const key = normalizeId(sessionKey);
-        if (!key)
-            return undefined;
-        const route = parseBoardSessionKey(key);
-        if (!route)
-            return undefined;
-        return {
-            ...route,
-            sessionKey: key,
-            inherited: false,
-            updatedAt: nowMs(),
-        };
     }
     function rememberBoardScope(scope, opts) {
         const stamped = { ...scope, updatedAt: nowMs() };
@@ -633,28 +420,7 @@ export default function register(api) {
         return undefined;
     }
     function extractTextForHook(value, depth = 0) {
-        if (!value || depth > 4)
-            return undefined;
-        if (typeof value === "string")
-            return value;
-        if (Array.isArray(value)) {
-            const parts = value
-                .map((part) => extractTextForHook(part, depth + 1))
-                .filter((part) => Boolean(part));
-            return parts.length ? parts.join("\n") : undefined;
-        }
-        if (typeof value === "object") {
-            const obj = value;
-            const keys = ["text", "content", "value", "message", "output_text", "input_text"];
-            const parts = [];
-            for (const key of keys) {
-                const extracted = extractTextForHook(obj[key], depth + 1);
-                if (extracted)
-                    parts.push(extracted);
-            }
-            return parts.length ? parts.join("\n") : undefined;
-        }
-        return undefined;
+        return extractNestedText(value, depth);
     }
     function hookSourceHints(params) {
         const eventRecord = asRecord(params.event);
@@ -853,12 +619,12 @@ export default function register(api) {
             inherited: true,
             updatedAt: nowMs(),
         };
-        const sessionKeys = requestSessionKeys(key);
+        const sessionKeys = requestSessionKeysFor(key);
         rememberBoardScope(inheritedScope, { sessionKeys, agentIds: [] });
         getQueueDb()
             .then((db) => {
             for (const sessionKey of sessionKeys) {
-                db.saveBoardScopeForSession(sessionKey, inheritedScope);
+                db.saveBoardScopeForSession(sessionKey, inheritedScope, normalizeId);
             }
         })
             .catch(() => { });
@@ -884,7 +650,7 @@ export default function register(api) {
             ? explicitSessionCandidates
             : uniqueSessionCandidates([...explicitSessionCandidates, conversationKey]);
         const subagentSessionCandidates = subagent
-            ? uniqueSessionCandidates([normalizedSessionKey, ctxSessionKey, metaSessionKey].flatMap((candidate) => requestSessionKeys(candidate)))
+            ? uniqueSessionCandidates([normalizedSessionKey, ctxSessionKey, metaSessionKey].flatMap((candidate) => requestSessionKeysFor(candidate)))
             : [];
         const now = nowMs();
         // Direct board scope from any supplied session key always wins.
@@ -900,7 +666,7 @@ export default function register(api) {
                     boardScope: cached,
                 };
             }
-            const direct = boardScopeFromSessionKey(candidate);
+            const direct = boardScopeFromCurrentSessionKey(candidate);
             if (!direct)
                 continue;
             const sessionOwners = sessionCandidates
@@ -929,7 +695,7 @@ export default function register(api) {
                     const db = await getQueueDb();
                     const cutoffPersistence = now - BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS;
                     for (const candidate of subagentSessionCandidates) {
-                        const fromDb = db.getFreshBoardScopeForSession(candidate, cutoffPersistence);
+                        const fromDb = db.getFreshBoardScopeForSession(candidate, cutoffPersistence, normalizeId);
                         if (!fromDb)
                             continue;
                         inherited = fromDb;
@@ -957,7 +723,7 @@ export default function register(api) {
                     getQueueDb()
                         .then((db) => {
                         for (const candidate of subagentSessionCandidates) {
-                            db.saveBoardScopeForSession(candidate, nextScope);
+                            db.saveBoardScopeForSession(candidate, nextScope, normalizeId);
                         }
                     })
                         .catch(() => { });
@@ -1109,61 +875,18 @@ export default function register(api) {
             await sleep(delay);
         }
     }
-    async function flushQueueOnce(limit = 25) {
-        if (!useQueue) {
-            // Even if server-side queueing isn't enabled, the plugin still needs its local durable queue.
-            // This block intentionally does nothing; local queue flush is always enabled.
-        }
-        const db = await getQueueDb();
-        const rows = db.pickDue(limit);
-        if (rows.length === 0)
-            return;
-        for (const row of rows) {
-            let payload;
-            try {
-                payload = JSON.parse(row.payloadJson);
-            }
-            catch (err) {
-                db.markFailed(row.id, row.attempts + 1, nowMs() + 60_000, `json parse failed: ${String(err)}`);
-                continue;
-            }
-            // Always send with the same idempotency key that was queued.
-            payload.idempotencyKey = row.idempotencyKey;
-            const ok = await postLog(payload);
-            if (ok) {
-                db.markSent(row.id);
-                continue;
-            }
-            const attempts = row.attempts + 1;
-            const backoff = computeBackoffMs(attempts, 300_000);
-            db.markFailed(row.id, attempts, nowMs() + backoff, "send failed");
-        }
-    }
-    async function flushQueue() {
-        if (flushing)
-            return;
-        flushing = true;
-        try {
-            await flushQueueOnce(50);
-        }
-        finally {
-            flushing = false;
-        }
-    }
-    function ensureFlushLoop() {
-        if (flushTimer)
-            return;
-        flushTimer = setInterval(() => {
-            flushQueue().catch(() => undefined);
-        }, 2000);
-        flushTimer?.unref?.();
-    }
-    async function enqueueDurable(payload, error) {
-        const db = await getQueueDb();
-        const idempotencyKey = ensureIdempotencyKey(payload);
-        db.enqueue(idempotencyKey, payload, error);
-        ensureFlushLoop();
-    }
+    const queueLeaseOwner = `clawboard-logger:${process.pid}:${crypto.randomUUID()}`;
+    const queueLeaseDurationMs = Math.max(60_000, postTimeoutMs * 3);
+    const { getQueueDb, flushQueue, ensureFlushLoop, enqueueDurable } = createDurableQueueRuntime({
+        queuePath,
+        ensureDir,
+        ensureIdempotencyKey,
+        postLog,
+        computeBackoffMs,
+        leaseOwner: queueLeaseOwner,
+        leaseDurationMs: queueLeaseDurationMs,
+        nowMs,
+    });
     async function send(payload) {
         ensureIdempotencyKey(payload);
         const ok = await postLogWithRetry(payload);
@@ -1639,81 +1362,14 @@ export default function register(api) {
         });
     }
     registerAgentTools();
-    const contextCache = new Map();
-    function contextSessionCacheKey(sessionKey) {
-        const normalized = normalizeWhitespace(String(sessionKey ?? ""));
-        return normalized || "global";
-    }
-    function contextQueryHash(query) {
-        return crypto.createHash("sha256").update(query).digest("hex").slice(0, 24);
-    }
-    function contextCacheKey(sessionKey, query, mode) {
-        return `${contextSessionCacheKey(sessionKey)}|${mode}|${contextQueryHash(query)}`;
-    }
-    function contextModePlan(primary) {
-        const defaultsByPrimary = {
-            auto: ["full", "cheap"],
-            cheap: ["auto", "full"],
-            full: ["auto", "cheap"],
-            patient: ["full", "auto", "cheap"],
-        };
-        const configured = contextFallbackModes.length > 0 ? contextFallbackModes : defaultsByPrimary[primary];
-        const ordered = [primary, ...configured];
-        const seen = new Set();
-        const deduped = [];
-        for (const mode of ordered) {
-            if (!isContextMode(mode) || seen.has(mode))
-                continue;
-            seen.add(mode);
-            deduped.push(mode);
-        }
-        return deduped.length > 0 ? deduped : [primary];
-    }
-    function pruneContextCache() {
-        if (contextCache.size === 0)
-            return;
-        const now = nowMs();
-        if (contextCacheTtlMs > 0) {
-            for (const [key, entry] of contextCache.entries()) {
-                if (now - entry.cachedAtMs > contextCacheTtlMs)
-                    contextCache.delete(key);
-            }
-        }
-        else {
-            contextCache.clear();
-            return;
-        }
-        if (contextCache.size <= contextCacheMaxEntries)
-            return;
-        const sorted = Array.from(contextCache.entries()).sort((a, b) => a[1].cachedAtMs - b[1].cachedAtMs);
-        const overflow = contextCache.size - contextCacheMaxEntries;
-        for (let i = 0; i < overflow; i += 1) {
-            const row = sorted[i];
-            if (!row)
-                break;
-            contextCache.delete(row[0]);
-        }
-    }
-    function readContextCacheEntry(sessionKey, query, mode, maxAgeMs) {
-        if (contextCacheTtlMs <= 0 || maxAgeMs <= 0)
-            return undefined;
-        const entry = contextCache.get(contextCacheKey(sessionKey, query, mode));
-        if (!entry)
-            return undefined;
-        if (nowMs() - entry.cachedAtMs > maxAgeMs)
-            return undefined;
-        return entry;
-    }
-    function writeContextCache(sessionKey, query, mode, block) {
-        if (contextCacheTtlMs <= 0)
-            return;
-        contextCache.set(contextCacheKey(sessionKey, query, mode), {
-            mode,
-            block,
-            cachedAtMs: nowMs(),
-        });
-        pruneContextCache();
-    }
+    const { contextModePlan, readContextCacheEntry, writeContextCache } = createContextCache({
+        ttlMs: contextCacheTtlMs,
+        maxEntries: contextCacheMaxEntries,
+        fallbackModes: contextFallbackModes,
+        normalizeWhitespace,
+        isContextMode,
+        nowMs,
+    });
     async function fetchContextBlockViaContextApi(query, sessionKey, mode) {
         const controller = new AbortController();
         const t = setTimeout(() => controller.abort(), contextFetchTimeoutMs);
@@ -1923,7 +1579,7 @@ export default function register(api) {
         if (!normalizedRequestId)
             return;
         const ts = nowMs();
-        for (const key of requestSessionKeys(sessionKey)) {
+        for (const key of requestSessionKeysFor(sessionKey)) {
             openclawRequestBySession.set(key, { requestId: normalizedRequestId, ts });
         }
         pruneOpenclawRequestMap(ts, openclawRequestBySession.size > OPENCLAW_REQUEST_ID_MAX_ENTRIES);
@@ -1933,7 +1589,7 @@ export default function register(api) {
         if (openclawRequestBySession.size > OPENCLAW_REQUEST_ID_MAX_ENTRIES) {
             pruneOpenclawRequestMap(ts, true);
         }
-        for (const key of requestSessionKeys(sessionKey)) {
+        for (const key of requestSessionKeysFor(sessionKey)) {
             const row = openclawRequestBySession.get(key);
             if (!row)
                 continue;
@@ -1951,7 +1607,7 @@ export default function register(api) {
             rememberOpenclawRequestId(params.sessionKey, explicit);
             return explicit;
         }
-        const inferred = inferRequestIdFromMessageId(params.messageId);
+        const inferred = inferOpenclawRequestIdFromMessageId(params.messageId);
         if (inferred) {
             rememberOpenclawRequestId(params.sessionKey, inferred);
             return inferred;
@@ -1971,21 +1627,21 @@ export default function register(api) {
         const candidates = new Set();
         const sessionKey = normalizeId(params.sessionKey);
         if (sessionKey) {
-            for (const key of requestSessionKeys(sessionKey))
+            for (const key of requestSessionKeysFor(sessionKey))
                 candidates.add(key);
         }
         const scopeSessionKey = normalizeId(params.boardScope?.sessionKey);
         if (scopeSessionKey) {
-            for (const key of requestSessionKeys(scopeSessionKey))
+            for (const key of requestSessionKeysFor(scopeSessionKey))
                 candidates.add(key);
         }
-        const canonicalScopeSessionKeys = canonicalBoardScopeSessionKeys(params.boardScope ?? boardScopeFromSessionKey(sessionKey));
+        const canonicalScopeSessionKeys = canonicalBoardScopeSessionKeys(params.boardScope ?? boardScopeFromCurrentSessionKey(sessionKey));
         for (const canonicalScopeSessionKey of canonicalScopeSessionKeys) {
-            for (const key of requestSessionKeys(canonicalScopeSessionKey))
+            for (const key of requestSessionKeysFor(canonicalScopeSessionKey))
                 candidates.add(key);
         }
         for (const candidate of candidates) {
-            const candidateRequestId = inferRequestIdFromMessageId(recentOpenclawRequestId(candidate));
+            const candidateRequestId = inferOpenclawRequestIdFromMessageId(recentOpenclawRequestId(candidate));
             if (!candidateRequestId)
                 continue;
             rememberOpenclawRequestId(params.sessionKey, candidateRequestId);
@@ -2023,10 +1679,10 @@ export default function register(api) {
                     const source = row.source && typeof row.source === "object"
                         ? (row.source ?? undefined)
                         : undefined;
-                    const candidateRequestId = inferRequestIdFromMessageId(source?.requestId) ??
-                        inferRequestIdFromMessageId(source?.messageId) ??
-                        inferRequestIdFromMessageId(row.requestId) ??
-                        inferRequestIdFromMessageId(row.messageId);
+                    const candidateRequestId = inferOpenclawRequestIdFromMessageId(source?.requestId) ??
+                        inferOpenclawRequestIdFromMessageId(source?.messageId) ??
+                        inferOpenclawRequestIdFromMessageId(row.requestId) ??
+                        inferOpenclawRequestIdFromMessageId(row.messageId);
                     if (!candidateRequestId)
                         continue;
                     rememberOpenclawRequestId(lookupSessionKey, candidateRequestId);
@@ -2323,14 +1979,14 @@ export default function register(api) {
             return;
         }
         const channelId = typeof ctx.channelId === "string" ? ctx.channelId.trim().toLowerCase() : "";
-        const inferredRequestId = inferRequestIdFromMessageId(messageId);
+        const inferredRequestId = inferOpenclawRequestIdFromMessageId(messageId);
         if (channelId === "webchat" &&
             (requestId?.toLowerCase().startsWith(OPENCLAW_REQUEST_ID_PREFIX) || Boolean(inferredRequestId))) {
             // ClawBoard already persisted this user prompt via `/api/openclaw/chat`.
             // WebChat can echo it back with a different messageId; skip to avoid duplicate user rows.
             return;
         }
-        const directBoardScope = boardScopeFromSessionKey(effectiveSessionKey ?? ctx?.sessionKey);
+        const directBoardScope = boardScopeFromCurrentSessionKey(effectiveSessionKey ?? ctx?.sessionKey);
         if (directBoardScope) {
             rememberBoardScope(directBoardScope, {
                 sessionKeys: [effectiveSessionKey, ctx.sessionKey],
@@ -2423,128 +2079,12 @@ export default function register(api) {
         // will attach this log to a real topic based on conversation context.
     });
     // Outbound assistant logging: message_sending is the reliable hook.
-    const recentOutgoing = new Set();
-    const rememberOutgoing = (key) => {
-        recentOutgoing.add(key);
-        if (recentOutgoing.size > 200) {
-            const first = recentOutgoing.values().next().value;
-            if (first)
-                recentOutgoing.delete(first);
-        }
-        setTimeout(() => recentOutgoing.delete(key), 30_000)?.unref?.();
-    };
-    const recentOutgoingBySession = new Map();
-    const RECENT_OUTGOING_SESSION_WINDOW_MS = 5 * 60_000;
-    const dedupeSessionKey = (sessionKey) => {
-        const raw = String(sessionKey ?? "").trim();
-        if (!raw)
-            return "";
-        return raw.split("|", 1)[0] ?? raw;
-    };
-    const rememberOutgoingSession = (sessionKey, content) => {
-        const key = dedupeSessionKey(sessionKey);
-        if (!key)
-            return;
-        const now = Date.now();
-        recentOutgoingBySession.set(key, { ts: now, content: sanitizeMessageContent(content ?? "") });
-        for (const [known, row] of recentOutgoingBySession) {
-            if (now - row.ts > RECENT_OUTGOING_SESSION_WINDOW_MS)
-                recentOutgoingBySession.delete(known);
-        }
-    };
-    const recentOutgoingSession = (sessionKey) => {
-        const key = dedupeSessionKey(sessionKey);
-        if (!key)
-            return undefined;
-        const row = recentOutgoingBySession.get(key);
-        if (!row)
-            return undefined;
-        const now = Date.now();
-        if (now - row.ts > RECENT_OUTGOING_SESSION_WINDOW_MS) {
-            recentOutgoingBySession.delete(key);
-            return undefined;
-        }
-        return row;
-    };
-    const looksLikeRecentBoardAssistantEcho = (sessionKey, content) => {
-        const recent = recentOutgoingSession(sessionKey);
-        if (!recent?.content)
-            return false;
-        const clean = sanitizeMessageContent(content);
-        if (!clean)
-            return false;
-        if (clean === recent.content)
-            return true;
-        if (clean.includes(recent.content) || recent.content.includes(clean))
-            return true;
-        return lexicalSimilarity(clean, recent.content) >= 0.6;
-    };
-    const outgoingMessageIdDedupeKey = (channelId, sessionKey, messageId) => {
-        const mid = String(messageId ?? "").trim();
-        if (!mid)
-            return "";
-        return `sending:${channelId ?? "nochannel"}:${sessionKey ?? ""}:${mid}`;
-    };
-    const outgoingFingerprintDedupeKey = (channelId, sessionKey, content) => `sending:${channelId ?? "nochannel"}:${sessionKey ?? ""}:fp:${dedupeFingerprint(content)}`;
-    const incomingFingerprintDedupeKey = (channelId, sessionKey, content) => `incoming-fp:${channelId ?? "nochannel"}:${sessionKey ?? ""}:${dedupeFingerprint(content)}`;
-    const recentIncoming = new Set();
-    const rememberIncoming = (key, ttlMs = 30_000) => {
-        recentIncoming.add(key);
-        if (recentIncoming.size > 200) {
-            const first = recentIncoming.values().next().value;
-            if (first)
-                recentIncoming.delete(first);
-        }
-        setTimeout(() => recentIncoming.delete(key), ttlMs)?.unref?.();
-    };
-    const recentTranscriptWrites = new Set();
-    const rememberTranscriptWrite = (key, ttlMs = 60_000) => {
-        recentTranscriptWrites.add(key);
-        if (recentTranscriptWrites.size > 400) {
-            const first = recentTranscriptWrites.values().next().value;
-            if (first)
-                recentTranscriptWrites.delete(first);
-        }
-        setTimeout(() => recentTranscriptWrites.delete(key), ttlMs)?.unref?.();
-    };
-    const transcriptWriteDedupeKey = (params) => {
-        if (params.messageId) {
-            return `before-write:${params.channelId ?? "nochannel"}:${params.sessionKey ?? ""}:${params.messageId}`;
-        }
-        const seed = [
-            params.channelId ?? "nochannel",
-            params.sessionKey ?? "",
-            params.role ?? "",
-            params.toolCallId ?? "",
-            dedupeFingerprint(params.contentSeed ?? ""),
-        ].join("|");
-        return `before-write:fp:${seed}`;
-    };
-    const recentToolResultPersist = new Set();
-    const rememberToolResultPersist = (key, ttlMs = 90_000) => {
-        recentToolResultPersist.add(key);
-        if (recentToolResultPersist.size > 500) {
-            const first = recentToolResultPersist.values().next().value;
-            if (first)
-                recentToolResultPersist.delete(first);
-        }
-        setTimeout(() => recentToolResultPersist.delete(key), ttlMs)?.unref?.();
-    };
-    const toolResultPersistDedupeKey = (params) => {
-        if (params.toolCallId) {
-            return `tool-persist:${params.channelId ?? "nochannel"}:${params.sessionKey ?? ""}:${params.toolCallId}`;
-        }
-        if (params.messageId) {
-            return `tool-persist:${params.channelId ?? "nochannel"}:${params.sessionKey ?? ""}:${params.messageId}`;
-        }
-        const seed = [
-            params.channelId ?? "nochannel",
-            params.sessionKey ?? "",
-            params.toolName ?? "",
-            dedupeFingerprint(params.contentSeed ?? ""),
-        ].join("|");
-        return `tool-persist:fp:${seed}`;
-    };
+    const { recentOutgoing, recentIncoming, recentTranscriptWrites, recentToolResultPersist, rememberOutgoing, rememberIncoming, rememberTranscriptWrite, rememberToolResultPersist, rememberOutgoingSession, looksLikeRecentBoardAssistantEcho, outgoingFingerprintDedupeKey, incomingFingerprintDedupeKey, transcriptWriteDedupeKey, toolResultPersistDedupeKey, } = createDedupeState({
+        sanitizeMessageContent,
+        lexicalSimilarity,
+        dedupeFingerprint,
+        nowMs,
+    });
     api.on("message_sending", async (event, ctx) => {
         const createdAt = new Date().toISOString();
         const sendEvent = event;
@@ -2916,30 +2456,6 @@ export default function register(api) {
             messageCount: event.messages?.length ?? 0,
         };
         const messages = Array.isArray(event.messages) ? event.messages : [];
-        const extractText = (value, depth = 0) => {
-            if (!value || depth > 4)
-                return undefined;
-            if (typeof value === "string")
-                return value;
-            if (Array.isArray(value)) {
-                const parts = value
-                    .map((part) => extractText(part, depth + 1))
-                    .filter((part) => Boolean(part));
-                return parts.length ? parts.join("\n") : undefined;
-            }
-            if (typeof value === "object") {
-                const obj = value;
-                const keys = ["text", "content", "value", "message", "output_text", "input_text"];
-                const parts = [];
-                for (const key of keys) {
-                    const extracted = extractText(obj[key], depth + 1);
-                    if (extracted)
-                        parts.push(extracted);
-                }
-                return parts.length ? parts.join("\n") : undefined;
-            }
-            return undefined;
-        };
         const anchor = ctx.sessionKey ? inboundBySession.get(ctx.sessionKey) : undefined;
         const anchorFresh = !!anchor && Date.now() - anchor.ts < 2 * 60_000;
         const channelFresh = Date.now() - lastMessageAt < 2 * 60_000;
@@ -2948,7 +2464,7 @@ export default function register(api) {
             const role = typeof msg.role === "string" ? msg.role : undefined;
             if (role !== "user")
                 return false;
-            const text = extractText(msg.content) ?? "";
+            const text = extractNestedText(msg.content) ?? "";
             return /\[Discord /i.test(text) || /channel:discord/i.test(text);
         });
         if (discordSignal && channelFresh && lastEffectiveSessionKey?.startsWith("channel:")) {
@@ -3049,7 +2565,7 @@ export default function register(api) {
                 const ch = (sourceChannel ?? ctx.channelId ?? "").toString().trim().toLowerCase();
                 if (role === "user" && ch === "heartbeat")
                     continue;
-                const content = extractText(msg.content);
+                const content = extractNestedText(msg.content);
                 if (!content || !content.trim())
                     continue;
                 const cleanedContent = sanitizeMessageContent(content);

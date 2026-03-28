@@ -3,7 +3,6 @@ import type {
 } from "openclaw/plugin-sdk";
 
 import crypto from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
 
 import {
   boardSessionRouteToSessionKeys,
@@ -34,6 +33,24 @@ import type {
   RoutingScope,
   ActorFlow,
 } from "./types.js";
+import { extractNestedText } from "./hook-text.js";
+import {
+  boardScopeFromSessionKey,
+  inferRequestIdFromMessageId,
+  normalizeId,
+  normalizeRequestId,
+  parseAgentSessionOwner,
+  parseSubagentSession,
+  requestSessionKeys,
+  resolveAgentLabel,
+  shortId,
+} from "./routing.js";
+import { createContextCache } from "./context.js";
+import {
+  createDedupeState,
+  outgoingMessageIdDedupeKey,
+} from "./dedupe.js";
+import { createDurableQueueRuntime } from "./queue.js";
 
 import {
   BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS,
@@ -229,9 +246,6 @@ export default function register(api: OpenClawPluginApi) {
   }
   registrationState[CLAWBOARD_LOGGER_REGISTERED_SYMBOL] = true;
 
-  let flushing = false;
-  let flushTimer: ReturnType<typeof setInterval> | undefined;
-
   const topicCache = new Map<string, string>();
 
   function nowMs() {
@@ -252,173 +266,18 @@ export default function register(api: OpenClawPluginApi) {
     return Math.max(50, jitter(base));
   }
 
-  type QueuedRow = {
-    id: number;
-    idempotencyKey: string;
-    payloadJson: string;
-    attempts: number;
-  };
-
-  class SqliteQueue {
-    db: DatabaseSync;
-    insertStmt: ReturnType<DatabaseSync["prepare"]>;
-    selectStmt: ReturnType<DatabaseSync["prepare"]>;
-    deleteStmt: ReturnType<DatabaseSync["prepare"]>;
-    failStmt: ReturnType<DatabaseSync["prepare"]>;
-    scopeInsertStmt: ReturnType<DatabaseSync["prepare"]>;
-    scopeSelectByAgentStmt: ReturnType<DatabaseSync["prepare"]>;
-
-    constructor(filePath: string) {
-      this.db = new DatabaseSync(filePath);
-      // Reasonable durability without being too slow.
-      this.db.exec("PRAGMA journal_mode=WAL;");
-      this.db.exec("PRAGMA synchronous=NORMAL;");
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS clawboard_queue (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          created_at_ms INTEGER NOT NULL,
-          next_attempt_at_ms INTEGER NOT NULL,
-          attempts INTEGER NOT NULL DEFAULT 0,
-          idempotency_key TEXT NOT NULL UNIQUE,
-          payload_json TEXT NOT NULL,
-          last_error TEXT
-        );
-      `);
-      this.db.exec("CREATE INDEX IF NOT EXISTS idx_clawboard_queue_next_attempt ON clawboard_queue(next_attempt_at_ms);");
-
-      this.insertStmt = this.db.prepare(`
-        INSERT OR IGNORE INTO clawboard_queue
-          (created_at_ms, next_attempt_at_ms, attempts, idempotency_key, payload_json, last_error)
-        VALUES
-          (?1, ?2, ?3, ?4, ?5, ?6);
-      `);
-      this.selectStmt = this.db.prepare(`
-        SELECT id, idempotency_key as idempotencyKey, payload_json as payloadJson, attempts
-        FROM clawboard_queue
-        WHERE next_attempt_at_ms <= ?1
-        ORDER BY id ASC
-        LIMIT ?2;
-      `);
-      this.deleteStmt = this.db.prepare("DELETE FROM clawboard_queue WHERE id = ?1;");
-      this.failStmt = this.db.prepare(`
-        UPDATE clawboard_queue
-        SET attempts = ?2, next_attempt_at_ms = ?3, last_error = ?4
-        WHERE id = ?1;
-      `);
-
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS board_scope_cache (
-          agent_id TEXT PRIMARY KEY,
-          topic_id TEXT NOT NULL,
-          task_id TEXT,
-          kind TEXT NOT NULL,
-          session_key TEXT,
-          updated_at_ms INTEGER NOT NULL
-        );
-      `);
-      this.scopeInsertStmt = this.db.prepare(`
-        INSERT OR REPLACE INTO board_scope_cache (agent_id, topic_id, task_id, kind, session_key, updated_at_ms)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6);
-      `);
-      this.scopeSelectByAgentStmt = this.db.prepare(`
-        SELECT topic_id as topicId, task_id as taskId, kind, session_key as sessionKey, updated_at_ms as updatedAt
-        FROM board_scope_cache
-        WHERE agent_id = ?1 AND updated_at_ms >= ?2
-        ORDER BY updated_at_ms DESC
-        LIMIT 1;
-      `);
-    }
-
-    enqueue(idempotencyKey: string, payload: Record<string, unknown>, error: string) {
-      const ts = nowMs();
-      this.insertStmt.run(ts, ts, 0, idempotencyKey, JSON.stringify(payload), error.slice(0, 1200));
-    }
-
-    pickDue(limit: number): QueuedRow[] {
-      const rows = this.selectStmt.all(nowMs(), Math.max(1, Math.min(200, limit))) as QueuedRow[];
-      return rows ?? [];
-    }
-
-    markSent(id: number) {
-      this.deleteStmt.run(id);
-    }
-
-    markFailed(id: number, attempts: number, nextAttemptAtMs: number, error: string) {
-      this.failStmt.run(id, attempts, nextAttemptAtMs, error.slice(0, 1200));
-    }
-
-    saveBoardScope(agentId: string, scope: BoardScope) {
-      this.scopeInsertStmt.run(
-        agentId,
-        scope.topicId,
-        scope.kind === "task" ? scope.taskId : null,
-        scope.kind,
-        scope.sessionKey ?? null,
-        scope.updatedAt,
-      );
-    }
-
-    saveBoardScopeForSession(sessionKey: string, scope: BoardScope) {
-      const key = normalizeId(sessionKey);
-      if (!key) return;
-      this.saveBoardScope(`session:${key}`, scope);
-    }
-
-    getFreshBoardScopeForAgent(agentId: string, cutoffMs: number): BoardScope | undefined {
-      const key = normalizeId(agentId);
-      if (!key) return undefined;
-      const rows = this.scopeSelectByAgentStmt.all(key, cutoffMs) as Array<{
-        topicId: string;
-        taskId: string | null;
-        kind: string;
-        sessionKey: string | null;
-        updatedAt: number;
-      }>;
-      const row = rows?.[0];
-      if (!row) return undefined;
-      if (row.kind === "task" && row.taskId) {
-        return {
-          topicId: row.topicId,
-          taskId: row.taskId,
-          kind: "task",
-          sessionKey: row.sessionKey ?? "",
-          inherited: true,
-          updatedAt: row.updatedAt,
-        };
-      }
-      return {
-        topicId: row.topicId,
-        kind: "topic",
-        sessionKey: row.sessionKey ?? "",
-        inherited: true,
-        updatedAt: row.updatedAt,
-      };
-    }
-
-    getFreshBoardScopeForSession(sessionKey: string, cutoffMs: number): BoardScope | undefined {
-      const key = normalizeId(sessionKey);
-      if (!key) return undefined;
-      return this.getFreshBoardScopeForAgent(`session:${key}`, cutoffMs);
-    }
-  }
-
-  let queueDb: SqliteQueue | undefined;
-  let queueDbPromise: Promise<SqliteQueue> | undefined;
-
-  async function getQueueDb() {
-    if (queueDb) return queueDb;
-    if (queueDbPromise) return queueDbPromise;
-    queueDbPromise = (async () => {
-      await ensureDir(queuePath);
-      const db = new SqliteQueue(queuePath);
-      queueDb = db;
-      return db;
-    })().catch((err) => {
-      queueDbPromise = undefined;
-      throw err;
+  const inferOpenclawRequestIdFromMessageId = (value: unknown) =>
+    inferRequestIdFromMessageId(value, OPENCLAW_REQUEST_ID_PREFIX);
+  const requestSessionKeysFor = (sessionKey: string | undefined | null) =>
+    requestSessionKeys(sessionKey, {
+      parseBoardSessionKey,
+      boardSessionRouteToSessionKeys,
     });
-    return queueDbPromise;
-  }
+  const boardScopeFromCurrentSessionKey = (sessionKey: string | undefined | null) =>
+    boardScopeFromSessionKey(sessionKey, {
+      parseBoardSessionKey,
+      nowMs,
+    });
 
   function ensureIdempotencyKey(payload: Record<string, unknown>) {
     const existing = payload.idempotencyKey;
@@ -519,18 +378,6 @@ export default function register(api: OpenClawPluginApi) {
     return topicId;
   }
 
-  function resolveAgentLabel(agentId?: string | null, sessionKey?: string | null) {
-    const fromCtx = agentId && agentId !== "agent" ? agentId : undefined;
-    let fromSession: string | undefined;
-    if (!fromCtx && sessionKey && sessionKey.startsWith("agent:")) {
-      const parts = sessionKey.split(":");
-      if (parts.length >= 2) fromSession = parts[1];
-    }
-    const resolved = fromCtx ?? fromSession;
-    if (!resolved || resolved === "main") return "OpenClaw";
-    return `Agent ${resolved}`;
-  }
-
   const boardScopeBySession = new Map<string, BoardScope>();
   const boardScopeByAgent = new Map<string, BoardScope>();
 
@@ -569,75 +416,6 @@ export default function register(api: OpenClawPluginApi) {
       return undefined;
     }
     return entry;
-  }
-
-  function normalizeId(value: string | undefined | null) {
-    const text = typeof value === "string" ? value.trim() : "";
-    return text || undefined;
-  }
-
-  function normalizeRequestId(value: unknown) {
-    return normalizeId(typeof value === "string" ? value : undefined);
-  }
-
-  function inferRequestIdFromMessageId(value: unknown) {
-    const candidate = normalizeId(typeof value === "string" ? value : undefined);
-    if (!candidate) return undefined;
-    return candidate.toLowerCase().startsWith(OPENCLAW_REQUEST_ID_PREFIX) ? candidate : undefined;
-  }
-
-  function requestSessionKeys(sessionKey: string | undefined | null): string[] {
-    const normalized = normalizeId(sessionKey);
-    if (!normalized) return [];
-    const keys = new Set<string>();
-    keys.add(normalized);
-    const base = normalized.split("|", 1)[0]?.trim() || normalized;
-    if (base) keys.add(base);
-    const boardRoute = parseBoardSessionKey(normalized);
-    if (boardRoute) {
-      for (const canonical of boardSessionRouteToSessionKeys(boardRoute)) {
-        keys.add(canonical);
-      }
-    }
-    return Array.from(keys);
-  }
-
-  function shortId(value: string, length = 8) {
-    const clean = value.replace(/[^a-zA-Z0-9]+/g, "");
-    return clean.slice(0, length) || value.slice(0, length);
-  }
-
-  function parseSubagentSession(sessionKey: string | undefined | null) {
-    const key = normalizeId(sessionKey);
-    if (!key || !key.startsWith("agent:")) return null;
-    const parts = key.split(":");
-    if (parts.length < 4) return null;
-    const ownerAgentId = normalizeId(parts[1]);
-    const subagentIdx = parts.indexOf("subagent");
-    if (!ownerAgentId || subagentIdx < 0 || subagentIdx + 1 >= parts.length) return null;
-    const subagentId = normalizeId(parts[subagentIdx + 1]);
-    if (!subagentId) return null;
-    return { ownerAgentId, subagentId };
-  }
-
-  function parseAgentSessionOwner(sessionKey: string | undefined | null) {
-    const key = normalizeId(sessionKey);
-    if (!key || !key.startsWith("agent:")) return undefined;
-    const parts = key.split(":");
-    return normalizeId(parts[1]);
-  }
-
-  function boardScopeFromSessionKey(sessionKey: string | undefined | null): BoardScope | undefined {
-    const key = normalizeId(sessionKey);
-    if (!key) return undefined;
-    const route = parseBoardSessionKey(key);
-    if (!route) return undefined;
-    return {
-      ...route,
-      sessionKey: key,
-      inherited: false,
-      updatedAt: nowMs(),
-    };
   }
 
   function rememberBoardScope(
@@ -796,25 +574,7 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   function extractTextForHook(value: unknown, depth = 0): string | undefined {
-    if (!value || depth > 4) return undefined;
-    if (typeof value === "string") return value;
-    if (Array.isArray(value)) {
-      const parts = value
-        .map((part) => extractTextForHook(part, depth + 1))
-        .filter((part): part is string => Boolean(part));
-      return parts.length ? parts.join("\n") : undefined;
-    }
-    if (typeof value === "object") {
-      const obj = value as Record<string, unknown>;
-      const keys = ["text", "content", "value", "message", "output_text", "input_text"];
-      const parts: string[] = [];
-      for (const key of keys) {
-        const extracted = extractTextForHook(obj[key], depth + 1);
-        if (extracted) parts.push(extracted);
-      }
-      return parts.length ? parts.join("\n") : undefined;
-    }
-    return undefined;
+    return extractNestedText(value, depth);
   }
 
   function hookSourceHints(params: {
@@ -1008,12 +768,12 @@ export default function register(api: OpenClawPluginApi) {
       inherited: true,
       updatedAt: nowMs(),
     };
-    const sessionKeys = requestSessionKeys(key);
+    const sessionKeys = requestSessionKeysFor(key);
     rememberBoardScope(inheritedScope, { sessionKeys, agentIds: [] });
     getQueueDb()
       .then((db) => {
         for (const sessionKey of sessionKeys) {
-          db.saveBoardScopeForSession(sessionKey, inheritedScope);
+          db.saveBoardScopeForSession(sessionKey, inheritedScope, normalizeId);
         }
       })
       .catch(() => {});
@@ -1045,7 +805,7 @@ export default function register(api: OpenClawPluginApi) {
       : uniqueSessionCandidates([...explicitSessionCandidates, conversationKey]);
     const subagentSessionCandidates = subagent
       ? uniqueSessionCandidates(
-          [normalizedSessionKey, ctxSessionKey, metaSessionKey].flatMap((candidate) => requestSessionKeys(candidate)),
+          [normalizedSessionKey, ctxSessionKey, metaSessionKey].flatMap((candidate) => requestSessionKeysFor(candidate)),
         )
       : [];
     const now = nowMs();
@@ -1063,7 +823,7 @@ export default function register(api: OpenClawPluginApi) {
         };
       }
 
-      const direct = boardScopeFromSessionKey(candidate);
+      const direct = boardScopeFromCurrentSessionKey(candidate);
       if (!direct) continue;
       const sessionOwners = sessionCandidates
         .map((rawKey) => parseAgentSessionOwner(rawKey))
@@ -1092,7 +852,7 @@ export default function register(api: OpenClawPluginApi) {
           const db = await getQueueDb();
           const cutoffPersistence = now - BOARD_SCOPE_SUBAGENT_PERSISTENCE_TTL_MS;
           for (const candidate of subagentSessionCandidates) {
-            const fromDb = db.getFreshBoardScopeForSession(candidate, cutoffPersistence);
+            const fromDb = db.getFreshBoardScopeForSession(candidate, cutoffPersistence, normalizeId);
             if (!fromDb) continue;
             inherited = fromDb;
             inheritedFromDb = true;
@@ -1118,7 +878,7 @@ export default function register(api: OpenClawPluginApi) {
           getQueueDb()
             .then((db) => {
               for (const candidate of subagentSessionCandidates) {
-                db.saveBoardScopeForSession(candidate, nextScope);
+                db.saveBoardScopeForSession(candidate, nextScope, normalizeId);
               }
             })
             .catch(() => {});
@@ -1277,63 +1037,18 @@ export default function register(api: OpenClawPluginApi) {
     }
   }
 
-  async function flushQueueOnce(limit = 25) {
-    if (!useQueue) {
-      // Even if server-side queueing isn't enabled, the plugin still needs its local durable queue.
-      // This block intentionally does nothing; local queue flush is always enabled.
-    }
-    const db = await getQueueDb();
-    const rows = db.pickDue(limit);
-    if (rows.length === 0) return;
-
-    for (const row of rows) {
-      let payload: Record<string, unknown>;
-      try {
-        payload = JSON.parse(row.payloadJson) as Record<string, unknown>;
-      } catch (err) {
-        db.markFailed(row.id, row.attempts + 1, nowMs() + 60_000, `json parse failed: ${String(err)}`);
-        continue;
-      }
-
-      // Always send with the same idempotency key that was queued.
-      payload.idempotencyKey = row.idempotencyKey;
-
-      const ok = await postLog(payload);
-      if (ok) {
-        db.markSent(row.id);
-        continue;
-      }
-
-      const attempts = row.attempts + 1;
-      const backoff = computeBackoffMs(attempts, 300_000);
-      db.markFailed(row.id, attempts, nowMs() + backoff, "send failed");
-    }
-  }
-
-  async function flushQueue() {
-    if (flushing) return;
-    flushing = true;
-    try {
-      await flushQueueOnce(50);
-    } finally {
-      flushing = false;
-    }
-  }
-
-  function ensureFlushLoop() {
-    if (flushTimer) return;
-    flushTimer = setInterval(() => {
-      flushQueue().catch(() => undefined);
-    }, 2000);
-    (flushTimer as unknown as { unref?: () => void })?.unref?.();
-  }
-
-  async function enqueueDurable(payload: Record<string, unknown>, error: string) {
-    const db = await getQueueDb();
-    const idempotencyKey = ensureIdempotencyKey(payload);
-    db.enqueue(idempotencyKey, payload, error);
-    ensureFlushLoop();
-  }
+  const queueLeaseOwner = `clawboard-logger:${process.pid}:${crypto.randomUUID()}`;
+  const queueLeaseDurationMs = Math.max(60_000, postTimeoutMs * 3);
+  const { getQueueDb, flushQueue, ensureFlushLoop, enqueueDurable } = createDurableQueueRuntime({
+    queuePath,
+    ensureDir,
+    ensureIdempotencyKey,
+    postLog,
+    computeBackoffMs,
+    leaseOwner: queueLeaseOwner,
+    leaseDurationMs: queueLeaseDurationMs,
+    nowMs,
+  });
 
   async function send(payload: Record<string, unknown>) {
     ensureIdempotencyKey(payload);
@@ -1834,88 +1549,14 @@ export default function register(api: OpenClawPluginApi) {
 
   registerAgentTools();
 
-  type ContextCacheEntry = {
-    mode: ContextMode;
-    block: string;
-    cachedAtMs: number;
-  };
-  const contextCache = new Map<string, ContextCacheEntry>();
-
-  function contextSessionCacheKey(sessionKey: string | undefined) {
-    const normalized = normalizeWhitespace(String(sessionKey ?? ""));
-    return normalized || "global";
-  }
-
-  function contextQueryHash(query: string) {
-    return crypto.createHash("sha256").update(query).digest("hex").slice(0, 24);
-  }
-
-  function contextCacheKey(sessionKey: string | undefined, query: string, mode: ContextMode) {
-    return `${contextSessionCacheKey(sessionKey)}|${mode}|${contextQueryHash(query)}`;
-  }
-
-  function contextModePlan(primary: ContextMode): ContextMode[] {
-    const defaultsByPrimary: Record<ContextMode, ContextMode[]> = {
-      auto: ["full", "cheap"],
-      cheap: ["auto", "full"],
-      full: ["auto", "cheap"],
-      patient: ["full", "auto", "cheap"],
-    };
-    const configured = contextFallbackModes.length > 0 ? contextFallbackModes : defaultsByPrimary[primary];
-    const ordered = [primary, ...configured];
-    const seen = new Set<ContextMode>();
-    const deduped: ContextMode[] = [];
-    for (const mode of ordered) {
-      if (!isContextMode(mode) || seen.has(mode)) continue;
-      seen.add(mode);
-      deduped.push(mode);
-    }
-    return deduped.length > 0 ? deduped : [primary];
-  }
-
-  function pruneContextCache() {
-    if (contextCache.size === 0) return;
-    const now = nowMs();
-    if (contextCacheTtlMs > 0) {
-      for (const [key, entry] of contextCache.entries()) {
-        if (now - entry.cachedAtMs > contextCacheTtlMs) contextCache.delete(key);
-      }
-    } else {
-      contextCache.clear();
-      return;
-    }
-    if (contextCache.size <= contextCacheMaxEntries) return;
-    const sorted = Array.from(contextCache.entries()).sort((a, b) => a[1].cachedAtMs - b[1].cachedAtMs);
-    const overflow = contextCache.size - contextCacheMaxEntries;
-    for (let i = 0; i < overflow; i += 1) {
-      const row = sorted[i];
-      if (!row) break;
-      contextCache.delete(row[0]);
-    }
-  }
-
-  function readContextCacheEntry(
-    sessionKey: string | undefined,
-    query: string,
-    mode: ContextMode,
-    maxAgeMs: number,
-  ): ContextCacheEntry | undefined {
-    if (contextCacheTtlMs <= 0 || maxAgeMs <= 0) return undefined;
-    const entry = contextCache.get(contextCacheKey(sessionKey, query, mode));
-    if (!entry) return undefined;
-    if (nowMs() - entry.cachedAtMs > maxAgeMs) return undefined;
-    return entry;
-  }
-
-  function writeContextCache(sessionKey: string | undefined, query: string, mode: ContextMode, block: string) {
-    if (contextCacheTtlMs <= 0) return;
-    contextCache.set(contextCacheKey(sessionKey, query, mode), {
-      mode,
-      block,
-      cachedAtMs: nowMs(),
-    });
-    pruneContextCache();
-  }
+  const { contextModePlan, readContextCacheEntry, writeContextCache } = createContextCache({
+    ttlMs: contextCacheTtlMs,
+    maxEntries: contextCacheMaxEntries,
+    fallbackModes: contextFallbackModes,
+    normalizeWhitespace,
+    isContextMode,
+    nowMs,
+  });
 
   async function fetchContextBlockViaContextApi(query: string, sessionKey: string | undefined, mode: ContextMode) {
     const controller = new AbortController();
@@ -2144,7 +1785,7 @@ export default function register(api: OpenClawPluginApi) {
     const normalizedRequestId = normalizeRequestId(requestId);
     if (!normalizedRequestId) return;
     const ts = nowMs();
-    for (const key of requestSessionKeys(sessionKey)) {
+    for (const key of requestSessionKeysFor(sessionKey)) {
       openclawRequestBySession.set(key, { requestId: normalizedRequestId, ts });
     }
     pruneOpenclawRequestMap(ts, openclawRequestBySession.size > OPENCLAW_REQUEST_ID_MAX_ENTRIES);
@@ -2155,7 +1796,7 @@ export default function register(api: OpenClawPluginApi) {
     if (openclawRequestBySession.size > OPENCLAW_REQUEST_ID_MAX_ENTRIES) {
       pruneOpenclawRequestMap(ts, true);
     }
-    for (const key of requestSessionKeys(sessionKey)) {
+    for (const key of requestSessionKeysFor(sessionKey)) {
       const row = openclawRequestBySession.get(key);
       if (!row) continue;
       if (ts - row.ts > OPENCLAW_REQUEST_ID_TTL_MS) {
@@ -2177,7 +1818,7 @@ export default function register(api: OpenClawPluginApi) {
       rememberOpenclawRequestId(params.sessionKey, explicit);
       return explicit;
     }
-    const inferred = inferRequestIdFromMessageId(params.messageId);
+    const inferred = inferOpenclawRequestIdFromMessageId(params.messageId);
     if (inferred) {
       rememberOpenclawRequestId(params.sessionKey, inferred);
       return inferred;
@@ -2202,20 +1843,20 @@ export default function register(api: OpenClawPluginApi) {
     const candidates = new Set<string>();
     const sessionKey = normalizeId(params.sessionKey);
     if (sessionKey) {
-      for (const key of requestSessionKeys(sessionKey)) candidates.add(key);
+      for (const key of requestSessionKeysFor(sessionKey)) candidates.add(key);
     }
     const scopeSessionKey = normalizeId(params.boardScope?.sessionKey);
     if (scopeSessionKey) {
-      for (const key of requestSessionKeys(scopeSessionKey)) candidates.add(key);
+      for (const key of requestSessionKeysFor(scopeSessionKey)) candidates.add(key);
     }
     const canonicalScopeSessionKeys = canonicalBoardScopeSessionKeys(
-      params.boardScope ?? boardScopeFromSessionKey(sessionKey),
+      params.boardScope ?? boardScopeFromCurrentSessionKey(sessionKey),
     );
     for (const canonicalScopeSessionKey of canonicalScopeSessionKeys) {
-      for (const key of requestSessionKeys(canonicalScopeSessionKey)) candidates.add(key);
+      for (const key of requestSessionKeysFor(canonicalScopeSessionKey)) candidates.add(key);
     }
     for (const candidate of candidates) {
-      const candidateRequestId = inferRequestIdFromMessageId(recentOpenclawRequestId(candidate));
+      const candidateRequestId = inferOpenclawRequestIdFromMessageId(recentOpenclawRequestId(candidate));
       if (!candidateRequestId) continue;
       rememberOpenclawRequestId(params.sessionKey, candidateRequestId);
       return candidateRequestId;
@@ -2252,10 +1893,10 @@ export default function register(api: OpenClawPluginApi) {
               ? ((row as { source?: Record<string, unknown> }).source ?? undefined)
               : undefined;
           const candidateRequestId =
-            inferRequestIdFromMessageId(source?.requestId) ??
-            inferRequestIdFromMessageId(source?.messageId) ??
-            inferRequestIdFromMessageId((row as { requestId?: unknown }).requestId) ??
-            inferRequestIdFromMessageId((row as { messageId?: unknown }).messageId);
+            inferOpenclawRequestIdFromMessageId(source?.requestId) ??
+            inferOpenclawRequestIdFromMessageId(source?.messageId) ??
+            inferOpenclawRequestIdFromMessageId((row as { requestId?: unknown }).requestId) ??
+            inferOpenclawRequestIdFromMessageId((row as { messageId?: unknown }).messageId);
           if (!candidateRequestId) continue;
           rememberOpenclawRequestId(lookupSessionKey, candidateRequestId);
           rememberOpenclawRequestId(params.sessionKey, candidateRequestId);
@@ -2563,7 +2204,7 @@ export default function register(api: OpenClawPluginApi) {
       return;
     }
     const channelId = typeof ctx.channelId === "string" ? ctx.channelId.trim().toLowerCase() : "";
-    const inferredRequestId = inferRequestIdFromMessageId(messageId);
+    const inferredRequestId = inferOpenclawRequestIdFromMessageId(messageId);
     if (
       channelId === "webchat" &&
       (requestId?.toLowerCase().startsWith(OPENCLAW_REQUEST_ID_PREFIX) || Boolean(inferredRequestId))
@@ -2572,7 +2213,7 @@ export default function register(api: OpenClawPluginApi) {
       // WebChat can echo it back with a different messageId; skip to avoid duplicate user rows.
       return;
     }
-    const directBoardScope = boardScopeFromSessionKey(effectiveSessionKey ?? ctx?.sessionKey);
+    const directBoardScope = boardScopeFromCurrentSessionKey(effectiveSessionKey ?? ctx?.sessionKey);
     if (directBoardScope) {
       rememberBoardScope(directBoardScope, {
         sessionKeys: [effectiveSessionKey, ctx.sessionKey],
@@ -2665,140 +2306,27 @@ export default function register(api: OpenClawPluginApi) {
   });
 
   // Outbound assistant logging: message_sending is the reliable hook.
-  const recentOutgoing = new Set<string>();
-  const rememberOutgoing = (key: string) => {
-    recentOutgoing.add(key);
-    if (recentOutgoing.size > 200) {
-      const first = recentOutgoing.values().next().value;
-      if (first) recentOutgoing.delete(first);
-    }
-    (setTimeout(() => recentOutgoing.delete(key), 30_000) as unknown as { unref?: () => void })?.unref?.();
-  };
-  const recentOutgoingBySession = new Map<string, { ts: number; content: string }>();
-  const RECENT_OUTGOING_SESSION_WINDOW_MS = 5 * 60_000;
-  const dedupeSessionKey = (sessionKey: string | undefined | null) => {
-    const raw = String(sessionKey ?? "").trim();
-    if (!raw) return "";
-    return raw.split("|", 1)[0] ?? raw;
-  };
-  const rememberOutgoingSession = (sessionKey: string | undefined | null, content?: string) => {
-    const key = dedupeSessionKey(sessionKey);
-    if (!key) return;
-    const now = Date.now();
-    recentOutgoingBySession.set(key, { ts: now, content: sanitizeMessageContent(content ?? "") });
-    for (const [known, row] of recentOutgoingBySession) {
-      if (now - row.ts > RECENT_OUTGOING_SESSION_WINDOW_MS) recentOutgoingBySession.delete(known);
-    }
-  };
-  const recentOutgoingSession = (sessionKey: string | undefined | null) => {
-    const key = dedupeSessionKey(sessionKey);
-    if (!key) return undefined;
-    const row = recentOutgoingBySession.get(key);
-    if (!row) return undefined;
-    const now = Date.now();
-    if (now - row.ts > RECENT_OUTGOING_SESSION_WINDOW_MS) {
-      recentOutgoingBySession.delete(key);
-      return undefined;
-    }
-    return row;
-  };
-  const looksLikeRecentBoardAssistantEcho = (sessionKey: string | undefined | null, content: string) => {
-    const recent = recentOutgoingSession(sessionKey);
-    if (!recent?.content) return false;
-    const clean = sanitizeMessageContent(content);
-    if (!clean) return false;
-    if (clean === recent.content) return true;
-    if (clean.includes(recent.content) || recent.content.includes(clean)) return true;
-    return lexicalSimilarity(clean, recent.content) >= 0.6;
-  };
-  const outgoingMessageIdDedupeKey = (
-    channelId: string | undefined,
-    sessionKey: string | undefined | null,
-    messageId: string | undefined
-  ) => {
-    const mid = String(messageId ?? "").trim();
-    if (!mid) return "";
-    return `sending:${channelId ?? "nochannel"}:${sessionKey ?? ""}:${mid}`;
-  };
-  const outgoingFingerprintDedupeKey = (
-    channelId: string | undefined,
-    sessionKey: string | undefined | null,
-    content: string
-  ) => `sending:${channelId ?? "nochannel"}:${sessionKey ?? ""}:fp:${dedupeFingerprint(content)}`;
-  const incomingFingerprintDedupeKey = (
-    channelId: string | undefined,
-    sessionKey: string | undefined | null,
-    content: string
-  ) => `incoming-fp:${channelId ?? "nochannel"}:${sessionKey ?? ""}:${dedupeFingerprint(content)}`;
-  const recentIncoming = new Set<string>();
-  const rememberIncoming = (key: string, ttlMs = 30_000) => {
-    recentIncoming.add(key);
-    if (recentIncoming.size > 200) {
-      const first = recentIncoming.values().next().value;
-      if (first) recentIncoming.delete(first);
-    }
-    (setTimeout(() => recentIncoming.delete(key), ttlMs) as unknown as { unref?: () => void })?.unref?.();
-  };
-  const recentTranscriptWrites = new Set<string>();
-  const rememberTranscriptWrite = (key: string, ttlMs = 60_000) => {
-    recentTranscriptWrites.add(key);
-    if (recentTranscriptWrites.size > 400) {
-      const first = recentTranscriptWrites.values().next().value;
-      if (first) recentTranscriptWrites.delete(first);
-    }
-    (setTimeout(() => recentTranscriptWrites.delete(key), ttlMs) as unknown as { unref?: () => void })?.unref?.();
-  };
-  const transcriptWriteDedupeKey = (params: {
-    channelId?: string;
-    sessionKey?: string;
-    messageId?: string;
-    role?: string;
-    toolCallId?: string;
-    contentSeed?: string;
-  }) => {
-    if (params.messageId) {
-      return `before-write:${params.channelId ?? "nochannel"}:${params.sessionKey ?? ""}:${params.messageId}`;
-    }
-    const seed = [
-      params.channelId ?? "nochannel",
-      params.sessionKey ?? "",
-      params.role ?? "",
-      params.toolCallId ?? "",
-      dedupeFingerprint(params.contentSeed ?? ""),
-    ].join("|");
-    return `before-write:fp:${seed}`;
-  };
-  const recentToolResultPersist = new Set<string>();
-  const rememberToolResultPersist = (key: string, ttlMs = 90_000) => {
-    recentToolResultPersist.add(key);
-    if (recentToolResultPersist.size > 500) {
-      const first = recentToolResultPersist.values().next().value;
-      if (first) recentToolResultPersist.delete(first);
-    }
-    (setTimeout(() => recentToolResultPersist.delete(key), ttlMs) as unknown as { unref?: () => void })?.unref?.();
-  };
-  const toolResultPersistDedupeKey = (params: {
-    channelId?: string;
-    sessionKey?: string;
-    toolCallId?: string;
-    messageId?: string;
-    toolName?: string;
-    contentSeed?: string;
-  }) => {
-    if (params.toolCallId) {
-      return `tool-persist:${params.channelId ?? "nochannel"}:${params.sessionKey ?? ""}:${params.toolCallId}`;
-    }
-    if (params.messageId) {
-      return `tool-persist:${params.channelId ?? "nochannel"}:${params.sessionKey ?? ""}:${params.messageId}`;
-    }
-    const seed = [
-      params.channelId ?? "nochannel",
-      params.sessionKey ?? "",
-      params.toolName ?? "",
-      dedupeFingerprint(params.contentSeed ?? ""),
-    ].join("|");
-    return `tool-persist:fp:${seed}`;
-  };
+  const {
+    recentOutgoing,
+    recentIncoming,
+    recentTranscriptWrites,
+    recentToolResultPersist,
+    rememberOutgoing,
+    rememberIncoming,
+    rememberTranscriptWrite,
+    rememberToolResultPersist,
+    rememberOutgoingSession,
+    looksLikeRecentBoardAssistantEcho,
+    outgoingFingerprintDedupeKey,
+    incomingFingerprintDedupeKey,
+    transcriptWriteDedupeKey,
+    toolResultPersistDedupeKey,
+  } = createDedupeState({
+    sanitizeMessageContent,
+    lexicalSimilarity,
+    dedupeFingerprint,
+    nowMs,
+  });
 
   api.on("message_sending", async (event: PluginHookMessageSentEvent, ctx: PluginHookMessageContext) => {
     const createdAt = new Date().toISOString();
@@ -3209,28 +2737,6 @@ export default function register(api: OpenClawPluginApi) {
     type HookMessage = { role?: unknown; content?: unknown; [key: string]: unknown };
     const messages: HookMessage[] = Array.isArray(event.messages) ? (event.messages as HookMessage[]) : [];
 
-    const extractText = (value: unknown, depth = 0): string | undefined => {
-      if (!value || depth > 4) return undefined;
-      if (typeof value === "string") return value;
-      if (Array.isArray(value)) {
-        const parts = value
-          .map((part) => extractText(part, depth + 1))
-          .filter((part): part is string => Boolean(part));
-        return parts.length ? parts.join("\n") : undefined;
-      }
-      if (typeof value === "object") {
-        const obj = value as Record<string, unknown>;
-        const keys = ["text", "content", "value", "message", "output_text", "input_text"];
-        const parts: string[] = [];
-        for (const key of keys) {
-          const extracted = extractText(obj[key], depth + 1);
-          if (extracted) parts.push(extracted);
-        }
-        return parts.length ? parts.join("\n") : undefined;
-      }
-      return undefined;
-    };
-
     const anchor = ctx.sessionKey ? inboundBySession.get(ctx.sessionKey) : undefined;
     const anchorFresh = !!anchor && Date.now() - anchor.ts < 2 * 60_000;
     const channelFresh = Date.now() - lastMessageAt < 2 * 60_000;
@@ -3238,7 +2744,7 @@ export default function register(api: OpenClawPluginApi) {
     const discordSignal = messages.some((msg) => {
       const role = typeof msg.role === "string" ? msg.role : undefined;
       if (role !== "user") return false;
-      const text = extractText(msg.content) ?? "";
+      const text = extractNestedText(msg.content) ?? "";
       return /\[Discord /i.test(text) || /channel:discord/i.test(text);
     });
     if (discordSignal && channelFresh && lastEffectiveSessionKey?.startsWith("channel:")) {
@@ -3340,7 +2846,7 @@ export default function register(api: OpenClawPluginApi) {
         // so logs do not show "User -> OpenClaw · channel: heartbeat" or pollute task threads.
         const ch = (sourceChannel ?? ctx.channelId ?? "").toString().trim().toLowerCase();
         if (role === "user" && ch === "heartbeat") continue;
-        const content = extractText(msg.content);
+        const content = extractNestedText(msg.content);
         if (!content || !content.trim()) continue;
         const cleanedContent = sanitizeMessageContent(content);
         if (!cleanedContent) continue;
