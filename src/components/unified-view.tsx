@@ -18,7 +18,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import type { LogEntry, OpenClawWorkspace, Space, Task, Topic, TopicStatus } from "@/lib/types";
+import type { LogEntry, Space, Task, Topic, TopicStatus } from "@/lib/types";
 import { Button, Input, Select, StatusPill, TextArea } from "@/components/ui";
 import { LogList } from "@/components/log-list";
 import { formatRelativeTime } from "@/lib/format";
@@ -62,6 +62,29 @@ import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "
 import { SnoozeModal } from "@/components/snooze-modal";
 import { useUnifiedExpansionState } from "@/components/unified-view-state";
 import { getInitialUnifiedUrlState, parseUnifiedUrlState } from "@/components/unified-view-url-state";
+import {
+  buildUnifiedSearchPlan,
+  describeSemanticSearchMode,
+  matchesSearchText,
+  pickConfidentSemanticIds,
+  scoreSearchText,
+} from "@/components/unified-view/search";
+import {
+  buildOrchestrationThreadWorkIndex,
+  buildRecentNonUserActivityIndex,
+  compareLogCreatedAtAsc,
+  compareLogCreatedAtDesc,
+  deriveTaskWorkspaceAttention,
+  isTerminalSystemRequestEvent,
+  normalizeAgentToken,
+  normalizeOpenClawRequestId,
+  parseIsoMs,
+  requestIdForLogEntry,
+  resolveAuthoritativeSessionWorkState,
+  resolveThreadWorkSignal,
+  type SessionWorkTtls,
+} from "@/components/unified-view/thread-state";
+import { SwipeRevealRow } from "@/components/unified-view/swipe-reveal-row";
 import { workspaceDirDisplay, workspaceRoute } from "@/lib/openclaw-workspaces";
 import { buildLatestTopicTouchById, deriveAttentionTopicIds, topicLastTouchedAt } from "@/lib/topic-attention";
 import { compareByBoardOrder, optimisticTopSortIndex } from "@/lib/topic-order";
@@ -300,7 +323,6 @@ const TASK_FALLBACK_COLORS = [
   "#FF8A80",
 ];
 
-const TOPIC_ACTION_REVEAL_PX = 288;
 // New Topics/Tasks should float to the very top immediately after creation.
 // Keep that priority for a long window so "something else happening" displaces it,
 // instead of the item unexpectedly dropping due to time passing mid-session.
@@ -388,595 +410,9 @@ const OPENCLAW_ORCHESTRATION_ACTIVE_TTL_MS =
     12 * 60 * 60
   ) * 1000;
 
-const SEARCH_QUERY_STOPWORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "as",
-  "at",
-  "be",
-  "but",
-  "by",
-  "for",
-  "from",
-  "i",
-  "if",
-  "in",
-  "into",
-  "is",
-  "it",
-  "its",
-  "me",
-  "my",
-  "of",
-  "on",
-  "or",
-  "our",
-  "please",
-  "so",
-  "that",
-  "the",
-  "their",
-  "them",
-  "there",
-  "these",
-  "this",
-  "to",
-  "we",
-  "with",
-  "you",
-  "your",
-]);
-const SEARCH_QUERY_MAX_TERMS = 20;
-const SEARCH_QUERY_LONG_MAX_TERMS = 32;
-const SEARCH_QUERY_LONG_TRIGGER_CHARS = 220;
-const SEARCH_QUERY_LONG_TRIGGER_TERMS = 24;
-const SEARCH_QUERY_LEXICAL_MAX_CHARS = 260;
-const SEARCH_QUERY_SEMANTIC_MAX_CHARS = 640;
-
-type UnifiedSearchPlan = {
-  raw: string;
-  normalized: string;
-  lexicalQuery: string;
-  semanticQuery: string;
-  terms: string[];
-  phraseShards: string[];
-  isLong: boolean;
-};
-
-type SemanticConfidenceOptions = {
-  absoluteFloor: number;
-  relativeFloor: number;
-  maxCount: number;
-};
-
-type ScoredSemanticMatch = {
-  id: string;
-  score: number;
-  sessionBoosted?: boolean;
-};
-
 type LogChatCountsPayload = {
   topicChatCounts?: Record<string, number>;
 };
-
-function tokenizeSearchQuery(query: string, maxTerms: number) {
-  const normalized = String(query ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9\s/_:-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!normalized) return [];
-  const stats = new Map<string, { count: number; firstIndex: number }>();
-  let tokenIndex = 0;
-  for (const token of normalized.split(/\s+/)) {
-    const term = token.trim().replace(/^[:/_-]+|[:/_-]+$/g, "");
-    if (term.length < 2) continue;
-    if (SEARCH_QUERY_STOPWORDS.has(term)) continue;
-    const stat = stats.get(term);
-    if (stat) {
-      stat.count += 1;
-    } else {
-      stats.set(term, { count: 1, firstIndex: tokenIndex });
-    }
-    tokenIndex += 1;
-  }
-  const ranked = Array.from(stats.entries())
-    .map(([term, stat]) => {
-      const lengthBoost = Math.min(0.55, Math.max(0, term.length - 2) * 0.045);
-      const freqBoost = Math.min(0.45, Math.max(0, stat.count - 1) * 0.16);
-      const shapeBoost = /[0-9/:_-]/.test(term) ? 0.2 : 0;
-      const earlyBoost = Math.max(0, 0.28 - Math.min(0.28, stat.firstIndex / 120));
-      const score = 1 + lengthBoost + freqBoost + shapeBoost + earlyBoost;
-      return { term, score, firstIndex: stat.firstIndex, count: stat.count };
-    })
-    .sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      if (b.count !== a.count) return b.count - a.count;
-      if (a.firstIndex !== b.firstIndex) return a.firstIndex - b.firstIndex;
-      return a.term.localeCompare(b.term);
-    });
-  return ranked.slice(0, Math.max(1, maxTerms)).map((item) => item.term);
-}
-
-function extractPhraseShards(rawQuery: string, maxShards = 2) {
-  const normalized = String(rawQuery ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-  if (!normalized) return [];
-  const sentences = normalized
-    .split(/(?<=[.!?])\s+|\n+/)
-    .map((part) => part.trim())
-    .filter(Boolean);
-  const shards: string[] = [];
-  for (const sentence of sentences) {
-    if (sentence.length < 18) continue;
-    const clipped = sentence.slice(0, 180).trim();
-    if (!clipped) continue;
-    if (shards.includes(clipped)) continue;
-    shards.push(clipped);
-    if (shards.length >= maxShards) break;
-  }
-  if (shards.length === 0 && normalized.length >= 40) {
-    shards.push(normalized.slice(0, 180).trim());
-  }
-  return shards.slice(0, maxShards);
-}
-
-function buildUnifiedSearchPlan(rawQuery: string): UnifiedSearchPlan {
-  const raw = String(rawQuery ?? "").replace(/\s+/g, " ").trim();
-  const normalized = raw.toLowerCase();
-  if (!normalized) {
-    return {
-      raw: "",
-      normalized: "",
-      lexicalQuery: "",
-      semanticQuery: "",
-      terms: [],
-      phraseShards: [],
-      isLong: false,
-    };
-  }
-
-  const rankedTerms = tokenizeSearchQuery(normalized, SEARCH_QUERY_LONG_MAX_TERMS);
-  const isLong =
-    normalized.length >= SEARCH_QUERY_LONG_TRIGGER_CHARS || rankedTerms.length >= SEARCH_QUERY_LONG_TRIGGER_TERMS;
-  const terms = rankedTerms.slice(0, isLong ? SEARCH_QUERY_LONG_MAX_TERMS : SEARCH_QUERY_MAX_TERMS);
-  const lexicalQuery = (
-    isLong
-      ? (terms.slice(0, SEARCH_QUERY_MAX_TERMS).join(" ").trim() || normalized.slice(0, SEARCH_QUERY_LEXICAL_MAX_CHARS))
-      : normalized
-  )
-    .slice(0, SEARCH_QUERY_LEXICAL_MAX_CHARS)
-    .trim();
-  const phraseShards = isLong ? extractPhraseShards(raw, 3) : [];
-  const semanticParts = [
-    ...phraseShards.slice(0, 2),
-    terms.slice(0, SEARCH_QUERY_LONG_MAX_TERMS).join(" ").trim(),
-  ].filter(Boolean);
-  const semanticQuery = (isLong ? semanticParts.join(" ").trim() : normalized)
-    .slice(0, SEARCH_QUERY_SEMANTIC_MAX_CHARS)
-    .trim();
-  const semanticEffective = semanticQuery || lexicalQuery || normalized;
-  return {
-    raw,
-    normalized,
-    lexicalQuery: lexicalQuery || normalized,
-    semanticQuery: semanticEffective,
-    terms,
-    phraseShards,
-    isLong,
-  };
-}
-
-function pickConfidentSemanticIds(
-  matches: readonly ScoredSemanticMatch[] | undefined,
-  options: SemanticConfidenceOptions
-) {
-  const ranked = (matches ?? [])
-    .map((item) => ({
-      id: String(item.id ?? "").trim(),
-      score: Number(item.score) || 0,
-      sessionBoosted: item.sessionBoosted === true,
-    }))
-    .filter((item) => item.id && (item.sessionBoosted || item.score > 0))
-    .sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      if (a.sessionBoosted !== b.sessionBoosted) return a.sessionBoosted ? -1 : 1;
-      return a.id.localeCompare(b.id);
-    });
-
-  if (ranked.length === 0) return new Set<string>();
-
-  const topScore = ranked[0]?.score ?? 0;
-  const floor = Math.max(options.absoluteFloor, topScore * options.relativeFloor);
-  const ids = new Set<string>();
-
-  for (const item of ranked.slice(0, Math.max(1, options.maxCount))) {
-    if (!item.sessionBoosted && item.score < floor) continue;
-    ids.add(item.id);
-  }
-
-  if (ids.size === 0 && ranked[0]?.id) {
-    ids.add(ranked[0].id);
-  }
-
-  return ids;
-}
-
-function matchesSearchText(haystackRaw: string, plan: UnifiedSearchPlan) {
-  const haystack = String(haystackRaw ?? "").toLowerCase();
-  if (!plan.normalized) return true;
-  if (haystack.includes(plan.normalized)) return true;
-  if (plan.lexicalQuery && haystack.includes(plan.lexicalQuery)) return true;
-  if (plan.phraseShards.some((shard) => shard.length >= 20 && haystack.includes(shard))) return true;
-  if (plan.terms.length === 0) return false;
-  let hits = 0;
-  for (const term of plan.terms) {
-    if (!haystack.includes(term)) continue;
-    hits += 1;
-  }
-  const requiredHits = plan.isLong
-    ? Math.min(3, Math.max(1, Math.ceil(plan.terms.length * 0.14)))
-    : plan.terms.length <= 2
-      ? plan.terms.length
-      : plan.terms.length <= 5
-        ? 2
-        : 3;
-  return hits >= requiredHits;
-}
-
-function scoreSearchText(haystackRaw: string, plan: UnifiedSearchPlan) {
-  const haystack = String(haystackRaw ?? "").toLowerCase();
-  if (!plan.normalized || !haystack) return 0;
-
-  let score = 0;
-  if (haystack.includes(plan.normalized)) {
-    score += 3;
-  } else if (plan.lexicalQuery && haystack.includes(plan.lexicalQuery)) {
-    score += 2.4;
-  }
-
-  for (const shard of plan.phraseShards) {
-    if (shard.length < 20) continue;
-    if (!haystack.includes(shard)) continue;
-    score += 1.2;
-  }
-
-  let hits = 0;
-  let weightedHits = 0;
-  for (const term of plan.terms) {
-    if (!haystack.includes(term)) continue;
-    hits += 1;
-    weightedHits += Math.min(0.85, 0.34 + Math.max(0, term.length - 2) * 0.045);
-  }
-
-  if (hits > 0) {
-    score += Math.min(2.6, weightedHits);
-    score += Math.min(0.9, hits / Math.max(1, plan.terms.length));
-  }
-
-  if (score > 0 && haystack.startsWith(plan.normalized)) {
-    score += 0.35;
-  }
-
-  return Number(score.toFixed(4));
-}
-
-function describeSemanticSearchMode(mode: string) {
-  const normalized = String(mode ?? "").trim().toLowerCase();
-  if (!normalized) return "smart search";
-  if (normalized.includes("qdrant") || normalized.includes("semantic")) return "smart search";
-  if (normalized.includes("bm25") || normalized.includes("lexical")) return "keyword search";
-  return "smart search";
-}
-
-function isTruthyFlag(value: unknown) {
-  return value === true || value === "true" || value === 1 || value === "1";
-}
-
-function isFalseFlag(value: unknown) {
-  return value === false || value === "false" || value === 0 || value === "0";
-}
-
-const ORCHESTRATION_TERMINAL_RUN_STATUSES = new Set(["done", "failed", "cancelled"]);
-const ORCHESTRATION_KNOWN_RUN_STATUSES = new Set(["running", "stalled", "done", "failed", "cancelled"]);
-
-type SessionOrchestrationWork = {
-  active: boolean;
-  requestId?: string;
-  updatedAt: string;
-};
-
-type SessionThreadWorkSignal = {
-  active: boolean;
-  requestId?: string;
-  reason?: string;
-  updatedAt: string;
-};
-
-type SessionNonUserActivity = {
-  updatedAt: string;
-  requestId?: string;
-};
-
-function parseIsoMs(value: unknown) {
-  const text = String(value ?? "").trim();
-  if (!text) return Number.NaN;
-  const parsed = Date.parse(text);
-  return Number.isFinite(parsed) ? parsed : Number.NaN;
-}
-
-function resolveThreadWorkSignal(
-  signal: SessionThreadWorkSignal | undefined,
-  params: { latestOtherSignalMs: number; nowMs: number }
-): boolean | undefined {
-  if (!signal) return undefined;
-  const { latestOtherSignalMs, nowMs } = params;
-  const signalMs = parseIsoMs(signal.updatedAt);
-  if (!Number.isFinite(signalMs)) return undefined;
-  const ageMs = nowMs - signalMs;
-  const ttlMs = signal.active ? OPENCLAW_THREAD_WORK_ACTIVE_TTL_MS : OPENCLAW_THREAD_WORK_INACTIVE_OVERRIDE_TTL_MS;
-  if (ageMs < 0 || ageMs > ttlMs) return undefined;
-  if (!signal.active && Number.isFinite(latestOtherSignalMs) && latestOtherSignalMs > signalMs) return undefined;
-  return signal.active;
-}
-
-function resolveAuthoritativeSessionWorkState(params: {
-  nowMs: number;
-  typing: { typing?: boolean; requestId?: string; updatedAt?: string } | undefined;
-  threadWorkSignal: SessionThreadWorkSignal | undefined;
-  orchestrationWork: SessionOrchestrationWork | undefined;
-  recentNonUserActivity: SessionNonUserActivity | undefined;
-}) {
-  const { nowMs, typing, threadWorkSignal, orchestrationWork, recentNonUserActivity } = params;
-  const orchestrationWorkMs = parseIsoMs(orchestrationWork?.updatedAt);
-  const hasFreshOrchestrationWork =
-    Boolean(orchestrationWork?.active) &&
-    Number.isFinite(orchestrationWorkMs) &&
-    nowMs - orchestrationWorkMs >= 0 &&
-    nowMs - orchestrationWorkMs <= OPENCLAW_ORCHESTRATION_ACTIVE_TTL_MS;
-  const recentNonUserActivityMs = parseIsoMs(recentNonUserActivity?.updatedAt);
-  const hasRecentNonUserActivity =
-    Number.isFinite(recentNonUserActivityMs) &&
-    nowMs - recentNonUserActivityMs >= 0 &&
-    nowMs - recentNonUserActivityMs <= OPENCLAW_NON_USER_ACTIVITY_TTL_MS;
-  const threadWorkSignalMs = parseIsoMs(threadWorkSignal?.updatedAt);
-  const latestOtherSignalMs = Math.max(
-    parseIsoMs(typing?.updatedAt),
-    hasFreshOrchestrationWork ? orchestrationWorkMs : Number.NaN,
-    recentNonUserActivityMs
-  );
-  const directThreadSignal = resolveThreadWorkSignal(threadWorkSignal, {
-    latestOtherSignalMs,
-    nowMs,
-  });
-  const newerActivityAfterStopSignal =
-    hasRecentNonUserActivity &&
-    Number.isFinite(threadWorkSignalMs) &&
-    Number.isFinite(recentNonUserActivityMs) &&
-    recentNonUserActivityMs > threadWorkSignalMs;
-
-  if (directThreadSignal === false) {
-    const stopRequestId = normalizeOpenClawRequestId(threadWorkSignal?.requestId);
-    const activeRequestId =
-      normalizeOpenClawRequestId(typing?.requestId) ||
-      normalizeOpenClawRequestId(hasFreshOrchestrationWork ? orchestrationWork?.requestId : "") ||
-      normalizeOpenClawRequestId(recentNonUserActivity?.requestId);
-    if (
-      (!stopRequestId || !activeRequestId || stopRequestId === activeRequestId) &&
-      !newerActivityAfterStopSignal
-    ) {
-      return false;
-    }
-  }
-  if (directThreadSignal === true) return true;
-  if (typing?.typing) return true;
-  if (hasFreshOrchestrationWork) return true;
-  return false;
-}
-
-function isTerminalSystemRequestEvent(entry: LogEntry) {
-  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
-  if (agentId !== "system") return false;
-  const type = String(entry.type ?? "").trim().toLowerCase();
-  if (type !== "system") return false;
-  const source = (entry.source && typeof entry.source === "object" ? entry.source : {}) as Record<string, unknown>;
-  if (isTruthyFlag(source.watchdogMissingAssistant)) return false;
-  if (isFalseFlag(source.requestTerminal)) return false;
-  return true;
-}
-
-function compareLogCreatedAtAsc(a: LogEntry, b: LogEntry) {
-  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
-  // Stable, deterministic tiebreaker for entries that share the same createdAt.
-  // Prefer idempotencyKey (present on history-synced entries) so same-second
-  // messages from the gateway maintain a consistent order across renders.
-  const aKey = a.idempotencyKey ?? a.id;
-  const bKey = b.idempotencyKey ?? b.id;
-  return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
-}
-
-function compareLogCreatedAtDesc(a: LogEntry, b: LogEntry) {
-  return compareLogCreatedAtAsc(b, a);
-}
-
-function normalizeOpenClawRequestId(value: unknown) {
-  const text = String(value ?? "").trim();
-  if (!text) return "";
-  if (!text.toLowerCase().startsWith("occhat-")) return text;
-  const base = text.split(":", 1)[0]?.trim() ?? "";
-  return base || text;
-}
-
-function requestIdForLogEntry(entry: LogEntry) {
-  const source = (entry.source && typeof entry.source === "object" ? entry.source : {}) as Record<string, unknown>;
-  const requestId = normalizeOpenClawRequestId(source.requestId);
-  if (requestId) return requestId;
-  return normalizeOpenClawRequestId(source.messageId);
-}
-
-function isNonUserActivityChatLog(entry: LogEntry) {
-  const agentId = String(entry.agentId ?? "").trim().toLowerCase();
-  if (!agentId || agentId === "user" || agentId === "assistant") return false;
-  if (isTerminalSystemRequestEvent(entry)) return false;
-  if (isChatNoiseLog(entry)) return false;
-  if (isMeaningfulToolingOrSystemChatLog(entry)) return true;
-  return String(entry.type ?? "").trim().toLowerCase() === "conversation";
-}
-
-function buildRecentNonUserActivityIndex(logs: LogEntry[]): Record<string, SessionNonUserActivity> {
-  const out: Record<string, SessionNonUserActivity> = {};
-  for (const entry of logs) {
-    if (!isNonUserActivityChatLog(entry)) continue;
-    const sessionKey = normalizeBoardSessionKey(entry.source?.sessionKey);
-    if (!sessionKey) continue;
-    // Use createdAt to avoid classifer/status patch churn on updatedAt from
-    // falsely re-marking old sessions as recently active.
-    const stamp = String(entry.createdAt ?? "").trim();
-    if (!stamp) continue;
-    const stampMs = parseIsoMs(stamp);
-    const current = out[sessionKey];
-    const currentMs = parseIsoMs(current?.updatedAt);
-    if (
-      Number.isFinite(currentMs) &&
-      Number.isFinite(stampMs) &&
-      stampMs < currentMs
-    ) {
-      continue;
-    }
-    if (Number.isFinite(currentMs) && !Number.isFinite(stampMs)) continue;
-    const requestId = requestIdForLogEntry(entry);
-    out[sessionKey] = {
-      updatedAt: stamp,
-      requestId: requestId || current?.requestId || undefined,
-    };
-  }
-  return out;
-}
-
-function normalizeOrchestrationRunStatus(value: unknown) {
-  const status = String(value ?? "").trim().toLowerCase();
-  if (!status) return "";
-  return ORCHESTRATION_KNOWN_RUN_STATUSES.has(status) ? status : "";
-}
-
-function inferOrchestrationRunStatus(entry: LogEntry, source: Record<string, unknown>, previousStatus: string) {
-  const direct = normalizeOrchestrationRunStatus(source.runStatus);
-  if (direct) return direct;
-
-  const eventType = String(source.eventType ?? "").trim().toLowerCase();
-  if (eventType === "run_created") return "running";
-  if (eventType !== "run_status_changed") return previousStatus || "running";
-
-  const haystack = `${String(entry.summary ?? "")} ${String(entry.content ?? "")}`.toLowerCase();
-  if (haystack.includes("cancelled")) return "cancelled";
-  if (haystack.includes("failed")) return "failed";
-  if (haystack.includes("stalled")) return "stalled";
-  if (haystack.includes("done")) return "done";
-  return previousStatus || "running";
-}
-
-function buildOrchestrationThreadWorkIndex(logs: LogEntry[]): Record<string, SessionOrchestrationWork> {
-  const byRun = new Map<
-    string,
-    {
-      status: string;
-      requestId?: string;
-      updatedAt: string;
-      updatedAtMs: number;
-      sessionKeys: Set<string>;
-    }
-  >();
-  const ascending = [...logs].sort(compareLogCreatedAtAsc);
-
-  for (const entry of ascending) {
-    const source = (entry.source && typeof entry.source === "object" ? entry.source : {}) as Record<string, unknown>;
-    if (!isTruthyFlag(source.orchestration)) continue;
-    const runId = String(source.runId ?? "").trim();
-    if (!runId) continue;
-
-    const next = byRun.get(runId) ?? {
-      status: "running",
-      requestId: undefined,
-      updatedAt: "",
-      updatedAtMs: Number.NEGATIVE_INFINITY,
-      sessionKeys: new Set<string>(),
-    };
-
-    const sourceSessionKey = normalizeBoardSessionKey(String(source.sessionKey ?? ""));
-    if (sourceSessionKey) next.sessionKeys.add(sourceSessionKey);
-
-    const boardTopicId = String(source.boardScopeTopicId ?? entry.topicId ?? "").trim();
-    const boardTaskId = String(source.boardScopeTaskId ?? "").trim();
-    if (boardTopicId) {
-      next.sessionKeys.add(taskSessionKey(boardTopicId, boardTaskId || boardTopicId));
-    }
-
-    const requestId = normalizeOpenClawRequestId(source.requestId ?? source.messageId);
-    if (requestId) next.requestId = requestId;
-
-    next.status = inferOrchestrationRunStatus(entry, source, next.status);
-    // Use createdAt so unrelated row updates (classification/status patches)
-    // do not keep old orchestration runs "fresh" forever.
-    const stamp = String(entry.createdAt ?? "").trim();
-    const stampMs = Date.parse(stamp);
-    const normalizedStampMs = Number.isFinite(stampMs) ? stampMs : Number.NEGATIVE_INFINITY;
-    if (!next.updatedAt || normalizedStampMs >= next.updatedAtMs) {
-      next.updatedAt = stamp;
-      next.updatedAtMs = normalizedStampMs;
-    }
-
-    byRun.set(runId, next);
-  }
-
-  type SessionAgg = {
-    active: boolean;
-    latestAnyAt: string;
-    latestAnyMs: number;
-    latestAnyRequestId?: string;
-    latestActiveMs: number;
-    latestActiveRequestId?: string;
-  };
-
-  const bySession = new Map<string, SessionAgg>();
-  for (const runState of byRun.values()) {
-    const active = !ORCHESTRATION_TERMINAL_RUN_STATUSES.has(runState.status);
-    for (const sessionKey of runState.sessionKeys) {
-      const key = normalizeBoardSessionKey(sessionKey);
-      if (!key) continue;
-      const agg = bySession.get(key) ?? {
-        active: false,
-        latestAnyAt: "",
-        latestAnyMs: Number.NEGATIVE_INFINITY,
-        latestAnyRequestId: undefined,
-        latestActiveMs: Number.NEGATIVE_INFINITY,
-        latestActiveRequestId: undefined,
-      };
-
-      agg.active = agg.active || active;
-      if (runState.updatedAtMs >= agg.latestAnyMs) {
-        agg.latestAnyMs = runState.updatedAtMs;
-        agg.latestAnyAt = runState.updatedAt;
-        agg.latestAnyRequestId = runState.requestId || agg.latestAnyRequestId;
-      }
-      if (active && runState.updatedAtMs >= agg.latestActiveMs) {
-        agg.latestActiveMs = runState.updatedAtMs;
-        agg.latestActiveRequestId = runState.requestId || agg.latestActiveRequestId;
-      }
-      bySession.set(key, agg);
-    }
-  }
-
-  const out: Record<string, SessionOrchestrationWork> = {};
-  for (const [sessionKey, agg] of bySession.entries()) {
-    out[sessionKey] = {
-      active: agg.active,
-      requestId: agg.latestActiveRequestId || agg.latestAnyRequestId,
-      updatedAt: agg.latestAnyAt,
-    };
-  }
-  return out;
-}
 
 function normalizeTagValue(value: string) {
   const lowered = String(value ?? "").toLowerCase();
@@ -1330,10 +766,6 @@ function deriveTopicHeaderBlurb(topic: Topic, entries: LogEntry[]) {
   );
 }
 
-function normalizeAgentToken(value: string | undefined | null) {
-  return String(value ?? "").trim().toLowerCase();
-}
-
 function stringArraysEqual(a: string[], b: string[]) {
   if (a === b) return true;
   if (a.length !== b.length) return false;
@@ -1350,408 +782,12 @@ function stringSetMatchesArray(set: Set<string>, values: string[]) {
   }
   return true;
 }
-
-function hasActiveTextSelectionWithin(root: HTMLElement | null) {
-  if (!root || typeof window === "undefined") return false;
-  const selection = window.getSelection?.();
-  if (!selection || selection.rangeCount < 1 || selection.isCollapsed) return false;
-  if (!selection.toString().trim()) return false;
-  const anchorNode = selection.anchorNode;
-  const focusNode = selection.focusNode;
-  if (anchorNode && root.contains(anchorNode)) return true;
-  if (focusNode && root.contains(focusNode)) return true;
-  return false;
-}
-
-function deriveTaskWorkspaceAttention(
-  entries: LogEntry[],
-  workspaceByAgentId: Map<string, OpenClawWorkspace>,
-  sessionKey: string,
-  seenByKey: Record<string, string>
-) {
-  const normalizedSessionKey = normalizeBoardSessionKey(sessionKey);
-  if (!normalizedSessionKey) return null;
-
-  let latestAny: { workspace: OpenClawWorkspace; agentId: string; activityAt: string; sessionKey: string } | null = null;
-  let latestCoding: { workspace: OpenClawWorkspace; agentId: string; activityAt: string; sessionKey: string } | null = null;
-
-  for (let i = entries.length - 1; i >= 0; i -= 1) {
-    const entry = entries[i];
-    const agentId = normalizeAgentToken(entry.agentId);
-    if (!agentId || agentId === "user" || agentId === "assistant" || agentId === "system" || agentId === "toolresult") {
-      continue;
-    }
-    if (isChatNoiseLog(entry)) continue;
-    const entryType = String(entry.type ?? "").trim().toLowerCase();
-    const authenticActivity = isMeaningfulToolingOrSystemChatLog(entry) || entryType === "conversation";
-    if (!authenticActivity) continue;
-    const workspace = workspaceByAgentId.get(agentId);
-    if (!workspace?.ideUrl) continue;
-    const activityAt = String(entry.createdAt ?? "").trim();
-    if (!activityAt) continue;
-    const candidate = { workspace, agentId, activityAt, sessionKey: normalizedSessionKey };
-    if (!latestAny) latestAny = candidate;
-    if (agentId === "coding") {
-      latestCoding = candidate;
-    }
-    if (latestAny && latestCoding) {
-      break;
-    }
-  }
-
-  const candidates = [latestCoding, latestAny].filter(
-    (candidate, index, list): candidate is NonNullable<typeof candidate> =>
-      Boolean(candidate) &&
-      list.findIndex(
-        (other) =>
-          other?.agentId === candidate?.agentId &&
-          other?.activityAt === candidate?.activityAt &&
-          other?.sessionKey === candidate?.sessionKey
-      ) === index
-  );
-  const target = candidates.find((candidate) => {
-    const seenKey = `${candidate.sessionKey}::${candidate.agentId}`;
-    return seenByKey[seenKey] !== candidate.activityAt;
-  });
-  if (!target) return null;
-  const agentName = String(target.workspace.agentName || "").trim() || target.agentId;
-  const label = target.agentId === "coding" ? "Open coding workspace" : `Open ${agentName} workspace`;
-  const hint = target.agentId === "coding" ? "Recent coding activity" : `Recent ${agentName} workspace activity`;
-  return { ...target, label, hint };
-}
-
-function SwipeRevealRow({
-  rowId,
-  openId,
-  setOpenId,
-  actions,
-  anchorLabel,
-  children,
-  disabled = false,
-  surfaceTint,
-  wrapperTestId,
-  wrapperClassName,
-  wrapperStyle,
-  backdropTinted = true,
-  anchorRowClassName,
-  anchorPillClassName,
-}: {
-  rowId: string;
-  openId: string | null;
-  setOpenId: (id: string | null) => void;
-  actions: ReactNode;
-  anchorLabel?: string;
-  children: ReactNode;
-  disabled?: boolean;
-  surfaceTint?: string | null;
-  wrapperTestId?: string;
-  wrapperClassName?: string;
-  wrapperStyle?: CSSProperties;
-  backdropTinted?: boolean;
-  anchorRowClassName?: string;
-  anchorPillClassName?: string;
-}) {
-  const allowSwipe = !disabled;
-  const isOpen = allowSwipe && openId === rowId;
-  const gesture = useRef<{
-    startX: number;
-    startY: number;
-    startOffset: number;
-    pointerType: string;
-    pointerId: number;
-    captureNode: HTMLElement | null;
-  } | null>(null);
-  const [swiping, setSwiping] = useState(false);
-  // Keep swipe state in a ref so pointer events remain correct even if React state
-  // hasn't re-rendered between pointermove and pointerup (fast swipes, test dispatch).
-  const swipingRef = useRef(false);
-  const [dragOffset, setDragOffset] = useState(0);
-  const dragOffsetRef = useRef(0);
-  const rafRef = useRef<number | null>(null);
-  const pendingOffsetRef = useRef(0);
-  const wheelEndTimerRef = useRef<number | null>(null);
-  const wheelWasOpenRef = useRef(false);
-
-  const effectiveOffset = !allowSwipe ? 0 : swiping ? dragOffset : isOpen ? TOPIC_ACTION_REVEAL_PX : 0;
-  const actionsOpacity = clamp(effectiveOffset / TOPIC_ACTION_REVEAL_PX, 0, 1);
-  const showActions = allowSwipe && actionsOpacity > 0.01;
-  const showAnchorLabel =
-    allowSwipe && Boolean((anchorLabel ?? "").trim()) && (isOpen || swiping || effectiveOffset > 8);
-  const rowContentOpacity = !allowSwipe ? 1 : clamp(1 - effectiveOffset / (TOPIC_ACTION_REVEAL_PX * 0.62), 0, 1);
-  const swipeBackdropStyle = swipeRevealBackdropStyle(surfaceTint);
-
-  const scheduleOffset = (next: number) => {
-    dragOffsetRef.current = next;
-    pendingOffsetRef.current = next;
-    if (rafRef.current != null) return;
-    rafRef.current = window.requestAnimationFrame(() => {
-      rafRef.current = null;
-      setDragOffset(pendingOffsetRef.current);
-    });
-  };
-
-  const settleSwipe = useCallback(() => {
-    if (!allowSwipe) return;
-    if (rafRef.current != null) {
-      window.cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
-    // Favor easier "swipe back to close" when the row started open (mobile and trackpad).
-    const threshold = wheelWasOpenRef.current ? TOPIC_ACTION_REVEAL_PX * 0.85 : TOPIC_ACTION_REVEAL_PX * 0.35;
-    const shouldOpen = dragOffsetRef.current > threshold;
-    setOpenId(shouldOpen ? rowId : null);
-    setDragOffset(0);
-    dragOffsetRef.current = 0;
-    pendingOffsetRef.current = 0;
-    setSwiping(false);
-    swipingRef.current = false;
-  }, [allowSwipe, rowId, setOpenId]);
-
-  const handlePointerDown = allowSwipe
-    ? (event: React.PointerEvent<HTMLDivElement>) => {
-        if ("button" in event && event.button !== 0) return;
-        const target = event.target as HTMLElement | null;
-
-        // Desktop clicks should never feel like swipes. For mouse pointers we only
-        // support swipe actions via horizontal trackpad scroll (wheel deltaX).
-        if (event.pointerType === "mouse") return;
-
-        // When the row is closed, ignore gesture starts on interactive controls.
-        // When it's open, allow the user to begin a swipe-to-close even if their thumb
-        // is on the action buttons (as long as they actually swipe).
-        if (!isOpen && target?.closest("button, a, input, textarea, select, [data-no-swipe='true']")) return;
-
-        // Prevent nested SwipeRevealRow parents (topic row) from starting a competing gesture
-        // when we start on a child row (task row).
-        event.stopPropagation();
-
-        setSwiping(false);
-        swipingRef.current = false;
-        gesture.current = {
-          startX: event.clientX,
-          startY: event.clientY,
-          startOffset: isOpen ? TOPIC_ACTION_REVEAL_PX : 0,
-          pointerType: event.pointerType,
-          pointerId: event.pointerId,
-          captureNode: event.currentTarget as HTMLElement,
-        };
-      }
-    : undefined;
-
-  const handlePointerMove = allowSwipe
-    ? (event: React.PointerEvent<HTMLDivElement>) => {
-        const g = gesture.current;
-        if (!g) return;
-        if (g.pointerType === "mouse") return;
-        const dx = event.clientX - g.startX;
-        const dy = event.clientY - g.startY;
-        if (!swipingRef.current) {
-          if (Math.abs(dx) < 12) return;
-          if (Math.abs(dx) < Math.abs(dy) * 1.25) return;
-          swipingRef.current = true;
-          setSwiping(true);
-          if (openId !== rowId) setOpenId(rowId);
-          // Prevent nested SwipeRevealRow parents from starting a competing gesture.
-          event.stopPropagation();
-          // Capture the pointer once we know it's a swipe so we keep receiving move/up.
-          try {
-            g.captureNode?.setPointerCapture(g.pointerId);
-          } catch {
-            // ok
-          }
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        const next = clamp(g.startOffset - dx, 0, TOPIC_ACTION_REVEAL_PX);
-        scheduleOffset(next);
-      }
-    : undefined;
-
-  const handlePointerUp = allowSwipe
-    ? (event: React.PointerEvent<HTMLDivElement>) => {
-        const g = gesture.current;
-        gesture.current = null;
-        const wasSwiping = swipingRef.current;
-        swipingRef.current = false;
-        try {
-          (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
-        } catch {
-          // ok
-        }
-        if (rafRef.current != null) {
-          window.cancelAnimationFrame(rafRef.current);
-          rafRef.current = null;
-        }
-        if (!g) return;
-        if (!wasSwiping) return;
-        // If actions were already open, require only a small swipe-back to close them.
-        const threshold = g.startOffset > 0 ? TOPIC_ACTION_REVEAL_PX * 0.9 : TOPIC_ACTION_REVEAL_PX * 0.35;
-        const shouldOpen = dragOffsetRef.current > threshold;
-        setOpenId(shouldOpen ? rowId : null);
-        setDragOffset(0);
-        dragOffsetRef.current = 0;
-        pendingOffsetRef.current = 0;
-        setSwiping(false);
-      }
-    : undefined;
-
-  const handlePointerCancel = allowSwipe
-    ? () => {
-        gesture.current = null;
-        swipingRef.current = false;
-        if (rafRef.current != null) {
-          window.cancelAnimationFrame(rafRef.current);
-          rafRef.current = null;
-        }
-        if (wheelEndTimerRef.current != null) {
-          window.clearTimeout(wheelEndTimerRef.current);
-          wheelEndTimerRef.current = null;
-        }
-        setDragOffset(0);
-        dragOffsetRef.current = 0;
-        pendingOffsetRef.current = 0;
-        setSwiping(false);
-      }
-    : undefined;
-
-  return (
-    <div
-      data-testid={wrapperTestId}
-      className={cn("relative overflow-x-clip rounded-[var(--radius-lg)]", wrapperClassName)}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerCancel}
-      onContextMenu={
-        allowSwipe
-          ? (event) => {
-              const target = event.target as HTMLElement | null;
-              // Keep native context menus for explicitly interactive controls,
-              // but still allow desktop right-click-open inside no-swipe containers
-              // like Topic chat timelines.
-              if (target?.closest("button, a, input, textarea, select")) return;
-              if (hasActiveTextSelectionWithin(event.currentTarget)) return;
-              if (typeof window !== "undefined" && !window.matchMedia("(min-width: 768px)").matches) return;
-              event.preventDefault();
-              event.stopPropagation();
-              gesture.current = null;
-              swipingRef.current = false;
-              if (rafRef.current != null) {
-                window.cancelAnimationFrame(rafRef.current);
-                rafRef.current = null;
-              }
-              if (wheelEndTimerRef.current != null) {
-                window.clearTimeout(wheelEndTimerRef.current);
-                wheelEndTimerRef.current = null;
-              }
-              setSwiping(false);
-              setDragOffset(0);
-              dragOffsetRef.current = 0;
-              pendingOffsetRef.current = 0;
-              if (openId !== rowId) setOpenId(rowId);
-            }
-          : undefined
-      }
-      style={{ touchAction: allowSwipe ? "pan-y" : "auto", ...wrapperStyle }}
-    >
-      {showActions ? (
-        <div
-          className="absolute inset-0 flex items-stretch gap-2 p-1 transition-opacity"
-          style={{ opacity: actionsOpacity, ...(backdropTinted ? swipeBackdropStyle : undefined) }}
-        >
-          {showAnchorLabel ? (
-            <div className={cn("pointer-events-none flex min-w-0 flex-1 items-center", anchorRowClassName)}>
-              <div
-                className={cn(
-                  "max-w-[min(42vw,12rem)] rounded-full border border-[rgba(255,255,255,0.14)] bg-[rgba(9,11,15,0.72)] px-3 py-1.5 text-[11px] font-semibold tracking-[0.02em] text-[rgb(var(--claw-text))] shadow-[0_8px_18px_rgba(0,0,0,0.26)] backdrop-blur",
-                  anchorPillClassName
-                )}
-                style={
-                  surfaceTint
-                    ? {
-                        backgroundImage: `linear-gradient(135deg, ${rgba(surfaceTint, 0.18)} 0%, rgba(9,11,15,0.78) 72%)`,
-                        borderColor: rgba(surfaceTint, 0.18),
-                      }
-                    : undefined
-                }
-                title={anchorLabel}
-              >
-                <span className="block truncate whitespace-nowrap">{anchorLabel}</span>
-              </div>
-            </div>
-          ) : null}
-          <div className="ml-auto flex items-stretch gap-2">{actions}</div>
-        </div>
-      ) : null}
-      <div
-        onClickCapture={
-          allowSwipe
-            ? (event) => {
-                if (swiping || effectiveOffset > 8) {
-                  event.preventDefault();
-                  event.stopPropagation();
-                }
-                if (isOpen && !swiping) {
-                  // Gmail-style: a tap closes the actions, but does not trigger the underlying click handler.
-                  setOpenId(null);
-                  event.preventDefault();
-                  event.stopPropagation();
-                }
-              }
-            : undefined
-        }
-        onWheel={
-          allowSwipe
-            ? (event) => {
-                // Enable swipe-to-reveal on trackpads via horizontal wheel deltas.
-                // Gate on pixel-based deltas so mouse wheels (line/page deltas) don't accidentally open rows.
-                if (event.deltaMode !== 0) return;
-
-                const target = event.target as HTMLElement | null;
-                if (target?.closest("button, a, input, textarea, select, [data-no-swipe='true']")) return;
-                const dx = event.deltaX;
-                const dy = event.deltaY;
-                if (Math.abs(dx) < 10) return;
-                if (Math.abs(dx) < Math.abs(dy) * 1.35) return;
-                event.preventDefault();
-                event.stopPropagation();
-
-                // deltaX > 0 corresponds to a leftward finger swipe on macOS trackpads in most cases.
-                const current = swipingRef.current ? dragOffsetRef.current : isOpen ? TOPIC_ACTION_REVEAL_PX : 0;
-                const next = clamp(current + dx, 0, TOPIC_ACTION_REVEAL_PX);
-                if (!swipingRef.current) {
-                  wheelWasOpenRef.current = isOpen;
-                  swipingRef.current = true;
-                  setSwiping(true);
-                  if (openId !== rowId) setOpenId(rowId);
-                }
-                scheduleOffset(next);
-
-                if (wheelEndTimerRef.current != null) window.clearTimeout(wheelEndTimerRef.current);
-                wheelEndTimerRef.current = window.setTimeout(() => {
-                  wheelEndTimerRef.current = null;
-                  settleSwipe();
-                }, 120);
-              }
-            : undefined
-        }
-        className={cn(
-          "relative",
-          allowSwipe && (swiping || effectiveOffset > 0) ? "will-change-transform" : "",
-          allowSwipe && (swiping || isOpen) ? "z-20" : "",
-          allowSwipe && swiping ? "" : "transition-[transform,opacity] duration-200 ease-out"
-        )}
-        style={{
-          ...(effectiveOffset > 0 ? { transform: `translate3d(-${effectiveOffset}px,0,0)` } : {}),
-          opacity: rowContentOpacity,
-          touchAction: allowSwipe ? "pan-y" : "auto",
-        }}
-      >
-        {children}
-      </div>
-    </div>
-  );
-}
+const SESSION_WORK_TTLS: SessionWorkTtls = {
+  orchestrationActiveTtlMs: OPENCLAW_ORCHESTRATION_ACTIVE_TTL_MS,
+  nonUserActivityTtlMs: OPENCLAW_NON_USER_ACTIVITY_TTL_MS,
+  threadWorkActiveTtlMs: OPENCLAW_THREAD_WORK_ACTIVE_TTL_MS,
+  threadWorkInactiveOverrideTtlMs: OPENCLAW_THREAD_WORK_INACTIVE_OVERRIDE_TTL_MS,
+};
 
 function normalizeHexColor(value: string | undefined | null) {
   if (!value) return null;
@@ -1962,19 +998,6 @@ function mobileOverlaySurfaceStyle(color: string): CSSProperties {
     // Use an opaque base so board content never bleeds through fullscreen chat layers.
     backgroundColor: "rgb(10,12,16)",
     backgroundImage: `linear-gradient(180deg, ${rgba(color, 0.3)} 0%, rgba(12,14,18,0.95) 38%, rgba(12,14,18,0.99) 100%)`,
-  };
-}
-
-function swipeRevealBackdropStyle(color?: string | null): CSSProperties | undefined {
-  const normalized = normalizeHexColor(color);
-  if (!normalized) return undefined;
-  return {
-    backgroundColor: "rgb(10,12,16)",
-    backgroundImage: [
-      `radial-gradient(circle at 14% 50%, ${rgba(normalized, 0.18)} 0%, transparent 52%)`,
-      `linear-gradient(148deg, ${rgba(normalized, 0.22)} 0%, rgba(12,14,18,0.84) 42%, ${rgba(normalized, 0.1)} 100%)`,
-    ].join(", "),
-    boxShadow: `inset 0 0 0 1px ${rgba(normalized, 0.1)}`,
   };
 }
 
@@ -3373,7 +2396,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         threadWorkSignal: openclawThreadWork[key],
         orchestrationWork: orchestrationThreadWorkBySession[key],
         recentNonUserActivity: recentNonUserActivityBySession[key],
-      });
+      }, SESSION_WORK_TTLS);
       if (directResponding) return true;
 
       const alias = typingAliasRef.current.get(key);
@@ -3385,7 +2408,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         threadWorkSignal: openclawThreadWork[sourceKey],
         orchestrationWork: orchestrationThreadWorkBySession[sourceKey],
         recentNonUserActivity: recentNonUserActivityBySession[sourceKey],
-      });
+      }, SESSION_WORK_TTLS);
       if (sourceResponding) return true;
 
       if (Date.now() - alias.createdAt > OPENCLAW_TYPING_ALIAS_INACTIVE_RETENTION_MS) {
@@ -3433,7 +2456,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
       const directThreadSignal = resolveThreadWorkSignal(threadWorkSignal, {
         latestOtherSignalMs,
         nowMs,
-      });
+      }, SESSION_WORK_TTLS);
       const newerActivityAfterStopSignal =
         hasRecentNonUserActivity &&
         Number.isFinite(threadWorkSignalMs) &&
@@ -3496,7 +2519,8 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         {
           latestOtherSignalMs: sourceLatestOtherSignalMs,
           nowMs,
-        }
+        },
+        SESSION_WORK_TTLS
       );
       const sourceNewerActivityAfterStopSignal =
         sourceHasRecentNonUserActivity &&

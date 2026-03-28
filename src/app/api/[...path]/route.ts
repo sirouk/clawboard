@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveServerApiBase } from "../../../lib/server-api-base";
+import { buildForwardHeaders } from "../../../lib/server-api-proxy";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -14,13 +15,6 @@ const HOP_BY_HOP_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
-
-function forwardRequestHeaders(request: NextRequest) {
-  const headers = new Headers(request.headers);
-  headers.delete("host");
-  for (const key of HOP_BY_HOP_HEADERS) headers.delete(key);
-  return headers;
-}
 
 function forwardResponseHeaders(upstream: Response) {
   const headers = new Headers(upstream.headers);
@@ -39,7 +33,7 @@ async function proxyRequest(request: NextRequest, path: string[]) {
 
   const init: RequestInit = {
     method: request.method,
-    headers: forwardRequestHeaders(request),
+    headers: buildForwardHeaders(request),
     redirect: "manual",
     cache: "no-store",
   };

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { normalizeApiBase, resolveServerApiBase } from "../../../../lib/server-api-base";
+import { buildForwardHeaders } from "../../../../lib/server-api-proxy";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -25,12 +26,6 @@ function isPrivateIpv4Host(hostname: string) {
 function isLocalishHost(hostname: string) {
   const value = String(hostname || "").trim().toLowerCase();
   return isLoopbackHost(value) || isPrivateIpv4Host(value) || value.endsWith(".local");
-}
-
-function buildForwardHeaders(request: NextRequest) {
-  const headers = new Headers(request.headers);
-  headers.delete("host");
-  return headers;
 }
 
 function resolveBrowserOrigin(request: NextRequest) {

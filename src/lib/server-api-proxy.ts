@@ -18,10 +18,20 @@ type ProxyApiOptions = {
   legacyRouteId?: string;
 };
 
-function buildForwardHeaders(request: NextRequest) {
+function resolveServerProxyToken() {
+  const explicit = String(process.env.CLAWBOARD_SERVER_API_TOKEN || "").trim();
+  if (explicit) return explicit;
+  return String(process.env.CLAWBOARD_TOKEN || "").trim();
+}
+
+export function buildForwardHeaders(request: NextRequest) {
   const headers = new Headers(request.headers);
   headers.delete("host");
   for (const key of HOP_BY_HOP_HEADERS) headers.delete(key);
+  if (!headers.has("x-clawboard-token")) {
+    const fallbackToken = resolveServerProxyToken();
+    if (fallbackToken) headers.set("x-clawboard-token", fallbackToken);
+  }
   return headers;
 }
 

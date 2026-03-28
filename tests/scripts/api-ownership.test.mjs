@@ -75,4 +75,5 @@ test("server proxy helper emits ownership telemetry headers and warnings", async
 
   assert.match(text, /x-clawboard-api-owner/, "expected ownership header tagging");
   assert.match(text, /Legacy Next API route/, "expected legacy route warning telemetry");
+  assert.match(text, /CLAWBOARD_SERVER_API_TOKEN|CLAWBOARD_TOKEN/, "expected server-side proxy token fallback");
 });

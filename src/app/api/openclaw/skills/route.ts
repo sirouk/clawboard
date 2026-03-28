@@ -1,14 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveServerApiBase } from "../../../../lib/server-api-base";
+import { buildForwardHeaders } from "../../../../lib/server-api-proxy";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-
-function buildForwardHeaders(request: NextRequest) {
-  const headers = new Headers(request.headers);
-  headers.delete("host");
-  return headers;
-}
 
 export async function GET(req: NextRequest) {
   // Auth is enforced by the FastAPI middleware via the forwarded X-Clawboard-Token header.
