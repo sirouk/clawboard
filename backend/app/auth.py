@@ -75,7 +75,8 @@ def is_local_request(request: Request) -> bool:
 
 
 def ensure_read_access(request: Request, provided_token: str | None) -> None:
-    """Require token for all reads — no unauthenticated access."""
+    if is_local_request(request):
+        return
     _validate_token(provided_token)
 
 

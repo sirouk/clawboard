@@ -14,6 +14,7 @@ import asyncio
 import threading
 import time
 import re
+import sys
 import httpx
 from pathlib import Path
 import urllib.request
@@ -102,6 +103,20 @@ from .events import event_hub
 from .clawgraph import build_clawgraph
 from .vector_search import dense_candidate_ids, semantic_search
 from . import dispatch as dispatch_module
+from .routes import (
+    register_log_routes,
+    register_openclaw_routes,
+    register_system_routes,
+    register_topic_routes,
+)
+from .services.context_service import build_context_response
+from .services.metrics_service import build_health_payload, build_metrics_payload
+from .services.orchestration_service import (
+    build_openclaw_chat_dispatch_status_payload,
+    build_openclaw_history_sync_status_payload,
+    build_resolver_context_payload_for_board_send,
+)
+from .services.search_service import build_search_response
 from .background import (  # noqa: F401 – re-exported for use throughout this module
     _BACKGROUND_STOP_EVENT,
     _BACKGROUND_THREADS,
@@ -1206,9 +1221,9 @@ def on_shutdown() -> None:
         thread.join(timeout=2.0)
 
 
-@app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok"}
+    with get_session() as session:
+        return build_health_payload(session, main_module=sys.modules[__name__])
 
 
 def _queue_worker() -> None:
@@ -11006,36 +11021,15 @@ def _resolver_context_payload_for_board_send(
     force_new_topic: bool,
     explicit_space_id: str | None,
 ) -> tuple[dict[str, Any] | None, str]:
-    if force_new_topic:
-        return None, "skipped_force_new_topic"
-    if selected_topic_id:
-        return None, "skipped_selected_topic"
-
-    try:
-        context_result = context(
-            q=message,
-            sessionKey=None,
-            spaceId=explicit_space_id,
-            mode="cheap",
-            includePending=False,
-            maxChars=1400,
-            workingSetLimit=4,
-            timelineLimit=4,
-        )
-    except Exception:
-        return None, "cheap_error"
-
-    if isinstance(context_result, dict):
-        return context_result, "cheap"
-    return None, "cheap_empty"
+    return build_resolver_context_payload_for_board_send(
+        sys.modules[__name__],
+        message=message,
+        selected_topic_id=selected_topic_id,
+        force_new_topic=force_new_topic,
+        explicit_space_id=explicit_space_id,
+    )
 
 
-@app.post(
-    "/api/openclaw/resolve-board-send",
-    dependencies=[Depends(require_token)],
-    response_model=OpenClawResolveBoardSendResponse,
-    tags=["openclaw"],
-)
 def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
     message = _sanitize_log_text(payload.message or "")
     if not message:
@@ -11152,12 +11146,6 @@ def resolve_board_send(payload: OpenClawResolveBoardSendRequest):
         }
 
 
-@app.post(
-    "/api/openclaw/chat",
-    dependencies=[Depends(require_token)],
-    response_model=OpenClawChatQueuedResponse,
-    tags=["openclaw"],
-)
 def openclaw_chat(payload: OpenClawChatRequest, _background_tasks: BackgroundTasks):
     """Send a user message to OpenClaw via the Gateway and tie it to a stable sessionKey."""
     base_url = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789").strip().rstrip("/")
@@ -11313,12 +11301,6 @@ def openclaw_chat(payload: OpenClawChatRequest, _background_tasks: BackgroundTas
     return {"queued": True, "requestId": request_id}
 
 
-@app.delete(
-    "/api/openclaw/chat",
-    dependencies=[Depends(require_token)],
-    response_model=OpenClawChatCancelResponse,
-    tags=["openclaw"],
-)
 def openclaw_chat_cancel(payload: OpenClawChatCancelRequest):
     """Cancel an in-flight OpenClaw request.
 
@@ -11865,12 +11847,6 @@ def _workspace_ide_url_for(agent_id: str, workspace_dir: str) -> str | None:
     return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", query_string, ""))
 
 
-@app.get(
-    "/api/openclaw/workspaces",
-    dependencies=[Depends(require_token)],
-    response_model=OpenClawWorkspacesResponse,
-    tags=["openclaw"],
-)
 def openclaw_workspaces(agentId: str | None = Query(default=None, description="Optional OpenClaw agent id filter")):
     requested_agent_id = str(agentId or "").strip()
     rows = _resolve_openclaw_agent_workspaces()
@@ -11890,12 +11866,6 @@ def openclaw_workspaces(agentId: str | None = Query(default=None, description="O
     }
 
 
-@app.get(
-    "/api/openclaw/skills",
-    dependencies=[Depends(require_token)],
-    response_model=OpenClawSkillsResponse,
-    tags=["openclaw"],
-)
 async def openclaw_skills(agentId: str = Query(default="main", description="OpenClaw agent id")):
     """Fetch live OpenClaw skill directory via gateway RPC (skills.status)."""
     agent_id = (agentId or "main").strip() or "main"
@@ -11939,59 +11909,9 @@ async def openclaw_skills(agentId: str = Query(default="main", description="Open
     }
 
 
-@app.get(
-    "/api/openclaw/chat-dispatch/status",
-    dependencies=[Depends(require_token)],
-    tags=["openclaw"],
-)
 def openclaw_chat_dispatch_status():
     with get_session() as session:
-        rows = session.exec(select(OpenClawChatDispatchQueue)).all()
-
-    counts = {
-        "pending": 0,
-        "retry": 0,
-        "processing": 0,
-        "sent": 0,
-        "failed": 0,
-    }
-    oldest_open: str | None = None
-    newest_completed: str | None = None
-    max_attempts = 0
-    for row in rows:
-        status = str(getattr(row, "status", "") or "").strip().lower()
-        if status in counts:
-            counts[status] += 1
-        attempts = int(getattr(row, "attempts", 0) or 0)
-        max_attempts = max(max_attempts, attempts)
-        created_at = normalize_iso(str(getattr(row, "createdAt", "") or ""))
-        completed_at = normalize_iso(str(getattr(row, "completedAt", "") or ""))
-        if status in {"pending", "retry", "processing"} and created_at:
-            if oldest_open is None or created_at < oldest_open:
-                oldest_open = created_at
-        if completed_at:
-            if newest_completed is None or completed_at > newest_completed:
-                newest_completed = completed_at
-
-    return {
-        "enabled": _openclaw_chat_dispatch_enabled(),
-        "workers": _openclaw_chat_dispatch_workers(),
-        "hotWindowSeconds": _openclaw_chat_dispatch_hot_window_seconds(),
-        "pollSeconds": _openclaw_chat_dispatch_poll_seconds(),
-        "staleProcessingSeconds": _openclaw_chat_dispatch_stale_processing_seconds(),
-        "maxRetryDelaySeconds": _openclaw_chat_dispatch_max_retry_delay_seconds(),
-        "maxAttempts": _openclaw_chat_dispatch_max_attempts(),
-        "recoveryLookbackSeconds": _openclaw_chat_dispatch_recovery_lookback_seconds(),
-        "recoveryIntervalSeconds": _openclaw_chat_dispatch_recovery_interval_seconds(),
-        "autoQuarantineEnabled": _openclaw_chat_dispatch_auto_quarantine_enabled(),
-        "autoQuarantineSeconds": _openclaw_chat_dispatch_auto_quarantine_seconds(),
-        "autoQuarantineLimit": _openclaw_chat_dispatch_auto_quarantine_limit(),
-        "autoQuarantineSyntheticOnly": _openclaw_chat_dispatch_auto_quarantine_synthetic_only(),
-        "counts": counts,
-        "oldestOpenCreatedAt": oldest_open,
-        "newestCompletedAt": newest_completed,
-        "maxObservedAttempts": max_attempts,
-    }
+        return build_openclaw_chat_dispatch_status_payload(session, sys.modules[__name__])
 
 
 
@@ -12079,60 +11999,11 @@ def openclaw_chat_dispatch_quarantine(
     }
 
 
-@app.get(
-    "/api/openclaw/history-sync/status",
-    dependencies=[Depends(require_token)],
-    tags=["openclaw"],
-)
 def openclaw_history_sync_status():
     with get_session() as session:
-        row = session.get(OpenClawGatewayHistorySyncState, _OPENCLAW_HISTORY_SYNC_STATE_ID)
-    return {
-        "enabled": _openclaw_gateway_history_sync_enabled(),
-        "pollSeconds": _openclaw_gateway_history_sync_poll_seconds(),
-        "activeMinutes": _openclaw_gateway_history_sync_active_minutes(),
-        "sessionLimit": _openclaw_gateway_history_sync_session_limit(),
-        "sessionsListEnabled": _openclaw_gateway_history_sync_sessions_list_enabled(),
-        "cycleBudgetSeconds": _openclaw_gateway_history_sync_cycle_budget_seconds(),
-        "cursorSeedLimit": _openclaw_gateway_history_sync_cursor_seed_limit(),
-        "logSeedLimit": _openclaw_gateway_history_sync_log_seed_limit(),
-        "logSeedLookbackSeconds": _openclaw_gateway_history_sync_log_seed_lookback_seconds(),
-        "unresolvedSeedLimit": _openclaw_gateway_history_sync_unresolved_seed_limit(),
-        "unresolvedLookbackSeconds": _openclaw_gateway_history_sync_unresolved_lookback_seconds(),
-        "rpcTimeoutSeconds": _openclaw_gateway_history_sync_rpc_timeout_seconds(),
-        "maxBackoffSeconds": _openclaw_gateway_history_sync_max_backoff_seconds(),
-        "sessionBackoffBaseSeconds": _openclaw_gateway_history_sync_session_backoff_base_seconds(),
-        "sessionBackoffTtlSeconds": _openclaw_gateway_history_sync_session_backoff_ttl_seconds(),
-        "transportRetryAttempts": _openclaw_gateway_history_sync_transport_retry_attempts(),
-        "transportRetryBaseSeconds": _openclaw_gateway_history_sync_transport_retry_base_seconds(),
-        "historyLimit": _openclaw_gateway_history_sync_history_limit(),
-        "overlapSeconds": _openclaw_gateway_history_sync_overlap_seconds(),
-        "runtime": {
-            "sessionBackoffStateCount": _openclaw_gateway_history_sync_backoff_state_size(),
-        },
-        "auth": {
-            "tokenConfigured": bool(_openclaw_gateway_history_sync_token()),
-            "explicitDeviceAuthMode": _openclaw_gateway_history_sync_use_device_auth(),
-            "retryWithoutDeviceAuth": _openclaw_gateway_history_sync_retry_without_device_auth(),
-            "retryWithWriteScope": _openclaw_gateway_history_sync_retry_with_write_scope(),
-        },
-        "state": {
-            "status": str(getattr(row, "status", "idle") or "idle"),
-            "lastRunAt": getattr(row, "lastRunAt", None),
-            "lastSuccessAt": getattr(row, "lastSuccessAt", None),
-            "lastErrorAt": getattr(row, "lastErrorAt", None),
-            "lastError": getattr(row, "lastError", None),
-            "consecutiveFailures": int(getattr(row, "consecutiveFailures", 0) or 0),
-            "lastIngestedCount": int(getattr(row, "lastIngestedCount", 0) or 0),
-            "lastSessionCount": int(getattr(row, "lastSessionCount", 0) or 0),
-            "lastCursorUpdateCount": int(getattr(row, "lastCursorUpdateCount", 0) or 0),
-            "lastDeferredCount": int(getattr(row, "lastDeferredCount", 0) or 0),
-            "updatedAt": getattr(row, "updatedAt", None),
-        },
-    }
+        return build_openclaw_history_sync_status_payload(session, sys.modules[__name__])
 
 
-@app.get("/api/stream")
 async def stream_events(request: Request):
     """Server-sent events stream for real-time UI updates."""
     subscriber = event_hub.subscribe()
@@ -12189,7 +12060,6 @@ async def stream_events(request: Request):
     )
 
 
-@app.get("/api/config", response_model=InstanceResponse, tags=["config"])
 def get_config():
     """Return instance configuration plus token requirement info."""
     with get_session() as session:
@@ -12211,7 +12081,6 @@ def get_config():
         }
 
 
-@app.post("/api/config", dependencies=[Depends(require_token)], response_model=InstanceResponse, tags=["config"])
 def update_config(
     payload: InstanceUpdate = Body(
         ...,
@@ -12633,7 +12502,6 @@ def _touch_topic_activity(session: Any, topic: Topic, *, stamp: str | None = Non
     return resolved_stamp
 
 
-@app.get("/api/topics", response_model=List[TopicOut], tags=["topics"])
 def list_topics(
     sessionKey: str | None = Query(default=None, description="Session key continuity scope (source.sessionKey)."),
     spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
@@ -12658,7 +12526,6 @@ def list_topics(
         return topics
 
 
-@app.get("/api/topics/{topic_id}", response_model=TopicOut, tags=["topics"])
 def get_topic(topic_id: str):
     """Fetch one topic by id."""
     with get_session() as session:
@@ -12668,7 +12535,6 @@ def get_topic(topic_id: str):
         return topic
 
 
-@app.patch("/api/topics/{topic_id}", dependencies=[Depends(require_token)], response_model=TopicOut, tags=["topics"])
 def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
     """Patch an existing topic (partial update)."""
     with get_session() as session:
@@ -12822,7 +12688,6 @@ def patch_topic(topic_id: str, payload: TopicPatch = Body(...)):
         return topic
 
 
-@app.post("/api/topics/reorder", dependencies=[Depends(require_token)], tags=["topics"])
 def reorder_topics(payload: TopicReorderRequest):
     """Persist a manual topic order by assigning sortIndex sequentially."""
     ordered_ids: list[str] = []
@@ -12898,7 +12763,6 @@ def reorder_topics(payload: TopicReorderRequest):
         return {"ok": True, "count": len(final_ids), "changed": len(changed)}
 
 
-@app.post("/api/topics", dependencies=[Depends(require_token)], response_model=TopicOut, tags=["topics"])
 def upsert_topic(
     payload: TopicUpsert = Body(
         ...,
@@ -13149,7 +13013,6 @@ def upsert_topic(
         return topic
 
 
-@app.delete("/api/topics/{topic_id}", dependencies=[Depends(require_token)], tags=["topics"])
 def delete_topic(topic_id: str):
     """Delete a topic and detach dependent tasks/logs to keep history intact."""
     with get_session() as session:
@@ -13530,7 +13393,6 @@ def replay_classifier_bundle(payload: ClassifierReplayRequest):
         }
 
 
-@app.get("/api/log", response_model=List[LogOut], tags=["logs"])
 def list_logs(
     topicId: str | None = Query(default=None, description="Filter logs by topic ID.", example="topic-1"),
     relatedLogId: str | None = Query(
@@ -13638,7 +13500,6 @@ def _topic_thread_snapshot_cursor(topic: Topic, rows: list[LogEntry]) -> str | N
     return latest
 
 
-@app.get("/api/topics/{topic_id}/thread", response_model=TopicThreadResponse, tags=["topics"])
 def get_topic_thread(
     topic_id: str,
     spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
@@ -13771,7 +13632,6 @@ def _visible_chat_count_log_predicate():
     )
 
 
-@app.get("/api/log/chat-counts", response_model=LogChatCountsResponse, tags=["logs"])
 def get_log_chat_counts(
     spaceId: str | None = Query(default=None, description="Resolve visibility from this source space id."),
     allowedSpaceIds: str | None = Query(default=None, description="Explicit allowed space ids (comma-separated)."),
@@ -13811,7 +13671,6 @@ def get_log_chat_counts(
         return {"topicChatCounts": topic_counts}
 
 
-@app.get("/api/log/{log_id}", response_model=LogOut, tags=["logs"])
 def get_log(
     log_id: str,
     includeRaw: bool = Query(
@@ -13833,7 +13692,6 @@ def get_log(
         return LogOut.model_validate(entry)
 
 
-@app.post("/api/log", dependencies=[Depends(require_token)], response_model=LogOut, tags=["logs"])
 def append_log(
     payload: LogAppend = Body(
         ...,
@@ -13862,7 +13720,6 @@ def append_log(
         return append_log_entry(session, payload, idem)
 
 
-@app.post("/api/ingest", dependencies=[Depends(require_token)], tags=["logs"])
 def enqueue_log(
     payload: LogAppend = Body(...),
 ):
@@ -13885,7 +13742,6 @@ def enqueue_log(
         return {"queued": True, "id": job.id}
 
 
-@app.patch("/api/log/{log_id}", dependencies=[Depends(require_token)], response_model=LogOut, tags=["logs"])
 def patch_log(log_id: str, payload: LogPatch = Body(...)):
     """Patch an existing log entry (used by async classifier; idempotent)."""
     with get_session() as session:
@@ -14140,7 +13996,6 @@ def _detach_deleted_topic_from_log_source(source: Any, *, topic_id: str) -> tupl
     return (source_map if changed else source), changed
 
 
-@app.delete("/api/log/{log_id}", dependencies=[Depends(require_token)], tags=["logs"])
 def delete_log(log_id: str):
     """Delete a log entry and its attached note/receipt/attachment rows."""
     with get_session() as session:
@@ -14170,11 +14025,6 @@ def delete_log(log_id: str):
         return {"ok": True, "deleted": True, "deletedIds": deleted_ids}
 
 
-@app.post(
-    "/api/log/{log_id}/purge_forward",
-    dependencies=[Depends(require_token)],
-    tags=["logs"],
-)
 def purge_log_forward(log_id: str):
     """Permanently delete the given log entry and everything after it in the same topic chat session."""
     anchor_id = (log_id or "").strip()
@@ -14600,7 +14450,6 @@ def _build_changes_payload(
     )
 
 
-@app.get("/api/changes", response_model=ChangesResponse, tags=["changes"])
 def list_changes(
     since: str | None = Query(
         default=None,
@@ -16251,7 +16100,6 @@ def _topic_visible(topic: Topic, now: datetime) -> bool:
     return True
 
 
-@app.get("/api/context", response_model=ContextResponse, tags=["context"])
 def context(
     q: str | None = Query(default=None, description="Current user input/query."),
     sessionKey: str | None = Query(default=None, description="Session key for continuity (source.sessionKey)."),
@@ -16264,378 +16112,20 @@ def context(
     timelineLimit: int = Query(default=6, ge=0, le=40, description="Max session timeline lines."),
 ):
     """Return a prompt-ready, layered context block for agent runs (Layer A always; Layer B optional)."""
-    raw_query_input = _coerce_safe_text(q or "")
-    raw_query = _sanitize_log_text(raw_query_input)
-    completion_event = _parse_internal_task_completion_event(raw_query_input)
-    normalized_query = (
-        _internal_task_completion_intent_label(completion_event)
-        if completion_event
-        else _clip(raw_query, 500)
+    return build_context_response(
+        sys.modules[__name__],
+        q=q,
+        session_key=sessionKey,
+        space_id=spaceId,
+        allowed_space_ids_raw=allowedSpaceIds,
+        mode=mode,
+        include_pending=includePending,
+        max_chars=maxChars,
+        working_set_limit=workingSetLimit,
+        timeline_limit=timelineLimit,
     )
-    requested_mode = (mode or "auto").strip().lower()
-    effective_mode = requested_mode if requested_mode in {"auto", "cheap", "full", "patient"} else "auto"
-
-    low_signal = (
-        bool(completion_event)
-        or _is_affirmation(normalized_query)
-        or normalized_query.strip().startswith("/")
-        or _is_low_signal_context_query(normalized_query)
-    )
-    board_topic_hint_id = _parse_board_session_key(sessionKey or "")
-    board_session_hint = bool(board_topic_hint_id)
-    if completion_event:
-        run_semantic = False
-    elif effective_mode in {"full", "patient"}:
-        run_semantic = True
-    elif effective_mode == "cheap":
-        run_semantic = False
-    else:
-        run_semantic = ((not low_signal) and _query_has_signal(normalized_query)) or (
-            low_signal and board_session_hint and bool(normalized_query.strip())
-        )
-
-    now_dt = datetime.now(timezone.utc)
-    data: dict[str, Any] = {}
-    layers: list[str] = []
-    lines: list[str] = []
-
-    lines.append("ClawBoard context (layered):")
-    if normalized_query:
-        lines.append(f"Current user intent: {_clip(normalized_query, 180)}")
-    if completion_event:
-        remaining_active_subagents = 0
-        try:
-            remaining_active_subagents = max(0, int(str(completion_event.get("active_subagent_runs") or "0").strip() or "0"))
-        except Exception:
-            remaining_active_subagents = 0
-        completion_task = _sanitize_log_text(completion_event.get("task"))
-        data["turnHint"] = {
-            "kind": "delegated_completion",
-            "task": completion_task or None,
-            "status": _sanitize_log_text(completion_event.get("status")) or None,
-            "source": _sanitize_log_text(completion_event.get("source")) or None,
-            "resultPreview": _sanitize_log_text(completion_event.get("result_preview")) or None,
-            "remainingActiveSubagentRuns": remaining_active_subagents or None,
-        }
-        layers.append("A:turn_hint")
-        lines.append("Turn hint:")
-        lines.append(
-            f"- Delegated specialist just completed{f': {completion_task}' if completion_task else ' in the current task'}."
-        )
-        lines.append("- Read the current topic thread before replying.")
-        lines.append("- If the specialist result is already visible there, do not repeat or paraphrase the full body.")
-        if remaining_active_subagents > 0:
-            lines.append(
-                f"- {remaining_active_subagents} sibling delegated run(s) are still active in this workflow/session."
-            )
-            lines.append(
-                "- Keep this completion internal until the remaining related runs finish unless a user decision is needed or more than 5 minutes have passed since the last visible update."
-            )
-            lines.append(
-                "- Do not send a user-facing message that only says you are checking, waiting on, or confirming other specialists."
-            )
-            lines.append(
-                "- If you need confirmation, use session_status(...) as internal supervision rather than another status post."
-            )
-        lines.append("- Close the loop by validating the work, adding only the delta or caveats, and stating whether the request is satisfied.")
-    if effective_mode != "auto":
-        lines.append(f"Mode: {effective_mode}")
-
-    with get_session() as session:
-        resolved_source_space_id = _resolve_source_space_id(
-            session,
-            explicit_space_id=spaceId,
-            session_key=sessionKey,
-        )
-        allowed_space_ids = _resolve_allowed_space_ids(
-            session,
-            source_space_id=resolved_source_space_id,
-            allowed_space_ids_raw=allowedSpaceIds,
-        )
-
-        routing_items: list[dict[str, Any]] = []
-        routing_row: SessionRoutingMemory | None = None
-        if sessionKey:
-            row = session.get(SessionRoutingMemory, sessionKey)
-            if not row and "|" in sessionKey:
-                row = session.get(SessionRoutingMemory, sessionKey.split("|", 1)[0])
-            if row and isinstance(getattr(row, "items", None), list):
-                routing_row = row
-                routing_items = list(row.items or [])[-6:]
-
-        timeline: list[dict[str, Any]] = []
-        timeline_label = "Recent session timeline:"
-        timeline_scope = "session"
-        if timelineLimit > 0 and (sessionKey or board_topic_hint_id):
-            query_logs = select(LogEntry).options(defer(LogEntry.raw))
-            if board_topic_hint_id:
-                timeline_scope = "topic_thread"
-                timeline_label = "Recent current topic thread:"
-                query_logs = query_logs.where(LogEntry.topicId == board_topic_hint_id)
-            else:
-                base_key = (sessionKey.split("|", 1)[0] or "").strip()
-                if not base_key:
-                    query_logs = None
-                elif DATABASE_URL.startswith("sqlite"):
-                    query_logs = query_logs.where(
-                        text(
-                            "(json_extract(source, '$.sessionKey') = :base_key OR json_extract(source, '$.sessionKey') LIKE :like_key)"
-                        )
-                    ).params(base_key=base_key, like_key=f"{base_key}|%")
-                else:
-                    expr = LogEntry.source["sessionKey"].as_string()
-                    query_logs = query_logs.where(or_(expr == base_key, expr.like(f"{base_key}|%")))
-            if query_logs is not None:
-                query_logs = query_logs.where(LogEntry.type == "conversation").order_by(
-                    LogEntry.createdAt.desc(),
-                    (text("rowid DESC") if DATABASE_URL.startswith("sqlite") else LogEntry.id.desc()),
-                ).limit(max(20, timelineLimit * 5))
-                rows = session.exec(query_logs).all()
-                if allowed_space_ids is not None:
-                    topic_by_id_for_timeline = _load_related_maps_for_logs(session, rows)
-                    rows = [
-                        entry
-                        for entry in rows
-                        if _log_matches_allowed_spaces(
-                            entry,
-                            allowed_space_ids,
-                            topic_by_id_for_timeline,
-                        )
-                    ]
-                for entry in rows:
-                    if _is_command_log(entry):
-                        continue
-                    summary = _sanitize_log_text(entry.summary or "") or _clip(_sanitize_log_text(entry.content or ""), 220)
-                    who = (
-                        "User"
-                        if str(entry.agentId or "").strip().lower() == "user"
-                        else (entry.agentLabel or entry.agentId or "Agent")
-                    )
-                    source_map = entry.source if isinstance(entry.source, dict) else {}
-                    timeline.append(
-                        {
-                            "id": entry.id,
-                            "topicId": entry.topicId,
-                            "agentId": entry.agentId,
-                            "agentLabel": entry.agentLabel,
-                            "sessionKey": str(source_map.get("sessionKey") or "").strip() or None,
-                            "createdAt": entry.createdAt,
-                            "text": _clip(f"{who}: {summary}", 160),
-                        }
-                    )
-                    if len(timeline) >= timelineLimit:
-                        break
-                if timeline:
-                    data["timeline"] = timeline
-                    data["timelineScope"] = timeline_scope
-                    layers.append("A:timeline")
-
-        all_topics = session.exec(select(Topic)).all()
-        all_topic_by_id = {str(getattr(topic, "id", "") or ""): topic for topic in all_topics if getattr(topic, "id", None)}
-        topics = (
-            [topic for topic in all_topics if _topic_matches_allowed_spaces(topic, allowed_space_ids)]
-            if allowed_space_ids is not None
-            else all_topics
-        )
-        topic_by_id = {t.id: t for t in topics}
-
-        if routing_items and allowed_space_ids is not None:
-            filtered_routing_items: list[dict[str, Any]] = []
-            for item in routing_items:
-                topic_id_hint = str(item.get("topicId") or "").strip()
-                allowed = False
-                if topic_id_hint:
-                    candidate_topic = all_topic_by_id.get(topic_id_hint)
-                    if candidate_topic and _topic_matches_allowed_spaces(candidate_topic, allowed_space_ids):
-                        allowed = True
-                if not topic_id_hint:
-                    allowed = True
-                if allowed:
-                    filtered_routing_items.append(item)
-            routing_items = filtered_routing_items
-
-        if routing_items:
-            data["routingMemory"] = {
-                "sessionKey": str(getattr(routing_row, "sessionKey", "") or sessionKey or ""),
-                "items": routing_items,
-                "createdAt": getattr(routing_row, "createdAt", None),
-                "updatedAt": getattr(routing_row, "updatedAt", None),
-            }
-            layers.append("A:routing_memory")
-
-        visible_topics = [t for t in topics if _topic_visible(t, now_dt)]
-        visible_topics.sort(key=_topic_order_key)
-
-        working_topics = visible_topics[: max(0, min(12, workingSetLimit))]
-
-        # Board chat location: ClawBoard Topic chat sessions carry a stable sessionKey that
-        # identifies the active Topic. Always surface that entity first so the model knows
-        # "where the user is speaking from" even on vague turns like "resume" or "thoughts?".
-        board_topic_id = _parse_board_session_key(sessionKey or "")
-        board_topic = topic_by_id.get(board_topic_id) if board_topic_id else None
-
-        if board_topic:
-            data["boardSession"] = {
-                "kind": "topic",
-                "topicId": board_topic.id,
-                "topicName": board_topic.name,
-            }
-            layers.append("A:board_session")
-            status = str(getattr(board_topic, "status", "") or "").strip()
-            suffix = f" [{status}]" if status else ""
-            lines.append("Active board location:")
-            lines.append(f"- Topic Chat: {board_topic.name}{suffix}")
-
-            # Promote the active board entity to the top even if it would normally rank lower.
-            working_topics = [board_topic, *[t for t in working_topics if t.id != board_topic.id]]
-
-        orchestration_runs = _orchestration_context_snapshot(session, session_key=sessionKey, limit=3)
-        if orchestration_runs:
-            data["orchestration"] = {"runs": orchestration_runs}
-            layers.append("A:orchestration")
-            lines.append("Active orchestration runs:")
-            for run in orchestration_runs:
-                mode_label = str(run.get("mode") or "single")
-                status_label = str(run.get("status") or "running")
-                terminal = int(run.get("itemsTerminal") or 0)
-                total = int(run.get("itemsTotal") or 0)
-                request_id = str(run.get("requestId") or "")
-                convergence = run.get("convergence") if isinstance(run.get("convergence"), dict) else {}
-                gate_ready = bool(convergence.get("ready"))
-                gate_reason = str(convergence.get("reason") or "").strip().lower()
-                gate_label = "ready" if gate_ready else (f"waiting:{gate_reason}" if gate_reason else "waiting")
-                lines.append(f"- {status_label} [{mode_label}] {terminal}/{total} items | gate {gate_label} | request {request_id}")
-            if completion_event:
-                related_active_subagents = 0
-                for run in orchestration_runs:
-                    for item in run.get("items") or []:
-                        if str(item.get("kind") or "").strip().lower() != "subagent":
-                            continue
-                        if str(item.get("status") or "").strip().lower() in _ORCHESTRATION_TERMINAL_ITEM_STATUSES:
-                            continue
-                        related_active_subagents += 1
-                if related_active_subagents > 0:
-                    turn_hint = data.get("turnHint") if isinstance(data.get("turnHint"), dict) else {}
-                    turn_hint["remainingActiveSubagentRuns"] = related_active_subagents
-                    data["turnHint"] = turn_hint
-                    lines.append("Delegation handling:")
-                    lines.append(
-                        f"- {related_active_subagents} sibling delegated run(s) are still active in this topic/workflow."
-                    )
-                    lines.append(
-                        "- Treat this completion as internal supervision unless a real blocker or decision needs to be surfaced now."
-                    )
-                    lines.append(
-                        "- Do not narrate routine bookkeeping like 'checking on the others' or 'awaiting the rest' back to the user."
-                    )
-
-        continuity_topic_ids: list[str] = []
-        for item in routing_items[-4:]:
-            tid = str(item.get("topicId") or "").strip()
-            if tid:
-                continuity_topic_ids.append(tid)
-        for item in timeline[: max(0, min(12, timelineLimit * 2))]:
-            tid = str(item.get("topicId") or "").strip()
-            if tid:
-                continuity_topic_ids.append(tid)
-
-        seen_topic_ids = {t.id for t in working_topics}
-        for tid in continuity_topic_ids:
-            if len(working_topics) >= max(0, min(12, workingSetLimit)):
-                break
-            t = topic_by_id.get(tid)
-            if t and _topic_visible(t, now_dt) and tid not in seen_topic_ids:
-                working_topics.append(t)
-                seen_topic_ids.add(tid)
-
-        data["workingSet"] = {
-            "topics": [t.model_dump() for t in working_topics[:workingSetLimit]],
-        }
-        layers.append("A:working_set")
-
-        if working_topics:
-            lines.append("Working set topics:")
-            for t in working_topics[:workingSetLimit]:
-                digest = _sanitize_log_text(getattr(t, "digest", None))
-                suffix = f" | digest: {_clip(digest, 140)}" if digest else ""
-                lines.append(f"- {t.name}{suffix}")
-
-        if routing_items:
-            lines.append("Session routing memory (newest last):")
-            for item in routing_items[-4:]:
-                topic_name = str(item.get("topicName") or item.get("topicId") or "").strip()
-                anchor = str(item.get("anchor") or "").strip()
-                if anchor:
-                    lines.append(f"- {topic_name} | anchor: {_clip(_sanitize_log_text(anchor), 120)}")
-                else:
-                    lines.append(f"- {topic_name}")
-
-        if timeline:
-            lines.append(timeline_label)
-            for item in timeline[:timelineLimit]:
-                lines.append(f"- {item['text']}")
-
-        semantic = None
-        if run_semantic and normalized_query:
-            limit_topics = 8
-            limit_logs = max(24, timelineLimit * 6)
-            if effective_mode == "patient":
-                limit_topics = 12
-                limit_logs = max(60, timelineLimit * 10)
-            semantic = _search_impl(
-                session,
-                normalized_query,
-                topic_id=None,
-                allowed_space_ids=allowed_space_ids,
-                session_key=sessionKey,
-                include_pending=includePending,
-                limit_topics=limit_topics,
-                limit_logs=limit_logs,
-                allow_deep_content_scan=False,
-            )
-            data["semantic"] = semantic
-            layers.append("B:semantic")
-
-        if semantic:
-            topics_hit_limit = 3
-            logs_hit_limit = 6
-            if effective_mode == "patient":
-                topics_hit_limit = 5
-                logs_hit_limit = 12
-
-            topics_hit = list(semantic.get("topics") or [])[:topics_hit_limit]
-            logs_hit = list(semantic.get("logs") or [])[:logs_hit_limit]
-
-            if topics_hit:
-                lines.append("Semantic recall topics:")
-                for item in topics_hit:
-                    name = str(item.get("name") or item.get("id") or "").strip()
-                    score = item.get("score")
-                    lines.append(f"- {name} (score {score})")
-            if logs_hit:
-                lines.append("Semantic recall logs:")
-                for item in logs_hit:
-                    who = (
-                        "User"
-                        if str(item.get("agentId") or "").strip().lower() == "user"
-                        else (item.get("agentLabel") or item.get("agentId") or "Agent")
-                    )
-                    text2 = _sanitize_log_text(str(item.get("summary") or item.get("content") or ""))
-                    lines.append(f"- {who}: {_clip(text2, 140)}")
-
-    block = _clip("\n".join(lines).strip(), maxChars)
-    return {
-        "ok": True,
-        "sessionKey": sessionKey,
-        "q": normalized_query,
-        "mode": effective_mode,
-        "layers": layers,
-        "block": block,
-        "data": data,
-    }
 
 
-@app.get("/api/search", tags=["search"])
 def search(
     q: str = Query(..., min_length=1, description="Natural language query."),
     semanticQuery: str | None = Query(
@@ -16651,130 +16141,18 @@ def search(
     limitLogs: int = Query(default=360, ge=10, le=5000, description="Max log matches."),
 ):
     """Hybrid semantic + lexical search across topics and logs."""
-    query = (q or "").strip()
-    started_at = time.perf_counter()
-    query_tokens = _search_query_tokens(query.lower())
-    query_has_deep_signal = len(query_tokens) >= 2 and len(query) >= 6
-    if len(query) < 1:
-        return {
-            "query": "",
-            "mode": "empty",
-            "topics": [],
-            "logs": [],
-            "notes": [],
-            "matchedTopicIds": [],
-            "matchedLogIds": [],
-            "searchMeta": {
-                "degraded": False,
-                "gateAcquired": True,
-                "gateWaitMs": 0.0,
-                "durationMs": round((time.perf_counter() - started_at) * 1000.0, 2),
-            },
-        }
-
-    wait_seconds = max(0.0, SEARCH_CONCURRENCY_WAIT_SECONDS)
-    gate_wait_started = time.perf_counter()
-    acquired = _SEARCH_QUERY_GATE.acquire(timeout=wait_seconds)
-    gate_wait_ms = round((time.perf_counter() - gate_wait_started) * 1000.0, 2)
-    degraded_busy_fallback = not acquired
-    effective_limit_topics = int(limitTopics)
-    effective_limit_logs = int(limitLogs)
-    allow_deep_content_scan = bool(query_has_deep_signal)
-    if degraded_busy_fallback:
-        # If the deep-search gate is saturated, run a bounded degraded pass instead of
-        # returning a hard 429. This preserves semantic ordering while avoiding UI fallback.
-        effective_limit_topics = min(effective_limit_topics, max(1, SEARCH_BUSY_FALLBACK_LIMIT_TOPICS))
-        effective_limit_logs = min(effective_limit_logs, max(10, SEARCH_BUSY_FALLBACK_LIMIT_LOGS))
-        allow_deep_content_scan = False
-    try:
-        with get_session() as session:
-            resolved_source_space_id = _resolve_source_space_id(
-                session,
-                explicit_space_id=spaceId,
-                session_key=sessionKey,
-            )
-            allowed_space_ids = _resolve_allowed_space_ids(
-                session,
-                source_space_id=resolved_source_space_id,
-                allowed_space_ids_raw=allowedSpaceIds,
-            )
-            revision = _graph_revision_token(session)
-            cache_key = _search_result_cache_key(
-                query=query,
-                semantic_query=semanticQuery,
-                revision=revision,
-                topic_id=topicId,
-                session_key=sessionKey,
-                include_pending=includePending,
-                limit_topics=effective_limit_topics,
-                limit_logs=effective_limit_logs,
-                allow_deep_content_scan=allow_deep_content_scan,
-                allowed_space_ids=allowed_space_ids,
-            )
-            cached_result = _search_result_cache_get(cache_key)
-            if cached_result is not None:
-                duration_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
-                cached_meta = dict(cached_result.get("searchMeta") or {})
-                cached_meta.update(
-                    {
-                        "degraded": bool(degraded_busy_fallback),
-                        "gateAcquired": bool(acquired),
-                        "gateWaitMs": float(gate_wait_ms),
-                        "durationMs": float(duration_ms),
-                        "allowDeepContentScan": bool(allow_deep_content_scan),
-                        "effectiveLimits": {
-                            "topics": int(effective_limit_topics),
-                            "logs": int(effective_limit_logs),
-                        },
-                        "cacheHit": True,
-                    }
-                )
-                cached_result["searchMeta"] = cached_meta
-                if degraded_busy_fallback:
-                    mode = str(cached_result.get("mode") or "")
-                    cached_result["mode"] = f"{mode}+busy-fallback" if mode else "busy-fallback"
-                    cached_result["degraded"] = True
-                return cached_result
-            result = _search_impl(
-                session,
-                query,
-                topic_id=topicId,
-                allowed_space_ids=allowed_space_ids,
-                session_key=sessionKey,
-                include_pending=includePending,
-                limit_topics=effective_limit_topics,
-                limit_logs=effective_limit_logs,
-                allow_deep_content_scan=allow_deep_content_scan,
-                semantic_query=semanticQuery,
-            )
-            duration_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
-            meta = dict(result.get("searchMeta") or {})
-            meta.update(
-                {
-                    "degraded": bool(degraded_busy_fallback),
-                    "gateAcquired": bool(acquired),
-                    "gateWaitMs": float(gate_wait_ms),
-                    "durationMs": float(duration_ms),
-                    "allowDeepContentScan": bool(allow_deep_content_scan),
-                    "effectiveLimits": {
-                        "topics": int(effective_limit_topics),
-                        "logs": int(effective_limit_logs),
-                    },
-                    "cacheHit": False,
-                }
-            )
-            enriched = dict(result)
-            enriched["searchMeta"] = meta
-            if degraded_busy_fallback:
-                mode = str(enriched.get("mode") or "")
-                enriched["mode"] = f"{mode}+busy-fallback" if mode else "busy-fallback"
-                enriched["degraded"] = True
-                return enriched
-            _search_result_cache_set(cache_key, enriched)
-            return enriched
-    finally:
-        if acquired:
-            _SEARCH_QUERY_GATE.release()
+    return build_search_response(
+        sys.modules[__name__],
+        q=q,
+        semantic_query=semanticQuery,
+        topic_id=topicId,
+        session_key=sessionKey,
+        space_id=spaceId,
+        allowed_space_ids_raw=allowedSpaceIds,
+        include_pending=includePending,
+        limit_topics=limitTopics,
+        limit_logs=limitLogs,
+    )
 
 
 @app.post("/api/reindex", dependencies=[Depends(require_token)], tags=["classifier"])
@@ -16785,147 +16163,8 @@ def request_reindex(payload: ReindexRequest = Body(...)):
 
 
 def _build_metrics_payload(session: Any) -> dict[str, Any]:
-    total = int(session.exec(select(func.count()).select_from(LogEntry)).one() or 0)
-    pending_count = int(
-        session.exec(
-            select(func.count()).select_from(LogEntry).where(LogEntry.classificationStatus == "pending")
-        ).one()
-        or 0
-    )
-    failed_count = int(
-        session.exec(
-            select(func.count()).select_from(LogEntry).where(LogEntry.classificationStatus == "failed")
-        ).one()
-        or 0
-    )
-    classified_count = max(0, total - pending_count - failed_count)
-    newest = session.exec(select(func.max(LogEntry.createdAt))).one()
-    oldest_pending = session.exec(
-        select(func.min(LogEntry.createdAt)).where(LogEntry.classificationStatus == "pending")
-    ).one()
+    return build_metrics_payload(session, main_module=sys.modules[__name__])
 
-    topics_total = int(session.exec(select(func.count()).select_from(Topic)).one() or 0)
-
-    cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=24)
-    cutoff_iso = cutoff_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    topics_created_24h = int(session.exec(select(func.count()).select_from(Topic).where(Topic.createdAt >= cutoff_iso)).one() or 0)
-
-    gate = {
-        "topics": {"allowedTotal": 0, "blockedTotal": 0, "allowed24h": 0, "blocked24h": 0},
-    }
-    audit_path = _creation_audit_path()
-
-    def parse_iso(value: str | None) -> datetime | None:
-        if not value:
-            return None
-        raw = str(value).strip()
-        if not raw:
-            return None
-        try:
-            if raw.endswith("Z"):
-                raw = raw[:-1] + "+00:00"
-            ts = datetime.fromisoformat(raw)
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            return ts.astimezone(timezone.utc)
-        except Exception:
-            return None
-
-    cutoff_ts = cutoff_dt.timestamp()
-    try:
-        if audit_path and os.path.exists(audit_path):
-            with open(audit_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        item = json.loads(line)
-                    except Exception:
-                        continue
-                    kind = str(item.get("kind") or "").lower()
-                    decision = str(item.get("decision") or "").lower()
-                    if kind != "topic":
-                        continue
-                    bucket = gate["topics"]
-                    is_allowed = decision == "allow"
-                    if is_allowed:
-                        bucket["allowedTotal"] += 1
-                    else:
-                        bucket["blockedTotal"] += 1
-                    ts = parse_iso(item.get("ts"))
-                    if ts and ts.timestamp() >= cutoff_ts:
-                        if is_allowed:
-                            bucket["allowed24h"] += 1
-                        else:
-                            bucket["blocked24h"] += 1
-    except Exception:
-        pass
-
-    history_sync = {
-        "enabled": _openclaw_gateway_history_sync_enabled(),
-        "sessionsListEnabled": _openclaw_gateway_history_sync_sessions_list_enabled(),
-        "status": "idle",
-        "lastRunAt": None,
-        "lastSuccessAt": None,
-        "lastErrorAt": None,
-        "lastError": None,
-        "consecutiveFailures": 0,
-        "lastIngestedCount": 0,
-        "lastSessionCount": 0,
-        "lastCursorUpdateCount": 0,
-        "lastDeferredCount": 0,
-        "cycleBudgetSeconds": _openclaw_gateway_history_sync_cycle_budget_seconds(),
-        "cursorSeedLimit": _openclaw_gateway_history_sync_cursor_seed_limit(),
-        "logSeedLimit": _openclaw_gateway_history_sync_log_seed_limit(),
-        "logSeedLookbackSeconds": _openclaw_gateway_history_sync_log_seed_lookback_seconds(),
-        "unresolvedSeedLimit": _openclaw_gateway_history_sync_unresolved_seed_limit(),
-        "unresolvedLookbackSeconds": _openclaw_gateway_history_sync_unresolved_lookback_seconds(),
-        "rpcTimeoutSeconds": _openclaw_gateway_history_sync_rpc_timeout_seconds(),
-        "maxBackoffSeconds": _openclaw_gateway_history_sync_max_backoff_seconds(),
-        "auth": {
-            "tokenConfigured": bool(_openclaw_gateway_history_sync_token()),
-            "explicitDeviceAuthMode": _openclaw_gateway_history_sync_use_device_auth(),
-            "retryWithoutDeviceAuth": _openclaw_gateway_history_sync_retry_without_device_auth(),
-            "retryWithWriteScope": _openclaw_gateway_history_sync_retry_with_write_scope(),
-        },
-    }
-    try:
-        sync_row = session.get(OpenClawGatewayHistorySyncState, _OPENCLAW_HISTORY_SYNC_STATE_ID)
-        if sync_row is not None:
-            history_sync["status"] = str(sync_row.status or "idle")
-            history_sync["lastRunAt"] = sync_row.lastRunAt
-            history_sync["lastSuccessAt"] = sync_row.lastSuccessAt
-            history_sync["lastErrorAt"] = sync_row.lastErrorAt
-            history_sync["lastError"] = sync_row.lastError
-            history_sync["consecutiveFailures"] = int(sync_row.consecutiveFailures or 0)
-            history_sync["lastIngestedCount"] = int(sync_row.lastIngestedCount or 0)
-            history_sync["lastSessionCount"] = int(sync_row.lastSessionCount or 0)
-            history_sync["lastCursorUpdateCount"] = int(sync_row.lastCursorUpdateCount or 0)
-            history_sync["lastDeferredCount"] = int(getattr(sync_row, "lastDeferredCount", 0) or 0)
-    except Exception:
-        pass
-
-    return {
-        "logs": {
-            "total": total,
-            "pending": pending_count,
-            "classified": classified_count,
-            "failed": failed_count,
-            "newestCreatedAt": newest,
-            "oldestPendingAt": oldest_pending,
-        },
-        "creation": {
-            "topics": {"total": topics_total, "created24h": topics_created_24h},
-            "gate": gate,
-        },
-        "openclaw": {
-            "historySync": history_sync,
-        },
-    }
-
-
-@app.get("/api/metrics", tags=["metrics"])
 def metrics():
     """Operational metrics for ingestion + classifier lag."""
     with get_session() as session:
@@ -16937,3 +16176,9 @@ def metrics():
             build_fn=lambda: _build_metrics_payload(session),
         )
         return payload
+
+
+register_system_routes(app, sys.modules[__name__])
+register_topic_routes(app, sys.modules[__name__])
+register_log_routes(app, sys.modules[__name__])
+register_openclaw_routes(app, sys.modules[__name__])
