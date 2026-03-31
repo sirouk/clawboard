@@ -3,8 +3,7 @@
 import { usePathname } from "next/navigation";
 import { startTransition, useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/cn";
-import { getApiToken } from "@/lib/api";
-import { useOpenClawWorkspaces } from "@/components/providers";
+import { useAppConfig, useOpenClawWorkspaces } from "@/components/providers";
 import { setLocalStorageItem } from "@/lib/local-storage";
 import { orderOpenClawWorkspaces, workspaceLabel } from "@/lib/openclaw-workspaces";
 
@@ -42,11 +41,11 @@ export function WorkspacesLive({
   active?: boolean;
 }) {
   const pathname = usePathname();
-  const { error, configured, workspaces } = useOpenClawWorkspaces();
-  const [ideSessionStatus, setIdeSessionStatus] = useState<"idle" | "authorizing" | "ready" | "error">("idle");
-  const [ideSessionError, setIdeSessionError] = useState<string | null>(null);
+  const { token } = useAppConfig();
+  const { error, configured, workspaces, loading: workspaceLoading } = useOpenClawWorkspaces();
   const [selectedWorkspaceKey, setSelectedWorkspaceKey] = useState("");
   const [mountedWorkspaceKeys, setMountedWorkspaceKeys] = useState<string[]>([]);
+  const [loadedIframeKeys, setLoadedIframeKeys] = useState<string[]>([]);
 
   const ordered = useMemo(() => {
     return orderOpenClawWorkspaces(workspaces);
@@ -107,7 +106,7 @@ export function WorkspacesLive({
     Boolean(selectedWorkspace?.ideUrl) &&
     (active || selectedWorkspaceMounted) &&
     !mountedWorkspaceKeys.includes(selectedAgentNormalized) &&
-    Boolean(getApiToken());
+    Boolean(token);
 
   useEffect(() => {
     if (!shouldMount) return;
@@ -116,26 +115,9 @@ export function WorkspacesLive({
     );
   }, [shouldMount, selectedAgentNormalized]);
 
-  // Derive session status from state (no setState in effect needed).
-  const derivedSessionStatus = !configured || !selectedWorkspace?.ideUrl
-    ? "idle"
-    : !active && !selectedWorkspaceMounted
-      ? "idle"
-      : !getApiToken()
-        ? "error"
-        : mountedWorkspaceKeys.includes(selectedAgentNormalized)
-          ? "ready"
-          : "idle";
-  const derivedSessionError = derivedSessionStatus === "error"
-    ? "Set your API token in Settings to access the Code Workspace."
-    : null;
-
-  if (ideSessionStatus !== derivedSessionStatus) setIdeSessionStatus(derivedSessionStatus);
-  if (ideSessionError !== derivedSessionError) setIdeSessionError(derivedSessionError);
-
   // Build auto-login iframe URLs using the same-origin page route.
+  // Depends on the reactive context token so URLs update if the token changes.
   const iframeUrls = useMemo(() => {
-    const token = getApiToken();
     const urls: Record<string, string> = {};
     for (const workspace of mountedWorkspaces) {
       const key = normalizeAgentId(workspace.agentId);
@@ -144,11 +126,24 @@ export function WorkspacesLive({
     }
     return urls;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mountedWorkspaces.map((w) => normalizeAgentId(w.agentId)).join(",")]);
+  }, [token, mountedWorkspaces.map((w) => normalizeAgentId(w.agentId)).join(",")]);
+
+  const hasToken = Boolean(token.trim());
+  const selectedNormalizedKey = normalizeAgentId(selectedWorkspace?.agentId);
+  const selectedIframeLoaded = loadedIframeKeys.includes(selectedNormalizedKey);
+
+  // Determine whether to show "Opening workspace…" overlay:
+  // visible while the workspace is initializing (not yet mounted) or the iframe hasn't loaded.
+  const showLoadingOverlay =
+    configured &&
+    Boolean(selectedWorkspace?.ideUrl) &&
+    hasToken &&
+    (!selectedWorkspaceMounted || !selectedIframeLoaded);
 
   return (
     <div className="space-y-4">
-      {!configured ? (
+      {/* Only show "not configured" once we know (not during initial load) */}
+      {!workspaceLoading && !configured ? (
         <div className="rounded-[var(--radius-md)] border border-[rgba(255,90,45,0.24)] bg-[rgba(43,18,12,0.42)] px-3 py-2 text-sm text-[rgb(var(--claw-warning))]">
           Workspace IDE is not configured yet.
         </div>
@@ -158,15 +153,31 @@ export function WorkspacesLive({
           {error}
         </div>
       ) : null}
-      {ideSessionError ? (
+      {!hasToken ? (
         <div className="rounded-[var(--radius-md)] border border-[rgba(255,90,45,0.24)] bg-[rgba(43,18,12,0.42)] px-3 py-2 text-sm text-[rgb(var(--claw-warning))]">
-          {ideSessionError}
+          Set your API token in Settings to access the Code Workspace.
+        </div>
+      ) : null}
+
+      {/* Loading skeleton while workspace data is being fetched */}
+      {workspaceLoading && !configured && workspaces.length === 0 ? (
+        <div className="relative h-[76vh] min-h-[32rem] overflow-hidden rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] bg-black">
+          <div className="absolute inset-0 z-20 flex items-center justify-center text-sm text-[rgb(var(--claw-muted))]">
+            Loading workspace…
+          </div>
+        </div>
+      ) : null}
+
+      {/* Empty state: configured but no workspaces */}
+      {!workspaceLoading && configured && workspaces.length === 0 ? (
+        <div className="rounded-[var(--radius-md)] border border-[rgba(77,171,158,0.18)] bg-[rgba(5,8,12,0.6)] px-4 py-6 text-center text-sm text-[rgb(var(--claw-muted))]">
+          No workspaces are available yet.
         </div>
       ) : null}
 
       {selectedWorkspace?.ideUrl ? (
         <div className="relative h-[76vh] min-h-[32rem] overflow-hidden rounded-[var(--radius-lg)] border border-[rgb(var(--claw-border))] bg-black">
-          {ideSessionStatus === "authorizing" && !selectedWorkspaceMounted ? (
+          {showLoadingOverlay ? (
             <div className="absolute inset-0 z-20 flex items-center justify-center bg-[rgba(5,8,12,0.82)] text-sm text-[rgb(var(--claw-muted))]">
               Opening workspace…
             </div>
@@ -183,6 +194,11 @@ export function WorkspacesLive({
                 title={`${workspaceLabel(workspace.agentId, workspace.agentName)} workspace`}
                 src={src}
                 allow="clipboard-read; clipboard-write; fullscreen"
+                onLoad={() => {
+                  setLoadedIframeKeys((current) =>
+                    current.includes(normalizedAgentId) ? current : [...current, normalizedAgentId]
+                  );
+                }}
                 className={cn(
                   "absolute inset-0 h-full w-full border-0 bg-black transition-opacity",
                   isActive ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
