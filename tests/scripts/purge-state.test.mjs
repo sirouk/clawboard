@@ -58,16 +58,15 @@ test("purge-state.sh: brings down clawboard before stopping gateway; ends with d
 
   // Seed fake state to be archived.
   const openclawDir = path.join(homeDir, ".openclaw");
-  await mkdir(path.join(openclawDir, "workspace-main"), { recursive: true });
+  await mkdir(path.join(openclawDir, "workspace"), { recursive: true });
   await mkdir(path.join(openclawDir, "agents", "main", "sessions"), { recursive: true });
   await writeFile(path.join(openclawDir, "agents", "main", "sessions", "sessions.json"), "{}\n");
   await mkdir(path.join(openclawDir, "memory"), { recursive: true });
   await writeFile(path.join(openclawDir, "memory", "m.sqlite"), "fake\n");
   await writeFile(path.join(openclawDir, "clawboard-queue.sqlite"), "queue\n");
 
-  const clawdRepo = path.join(homeDir, "clawd");
-  await mkdir(path.join(clawdRepo, "_purged"), { recursive: true });
-  await writeFile(path.join(clawdRepo, "_purged", "x.txt"), "x\n");
+  await mkdir(path.join(openclawDir, "workspace", "_purged"), { recursive: true });
+  await writeFile(path.join(openclawDir, "workspace", "_purged", "x.txt"), "x\n");
 
   await mkdir(path.join(repoRoot, "data"), { recursive: true });
   await writeFile(path.join(repoRoot, "data", "db.sqlite"), "db\n");
@@ -96,7 +95,7 @@ test("purge-state.sh: brings down clawboard before stopping gateway; ends with d
   const archiveDir = path.join(archiveRoot, archives[0]);
 
   // Ensure state was moved into archive (not deleted).
-  assert.equal(await stat(path.join(archiveDir, "workspace-main")).then(() => true).catch(() => false), true);
+  assert.equal(await stat(path.join(archiveDir, "workspace")).then(() => true).catch(() => false), true);
   assert.equal(
     await stat(path.join(archiveDir, "openclaw-agent-sessions", "main", "sessions")).then(() => true).catch(() => false),
     true
@@ -104,7 +103,7 @@ test("purge-state.sh: brings down clawboard before stopping gateway; ends with d
   assert.equal(await stat(path.join(archiveDir, "openclaw-memory", "m.sqlite")).then(() => true).catch(() => false), true);
   assert.equal(await stat(path.join(archiveDir, "clawboard-queue.sqlite")).then(() => true).catch(() => false), true);
   assert.equal(await stat(path.join(archiveDir, "data")).then(() => true).catch(() => false), true);
-  assert.equal(await stat(path.join(archiveDir, "_purged")).then(() => true).catch(() => false), true);
+  assert.equal(await stat(path.join(archiveDir, "workspace", "_purged")).then(() => true).catch(() => false), true);
 
   const calls = (await readFile(stubLog, "utf8"))
     .split("\n")
@@ -144,7 +143,7 @@ test("purge-state.sh: hot reload mode uses dev profile and web-dev service", asy
   await writeFile(path.join(repoRoot, ".env"), "CLAWBOARD_WEB_HOT_RELOAD=true\n");
 
   const openclawDir = path.join(homeDir, ".openclaw");
-  await mkdir(path.join(openclawDir, "workspace-main"), { recursive: true });
+  await mkdir(path.join(openclawDir, "workspace"), { recursive: true });
   await mkdir(path.join(repoRoot, "data"), { recursive: true });
 
   const stubLog = path.join(tmp, "stub.log");
@@ -179,4 +178,3 @@ test("purge-state.sh: hot reload mode uses dev profile and web-dev service", asy
     `expected prod web to be stopped in hot reload mode.\nCalls:\n${calls.join("\n")}`
   );
 });
-

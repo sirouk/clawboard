@@ -1409,7 +1409,7 @@ const LogRow = memo(function LogRow({
 	                  event.stopPropagation();
 	                  setExpanded(true);
 	                }}
-	                className={`rounded-[20px] border px-4 py-3 text-sm leading-relaxed ${isPending ? "opacity-85 " : ""}${
+	                className={`rounded-[20px] border px-4 py-3 text-[0.9375rem] leading-[1.65] ${isPending ? "opacity-85 " : ""}${
 	                  isUser
 	                    ? "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
 	                    : "border-[rgba(255,255,255,0.12)] bg-[rgba(20,24,31,0.8)] text-[rgb(var(--claw-text))]"

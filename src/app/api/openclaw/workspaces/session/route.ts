@@ -8,20 +8,8 @@ function normalizeBase(raw: string) {
   return String(raw || "").trim().replace(/\/+$/, "");
 }
 
-function workspaceIdeAgentEnvSuffix(agentId: string | null | undefined) {
-  const value = String(agentId || "")
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  return value || null;
-}
-
-function resolveIdeBase(agentId: string | null | undefined) {
-  const suffix = workspaceIdeAgentEnvSuffix(agentId);
+function resolveIdeBase(_agentId: string | null | undefined) {
   const candidates = [
-    suffix ? process.env[`CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_${suffix}`] : null,
-    suffix ? process.env[`CLAWBOARD_WORKSPACE_IDE_BASE_URL_${suffix}`] : null,
     process.env.CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL,
     process.env.CLAWBOARD_WORKSPACE_IDE_BASE_URL,
     "http://workspace-ide:8080",

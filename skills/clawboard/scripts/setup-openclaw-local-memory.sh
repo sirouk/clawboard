@@ -253,7 +253,47 @@ PY
 
 cfg_get_json() {
   local key="$1"
-  openclaw config get "$key" --json 2>/dev/null || true
+  local value=""
+  value="$(openclaw config get "$key" --json 2>/dev/null || true)"
+  if [[ -n "${value//[[:space:]]/}" ]]; then
+    printf "%s\n" "$value"
+    return 0
+  fi
+
+  python3 - "$OPENCLAW_CONFIG_PATH" "$key" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+cfg_path, key = sys.argv[1], sys.argv[2]
+parts = [p for p in key.split(".") if p]
+if not parts:
+    raise SystemExit(0)
+
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    raise SystemExit(0)
+
+cur = data
+for part in parts:
+    if isinstance(cur, dict):
+        if part not in cur:
+            raise SystemExit(0)
+        cur = cur[part]
+        continue
+    if isinstance(cur, list):
+        if not part.isdigit():
+            raise SystemExit(0)
+        idx = int(part)
+        if idx < 0 or idx >= len(cur):
+            raise SystemExit(0)
+        cur = cur[idx]
+        continue
+    raise SystemExit(0)
+
+print(json.dumps(cur))
+PY
 }
 
 cfg_output_has_unsupported_key() {
@@ -639,6 +679,15 @@ def profile_workspace(base_dir, profile_name):
         return os.path.join(base_dir, "workspace")
     return os.path.join(base_dir, f"workspace-{safe}")
 
+def subagent_workspace(base_workspace, agent_id):
+    main_workspace = normalize_path(base_workspace)
+    safe = normalize_agent_id(agent_id)
+    if not main_workspace or not safe or safe == "main":
+        return main_workspace
+    if safe == "worker":
+        return os.path.join(main_workspace, "worker-agent")
+    return os.path.join(main_workspace, "subagents", safe)
+
 cfg = {}
 try:
     with open(cfg_path, "r", encoding="utf-8") as f:
@@ -683,14 +732,15 @@ if "main" not in seen_ids:
 workspaces = []
 seen_ws = set()
 for entry in agents_list:
+    agent_id = normalize_agent_id(entry.get("id"))
     workspace = entry.get("workspace")
     if not isinstance(workspace, str) or not workspace.strip():
-        workspace = defaults_workspace
+        workspace = defaults_workspace if agent_id == "main" else subagent_workspace(defaults_workspace, agent_id)
     ws = normalize_path(workspace)
     if not ws:
         continue
     if ws == openclaw_home:
-        ws = fallback_workspace
+        ws = fallback_workspace if agent_id == "main" else subagent_workspace(defaults_workspace, agent_id)
     if ws in seen_ws:
         continue
     seen_ws.add(ws)

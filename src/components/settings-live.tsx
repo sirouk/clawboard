@@ -2,14 +2,24 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, CardHeader, Input, Select, Switch } from "@/components/ui";
+import {
+  DEFAULT_PRESET_CONFIG,
+  normalizePresetConfig,
+  parsePresetConfig,
+  savePresetConfig,
+  SnoozePresetEditor,
+  SNOOZE_PRESET_CONFIG_KEY,
+} from "@/components/snooze-modal";
 import { useAppConfig } from "@/components/providers";
 import { useDataStore } from "@/components/data-provider";
 import { apiFetch, getApiBase, setApiBase } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { randomId } from "@/lib/id";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { getSpaceDefaultVisibility } from "@/lib/space-visibility";
 import { setPwaBadge, showPwaNotification, usePwaNotifications, usePwaBadging } from "@/lib/pwa-utils";
 import type { IntegrationLevel, Space, Topic } from "@/lib/types";
+import { normalizeHexColor, pickVibrantDistinctColor, TOPIC_FALLBACK_COLORS } from "@/components/unified-view";
 
 const TEST_PWA_DELAY_MS = 3000;
 const FOCUS_COMPOSER_ON_TOPIC_EXPAND_KEY = "clawboard.unified.focusComposerOnTopicExpand";
@@ -179,6 +189,10 @@ export function SettingsLive() {
   const testPwaTimerRef = useRef<number | null>(null);
   const [resetArmed, setResetArmed] = useState(false);
   const [resetRunning, setResetRunning] = useState(false);
+  const [shufflingSpaceColors, setShufflingSpaceColors] = useState(false);
+
+  const snoozePresetRaw = useLocalStorageItem(SNOOZE_PRESET_CONFIG_KEY);
+  const snoozePreset = useMemo(() => parsePresetConfig(snoozePresetRaw), [snoozePresetRaw]);
 
   const showFullMessagesRaw = useLocalStorageItem("clawboard.display.showFullMessages");
   const showFullMessages = showFullMessagesRaw !== "false";
@@ -697,6 +711,109 @@ export function SettingsLive() {
                 }
               />
             </div>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div>
+            <h2 className="text-lg font-semibold">Space Colors</h2>
+            <p className="mt-1 text-sm text-[rgb(var(--claw-muted))]">
+              Assign a distinct vibrant color to each space. Colors appear in the sidebar and on the Space chip.
+            </p>
+          </div>
+        </CardHeader>
+        <div className="space-y-4">
+          <div className="flex flex-wrap gap-3">
+            {spaces.map((space) => {
+              const color = normalizeHexColor(space.color) ?? "#4DA39E";
+              return (
+                <div key={space.id} className="flex items-center gap-2 rounded-full border border-[rgb(var(--claw-border))] px-3 py-1.5">
+                  <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
+                  <span className="text-xs font-semibold text-[rgb(var(--claw-text))]">{space.name}</span>
+                  <span className="font-mono text-[10px] text-[rgb(var(--claw-muted))]">{color}</span>
+                </div>
+              );
+            })}
+            {spaces.length === 0 && (
+              <p className="text-xs text-[rgb(var(--claw-muted))]">No spaces found.</p>
+            )}
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={shufflingSpaceColors || readOnly || spaces.length === 0}
+            onClick={async () => {
+              setShufflingSpaceColors(true);
+              setError(null);
+              setMessage(null);
+              try {
+                const runSeed = randomId();
+                const assigned: string[] = [];
+                const usageCount = new Map<string, number>();
+                const updates: Array<{ space: Space; color: string }> = [];
+                for (const space of spaces) {
+                  const color = pickVibrantDistinctColor({
+                    palette: TOPIC_FALLBACK_COLORS,
+                    seed: `${runSeed}:space:${space.id}:${space.name}`,
+                    primaryAvoid: assigned,
+                    secondaryAvoid: assigned,
+                    usageCount,
+                  });
+                  const normalized = normalizeHexColor(color) ?? color;
+                  assigned.push(normalized);
+                  usageCount.set(normalized, (usageCount.get(normalized) ?? 0) + 1);
+                  updates.push({ space, color: normalized });
+                }
+                for (const { space, color } of updates) {
+                  await apiFetch(
+                    `/api/spaces/${encodeURIComponent(space.id)}`,
+                    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ color }) },
+                    localToken.trim()
+                  );
+                }
+                setSpaces((prev) =>
+                  prev.map((s) => {
+                    const upd = updates.find((u) => u.space.id === s.id);
+                    return upd ? { ...s, color: upd.color } : s;
+                  })
+                );
+                setMessage("Space colors updated.");
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Failed to update space colors.");
+              } finally {
+                setShufflingSpaceColors(false);
+              }
+            }}
+          >
+            {shufflingSpaceColors ? "Shuffling…" : "Shuffle Space Colors"}
+          </Button>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div>
+            <h2 className="text-lg font-semibold">Snooze Shortcuts</h2>
+            <p className="mt-1 text-sm text-[rgb(var(--claw-muted))]">
+              Set the default return times for the snooze quick picks. Saved on this device.
+            </p>
+          </div>
+        </CardHeader>
+        <div className="space-y-4">
+          <SnoozePresetEditor
+            value={snoozePreset}
+            onChange={(patch) => savePresetConfig(normalizePresetConfig({ ...snoozePreset, ...patch }))}
+          />
+          <div className="flex items-center gap-3 pt-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => savePresetConfig(DEFAULT_PRESET_CONFIG)}
+            >
+              Reset to defaults
+            </Button>
           </div>
         </div>
       </Card>

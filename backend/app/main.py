@@ -461,6 +461,17 @@ def normalize_topic_status(value: str | None) -> str | None:
     return raw
 
 
+def _should_revive_topic_on_activity(topic: Topic, *, activity_type: str | None = None) -> bool:
+    """Return whether new activity should promote a hidden topic back to active."""
+
+    normalized_status = str(getattr(topic, "status", "active") or "active").strip().lower()
+    if normalized_status == "archived":
+        return True
+    if str(activity_type or "").strip().lower() != "conversation":
+        return False
+    return bool(getattr(topic, "snoozedUntil", None)) or normalized_status in {"snoozed", "paused"}
+
+
 def create_id(prefix: str) -> str:
     return f"{prefix}-{uuid4()}"
 
@@ -3924,17 +3935,14 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
     except Exception:
         pass
 
-    # Any new activity should revive snoozed topics and promote them to the front.
+    # Any new activity should revive archived topics; conversations also wake snoozed topics.
     touched_topic: Topic | None = None
     try:
         if topic_id:
             now = entry.updatedAt
             row = topic_row or session.get(Topic, topic_id)
             if row:
-                if str(payload.type or "").strip().lower() == "conversation" and (
-                    row.snoozedUntil
-                    or str(row.status or "active").strip().lower() in {"snoozed", "paused", "archived"}
-                ):
+                if _should_revive_topic_on_activity(row, activity_type=payload.type):
                     row.snoozedUntil = None
                     row.status = "active"
                 _touch_topic_activity(session, row, stamp=now)
@@ -11437,6 +11445,14 @@ def _openclaw_profile_workspace(base_dir: str, profile_name: str) -> str:
     return os.path.join(base_dir, f"workspace-{safe}")
 
 
+def _openclaw_subagent_workspace(main_workspace: str, agent_id: str) -> str:
+    normalized_main = _normalize_fs_path(main_workspace)
+    safe = re.sub(r"[^a-z0-9_-]+", "-", str(agent_id or "").strip().lower()).strip("-")
+    if not normalized_main or not safe or safe == "main":
+        return normalized_main
+    return os.path.join(normalized_main, "subagents", safe)
+
+
 def _friendly_agent_name(agent_id: str, raw_name: Any = None) -> str:
     provided = str(raw_name or "").strip()
     normalized_agent_id = str(agent_id or "").strip().lower()
@@ -11493,9 +11509,9 @@ def _resolve_openclaw_agent_workspaces() -> list[dict[str, Any]]:
             main_name = _friendly_agent_name(agent_id, entry.get("name"))
         workspace_dir = _normalize_fs_path(entry.get("workspace"))
         if not workspace_dir:
-            workspace_dir = defaults_workspace if agent_id == "main" else os.path.join(openclaw_home, f"workspace-{agent_id}")
+            workspace_dir = defaults_workspace if agent_id == "main" else _openclaw_subagent_workspace(defaults_workspace, agent_id)
         if workspace_dir == openclaw_home:
-            workspace_dir = defaults_workspace if agent_id == "main" else os.path.join(openclaw_home, f"workspace-{agent_id}")
+            workspace_dir = defaults_workspace if agent_id == "main" else _openclaw_subagent_workspace(defaults_workspace, agent_id)
         rows[agent_id] = {
             "agentId": agent_id,
             "agentName": _friendly_agent_name(agent_id, entry.get("name")),
@@ -11793,27 +11809,11 @@ def _workspace_ide_provider() -> str | None:
 def _workspace_ide_base_url() -> str | None:
     return _normalize_http_base_url(os.getenv("CLAWBOARD_WORKSPACE_IDE_BASE_URL"))
 
-
-def _workspace_ide_agent_env_suffix(agent_id: str) -> str | None:
-    safe = re.sub(r"[^A-Z0-9]+", "_", str(agent_id or "").strip().upper()).strip("_")
-    return safe or None
-
-
 def _workspace_ide_base_url_for_agent(agent_id: str) -> str | None:
-    suffix = _workspace_ide_agent_env_suffix(agent_id)
-    if suffix:
-        override = _normalize_http_base_url(os.getenv(f"CLAWBOARD_WORKSPACE_IDE_BASE_URL_{suffix}"))
-        if override:
-            return override
     return _workspace_ide_base_url()
 
 
 def _workspace_ide_folder_for_agent(agent_id: str, workspace_dir: str) -> str:
-    suffix = _workspace_ide_agent_env_suffix(agent_id)
-    if suffix:
-        override = _normalize_fs_path(os.getenv(f"CLAWBOARD_WORKSPACE_IDE_FOLDER_{suffix}"))
-        if override:
-            return override
     return workspace_dir
 
 
@@ -13832,10 +13832,7 @@ def patch_log(log_id: str, payload: LogPatch = Body(...)):
             if entry.topicId:
                 topic = session.get(Topic, entry.topicId)
                 if topic:
-                    if str(getattr(entry, "type", "") or "").strip().lower() == "conversation" and (
-                        topic.snoozedUntil
-                        or str(topic.status or "active").strip().lower() in {"snoozed", "paused", "archived"}
-                    ):
+                    if _should_revive_topic_on_activity(topic, activity_type=getattr(entry, "type", None)):
                         topic.snoozedUntil = None
                         topic.status = "active"
                     _touch_topic_activity(session, topic, stamp=stamp)

@@ -238,7 +238,7 @@ function inferMimeTypeFromName(fileName: string) {
 
 const TASK_TIMELINE_LIMIT = 2;
 type MessageDensity = "comfortable" | "compact";
-const TOPIC_FALLBACK_COLORS = [
+export const TOPIC_FALLBACK_COLORS = [
   "#FF1744",
   "#FF3D00",
   "#FF6D00",
@@ -789,7 +789,7 @@ const SESSION_WORK_TTLS: SessionWorkTtls = {
   threadWorkInactiveOverrideTtlMs: OPENCLAW_THREAD_WORK_INACTIVE_OVERRIDE_TTL_MS,
 };
 
-function normalizeHexColor(value: string | undefined | null) {
+export function normalizeHexColor(value: string | undefined | null) {
   if (!value) return null;
   const trimmed = value.trim();
   if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) return trimmed.toUpperCase();
@@ -897,7 +897,7 @@ function colorVibrancy(color: string) {
   return satScore * 0.7 + lightScore * 0.3;
 }
 
-function pickVibrantDistinctColor({
+export function pickVibrantDistinctColor({
   palette,
   seed,
   primaryAvoid = [],
@@ -7224,7 +7224,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                       <div className="w-full max-w-[78%]">
                                         <div
                                           className={cn(
-                                            "rounded-[20px] border px-4 py-3 text-sm leading-relaxed",
+                                            "rounded-[20px] border px-4 py-3 text-[0.9375rem] leading-[1.65]",
                                             pending.status === "failed" ? "opacity-90" : "",
                                             "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
                                           )}
@@ -8359,7 +8359,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                                   <div className="w-full max-w-[78%]">
                                                     <div
                                                       className={cn(
-                                                        "rounded-[20px] border px-4 py-3 text-sm leading-relaxed",
+                                                        "rounded-[20px] border px-4 py-3 text-[0.9375rem] leading-[1.65]",
                                                         pending.status === "failed" ? "opacity-90" : "",
                                                         "border-[rgba(36,145,255,0.35)] bg-[rgba(36,145,255,0.16)] text-[rgb(var(--claw-text))]"
                                                       )}

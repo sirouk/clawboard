@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Button, Input, Select } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
@@ -15,7 +15,7 @@ type SnoozePreset = {
   until: Date;
 };
 
-type SnoozePresetConfig = {
+export type SnoozePresetConfig = {
   tonightTime: string;
   tomorrowTime: string;
   weekendDay: number;
@@ -29,9 +29,9 @@ type TimeParts = {
   minutes: number;
 };
 
-const SNOOZE_PRESET_CONFIG_KEY = "clawboard.snoozePresetConfig";
+export const SNOOZE_PRESET_CONFIG_KEY = "clawboard.snoozePresetConfig";
 
-const DEFAULT_PRESET_CONFIG: SnoozePresetConfig = {
+export const DEFAULT_PRESET_CONFIG: SnoozePresetConfig = {
   tonightTime: "20:00",
   tomorrowTime: "09:00",
   weekendDay: 6,
@@ -103,7 +103,7 @@ function normalizeWeekday(value: unknown, allowedDays: readonly number[], fallba
   return allowedDays.includes(numeric) ? numeric : fallback;
 }
 
-function normalizePresetConfig(value: unknown): SnoozePresetConfig {
+export function normalizePresetConfig(value: unknown): SnoozePresetConfig {
   const raw = value && typeof value === "object" ? (value as Partial<SnoozePresetConfig>) : {};
   return {
     tonightTime: normalizeTimeInput(raw.tonightTime, DEFAULT_PRESET_CONFIG.tonightTime),
@@ -123,7 +123,7 @@ function normalizePresetConfig(value: unknown): SnoozePresetConfig {
   };
 }
 
-function parsePresetConfig(raw: string | null) {
+export function parsePresetConfig(raw: string | null) {
   if (!raw) return DEFAULT_PRESET_CONFIG;
   try {
     return normalizePresetConfig(JSON.parse(raw));
@@ -225,8 +225,117 @@ function buildSnoozePresets(now: Date, config: SnoozePresetConfig): SnoozePreset
   ];
 }
 
-function savePresetConfig(next: SnoozePresetConfig) {
+export function savePresetConfig(next: SnoozePresetConfig) {
   setLocalStorageItem(SNOOZE_PRESET_CONFIG_KEY, JSON.stringify(normalizePresetConfig(next)));
+}
+
+export function SnoozePresetEditor({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: SnoozePresetConfig;
+  onChange: (patch: Partial<SnoozePresetConfig>) => void;
+  disabled?: boolean;
+}) {
+  const uid = useId();
+  return (
+    <div className="grid gap-3 md:grid-cols-2">
+      <div className="rounded-[18px] border border-[rgba(255,255,255,0.1)] bg-[rgba(255,255,255,0.03)] p-3">
+        <label htmlFor={`${uid}-tonight`} className="text-xs font-semibold uppercase tracking-[0.16em] text-[rgba(148,163,184,0.82)]">
+          Tonight
+        </label>
+        <p className="mt-1 text-xs text-[rgba(201,210,222,0.72)]">Best for &quot;not now, but still today.&quot;</p>
+        <Input
+          id={`${uid}-tonight`}
+          type="time"
+          step={300}
+          value={value.tonightTime}
+          onChange={(event) => onChange({ tonightTime: event.target.value })}
+          disabled={disabled}
+          className="mt-3 h-11"
+        />
+      </div>
+
+      <div className="rounded-[18px] border border-[rgba(255,255,255,0.1)] bg-[rgba(255,255,255,0.03)] p-3">
+        <label htmlFor={`${uid}-tomorrow`} className="text-xs font-semibold uppercase tracking-[0.16em] text-[rgba(148,163,184,0.82)]">
+          Tomorrow
+        </label>
+        <p className="mt-1 text-xs text-[rgba(201,210,222,0.72)]">Useful for next-morning follow-up.</p>
+        <Input
+          id={`${uid}-tomorrow`}
+          type="time"
+          step={300}
+          value={value.tomorrowTime}
+          onChange={(event) => onChange({ tomorrowTime: event.target.value })}
+          disabled={disabled}
+          className="mt-3 h-11"
+        />
+      </div>
+
+      <div className="rounded-[18px] border border-[rgba(255,255,255,0.1)] bg-[rgba(255,255,255,0.03)] p-3">
+        <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[rgba(148,163,184,0.82)]">
+          This weekend
+        </div>
+        <p className="mt-1 text-xs text-[rgba(201,210,222,0.72)]">Choose the day and time you usually review.</p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <Select
+            aria-label="Weekend snooze day"
+            value={String(value.weekendDay)}
+            onChange={(event) => onChange({ weekendDay: Number(event.target.value) })}
+            disabled={disabled}
+            className="h-11"
+          >
+            {WEEKEND_DAY_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.long}
+              </option>
+            ))}
+          </Select>
+          <Input
+            aria-label="Weekend snooze time"
+            type="time"
+            step={300}
+            value={value.weekendTime}
+            onChange={(event) => onChange({ weekendTime: event.target.value })}
+            disabled={disabled}
+            className="h-11"
+          />
+        </div>
+      </div>
+
+      <div className="rounded-[18px] border border-[rgba(255,255,255,0.1)] bg-[rgba(255,255,255,0.03)] p-3">
+        <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[rgba(148,163,184,0.82)]">
+          Next week
+        </div>
+        <p className="mt-1 text-xs text-[rgba(201,210,222,0.72)]">Aim for the next real workday, not just &quot;later.&quot;</p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <Select
+            aria-label="Next week snooze day"
+            value={String(value.nextWeekDay)}
+            onChange={(event) => onChange({ nextWeekDay: Number(event.target.value) })}
+            disabled={disabled}
+            className="h-11"
+          >
+            {NEXT_WEEK_DAY_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.long}
+              </option>
+            ))}
+          </Select>
+          <Input
+            aria-label="Next week snooze time"
+            type="time"
+            step={300}
+            value={value.nextWeekTime}
+            onChange={(event) => onChange({ nextWeekTime: event.target.value })}
+            disabled={disabled}
+            className="h-11"
+          />
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function SnoozeModal({
@@ -477,101 +586,11 @@ export function SnoozeModal({
                     </button>
                   </div>
 
-                  <div className="mt-4 grid gap-3 md:grid-cols-2">
-                    <div className="rounded-[18px] border border-[rgba(255,255,255,0.1)] bg-[rgba(255,255,255,0.03)] p-3">
-                      <label htmlFor="snooze-tonight-time" className="text-xs font-semibold uppercase tracking-[0.16em] text-[rgba(148,163,184,0.82)]">
-                        Tonight
-                      </label>
-                      <p className="mt-1 text-xs text-[rgba(201,210,222,0.72)]">Best for “not now, but still today.”</p>
-                      <Input
-                        id="snooze-tonight-time"
-                        type="time"
-                        step={300}
-                        value={presetConfig.tonightTime}
-                        onChange={(event) => updatePresetConfig({ tonightTime: event.target.value })}
-                        disabled={saving}
-                        className="mt-3 h-11"
-                      />
-                    </div>
-
-                    <div className="rounded-[18px] border border-[rgba(255,255,255,0.1)] bg-[rgba(255,255,255,0.03)] p-3">
-                      <label htmlFor="snooze-tomorrow-time" className="text-xs font-semibold uppercase tracking-[0.16em] text-[rgba(148,163,184,0.82)]">
-                        Tomorrow
-                      </label>
-                      <p className="mt-1 text-xs text-[rgba(201,210,222,0.72)]">Useful for next-morning follow-up.</p>
-                      <Input
-                        id="snooze-tomorrow-time"
-                        type="time"
-                        step={300}
-                        value={presetConfig.tomorrowTime}
-                        onChange={(event) => updatePresetConfig({ tomorrowTime: event.target.value })}
-                        disabled={saving}
-                        className="mt-3 h-11"
-                      />
-                    </div>
-
-                    <div className="rounded-[18px] border border-[rgba(255,255,255,0.1)] bg-[rgba(255,255,255,0.03)] p-3">
-                      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[rgba(148,163,184,0.82)]">
-                        This weekend
-                      </div>
-                      <p className="mt-1 text-xs text-[rgba(201,210,222,0.72)]">Choose the day and time you usually review.</p>
-                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                        <Select
-                          aria-label="Weekend snooze day"
-                          value={String(presetConfig.weekendDay)}
-                          onChange={(event) => updatePresetConfig({ weekendDay: Number(event.target.value) })}
-                          disabled={saving}
-                          className="h-11"
-                        >
-                          {WEEKEND_DAY_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.long}
-                            </option>
-                          ))}
-                        </Select>
-                        <Input
-                          aria-label="Weekend snooze time"
-                          type="time"
-                          step={300}
-                          value={presetConfig.weekendTime}
-                          onChange={(event) => updatePresetConfig({ weekendTime: event.target.value })}
-                          disabled={saving}
-                          className="h-11"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="rounded-[18px] border border-[rgba(255,255,255,0.1)] bg-[rgba(255,255,255,0.03)] p-3">
-                      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[rgba(148,163,184,0.82)]">
-                        Next week
-                      </div>
-                      <p className="mt-1 text-xs text-[rgba(201,210,222,0.72)]">Aim for the next real workday, not just “later.”</p>
-                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                        <Select
-                          aria-label="Next week snooze day"
-                          value={String(presetConfig.nextWeekDay)}
-                          onChange={(event) => updatePresetConfig({ nextWeekDay: Number(event.target.value) })}
-                          disabled={saving}
-                          className="h-11"
-                        >
-                          {NEXT_WEEK_DAY_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.long}
-                            </option>
-                          ))}
-                        </Select>
-                        <Input
-                          aria-label="Next week snooze time"
-                          type="time"
-                          step={300}
-                          value={presetConfig.nextWeekTime}
-                          onChange={(event) => updatePresetConfig({ nextWeekTime: event.target.value })}
-                          disabled={saving}
-                          className="h-11"
-                        />
-                      </div>
-                    </div>
-                  </div>
+                  <SnoozePresetEditor
+                    value={presetConfig}
+                    onChange={updatePresetConfig}
+                    disabled={saving}
+                  />
                 </div>
               ) : null}
             </section>

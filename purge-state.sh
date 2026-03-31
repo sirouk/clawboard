@@ -466,7 +466,7 @@ validate_environment() {
 purge() {
   say "== What would change =="
   say "OpenClaw (sessions/conversations):"
-  say "  - $OPENCLAW_DIR/workspace-* (workspace-main/coding/web/social)"
+  say "  - $OPENCLAW_DIR/workspace and $OPENCLAW_DIR/workspace/subagents/*"
   say "  - $OPENCLAW_DIR/agents/*/sessions (per-agent session stores + jsonl)"
   say "OpenClaw (memories):"
   say "  - $OPENCLAW_DIR/memory/*.sqlite*"
@@ -494,6 +494,7 @@ purge() {
   gateway_begin
 
   # OpenClaw workspaces (session/conversation state)
+  archive_or_delete "$OPENCLAW_DIR/workspace"
   archive_or_delete "$OPENCLAW_DIR/workspace-main"
   archive_or_delete "$OPENCLAW_DIR/workspace-coding"
   archive_or_delete "$OPENCLAW_DIR/workspace-web"
@@ -621,6 +622,7 @@ restore_from_archive() {
   }
 
   # Restore OpenClaw workspaces
+  restore_item "$RESTORE_DIR/workspace" "$OPENCLAW_DIR/workspace"
   restore_item "$RESTORE_DIR/workspace-main" "$OPENCLAW_DIR/workspace-main"
   restore_item "$RESTORE_DIR/workspace-coding" "$OPENCLAW_DIR/workspace-coding"
   restore_item "$RESTORE_DIR/workspace-web" "$OPENCLAW_DIR/workspace-web"

@@ -41,10 +41,10 @@ test("apply_directives_to_agents.sh reconciles scope, replaces blocks, and prune
   const ocHome = path.join(tmp, "openclaw");
   const workspaces = {
     main: path.join(ocHome, "workspace"),
-    coding: path.join(ocHome, "workspace-coding"),
-    web: path.join(ocHome, "workspace-web"),
-    docs: path.join(ocHome, "workspace-docs"),
-    social: path.join(ocHome, "workspace-social"),
+    coding: path.join(ocHome, "workspace", "subagents", "coding"),
+    web: path.join(ocHome, "workspace", "subagents", "web"),
+    docs: path.join(ocHome, "workspace", "subagents", "docs"),
+    social: path.join(ocHome, "workspace", "subagents", "social"),
   };
 
   await mkdir(scriptsDir, { recursive: true });

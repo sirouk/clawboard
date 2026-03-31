@@ -111,7 +111,6 @@ services:
     depends_on:
       - api
       - workspace-ide
-      - workspace-ide-coding
     ports:
       - "3010:3000"
     restart: unless-stopped
@@ -141,7 +140,6 @@ services:
     depends_on:
       - api
       - workspace-ide
-      - workspace-ide-coding
     ports:
       - "3010:3000"
     working_dir: /app
@@ -169,25 +167,6 @@ services:
       - ${OPENCLAW_HOME:-/tmp/.openclaw}:${OPENCLAW_HOME:-/tmp/.openclaw}
       - ./data/code-server/config:/home/coder/.config/code-server
       - ./data/code-server/local:/home/coder/.local/share/code-server
-    restart: unless-stopped
-    networks:
-      - edge
-
-  workspace-ide-coding:
-    image: codercom/code-server:latest
-    environment:
-      PASSWORD: ${CLAWBOARD_TOKEN:-}
-      DOCKER_USER: ${USER:-coder}
-    command: >
-      --bind-addr 0.0.0.0:8080
-      --auth password
-      --disable-telemetry
-    ports:
-      - "${CLAWBOARD_WORKSPACE_IDE_CODING_PORT:-13338}:8080"
-    volumes:
-      - ${OPENCLAW_HOME:-/tmp/.openclaw}/workspace-coding:/workspace
-      - ./data/code-server-coding/config:/home/coder/.config/code-server
-      - ./data/code-server-coding/local:/home/coder/.local/share/code-server
     restart: unless-stopped
     networks:
       - edge

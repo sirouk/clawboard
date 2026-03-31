@@ -133,6 +133,16 @@ def profile_workspace(base_dir, profile_name):
     return os.path.join(base_dir, f"workspace-{safe}")
 
 
+def subagent_workspace(base_workspace, agent_id):
+    main_workspace = normalize_path(base_workspace)
+    safe = normalize_agent_id(agent_id)
+    if not main_workspace or not safe or safe == "main":
+        return main_workspace
+    if safe == "worker":
+        return os.path.join(main_workspace, "worker-agent")
+    return os.path.join(main_workspace, "subagents", safe)
+
+
 cfg = {}
 try:
     with open(cfg_path, "r", encoding="utf-8") as f:
@@ -183,10 +193,14 @@ for entry in agents:
     if agent_id in seen:
         continue
     name = entry.get("name") if isinstance(entry.get("name"), str) and entry.get("name").strip() else agent_id
-    workspace = entry.get("workspace") if isinstance(entry.get("workspace"), str) and entry.get("workspace").strip() else defaults_workspace
+    workspace = (
+        entry.get("workspace")
+        if isinstance(entry.get("workspace"), str) and entry.get("workspace").strip()
+        else (defaults_workspace if agent_id == "main" else subagent_workspace(defaults_workspace, agent_id))
+    )
     workspace = normalize_path(workspace) or defaults_workspace
     if workspace == openclaw_home:
-        workspace = fallback_workspace
+        workspace = fallback_workspace if agent_id == "main" else subagent_workspace(defaults_workspace, agent_id)
     if agent_id == "main":
         workspace = main_workspace
     rows.append((agent_id, name, workspace))

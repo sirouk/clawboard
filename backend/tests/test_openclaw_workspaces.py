@@ -47,7 +47,7 @@ class OpenClawWorkspaceEndpointTests(unittest.TestCase):
                             "defaults": {"workspace": f"{openclaw_home}/workspace"},
                             "list": [
                                 {"id": "main", "name": "Main", "workspace": f"{openclaw_home}/workspace"},
-                                {"id": "coding", "name": "Coding", "workspace": f"{openclaw_home}/workspace-coding"},
+                                {"id": "coding", "name": "Coding", "workspace": f"{openclaw_home}/workspace/subagents/coding"},
                                 {"id": "docs", "name": "Docs"},
                             ],
                         }
@@ -61,8 +61,6 @@ class OpenClawWorkspaceEndpointTests(unittest.TestCase):
                     "OPENCLAW_GATEWAY_IDENTITY_DIR": openclaw_home,
                     "OPENCLAW_CONFIG_PATH": str(config_path),
                     "CLAWBOARD_WORKSPACE_IDE_BASE_URL": "http://127.0.0.1:13337",
-                    "CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING": "http://127.0.0.1:13338",
-                    "CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING": "/workspace",
                     "CLAWBOARD_WORKSPACE_IDE_PROVIDER": "code-server",
                 },
                 clear=False,
@@ -80,12 +78,12 @@ class OpenClawWorkspaceEndpointTests(unittest.TestCase):
                 self.assertEqual(by_id["main"]["agentName"], "main")
                 self.assertEqual(by_id["coding"]["agentName"], "Coding")
                 self.assertEqual(by_id["main"]["workspaceDir"], f"{openclaw_home}/workspace")
-                self.assertEqual(by_id["coding"]["workspaceDir"], f"{openclaw_home}/workspace-coding")
-                self.assertEqual(by_id["docs"]["workspaceDir"], f"{openclaw_home}/workspace-docs")
+                self.assertEqual(by_id["coding"]["workspaceDir"], f"{openclaw_home}/workspace/subagents/coding")
+                self.assertEqual(by_id["docs"]["workspaceDir"], f"{openclaw_home}/workspace/subagents/docs")
                 self.assertTrue(by_id["coding"]["preferred"])
                 self.assertEqual(
                     by_id["coding"]["ideUrl"],
-                    "http://127.0.0.1:13338/?folder=/workspace",
+                    f"http://127.0.0.1:13337/?folder={openclaw_home}/workspace/subagents/coding",
                 )
 
     def test_openclaw_workspaces_support_agent_filter(self):
@@ -98,7 +96,7 @@ class OpenClawWorkspaceEndpointTests(unittest.TestCase):
                             "defaults": {"workspace": f"{openclaw_home}/workspace"},
                             "list": [
                                 {"id": "main", "workspace": f"{openclaw_home}/workspace"},
-                                {"id": "coding", "workspace": f"{openclaw_home}/workspace-coding"},
+                                {"id": "coding", "workspace": f"{openclaw_home}/workspace/subagents/coding"},
                             ],
                         }
                     }

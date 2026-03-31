@@ -283,3 +283,106 @@ class UnsnoozeOnActivityTests(unittest.TestCase):
             task = session.get(Task, "task-1")
             self.assertIsNotNone(task)
             self.assertIsNone(task.snoozedUntil)
+
+    def test_action_revives_archived_topic_on_append(self):
+        ts = now_iso()
+
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-1",
+                    name="Topic One",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="archived",
+                    snoozedUntil=None,
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "action",
+                "topicId": "topic-1",
+                "content": "Tool call: shell.exec",
+                "summary": "Tool call: shell.exec",
+                "raw": "Tool call: shell.exec {\"cmd\":\"echo hi\"}",
+                "createdAt": ts,
+                "agentId": "main",
+                "agentLabel": "Main Agent",
+                "source": {"channel": "openclaw", "sessionKey": "clawboard:topic:topic-1", "messageId": "a1"},
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+
+        with get_session() as session:
+            topic = session.get(Topic, "topic-1")
+            self.assertIsNotNone(topic)
+            self.assertEqual(topic.status, "active")
+            self.assertIsNone(topic.snoozedUntil)
+
+    def test_patch_log_revives_archived_topic_on_reroute(self):
+        ts = now_iso()
+
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id="topic-1",
+                    name="Topic One",
+                    color="#FF8A4A",
+                    description="test",
+                    priority="medium",
+                    status="archived",
+                    snoozedUntil=None,
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+        res = self.client.post(
+            "/api/log",
+            headers=self.auth_headers,
+            json={
+                "type": "action",
+                "content": "unrouted action",
+                "summary": "unrouted action",
+                "raw": "Tool result: shell.exec exit=0",
+                "createdAt": ts,
+                "agentId": "main",
+                "agentLabel": "Main Agent",
+                "source": {"channel": "openclaw", "sessionKey": "channel:openclaw:test-archived-revive", "messageId": "a2"},
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        log_id = (res.json() or {}).get("id")
+        self.assertTrue(log_id)
+
+        pres = self.client.patch(
+            f"/api/log/{log_id}",
+            headers=self.auth_headers,
+            json={
+                "topicId": "topic-1",
+                "classificationStatus": "classified",
+                "classificationAttempts": 1,
+                "classificationError": None,
+            },
+        )
+        self.assertEqual(pres.status_code, 200, pres.text)
+
+        with get_session() as session:
+            topic = session.get(Topic, "topic-1")
+            self.assertIsNotNone(topic)
+            self.assertEqual(topic.status, "active")
+            self.assertIsNone(topic.snoozedUntil)

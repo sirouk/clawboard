@@ -185,10 +185,10 @@ Bootstrap characteristics (current):
 - idempotent reruns (safe to run repeatedly)
 - atomic per-file deployment of shipped docs/templates plus atomic skill/plugin swaps during OpenClaw install
 - deploys main-agent templates (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`, `BOOTSTRAP.md`) into the resolved OpenClaw main workspace
-- provisions the worker workspace (`worker`) and, by default, asks to enroll it so main can delegate through a real team
+- provisions the worker instruction root under the main workspace (`workspace/worker-agent`) and, by default, asks to enroll the worker so main can delegate through a real team
 - supports non-interactive worker enrollment with `--setup-agentic-team` or `CLAWBOARD_AGENTIC_TEAM_SETUP=always`
 - optionally writes worker web-search and social API environment wiring (`CLAWBOARD_WEB_SEARCH_PROVIDER`, `SEARXNG_BASE_URL`, `BRAVE_API_KEY`, `BLUESKY_*`, `MASTODON_*`)
-- writes workspace-IDE defaults so ClawBoard can open resolved agent workspaces in a separate code-server tab, with dark-mode and trusted-workspace defaults seeded on first bootstrap
+- writes shared workspace-IDE defaults so ClawBoard can open the main workspace or any subagent folder in a single code-server surface, with dark-mode and trusted-workspace defaults seeded on first bootstrap
 - deploys ClawBoard contract docs (`ANATOMY.md`, `CONTEXT.md`, `CLASSIFICATION.md`, etc.) into the same workspace
 - applies scope-aware directive reconciliation (`directives/all/*` + `directives/<agent-id>/*`) with in-place updates, stale-block pruning, and a locally regenerated team roster
 - keeps main-agent execution lanes (main-only direct, single-worker, multi-worker/huddle) aligned with repository contracts

@@ -92,6 +92,15 @@ def profile_workspace(base_dir, profile_name):
         return os.path.join(base_dir, "workspace")
     return os.path.join(base_dir, f"workspace-{safe}")
 
+def subagent_workspace(base_workspace, agent_id):
+    main_workspace = normalize_path(base_workspace)
+    safe = normalize_agent_id(agent_id)
+    if not main_workspace or not safe or safe == "main":
+        return main_workspace
+    if safe == "worker":
+        return os.path.join(main_workspace, "worker-agent")
+    return os.path.join(main_workspace, "subagents", safe)
+
 default_workspace_from_home = profile_workspace(openclaw_home, profile)
 
 VALID_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -304,10 +313,10 @@ for entry in ((cfg.get("agents") or {}).get("list") or []):
         continue
     candidate = entry.get("workspace")
     if not isinstance(candidate, str) or not candidate.strip():
-        candidate = defaults_workspace
+        candidate = defaults_workspace if aid == "main" else subagent_workspace(defaults_workspace, aid)
     workspace = normalize_path(candidate) or defaults_workspace
     if workspace == openclaw_home:
-        workspace = fallback_workspace
+        workspace = fallback_workspace if aid == "main" else subagent_workspace(defaults_workspace, aid)
     if aid == "main":
         workspace = main_workspace
     pairs.append((aid, workspace))
@@ -882,6 +891,15 @@ def profile_workspace(base_dir, profile_name):
         return os.path.join(base_dir, "workspace")
     return os.path.join(base_dir, f"workspace-{safe}")
 
+def subagent_workspace(base_workspace, agent_id):
+    main_workspace = normalize_path(base_workspace)
+    safe = normalize_agent_id(agent_id)
+    if not main_workspace or not safe or safe == "main":
+        return main_workspace
+    if safe == "worker":
+        return os.path.join(main_workspace, "worker-agent")
+    return os.path.join(main_workspace, "subagents", safe)
+
 def normalize_path(value):
     p = os.path.expanduser(str(value or "").strip())
     if not p:
@@ -923,10 +941,10 @@ for entry in ((cfg.get("agents") or {}).get("list") or []):
         continue
     candidate = entry.get("workspace")
     if not isinstance(candidate, str) or not candidate.strip():
-        candidate = defaults_workspace
+        candidate = defaults_workspace if aid == "main" else subagent_workspace(defaults_workspace, aid)
     workspace = normalize_path(candidate) or defaults_workspace
     if workspace == openclaw_home:
-        workspace = fallback_workspace
+        workspace = fallback_workspace if aid == "main" else subagent_workspace(defaults_workspace, aid)
     if aid == "main":
         workspace = main_workspace
     agent_workspace_pairs.append((aid, workspace))

@@ -669,11 +669,7 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
     "OPENCLAW_REQUEST_ATTRIBUTION_MAX_CANDIDATES",
     "CLAWBOARD_WORKSPACE_IDE_PROVIDER",
     "CLAWBOARD_WORKSPACE_IDE_PORT",
-    "CLAWBOARD_WORKSPACE_IDE_CODING_PORT",
     "CLAWBOARD_WORKSPACE_IDE_BASE_URL",
-    "CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING",
-    "CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING",
-    "CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING",
     "CLAWBOARD_WORKSPACE_IDE_PASSWORD",
     "CLAWBOARD_SEARCH_INCLUDE_TOOL_CALL_LOGS",
     "CLAWBOARD_VECTOR_INCLUDE_TOOL_CALL_LOGS",
@@ -689,19 +685,12 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   assert.match(envText, /^OPENCLAW_CHAT_TRANSPORT=auto$/m);
   assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_PROVIDER=code-server$/m);
   assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_PORT=13337$/m);
-  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_CODING_PORT=13338$/m);
   const publicWebUrl = envLines.find((line) => line.startsWith("CLAWBOARD_PUBLIC_WEB_URL="))?.split("=")[1] ?? "";
   const publicWebHost = new URL(publicWebUrl).hostname;
   assert.match(
     envText,
     new RegExp(`^CLAWBOARD_WORKSPACE_IDE_BASE_URL=http://${escapeRegex(publicWebHost)}:13337$`, "m")
   );
-  assert.match(
-    envText,
-    new RegExp(`^CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING=http://${escapeRegex(publicWebHost)}:13338$`, "m")
-  );
-  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING=http:\/\/workspace-ide-coding:8080$/m);
-  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING=\/workspace$/m);
   assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_PASSWORD=test-token$/m);
 
   const openclawLog = await readFile(openclawLogPath, "utf8");
@@ -714,8 +703,6 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
 
   const codeServerSettingsPath = path.join(installDir, "data", "code-server", "local", "User", "settings.json");
   const codeServerSettings = JSON.parse(await readFile(codeServerSettingsPath, "utf8"));
-  const codingCodeServerSettingsPath = path.join(installDir, "data", "code-server-coding", "local", "User", "settings.json");
-  const codingCodeServerSettings = JSON.parse(await readFile(codingCodeServerSettingsPath, "utf8"));
   assert.equal(codeServerSettings["chat.agent.enabled"], false);
   assert.equal(codeServerSettings["chat.agentsControl.enabled"], false);
   assert.equal(codeServerSettings["chat.disableAIFeatures"], true);
@@ -729,7 +716,6 @@ test("bootstrap_clawboard.sh: installs skill into OPENCLAW_HOME/skills when set 
   assert.equal(codeServerSettings["workbench.preferredDarkColorTheme"], "Default Dark Modern");
   assert.equal(codeServerSettings["window.autoDetectColorScheme"], false);
   assert.equal(codeServerSettings["security.workspace.trust.enabled"], false);
-  assert.deepEqual(codingCodeServerSettings, codeServerSettings);
 });
 
 test("setup_specialist_agents.sh: worker workspace provisioning is idempotent on rerun", async () => {
@@ -737,7 +723,7 @@ test("setup_specialist_agents.sh: worker workspace provisioning is idempotent on
   const installDir = path.join(tmp, "install");
   const openclawHome = path.join(tmp, "openclaw-home");
   const configPath = path.join(openclawHome, "openclaw.json");
-  const workerWorkspace = path.join(openclawHome, "workspace-worker");
+  const workerWorkspace = path.join(openclawHome, "workspace", "worker-agent");
 
   await mkdir(path.join(installDir, "scripts"), { recursive: true });
   await mkdir(path.join(installDir, "agent-templates", "worker"), { recursive: true });
@@ -784,6 +770,120 @@ test("setup_specialist_agents.sh: worker workspace provisioning is idempotent on
   await access(path.join(workerWorkspace, "memory"));
   await access(path.join(workerWorkspace, "obsidian"));
   assert.match(secondRun.stdout, /already aligned|unchanged/i);
+});
+
+test("bootstrap_clawboard.sh: migrates legacy worker workspace into workspace/worker-agent and canonicalizes config", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clawboard-bootstrap-worker-migration-"));
+  const repoRoot = path.join(tmp, "repo");
+  const installDir = path.join(tmp, "install");
+  const homeDir = path.join(tmp, "home");
+  const openclawHome = path.join(tmp, "openclaw-home");
+  const binDir = path.join(tmp, "bin");
+  const configPath = path.join(openclawHome, "openclaw.json");
+  const openclawLogPath = path.join(tmp, "openclaw.log");
+  const mainWorkspace = path.join(openclawHome, "workspace");
+  const legacyWorkspace = path.join(openclawHome, "workspace-worker");
+  const canonicalWorkspace = path.join(mainWorkspace, "worker-agent");
+
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await mkdir(mainWorkspace, { recursive: true });
+  await mkdir(path.join(legacyWorkspace, "memory"), { recursive: true });
+  await mkdir(path.join(legacyWorkspace, "obsidian"), { recursive: true });
+  await seedBootstrapInstallTree(installDir, { includePlugin: false });
+
+  await mkdir(path.join(installDir, "scripts"), { recursive: true });
+  await cp(
+    path.join(process.cwd(), "scripts", "setup_specialist_agents.sh"),
+    path.join(installDir, "scripts", "setup_specialist_agents.sh")
+  );
+  await mkdir(path.join(installDir, "agent-templates", "worker"), { recursive: true });
+  await writeFile(path.join(installDir, "agent-templates", "worker", "AGENTS.md"), "# worker AGENTS\n");
+  await writeFile(path.join(installDir, "agent-templates", "worker", "SOUL.md"), "# worker SOUL\n");
+
+  await writeFile(path.join(legacyWorkspace, "memory", "note.md"), "legacy memory\n");
+  await writeFile(path.join(legacyWorkspace, "obsidian", "note.md"), "legacy obsidian\n");
+  await writeFile(path.join(legacyWorkspace, "keep.txt"), "legacy root file\n");
+
+  await writeFile(
+    configPath,
+    `${JSON.stringify(
+      {
+        agents: {
+          defaults: { workspace: mainWorkspace },
+          list: [
+            { id: "main", default: true, workspace: mainWorkspace },
+            { id: "worker", workspace: legacyWorkspace },
+          ],
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  await makeOpenClawStub(binDir);
+  await makeStub(binDir, "curl", "exit 0");
+
+  const bootstrapPath = path.join(repoRoot, "scripts");
+  await mkdir(bootstrapPath, { recursive: true });
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_clawboard.sh"), path.join(bootstrapPath, "bootstrap_clawboard.sh"));
+  await cp(path.join(process.cwd(), "scripts", "bootstrap_openclaw.sh"), path.join(bootstrapPath, "bootstrap_openclaw.sh"));
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    OPENCLAW_HOME: openclawHome,
+    OPENCLAW_CONFIG_PATH: configPath,
+    OPENCLAW_STUB_LOG_FILE: openclawLogPath,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    CLAWBOARD_TOKEN: "worker-migration-token",
+  };
+
+  const bootstrapArgs = [
+    "bash",
+    path.join(bootstrapPath, "bootstrap_clawboard.sh"),
+    "--dir",
+    installDir,
+    "--skip-docker",
+    "--skip-plugin",
+    "--skip-local-memory-setup",
+    "--skip-memory-backup-setup",
+    "--skip-obsidian-memory-setup",
+    "--skip-openclaw-heap-setup",
+    "--skip-agent-directives",
+    "--skip-agentic-team-setup",
+    "--no-access-url-prompt",
+    "--no-color",
+    "--integration-level",
+    "write",
+  ];
+
+  const firstRun = await run(bootstrapArgs, { cwd: repoRoot, env });
+  assert.equal(firstRun.code, 0, `exit=${firstRun.code}\nstdout:\n${firstRun.stdout}\nstderr:\n${firstRun.stderr}`);
+  assert.match(firstRun.stdout, /Migrated legacy execution workspace:/);
+  assert.match(firstRun.stdout, /Canonicalized execution workspace for worker:/);
+
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(config.agents.list[1].workspace, canonicalWorkspace);
+
+  assert.equal(await readFile(path.join(canonicalWorkspace, "memory", "note.md"), "utf8"), "legacy memory\n");
+  assert.equal(await readFile(path.join(canonicalWorkspace, "obsidian", "note.md"), "utf8"), "legacy obsidian\n");
+  assert.equal(await readFile(path.join(canonicalWorkspace, "keep.txt"), "utf8"), "legacy root file\n");
+  assert.equal(await readFile(path.join(canonicalWorkspace, "AGENTS.md"), "utf8"), "# worker AGENTS\n");
+  assert.equal(await readFile(path.join(canonicalWorkspace, "SOUL.md"), "utf8"), "# worker SOUL\n");
+
+  await assert.rejects(
+    lstat(legacyWorkspace),
+    /ENOENT/,
+    "expected legacy sibling workspace path to be removed after migration"
+  );
+
+  const secondRun = await run(bootstrapArgs, { cwd: repoRoot, env });
+  assert.equal(secondRun.code, 0, `exit=${secondRun.code}\nstdout:\n${secondRun.stdout}\nstderr:\n${secondRun.stderr}`);
+  assert.match(secondRun.stdout, /Execution agent workspaces already aligned under the main workspace\./);
 });
 
 test("bootstrap_clawboard.sh: prefers Tailscale MagicDNS host for public access URLs", async () => {
@@ -847,9 +947,6 @@ test("bootstrap_clawboard.sh: prefers Tailscale MagicDNS host for public access 
   assert.match(envText, /^CLAWBOARD_PUBLIC_WEB_URL=http:\/\/magicbox\.tail77f45e\.ts\.net:3010$/m);
   assert.match(envText, /^CLAWBOARD_PUBLIC_API_BASE=http:\/\/magicbox\.tail77f45e\.ts\.net:8010$/m);
   assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_BASE_URL=http:\/\/magicbox\.tail77f45e\.ts\.net:13337$/m);
-  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING=http:\/\/magicbox\.tail77f45e\.ts\.net:13338$/m);
-  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING=http:\/\/workspace-ide-coding:8080$/m);
-  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING=\/workspace$/m);
   assert.match(envText, /^CLAWBOARD_ALLOWED_DEV_ORIGINS=magicbox\.tail77f45e\.ts\.net$/m);
   assert.doesNotMatch(envText, /^CLAWBOARD_PUBLIC_WEB_URL=http:\/\/100\.88\.77\.66:3010$/m);
   assert.match(
@@ -922,16 +1019,12 @@ test("bootstrap_clawboard.sh: configures secure Tailscale HTTPS URLs when opted 
   assert.match(envText, /^CLAWBOARD_PUBLIC_WEB_URL=https:\/\/magicbox\.tail77f45e\.ts\.net$/m);
   assert.match(envText, /^CLAWBOARD_PUBLIC_API_BASE=https:\/\/magicbox\.tail77f45e\.ts\.net:8443$/m);
   assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_BASE_URL=https:\/\/magicbox\.tail77f45e\.ts\.net:10000$/m);
-  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING=https:\/\/magicbox\.tail77f45e\.ts\.net:10001$/m);
-  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING=http:\/\/workspace-ide-coding:8080$/m);
-  assert.match(envText, /^CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING=\/workspace$/m);
   assert.match(envText, /^CLAWBOARD_ALLOWED_DEV_ORIGINS=magicbox\.tail77f45e\.ts\.net$/m);
 
   const tailscaleLog = await readFile(tailscaleLogPath, "utf8");
   assert.match(tailscaleLog, /^serve --bg --https=443 http:\/\/127\.0\.0\.1:3010$/m);
   assert.match(tailscaleLog, /^serve --bg --https=8443 http:\/\/127\.0\.0\.1:8010$/m);
   assert.match(tailscaleLog, /^serve --bg --https=10000 http:\/\/127\.0\.0\.1:13337$/m);
-  assert.match(tailscaleLog, /^serve --bg --https=10001 http:\/\/127\.0\.0\.1:13338$/m);
 });
 
 test("bootstrap_clawboard.sh: uses CLAWBOARD_TOKEN for API health and config writes", async () => {
@@ -1373,8 +1466,8 @@ test("bootstrap_clawboard.sh: setup-agentic-team enrolls worker and syncs main a
   const res = await run(bootstrapArgs, { cwd: repoRoot, env });
 
   assert.equal(res.code, 0, `exit=${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
-  assert.match(res.stdout, /Added 1 worker agent\(s\) to config/);
-  assert.match(res.stdout, /Synced main subagents\.allowAgents to configured worker agents \(worker\)\./);
+  assert.match(res.stdout, /Added 1 execution agent\(s\) to config/);
+  assert.match(res.stdout, /Synced main subagents\.allowAgents to configured execution agents \(worker\)\./);
   assert.match(res.stdout, /Agentic team:\s+configured \(worker\)/);
 
   const secondRun = await run(bootstrapArgs, { cwd: repoRoot, env });
@@ -1387,7 +1480,7 @@ test("bootstrap_clawboard.sh: setup-agentic-team enrolls worker and syncs main a
   assert.deepEqual(config.agents.list[0].subagents.allowAgents, ["worker"]);
 
   for (const agentId of ["worker"]) {
-    const workspacePath = path.join(openclawHome, `workspace-${agentId}`);
+    const workspacePath = path.join(openclawHome, "workspace", "worker-agent");
     const agentsText = await readFile(path.join(workspacePath, "AGENTS.md"), "utf8");
     const soulText = await readFile(path.join(workspacePath, "SOUL.md"), "utf8");
     assert.equal(agentsText, `# ${agentId} AGENTS\n`);

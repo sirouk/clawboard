@@ -1077,6 +1077,15 @@ resolve_default_openclaw_workspace_root() {
   fi
 }
 
+resolve_default_openclaw_subagent_workspace() {
+  local agent_id="${1:-}"
+  if [ "$agent_id" = "worker" ]; then
+    printf "%s/worker-agent" "$(resolve_default_openclaw_workspace_root)"
+  else
+    printf "%s/subagents/%s" "$(resolve_default_openclaw_workspace_root)" "$agent_id"
+  fi
+}
+
 detect_openclaw_workspace_root() {
   if [ -n "${OPENCLAW_WORKSPACE_DIR:-}" ]; then
     printf "%s" "${OPENCLAW_WORKSPACE_DIR}"
@@ -1135,7 +1144,7 @@ resolve_agent_workspace_path() {
   if [ "$agent_id" = "main" ]; then
     fallback="$(resolve_default_openclaw_workspace_root)"
   else
-    fallback="$OPENCLAW_HOME/workspace-$agent_id"
+    fallback="$(resolve_default_openclaw_subagent_workspace "$agent_id")"
   fi
 
   local resolved=""
@@ -1173,6 +1182,15 @@ def normalize_agent_id(value):
         return "main"
     raw = re.sub(r"[^a-z0-9-]+", "-", raw).strip("-")
     return (raw[:64] or "main")
+
+def subagent_workspace(base_workspace, agent_id):
+    main_workspace = normalize_path(base_workspace)
+    safe = normalize_agent_id(agent_id)
+    if not main_workspace or not safe or safe == "main":
+        return main_workspace
+    if safe == "worker":
+        return os.path.join(main_workspace, "worker-agent")
+    return os.path.join(main_workspace, "subagents", safe)
 
 cfg = {}
 try:
@@ -1215,7 +1233,7 @@ else:
         if isinstance(candidate, str) and candidate.strip():
             resolved = candidate.strip()
     if not resolved:
-        resolved = os.path.join(openclaw_home, f"workspace-{target_id}")
+        resolved = subagent_workspace(defaults_workspace, target_id)
 
 resolved = normalize_path(resolved)
 if target_id == "main":
@@ -1223,7 +1241,7 @@ if target_id == "main":
         resolved = fallback_main
 else:
     if not resolved or resolved == openclaw_home:
-        resolved = os.path.join(openclaw_home, f"workspace-{target_id}")
+        resolved = subagent_workspace(defaults_workspace, target_id)
 
 print(resolved or "", end="")
 PY
@@ -1325,14 +1343,9 @@ WEB_URL="${CLAWBOARD_WEB_URL:-http://localhost:3010}"
 PUBLIC_API_BASE="${CLAWBOARD_PUBLIC_API_BASE:-}"
 PUBLIC_WEB_URL="${CLAWBOARD_PUBLIC_WEB_URL:-}"
 WORKSPACE_IDE_BASE_URL_VALUE="${CLAWBOARD_WORKSPACE_IDE_BASE_URL:-}"
-WORKSPACE_IDE_BASE_URL_CODING_VALUE="${CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING:-}"
-WORKSPACE_IDE_INTERNAL_BASE_URL_CODING_VALUE="${CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING:-http://workspace-ide-coding:8080}"
 WORKSPACE_IDE_PASSWORD_VALUE="${CLAWBOARD_WORKSPACE_IDE_PASSWORD:-}"
 WORKSPACE_IDE_PORT_VALUE="${CLAWBOARD_WORKSPACE_IDE_PORT:-13337}"
-WORKSPACE_IDE_CODING_PORT_VALUE="${CLAWBOARD_WORKSPACE_IDE_CODING_PORT:-13338}"
 WORKSPACE_IDE_PUBLIC_PORT_VALUE="${CLAWBOARD_WORKSPACE_IDE_PORT:-13337}"
-WORKSPACE_IDE_CODING_PUBLIC_PORT_VALUE="${CLAWBOARD_WORKSPACE_IDE_CODING_PORT:-13338}"
-WORKSPACE_IDE_FOLDER_CODING_VALUE="${CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING:-/workspace}"
 WORKSPACE_IDE_PROVIDER_VALUE="${CLAWBOARD_WORKSPACE_IDE_PROVIDER:-code-server}"
 OPENCLAW_BASE_URL_VALUE="${OPENCLAW_BASE_URL:-}"
 TOKEN="${CLAWBOARD_TOKEN:-}"
@@ -1348,7 +1361,6 @@ PUBLIC_API_BASE_EXPLICIT=false
 PUBLIC_WEB_URL_EXPLICIT=false
 OPENCLAW_BASE_URL_EXPLICIT=false
 WORKSPACE_IDE_BASE_URL_EXPLICIT=false
-WORKSPACE_IDE_BASE_URL_CODING_EXPLICIT=false
 if [ -n "${CLAWBOARD_API_URL+x}" ]; then
   API_URL_EXPLICIT=true
 fi
@@ -1363,9 +1375,6 @@ if [ -n "${CLAWBOARD_PUBLIC_WEB_URL+x}" ]; then
 fi
 if [ -n "${CLAWBOARD_WORKSPACE_IDE_BASE_URL+x}" ]; then
   WORKSPACE_IDE_BASE_URL_EXPLICIT=true
-fi
-if [ -n "${CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING+x}" ]; then
-  WORKSPACE_IDE_BASE_URL_CODING_EXPLICIT=true
 fi
 if [ -n "${OPENCLAW_BASE_URL+x}" ]; then
   OPENCLAW_BASE_URL_EXPLICIT=true
@@ -1412,7 +1421,6 @@ TAILSCALE_HTTPS_SETUP_MODE="${CLAWBOARD_TAILSCALE_HTTPS_SETUP:-ask}"
 TAILSCALE_HTTPS_WEB_PUBLIC_PORT="443"
 TAILSCALE_HTTPS_API_PUBLIC_PORT="8443"
 TAILSCALE_HTTPS_IDE_PUBLIC_PORT="10000"
-TAILSCALE_HTTPS_IDE_CODING_PUBLIC_PORT="10001"
 TAILSCALE_HTTPS_SELECTED=false
 TAILSCALE_HTTPS_HOST=""
 OPENCLAW_GATEWAY_DEVICE_AUTH_OVERRIDE="${CLAWBOARD_OPENCLAW_GATEWAY_USE_DEVICE_AUTH:-}"
@@ -2815,7 +2823,6 @@ configure_tailscale_https_routes() {
   local web_port="$2"
   local api_port="$3"
   local ide_port="$4"
-  local coding_ide_port="$5"
   [ -n "$host" ] || return 1
   if ! command -v tailscale >/dev/null 2>&1; then
     return 1
@@ -2829,13 +2836,9 @@ configure_tailscale_https_routes() {
   if ! tailscale serve --bg --https="$TAILSCALE_HTTPS_IDE_PUBLIC_PORT" "http://127.0.0.1:$ide_port" >/dev/null 2>&1; then
     return 1
   fi
-  if ! tailscale serve --bg --https="$TAILSCALE_HTTPS_IDE_CODING_PUBLIC_PORT" "http://127.0.0.1:$coding_ide_port" >/dev/null 2>&1; then
-    return 1
-  fi
   TAILSCALE_HTTPS_SELECTED=true
   TAILSCALE_HTTPS_HOST="$host"
   WORKSPACE_IDE_PUBLIC_PORT_VALUE="$TAILSCALE_HTTPS_IDE_PUBLIC_PORT"
-  WORKSPACE_IDE_CODING_PUBLIC_PORT_VALUE="$TAILSCALE_HTTPS_IDE_CODING_PUBLIC_PORT"
   return 0
 }
 
@@ -2872,7 +2875,7 @@ configure_access_urls() {
     if [ "$TAILSCALE_HTTPS_SETUP_MODE" = "always" ]; then
       if secure_tail_host="$(detect_tailscale_https_host)"; then
         if { [ -z "$PUBLIC_API_BASE" ] && is_local_host "$api_host"; } || { [ -z "$PUBLIC_WEB_URL" ] && is_local_host "$web_host"; }; then
-          if configure_tailscale_https_routes "$secure_tail_host" "$web_port" "$api_port" "$WORKSPACE_IDE_PORT_VALUE" "$WORKSPACE_IDE_CODING_PORT_VALUE"; then
+          if configure_tailscale_https_routes "$secure_tail_host" "$web_port" "$api_port" "$WORKSPACE_IDE_PORT_VALUE"; then
             apply_tailscale_https_urls "$secure_tail_host"
             secure_applied=true
           else
@@ -3331,6 +3334,24 @@ def profile_workspace(base_dir: str, profile_name: str) -> str:
     return os.path.join(base_dir, f"workspace-{safe}")
 
 
+def normalize_agent_id(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "main"
+    raw = re.sub(r"[^a-z0-9-]+", "-", raw).strip("-")
+    return raw[:64] or "main"
+
+
+def subagent_workspace(base_workspace: str, agent_id: str) -> str:
+    main_workspace = normalize_path(base_workspace)
+    safe = normalize_agent_id(agent_id)
+    if not main_workspace or not safe or safe == "main":
+        return main_workspace
+    if safe == "worker":
+        return os.path.join(main_workspace, "worker-agent")
+    return os.path.join(main_workspace, "subagents", safe)
+
+
 config = {}
 try:
     with open(config_path, "r", encoding="utf-8") as fh:
@@ -3363,6 +3384,7 @@ def add_workspace(value: str) -> None:
 
 
 fallback_workspace = profile_workspace(openclaw_home, profile)
+defaults_workspace = normalize_path(defaults_cfg.get("workspace") or config.get("workspace") or fallback_workspace) or fallback_workspace
 add_workspace(fallback_workspace)
 add_workspace(defaults_cfg.get("workspace") or "")
 add_workspace((config.get("agent") or {}).get("workspace") if isinstance(config.get("agent"), dict) else "")
@@ -3370,9 +3392,18 @@ add_workspace(config.get("workspace") or "")
 
 for entry in agents_cfg.get("list") or []:
     if isinstance(entry, dict):
-        add_workspace(entry.get("workspace") or "")
+        agent_id = normalize_agent_id(entry.get("id"))
+        explicit = entry.get("workspace") or ""
+        if explicit:
+            add_workspace(explicit)
+        elif agent_id != "main":
+            add_workspace(subagent_workspace(defaults_workspace, agent_id))
 
 for candidate in sorted(glob.glob(os.path.join(openclaw_home, "workspace*"))):
+    add_workspace(candidate)
+for candidate in sorted(glob.glob(os.path.join(openclaw_home, "workspace*", "*-agent"))):
+    add_workspace(candidate)
+for candidate in sorted(glob.glob(os.path.join(openclaw_home, "workspace*", "subagents", "*"))):
     add_workspace(candidate)
 
 had_any = False
@@ -3562,12 +3593,90 @@ verify_agent_contract_alignment() {
   fi
 }
 
-# Provision worker agent workspaces (for example workspace-worker).
-# Runs scripts/setup_specialist_agents.sh when present. Idempotent. Worker agents keep
-# their own workspace roots; shared repo work should use explicit delegated paths.
+# Discover the execution-agent roster to provision/enroll.
+# Preference order:
+# 1. Non-main agents already present in openclaw.json
+# 2. A worker template, if present (preserves current default bootstrap behavior)
+# 3. Any non-main agent template directories
+discover_specialist_agent_ids() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf "worker\n"
+    return 0
+  fi
+
+  python3 - "$OPENCLAW_CONFIG_PATH" "$INSTALL_DIR/agent-templates" <<'PY' 2>/dev/null || true
+import json
+import os
+import re
+import sys
+
+cfg_path = sys.argv[1]
+templates_base = sys.argv[2]
+valid = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+
+def normalize_agent_id(value):
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    if valid.match(raw):
+        return raw
+    raw = re.sub(r"[^a-z0-9-]+", "-", raw).strip("-")
+    return raw[:64]
+
+
+cfg = {}
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        parsed = json.load(f)
+        if isinstance(parsed, dict):
+            cfg = parsed
+except Exception:
+    cfg = {}
+
+configured = []
+seen = set()
+for entry in ((cfg.get("agents") or {}).get("list") or []):
+    if not isinstance(entry, dict):
+        continue
+    agent_id = normalize_agent_id(entry.get("id"))
+    if not agent_id or agent_id == "main" or agent_id in seen:
+        continue
+    configured.append(agent_id)
+    seen.add(agent_id)
+
+template_ids = []
+if os.path.isdir(templates_base):
+    for name in sorted(os.listdir(templates_base)):
+        if name.startswith("."):
+            continue
+        agent_id = normalize_agent_id(name)
+        if not agent_id or agent_id == "main":
+            continue
+        if os.path.isdir(os.path.join(templates_base, name)):
+            template_ids.append(agent_id)
+
+if "worker" in configured:
+    chosen = ["worker"]
+elif "worker" in template_ids:
+    chosen = ["worker"]
+elif configured:
+    chosen = configured
+else:
+    chosen = template_ids
+
+for agent_id in chosen:
+    print(agent_id)
+PY
+}
+
+# Provision specialist agent workspaces under the main workspace
+# (for example workspace/worker-agent).
+# Runs scripts/setup_specialist_agents.sh when present. Idempotent. Subagents keep
+# their own instruction roots, but shared repo work should use explicit delegated paths.
 setup_specialist_agents() {
   if [ ! -f "$INSTALL_DIR/scripts/setup_specialist_agents.sh" ]; then
-    log_warn "setup_specialist_agents.sh not found; skipping worker workspace provisioning."
+    log_warn "setup_specialist_agents.sh not found; skipping execution workspace provisioning."
     return 0
   fi
   OPENCLAW_HOME="$OPENCLAW_HOME" \
@@ -3577,7 +3686,127 @@ setup_specialist_agents() {
   bash "$INSTALL_DIR/scripts/setup_specialist_agents.sh"
 }
 
-# Optionally add the worker agent to openclaw.json
+reconcile_specialist_agent_workspaces_in_config() {
+  local payload=""
+  local idx=""
+  local agent_id=""
+  local current_workspace=""
+  local desired_workspace=""
+  local changed=0
+
+  if [ ! -f "$OPENCLAW_CONFIG_PATH" ]; then
+    log_warn "OpenClaw config not found at $OPENCLAW_CONFIG_PATH; skipping execution workspace reconciliation."
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    log_warn "python3 not found; skipping execution workspace reconciliation."
+    return 0
+  fi
+
+  payload="$(
+    python3 - "$OPENCLAW_CONFIG_PATH" "$OPENCLAW_HOME" "${OPENCLAW_PROFILE:-}" <<'PY' 2>/dev/null || true
+import json
+import os
+import re
+import sys
+
+cfg_path = sys.argv[1]
+openclaw_home = os.path.abspath(os.path.expanduser(sys.argv[2]))
+profile = (sys.argv[3] or "").strip()
+
+
+def normalize_path(value):
+    p = os.path.expanduser(str(value or "").strip())
+    if not p:
+        return ""
+    return os.path.abspath(p)
+
+
+def profile_workspace(base_dir, profile_name):
+    raw = (profile_name or "").strip()
+    if not raw or raw.lower() == "default":
+        return os.path.join(base_dir, "workspace")
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-")
+    if not safe:
+        return os.path.join(base_dir, "workspace")
+    return os.path.join(base_dir, f"workspace-{safe}")
+
+
+def normalize_agent_id(value):
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "main"
+    raw = re.sub(r"[^a-z0-9-]+", "-", raw).strip("-")
+    return raw[:64] or "main"
+
+
+def subagent_workspace(base_workspace, agent_id):
+    main_workspace = normalize_path(base_workspace)
+    safe = normalize_agent_id(agent_id)
+    if not main_workspace or not safe or safe == "main":
+        return main_workspace
+    if safe == "worker":
+        return os.path.join(main_workspace, "worker-agent")
+    return os.path.join(main_workspace, "subagents", safe)
+
+
+cfg = {}
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        parsed = json.load(f)
+        if isinstance(parsed, dict):
+            cfg = parsed
+except Exception:
+    cfg = {}
+
+fallback_workspace = profile_workspace(openclaw_home, profile)
+defaults_workspace = normalize_path(
+    (((cfg.get("agents") or {}).get("defaults") or {}).get("workspace"))
+    or ((cfg.get("agents") or {}).get("workspace"))
+    or ((cfg.get("agent") or {}).get("workspace"))
+    or cfg.get("workspace")
+    or fallback_workspace
+) or fallback_workspace
+if defaults_workspace == openclaw_home:
+    defaults_workspace = fallback_workspace
+
+for idx, entry in enumerate((cfg.get("agents") or {}).get("list") or []):
+    if not isinstance(entry, dict):
+        continue
+    agent_id = normalize_agent_id(entry.get("id"))
+    if agent_id == "main":
+        continue
+    current = normalize_path(entry.get("workspace"))
+    desired = subagent_workspace(defaults_workspace, agent_id)
+    if not desired or current == desired:
+        continue
+    print("\t".join([str(idx), agent_id, current, desired]))
+PY
+  )"
+  payload="${payload//$'\r'/}"
+  if [ -z "$payload" ]; then
+    log_success "Execution agent workspaces already aligned under the main workspace."
+    return 0
+  fi
+
+  openclaw_cfg_txn_begin
+  while IFS=$'\t' read -r idx agent_id current_workspace desired_workspace; do
+    [ -n "${idx:-}" ] || continue
+    [ -n "${agent_id:-}" ] || continue
+    [ -n "${desired_workspace:-}" ] || continue
+    openclaw_cfg_set_txn "agents.list.${idx}.workspace" "$desired_workspace" string true true
+    log_info "Canonicalized execution workspace for $agent_id: ${current_workspace:-<unset>} -> $desired_workspace"
+    changed=$((changed + 1))
+  done <<< "$payload"
+  openclaw_cfg_txn_commit
+
+  if [ "$changed" -gt 0 ]; then
+    OPENCLAW_GATEWAY_RESTART_NEEDED=true
+    log_success "Canonicalized $changed execution workspace path(s) under the main workspace."
+  fi
+}
+
+# Optionally add execution agents to openclaw.json
 # so the main agent can delegate. Uses `openclaw agents add` when enabled. Idempotent.
 maybe_offer_agentic_team_setup() {
   local mode="${1:-ask}"
@@ -3588,13 +3817,22 @@ maybe_offer_agentic_team_setup() {
   local added=0
   local missing_workspaces=0
   local prompt_rc=0
-  local worker_ids="worker"
+  local specialist_ids=""
+  local specialist_display=""
 
   if ! command -v openclaw >/dev/null 2>&1; then
     AGENTIC_TEAM_SETUP_STATUS="openclaw-missing"
     log_warn "openclaw not in PATH; skipping agentic team setup. Install OpenClaw and run: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"
     return 0
   fi
+
+  specialist_ids="$(discover_specialist_agent_ids)"
+  specialist_ids="${specialist_ids//$'\r'/}"
+  if [ -z "$specialist_ids" ]; then
+    specialist_ids="worker"
+  fi
+  specialist_display="$(printf "%s\n" "$specialist_ids" | paste -sd ',' - | sed 's/,/, /g')"
+  specialist_display="${specialist_display:-worker}"
 
   case "$mode" in
     never)
@@ -3603,19 +3841,19 @@ maybe_offer_agentic_team_setup() {
       ;;
     always) ;;
     ask)
-      if prompt_yes_no_tty "Set up the agentic team (main + worker) so the main agent can delegate execution work?" "y"; then
+      if prompt_yes_no_tty "Set up the agentic team (main + ${specialist_display}) so the main agent can delegate execution work?" "y"; then
         :
       else
         prompt_rc=$?
         case "$prompt_rc" in
           2)
             AGENTIC_TEAM_SETUP_STATUS="skipped-no-tty"
-            log_info "No interactive TTY available for the agentic team prompt. Re-run with --setup-agentic-team or CLAWBOARD_AGENTIC_TEAM_SETUP=always to enroll the worker automatically."
+            log_info "No interactive TTY available for the agentic team prompt. Re-run with --setup-agentic-team or CLAWBOARD_AGENTIC_TEAM_SETUP=always to enroll the execution roster automatically."
             return 0
             ;;
           *)
             AGENTIC_TEAM_SETUP_STATUS="skipped-by-user"
-            log_info "Skipped agentic team setup. Add the worker later with: openclaw agents add worker --workspace <resolved-workspace> --non-interactive"
+            log_info "Skipped agentic team setup. Add the execution roster later with: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"
             return 0
             ;;
         esac
@@ -3636,17 +3874,17 @@ maybe_offer_agentic_team_setup() {
   fi
   existing_ids=" ${existing_ids} "
 
-  for id in $worker_ids; do
+  for id in $specialist_ids; do
     case "$existing_ids" in *" $id "*) continue ;; *) ;; esac
     ws_path="$(resolve_agent_workspace_path "$id" 2>/dev/null || true)"
     ws_path="${ws_path//$'\r'/}"
     ws_path="${ws_path/#\~/$HOME}"
     if [ -z "$ws_path" ]; then
-      ws_path="$OPENCLAW_HOME/workspace-$id"
+      ws_path="$(resolve_default_openclaw_subagent_workspace "$id")"
     fi
     if [ ! -d "$ws_path" ]; then
       missing_workspaces=$((missing_workspaces + 1))
-      log_warn "Workspace $ws_path missing; run setup_specialist_agents first. Skipping worker $id."
+      log_warn "Workspace $ws_path missing; run setup_specialist_agents first. Skipping execution agent $id."
       continue
     fi
     log_info "Adding agent: $id (workspace: $ws_path)"
@@ -3660,13 +3898,13 @@ maybe_offer_agentic_team_setup() {
   if [ "$added" -gt 0 ]; then
     AGENTIC_TEAM_SETUP_STATUS="configured"
     OPENCLAW_GATEWAY_RESTART_NEEDED=true
-    log_success "Added $added worker agent(s) to config. Gateway will restart to apply."
+    log_success "Added $added execution agent(s) to config. Gateway will restart to apply."
     return 0
   fi
 
   if [ "$missing_workspaces" -gt 0 ]; then
     AGENTIC_TEAM_SETUP_STATUS="incomplete"
-    log_warn "Agentic team setup could not enroll every worker because $missing_workspaces workspace(s) were missing."
+    log_warn "Agentic team setup could not enroll every execution agent because $missing_workspaces workspace(s) were missing."
     return 0
   fi
 
@@ -3752,7 +3990,7 @@ PY
   if command -v openclaw >/dev/null 2>&1; then
     current_allow="$(openclaw_cfg_get_scalar_normalized "agents.list.${main_idx}.subagents.allowAgents" || true)"
     if [ "$current_allow" = "$allow_agents_json" ]; then
-      log_success "Main subagents.allowAgents already aligned with configured worker agents (${AGENTIC_TEAM_AGENT_IDS})."
+      log_success "Main subagents.allowAgents already aligned with configured execution agents (${AGENTIC_TEAM_AGENT_IDS})."
       return 0
     fi
   fi
@@ -3761,10 +3999,10 @@ PY
   if openclaw_cfg_set_txn "agents.list.${main_idx}.subagents.allowAgents" "$allow_agents_json" json false true; then
     openclaw_cfg_txn_commit
     OPENCLAW_GATEWAY_RESTART_NEEDED=true
-    log_success "Synced main subagents.allowAgents to configured worker agents (${AGENTIC_TEAM_AGENT_IDS})."
+    log_success "Synced main subagents.allowAgents to configured execution agents (${AGENTIC_TEAM_AGENT_IDS})."
   else
     openclaw_cfg_txn_rollback
-    log_warn "Failed syncing main subagents.allowAgents from configured worker agents."
+    log_warn "Failed syncing main subagents.allowAgents from configured execution agents."
   fi
 }
 
@@ -4223,20 +4461,14 @@ ensure_env_file "$INSTALL_DIR"
 # Keep workspace IDE state on host paths with deterministic ownership.
 mkdir -p \
   "$INSTALL_DIR/data/code-server/config" \
-  "$INSTALL_DIR/data/code-server/local" \
-  "$INSTALL_DIR/data/code-server-coding/config" \
-  "$INSTALL_DIR/data/code-server-coding/local"
+  "$INSTALL_DIR/data/code-server/local"
 chmod 700 \
   "$INSTALL_DIR/data/code-server/config" \
-  "$INSTALL_DIR/data/code-server/local" \
-  "$INSTALL_DIR/data/code-server-coding/config" \
-  "$INSTALL_DIR/data/code-server-coding/local" 2>/dev/null || true
-mkdir -p "$INSTALL_DIR/data/code-server/local/User" "$INSTALL_DIR/data/code-server-coding/local/User"
+  "$INSTALL_DIR/data/code-server/local" 2>/dev/null || true
+mkdir -p "$INSTALL_DIR/data/code-server/local/User"
 
 if command -v python3 >/dev/null 2>&1; then
-  python3 - \
-    "$INSTALL_DIR/data/code-server/local/User/settings.json" \
-    "$INSTALL_DIR/data/code-server-coding/local/User/settings.json" <<'PY'
+  python3 - "$INSTALL_DIR/data/code-server/local/User/settings.json" <<'PY'
 import json
 import os
 import sys
@@ -4297,9 +4529,7 @@ elif [ ! -f "$INSTALL_DIR/data/code-server/local/User/settings.json" ]; then
 }
 EOF
 fi
-if [ ! -f "$INSTALL_DIR/data/code-server-coding/local/User/settings.json" ]; then
-  cp "$INSTALL_DIR/data/code-server/local/User/settings.json" "$INSTALL_DIR/data/code-server-coding/local/User/settings.json"
-fi
+rm -rf "$INSTALL_DIR/data/code-server-coding" 2>/dev/null || true
 
 if [ "$PUBLIC_API_BASE_EXPLICIT" = false ] && read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" >/dev/null 2>&1; then
   PUBLIC_API_BASE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" || true)"
@@ -4345,10 +4575,8 @@ upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_API_BASE" "$ACCESS_API_UR
 log_info "Writing CLAWBOARD_PUBLIC_WEB_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_PUBLIC_WEB_URL" "$ACCESS_WEB_URL"
 WORKSPACE_IDE_PORT_VALUE="$(clamp_int "$WORKSPACE_IDE_PORT_VALUE" 1 65535 || echo "13337")"
-WORKSPACE_IDE_CODING_PORT_VALUE="$(clamp_int "$WORKSPACE_IDE_CODING_PORT_VALUE" 1 65535 || echo "13338")"
 if [ "$TAILSCALE_HTTPS_SELECTED" != true ]; then
   WORKSPACE_IDE_PUBLIC_PORT_VALUE="$WORKSPACE_IDE_PORT_VALUE"
-  WORKSPACE_IDE_CODING_PUBLIC_PORT_VALUE="$WORKSPACE_IDE_CODING_PORT_VALUE"
 fi
 WORKSPACE_IDE_PROVIDER_VALUE="$(printf "%s" "$WORKSPACE_IDE_PROVIDER_VALUE" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
 case "$WORKSPACE_IDE_PROVIDER_VALUE" in
@@ -4367,38 +4595,19 @@ if [ "$WORKSPACE_IDE_BASE_URL_EXPLICIT" = false ]; then
     WORKSPACE_IDE_BASE_URL_VALUE="http://$IDE_HOST:$WORKSPACE_IDE_PUBLIC_PORT_VALUE"
   fi
 fi
-if [ "$WORKSPACE_IDE_BASE_URL_CODING_EXPLICIT" = false ]; then
-  IDE_HOST="$(extract_url_host "$ACCESS_WEB_URL")"
-  [ -n "$IDE_HOST" ] || IDE_HOST="localhost"
-  if [[ "$ACCESS_WEB_URL" =~ ^https:// ]]; then
-    WORKSPACE_IDE_BASE_URL_CODING_VALUE="https://$IDE_HOST:$WORKSPACE_IDE_CODING_PUBLIC_PORT_VALUE"
-  else
-    WORKSPACE_IDE_BASE_URL_CODING_VALUE="http://$IDE_HOST:$WORKSPACE_IDE_CODING_PUBLIC_PORT_VALUE"
-  fi
-fi
 WORKSPACE_IDE_BASE_URL_VALUE="$(normalize_http_url "$WORKSPACE_IDE_BASE_URL_VALUE")"
-WORKSPACE_IDE_BASE_URL_CODING_VALUE="$(normalize_http_url "$WORKSPACE_IDE_BASE_URL_CODING_VALUE")"
-WORKSPACE_IDE_INTERNAL_BASE_URL_CODING_VALUE="$(normalize_http_url "$WORKSPACE_IDE_INTERNAL_BASE_URL_CODING_VALUE")"
-WORKSPACE_IDE_FOLDER_CODING_VALUE="$(printf "%s" "$WORKSPACE_IDE_FOLDER_CODING_VALUE" | tr -d '\r')"
-if [ -z "$WORKSPACE_IDE_FOLDER_CODING_VALUE" ]; then
-  WORKSPACE_IDE_FOLDER_CODING_VALUE="/workspace"
-fi
 log_info "Writing CLAWBOARD_WORKSPACE_IDE_PROVIDER in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_PROVIDER" "$WORKSPACE_IDE_PROVIDER_VALUE"
 log_info "Writing CLAWBOARD_WORKSPACE_IDE_PORT in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_PORT" "$WORKSPACE_IDE_PORT_VALUE"
-log_info "Writing CLAWBOARD_WORKSPACE_IDE_CODING_PORT in $INSTALL_DIR/.env..."
-upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_CODING_PORT" "$WORKSPACE_IDE_CODING_PORT_VALUE"
 log_info "Writing CLAWBOARD_WORKSPACE_IDE_BASE_URL in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_BASE_URL" "$WORKSPACE_IDE_BASE_URL_VALUE"
-log_info "Writing CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING in $INSTALL_DIR/.env..."
-upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING" "$WORKSPACE_IDE_BASE_URL_CODING_VALUE"
-log_info "Writing CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING in $INSTALL_DIR/.env..."
-upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING" "$WORKSPACE_IDE_INTERNAL_BASE_URL_CODING_VALUE"
-log_info "Writing CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING in $INSTALL_DIR/.env..."
-upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING" "$WORKSPACE_IDE_FOLDER_CODING_VALUE"
 log_info "Writing CLAWBOARD_WORKSPACE_IDE_PASSWORD in $INSTALL_DIR/.env..."
 upsert_env_value "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_PASSWORD" "$WORKSPACE_IDE_PASSWORD_VALUE"
+remove_env_key "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_CODING_PORT"
+remove_env_key "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_BASE_URL_CODING"
+remove_env_key "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_INTERNAL_BASE_URL_CODING"
+remove_env_key "$INSTALL_DIR/.env" "CLAWBOARD_WORKSPACE_IDE_FOLDER_CODING"
 if read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SERVER_API_BASE" >/dev/null 2>&1; then
   SERVER_API_BASE_VALUE="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_SERVER_API_BASE" || true)"
 else
@@ -5182,6 +5391,7 @@ PY
     maybe_deploy_contract_docs
 
     setup_specialist_agents
+    reconcile_specialist_agent_workspaces_in_config
 
     maybe_offer_agentic_team_setup "$AGENTIC_TEAM_SETUP_MODE"
     sync_main_subagent_allow_agents
@@ -5360,20 +5570,20 @@ case "$AGENTIC_TEAM_SETUP_STATUS" in
     echo "Agentic team:  configured (${AGENTIC_TEAM_AGENT_IDS:-none})"
     ;;
   incomplete)
-    echo "Agentic team:  setup attempted but some worker workspaces were missing"
+    echo "Agentic team:  setup attempted but some execution workspaces were missing"
     echo "               Current delegation pool: ${AGENTIC_TEAM_AGENT_IDS:-none}"
     echo "               Re-run: bash $INSTALL_DIR/scripts/setup_specialist_agents.sh"
     ;;
   openclaw-missing)
     echo "Agentic team:  openclaw not found on PATH during bootstrap"
-    echo "               Add later: openclaw agents add worker --workspace <resolved-workspace> --non-interactive"
+    echo "               Add later: openclaw agents add <id> --workspace <resolved-workspace> --non-interactive"
     ;;
   skipped-mode-never|skipped-by-user|skipped-no-tty|skipped-invalid-mode|not-run)
     if [ -n "${AGENTIC_TEAM_AGENT_IDS:-}" ] && [ "$AGENTIC_TEAM_AGENT_IDS" != "none" ]; then
       echo "Agentic team:  current delegation pool = ${AGENTIC_TEAM_AGENT_IDS}"
     else
       echo "Agentic team:  not configured in this run"
-      echo "               Use --setup-agentic-team or CLAWBOARD_AGENTIC_TEAM_SETUP=always to enroll the worker"
+      echo "               Use --setup-agentic-team or CLAWBOARD_AGENTIC_TEAM_SETUP=always to enroll the execution roster"
     fi
     ;;
 esac

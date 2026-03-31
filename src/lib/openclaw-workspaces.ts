@@ -1,7 +1,15 @@
 import type { OpenClawWorkspace } from "@/lib/types";
 
 export const WORKSPACE_NAV_SYNC_EVENT = "clawboard:navigation-sync";
-const PRIMARY_WORKSPACE_ROOT = "/Users/chris";
+
+function workspaceHomeRoot(path: string) {
+  const normalized = normalizeWorkspacePath(path);
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.length >= 2 && (segments[0] === "Users" || segments[0] === "home")) {
+    return `/${segments[0]}/${segments[1]}`;
+  }
+  return "";
+}
 
 function normalizeWorkspacePath(value: string | null | undefined) {
   return String(value || "")
@@ -14,7 +22,7 @@ function normalizeWorkspacePath(value: string | null | undefined) {
 export function workspaceLabel(agentId: string, agentName?: string | null) {
   const normalizedAgentId = String(agentId || "").trim().toLowerCase();
   const text = String(agentName || "").trim();
-  if (normalizedAgentId === "main" && (!text || text.toLowerCase() === "main")) return "main";
+  if (normalizedAgentId === "main" && (!text || text.toLowerCase() === "main")) return "workspace";
   if (text) return text;
   const raw = String(agentId || "").trim().replace(/[-_]+/g, " ");
   return raw ? raw.slice(0, 1).toUpperCase() + raw.slice(1) : "Agent";
@@ -50,9 +58,10 @@ export function workspaceDirLabel(workspaceDir: string, sharedPrefix: string) {
 export function workspaceDirDisplay(workspaceDir: string) {
   const normalized = normalizeWorkspacePath(workspaceDir);
   if (!normalized) return "";
-  if (normalized === PRIMARY_WORKSPACE_ROOT) return "~";
-  if (normalized.startsWith(`${PRIMARY_WORKSPACE_ROOT}/`)) {
-    return normalized.slice(PRIMARY_WORKSPACE_ROOT.length) || "/";
+  const root = workspaceHomeRoot(normalized);
+  if (root && normalized === root) return "~";
+  if (root && normalized.startsWith(`${root}/`)) {
+    return normalized.slice(root.length) || "/";
   }
   return normalized;
 }

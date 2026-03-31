@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   startTransition,
   useCallback,
@@ -10,6 +10,7 @@ import {
   useMemo,
   useRef,
   useState,
+  Suspense,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { createPortal } from "react-dom";
@@ -29,7 +30,7 @@ import {
 } from "@/lib/openclaw-workspaces";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
-import { buildTopicUrl, withFocusParam, withRevealParam, withSpaceParam } from "@/lib/url";
+import { buildTopicUrl, withFocusParam, withRevealParam } from "@/lib/url";
 import { getApiBase } from "@/lib/api";
 import { queueableApiMutation } from "@/lib/write-queue";
 import type { Space, Topic } from "@/lib/types";
@@ -99,6 +100,13 @@ const ICONS: Record<string, React.ReactElement> = {
   ),
 };
 
+
+function hexToRgba(hex: string, alpha: number) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 
 function SpacesIcon({ className }: { className?: string }) {
   return (
@@ -222,6 +230,7 @@ const NAV_ITEMS = [
 const BOARD_TOPICS_EXPANDED_KEY = "clawboard.board.topics.navExpanded";
 const BOARD_SPACES_EXPANDED_KEY = "clawboard.board.spaces.navExpanded";
 const BOARD_TOPICS_SEARCH_KEY = "clawboard.board.topics.search";
+const BOARD_SHOW_DONE_KEY = "clawboard.board.topics.showDone";
 const BOARD_LAST_URL_KEY = "clawboard.board.lastUrl";
 const WORKSPACE_LAST_URL_KEY = "clawboard.workspaces.lastUrl";
 const HEADER_COMPACT_KEY = "clawboard.header.compact";
@@ -664,7 +673,9 @@ function TopicNavRow({
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <DataProvider>
-      <AppShellLayout>{children}</AppShellLayout>
+      <Suspense fallback={<div className="flex h-screen items-center justify-center">Loading…</div>}>
+        <AppShellLayout>{children}</AppShellLayout>
+      </Suspense>
     </DataProvider>
   );
 }
@@ -672,6 +683,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 function AppShellLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const {
     spaces: storeSpaces,
     topics: storeTopics,
@@ -697,6 +709,9 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
   const [browserPathname, setBrowserPathname] = useState(pathname);
   const headerRef = useRef<HTMLElement | null>(null);
   const mobileNavTouchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const showDoneFromStorage = useLocalStorageItem(BOARD_SHOW_DONE_KEY) === "true";
+  const showDoneFromUrl = searchParams.get("done") === "1";
+  const showDone = showDoneFromStorage || showDoneFromUrl;
   const topicBackedSpaceIds = useMemo(() => {
     const ids = new Set<string>();
     for (const topic of storeTopics) {
@@ -756,6 +771,13 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     return (normalized || "Global").toUpperCase();
   }, [selectedSpaceName]);
 
+  const selectedSpaceColor = useMemo(() => {
+    if (!selectedSpaceId) return null;
+    const space = mergedSpaces.find((s) => s.id === selectedSpaceId);
+    const c = space?.color;
+    return c && /^#[0-9a-fA-F]{6}$/i.test(c) ? c : null;
+  }, [mergedSpaces, selectedSpaceId]);
+
   const allowedSpaceIds = useMemo(() => {
     if (mergedSpaces.length === 0) return [] as string[];
     if (!selectedSpaceId) return [] as string[];
@@ -774,16 +796,17 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     if (!selectedSpaceId) return storeTopics;
     return storeTopics.filter((topic) => topicMatchesSelectedSpace(topic, selectedSpaceId));
   }, [selectedSpaceId, storeTopics]);
+  const storeTopicsById = useMemo(() => new Map(storeTopics.map((topic) => [topic.id, topic])), [storeTopics]);
   const latestTopicTouchById = useMemo(() => buildLatestTopicTouchById(logs), [logs]);
   const attentionTopicIds = useMemo(
     () =>
       deriveAttentionTopicIds({
-        topics,
+        topics: storeTopics,
         latestTopicTouchById,
         topicSeenByKey: chatSeenByKey,
         unsnoozedTopicBadges,
       }),
-    [chatSeenByKey, latestTopicTouchById, topics, unsnoozedTopicBadges]
+    [chatSeenByKey, latestTopicTouchById, storeTopics, unsnoozedTopicBadges]
   );
 
   const apiBase = getApiBase();
@@ -1144,16 +1167,24 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	    });
       if (!query) {
         // Default nav should focus on active topics; snoozed topics only surface via search.
+        // Done topics are filtered out unless showDone is true (matches unified board view behavior).
         return base.filter((topic) => {
           const status = topic.status ?? "active";
-          return status !== "archived" && status !== "snoozed";
+          return status !== "archived" && status !== "snoozed" && (showDone || status !== "done");
         });
       }
+
+      // Apply done filter consistently for search results too
+      const filterDone = (topic: Topic) => {
+        const status = topic.status ?? "active";
+        return showDone || status !== "done";
+      };
 
       if (topicSemanticForQuery) {
         const ranked = (topicSemanticForQuery.topics ?? [])
           .map((match) => topicsById.get(match.id))
-          .filter((t): t is Topic => Boolean(t));
+          .filter((t): t is Topic => Boolean(t))
+          .filter(filterDone);
         if (ranked.length > 0) return ranked;
       }
 
@@ -1164,9 +1195,10 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
         const id = (topic.id ?? "").toLowerCase();
         const description = (topic.description ?? "").toLowerCase();
         const tags = (topic.tags ?? []).join(" ").toLowerCase();
-        return name.includes(q) || id.includes(q) || description.includes(q) || tags.includes(q);
+        const matchesQuery = name.includes(q) || id.includes(q) || description.includes(q) || tags.includes(q);
+        return matchesQuery && filterDone(topic);
       });
-	  }, [normalizedTopicSearch, selectedSpaceId, topicLastActivityById, topicSemanticForQuery, topics, topicsById]);
+	  }, [normalizedTopicSearch, selectedSpaceId, showDone, topicLastActivityById, topicSemanticForQuery, topics, topicsById]);
 
   const boardTopicReorderEnabled = showBoardTopics && !readOnly && normalizedTopicSearch.length === 0;
   const boardTopicsForNav = useMemo(() => {
@@ -1183,6 +1215,26 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
     }
     return count;
   }, [attentionTopicIds, boardTopicsForNav, showBoardTopics]);
+  const hiddenSelectedSpaceAttentionCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const topicId of attentionTopicIds) {
+      const topic = storeTopicsById.get(topicId);
+      if (!topic) continue;
+      const spaceIds = topicSpaceIds(topic);
+      if (spaceIds.length === 0) {
+        // Unspaced topics bubble to the Global button only when a specific space is active
+        if (selectedSpaceId) counts.set("", (counts.get("") ?? 0) + 1);
+        continue;
+      }
+      for (const spaceId of spaceIds) {
+        // Skip the selected space — its topics already show individual badges in the board nav
+        if (selectedSpaceId && spaceId === selectedSpaceId) continue;
+        counts.set(spaceId, (counts.get(spaceId) ?? 0) + 1);
+      }
+    }
+    return counts;
+  }, [attentionTopicIds, selectedSpaceId, storeTopicsById]);
+  const globalHiddenSelectedSpaceAttentionCount = hiddenSelectedSpaceAttentionCounts.get("") ?? 0;
 
   const [draggingBoardTopicId, setDraggingBoardTopicId] = useState<string | null>(null);
   const [boardTopicDropTargetId, setBoardTopicDropTargetId] = useState<string | null>(null);
@@ -1367,7 +1419,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 				              collapsed ? "lg:w-20" : "lg:w-64"
 				            )}
 				          >
-		            <div className="min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
+		            <div className="min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pl-0.5 lg:pr-1.5">
 		              <div className="flex items-center justify-between gap-2.5 lg:block">
 		                <div className={cn("flex min-w-0 items-center gap-2.5", collapsed ? "lg:mx-auto lg:w-fit lg:justify-center" : "")}>
 		                  <Link
@@ -1526,9 +1578,17 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                       className={cn(
                         "flex w-full items-center justify-between rounded-full px-4 py-2 text-sm transition",
                         boardSpacesExpanded
-                          ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.04))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]"
+                          ? "text-[rgb(var(--claw-text))]"
                           : "border border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
                       )}
+                      style={boardSpacesExpanded ? {
+                        background: selectedSpaceColor
+                          ? `linear-gradient(90deg, ${hexToRgba(selectedSpaceColor, 0.24)}, ${hexToRgba(selectedSpaceColor, 0.04)})`
+                          : "linear-gradient(90deg, rgba(255,90,45,0.24), rgba(255,90,45,0.04))",
+                        boxShadow: selectedSpaceColor
+                          ? `0 0 0 1px ${hexToRgba(selectedSpaceColor, 0.45)}`
+                          : "0 0 0 1px rgba(255,90,45,0.35)",
+                      } : undefined}
                       aria-expanded={boardSpacesExpanded}
                       aria-controls="clawboard-nav-spaces"
                     >
@@ -1536,44 +1596,58 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                         <span
                           className={cn(
                             "inline-flex h-5 w-5 items-center justify-center rounded-full border bg-[rgba(255,255,255,0.02)]",
-                            boardSpacesExpanded
-                              ? "border-[rgba(255,159,122,0.48)] text-[rgba(255,198,179,0.98)]"
-                              : "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))]"
+                            !boardSpacesExpanded && "border-[rgb(var(--claw-border))] text-[rgb(var(--claw-muted))]"
                           )}
+                          style={boardSpacesExpanded ? {
+                            borderColor: selectedSpaceColor ? hexToRgba(selectedSpaceColor, 0.55) : "rgba(255,159,122,0.48)",
+                            color: selectedSpaceColor ?? "rgba(255,198,179,0.98)",
+                          } : undefined}
                         >
-                          <SpacesIcon className="h-3.5 w-3.5" />
+                          {selectedSpaceColor ? (
+                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: selectedSpaceColor }} />
+                          ) : (
+                            <SpacesIcon className="h-3.5 w-3.5" />
+                          )}
                         </span>
                         <span className="text-xs uppercase tracking-[0.2em]">{selectedSpaceTagLabel}</span>
                       </span>
                       <span className="text-[10px]">{boardSpacesExpanded ? "▾" : "▸"}</span>
                     </button>
                     {boardSpacesExpanded && (
-                      <div
-                        id="clawboard-nav-spaces"
-                        className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.18)] p-3"
-                      >
-                        <div className="space-y-1">
+                      <div id="clawboard-nav-spaces" className="max-h-[13rem] space-y-1 overflow-y-auto overscroll-contain pl-0.5 pr-1.5">
                         <button
                           type="button"
                           onClick={() => {
                             setLocalStorageItem(ACTIVE_SPACE_KEY, "");
-                            setLocalStorageItem(BOARD_SPACES_EXPANDED_KEY, "false");
-                            router.push("/u");
+                            if (!pathname.startsWith("/u")) router.push("/u");
                           }}
+                          data-board-space-id="global"
                           className={cn(
                             "w-full rounded-full px-3 py-2 text-left text-xs transition",
                             !selectedSpaceId
-                              ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.04))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]"
+                              ? "border border-[rgba(77,171,158,0.52)] text-[rgb(var(--claw-text))]"
                               : "text-[rgb(var(--claw-muted))] hover:bg-[rgba(255,255,255,0.03)] hover:text-[rgb(var(--claw-text))]"
                           )}
                           title="Show everything across spaces"
                         >
-                          <div className="truncate font-semibold">Global</div>
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="truncate font-semibold">Global</div>
+                            {globalHiddenSelectedSpaceAttentionCount > 0 ? (
+                              <span
+                                data-space-attention-count={globalHiddenSelectedSpaceAttentionCount}
+                                aria-label={`${globalHiddenSelectedSpaceAttentionCount} hidden topics need a look`}
+                                className="inline-flex min-w-[1.15rem] shrink-0 items-center justify-center rounded-full border border-[rgba(255,90,45,0.42)] bg-[rgba(255,90,45,0.16)] px-1 text-[9px] font-semibold text-[rgb(var(--claw-text))]"
+                              >
+                                {globalHiddenSelectedSpaceAttentionCount}
+                              </span>
+                            ) : null}
+                          </div>
                           <div className="mt-0.5 truncate font-mono text-[10px] text-[rgba(148,163,184,0.8)]">all spaces</div>
                         </button>
                         <div className="space-y-1">
                           {mergedSpaces.map((space) => {
                             const active = space.id === selectedSpaceId;
+                            const attentionCount = hiddenSelectedSpaceAttentionCounts.get(space.id) ?? 0;
                             const swatch =
                               typeof space.color === "string" && /^#[0-9a-fA-F]{6}$/.test(space.color)
                                 ? space.color
@@ -1584,13 +1658,13 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                                 type="button"
                                 onClick={() => {
                                   setLocalStorageItem(ACTIVE_SPACE_KEY, space.id);
-                                  setLocalStorageItem(BOARD_SPACES_EXPANDED_KEY, "false");
-                                  router.push("/u");
+                                  if (!pathname.startsWith("/u")) router.push("/u");
                                 }}
+                                data-board-space-id={space.id}
                                 className={cn(
                                   "w-full rounded-full px-3 py-2 text-left text-xs transition",
                                   active
-                                    ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.04))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]"
+                                    ? "border border-[rgba(77,171,158,0.52)] text-[rgb(var(--claw-text))]"
                                     : "text-[rgb(var(--claw-muted))] hover:bg-[rgba(255,255,255,0.03)] hover:text-[rgb(var(--claw-text))]"
                                 )}
                                 title={space.name}
@@ -1603,9 +1677,13 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                                     />
                                     <div className="truncate font-semibold">{space.name}</div>
                                   </div>
-                                  {active ? (
-                                    <span className="shrink-0 text-[10px] uppercase tracking-[0.12em] text-[rgba(255,159,122,0.95)]">
-                                      Active
+                                  {attentionCount > 0 ? (
+                                    <span
+                                      data-space-attention-count={attentionCount}
+                                      aria-label={`${attentionCount} hidden topics need a look`}
+                                      className="inline-flex min-w-[1.15rem] shrink-0 items-center justify-center rounded-full border border-[rgba(255,90,45,0.42)] bg-[rgba(255,90,45,0.16)] px-1 text-[9px] font-semibold text-[rgb(var(--claw-text))]"
+                                    >
+                                      {attentionCount}
                                     </span>
                                   ) : null}
                                 </div>
@@ -1614,7 +1692,6 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
                             );
                           })}
                         </div>
-                      </div>
                       </div>
                     )}
                 </div>
@@ -1649,7 +1726,8 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 		                      }}
                       title={collapsed ? item.label : undefined}
                       className={cn(
-                        "flex items-center rounded-full text-sm transition",
+                        "flex items-center text-sm transition",
+                        isBoardItem ? "rounded-xl" : "rounded-full",
                         collapsed ? "justify-center px-3 py-2" : "justify-between px-4 py-2",
                         active
                           ? "bg-[linear-gradient(90deg,rgba(255,90,45,0.24),rgba(255,90,45,0.04))] text-[rgb(var(--claw-text))] shadow-[0_0_0_1px_rgba(255,90,45,0.35)]"
@@ -1685,7 +1763,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 		                    <div key={item.href} className="flex flex-col gap-2">
 		                      {navLink}
 		                      {expanded && isBoardItem && (
-		                        <div className="rounded-[var(--radius-md)] border border-[rgb(var(--claw-border))] bg-[rgba(10,12,16,0.18)] p-3">
+		                        <div className="pl-2">
 	                          <div className="flex items-center gap-2">
 	                            <SearchInput
 		                              value={topicPanelSearch}
@@ -1711,6 +1789,21 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                              {normalizedTopicSearch.length > 0 && topicSemanticSearch.error ? <span>Search failed</span> : null}
 	                              <button
 	                                type="button"
+	                                className={cn(
+	                                  "text-[11px] transition",
+	                                  showDone
+	                                    ? "text-[rgb(var(--claw-text))]"
+	                                    : "text-[rgb(var(--claw-muted))] hover:text-[rgb(var(--claw-text))]"
+	                                )}
+	                                onClick={() => {
+	                                  setLocalStorageItem(BOARD_SHOW_DONE_KEY, showDone ? "false" : "true");
+	                                }}
+	                                title={showDone ? "Hide done topics" : "Show done topics"}
+	                              >
+	                                {showDone ? "✓ Done" : "Done"}
+	                              </button>
+	                              <button
+	                                type="button"
 	                                className="text-[11px] text-[rgb(var(--claw-muted))] transition hover:text-[rgb(var(--claw-text))]"
 	                                onClick={() => {
 	                                  const el = document.querySelector<HTMLTextAreaElement>("[data-testid='unified-composer-textarea']");
@@ -1722,7 +1815,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 	                            </div>
 	                          </div>
 
-			                          <div className="mt-3 max-h-[52vh] space-y-1 overflow-y-auto overscroll-contain pr-1">
+			                          <div className="mt-3 max-h-[13rem] space-y-1 overflow-y-auto overscroll-contain pl-0.5 pr-1.5">
 		                            {filteredTopics.length === 0 ? (
 		                              <div className="rounded-[var(--radius-sm)] border border-[rgb(var(--claw-border))] px-3 py-2 text-xs text-[rgb(var(--claw-muted))]">
 		                                No topics found.
@@ -1732,7 +1825,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
 			                                const selected = topic.id === activeBoardIds.topicId;
 			                                const href = buildTopicUrl(topic, topics);
 			                                const go = () => {
-			                                  router.push(withSpaceParam(withFocusParam(withRevealParam(href, true), true), topic.spaceId));
+			                                  router.push(withFocusParam(withRevealParam(href, true), true));
 			                                };
 
 			                                const dropActive = Boolean(draggingBoardTopicId) && boardTopicDropTargetId === topic.id;

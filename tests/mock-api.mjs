@@ -69,15 +69,15 @@ const openclawWorkspaces = [
   {
     agentId: "coding",
     agentName: "Coding",
-    workspaceDir: "/Users/test/.openclaw/workspace-coding",
-    ideUrl: "http://workspace-ide-coding.localhost:13338/?folder=/workspace",
+    workspaceDir: "/Users/test/.openclaw/workspace/subagents/coding",
+    ideUrl: "http://workspace-ide.localhost:13337/?folder=/Users/test/.openclaw/workspace/subagents/coding",
     preferred: true,
   },
   {
     agentId: "docs",
     agentName: "Docs",
-    workspaceDir: "/Users/test/.openclaw/workspace-docs",
-    ideUrl: "http://workspace-ide.localhost:13337/?folder=/Users/test/.openclaw/workspace-docs",
+    workspaceDir: "/Users/test/.openclaw/workspace/subagents/docs",
+    ideUrl: "http://workspace-ide.localhost:13337/?folder=/Users/test/.openclaw/workspace/subagents/docs",
     preferred: false,
   },
 ];

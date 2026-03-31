@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${CLAWBOARD_ENV_FILE:-$ROOT_DIR/.env}"
 DATA_DIR="$ROOT_DIR/data"
-WORKSPACE_IDE_SERVICES=(workspace-ide workspace-ide-coding)
+WORKSPACE_IDE_SERVICES=(workspace-ide)
 
 COMPOSE_CMD=()
 if docker compose version >/dev/null 2>&1; then
@@ -1859,12 +1859,12 @@ if main_agent is None:
 else:
     emit("PASS", "agents.main.exists", "main agent present")
     allow = set(str(v) for v in ((main_agent.get("subagents") or {}).get("allowAgents") or []))
-    needed_allow = {"coding", "web", "social", "docs"}
+    needed_allow = {"worker"}
     missing_allow = sorted(needed_allow - allow)
     if missing_allow:
         emit("FAIL", "agents.main.subagents.allowAgents", f"missing: {', '.join(missing_allow)}")
     else:
-        emit("PASS", "agents.main.subagents.allowAgents", "coding,web,social,docs")
+        emit("PASS", "agents.main.subagents.allowAgents", "worker")
 
     hb_every = ((main_agent.get("heartbeat") or {}).get("every"))
     if hb_every == "5m":
@@ -1876,7 +1876,6 @@ else:
     needed_tools = {
         "sessions_spawn",
         "sessions_list",
-        "sessions_history",
         "sessions_send",
         "cron",
         "clawboard_search",
@@ -1902,6 +1901,14 @@ else:
         emit("WARN", "agents.main.tools.loopDetection", "not present (may be unsupported on this OpenClaw build)")
 
     main_workspace = str(main_agent.get("workspace", "")).strip()
+    if not main_workspace:
+        defaults_workspace = defaults.get("workspace")
+        if isinstance(defaults_workspace, str) and defaults_workspace.strip():
+            main_workspace = defaults_workspace.strip()
+    if not main_workspace:
+        top_level_workspace = cfg.get("workspace")
+        if isinstance(top_level_workspace, str) and top_level_workspace.strip():
+            main_workspace = top_level_workspace.strip()
     if not main_workspace:
         emit("FAIL", "agents.main.workspace", "missing workspace path")
     else:
