@@ -23,7 +23,16 @@ try:
     from app.db import get_session, init_db  # noqa: E402
     import app.main as main_module  # noqa: E402
     from app.main import app  # noqa: E402
-    from app.models import IngestReceipt, LogEntry, OpenClawRequestRoute, SessionRoutingMemory, Task, Topic  # noqa: E402
+    from app.models import (  # noqa: E402
+        IngestReceipt,
+        LogEntry,
+        OpenClawRequestRoute,
+        OrchestrationItem,
+        OrchestrationRun,
+        SessionRoutingMemory,
+        Task,
+        Topic,
+    )
     from app.schemas import LogAppend  # noqa: E402
 
     _API_TESTS_AVAILABLE = True
@@ -50,6 +59,10 @@ class AppendLogEntryTests(unittest.TestCase):
             for row in session.exec(select(IngestReceipt)).all():
                 session.delete(row)
             for row in session.exec(select(OpenClawRequestRoute)).all():
+                session.delete(row)
+            for row in session.exec(select(OrchestrationItem)).all():
+                session.delete(row)
+            for row in session.exec(select(OrchestrationRun)).all():
                 session.delete(row)
             for row in session.exec(select(SessionRoutingMemory)).all():
                 session.delete(row)
@@ -1999,3 +2012,169 @@ class AppendLogEntryTests(unittest.TestCase):
         patched = patch_res.json() or {}
         self.assertEqual(patched.get("taskId"), "task-a")
         self.assertEqual(patched.get("topicId"), "topic-a")
+
+    def test_append_log_assistant_keeps_thread_work_active_for_running_request(self):
+        ts = now_iso()
+        topic_id = "topic-assistant-active"
+        session_key = f"clawboard:topic:{topic_id}"
+        request_id = "occhat-assistant-active"
+        run_id = "ocorun-assistant-active"
+
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id=topic_id,
+                    name="Assistant Active",
+                    color="#4EA1FF",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.add(
+                OrchestrationRun(
+                    runId=run_id,
+                    requestId=request_id,
+                    sessionKey=session_key,
+                    baseSessionKey=session_key,
+                    spaceId="general",
+                    topicId=topic_id,
+                    mode="single",
+                    status="running",
+                    objective="Keep work visible.",
+                    agentId="main",
+                    leaseUntil=None,
+                    startedAt=ts,
+                    completedAt=None,
+                    version=0,
+                    meta={"lastActivityAt": ts},
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.add(
+                OrchestrationItem(
+                    runId=run_id,
+                    itemKey="subagent:worker:1",
+                    parentItemKey="main.response",
+                    requestId=request_id,
+                    agentId="worker",
+                    kind="subagent",
+                    goal="Research in background.",
+                    sessionKey="agent:worker:subagent:1",
+                    status="running",
+                    attempts=1,
+                    nextCheckAt=ts,
+                    startedAt=ts,
+                    completedAt=None,
+                    lastError=None,
+                    meta={"lastActivityAt": ts},
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+            published: list[dict[str, object]] = []
+            with patch.object(main_module, "publish_live_event", side_effect=published.append):
+                main_module.append_log_entry(
+                    session,
+                    LogAppend(
+                        type="conversation",
+                        topicId=topic_id,
+                        content="Handed off to the worker.",
+                        summary="Handed off to the worker.",
+                        raw="Handed off to the worker.",
+                        createdAt=ts,
+                        agentId="assistant",
+                        agentLabel="Assistant",
+                        classificationStatus="classified",
+                        source={
+                            "channel": "direct",
+                            "sessionKey": session_key,
+                            "requestId": request_id,
+                            "messageId": "oc:assistant-active-1",
+                        },
+                    ),
+                    idempotency_key="assistant-active-thread-work",
+                )
+
+        typing_events = [event for event in published if str(event.get("type") or "") == "openclaw.typing"]
+        thread_work_events = [event for event in published if str(event.get("type") or "") == "openclaw.thread_work"]
+        self.assertTrue(any(bool((event.get("data") or {}).get("typing")) is False for event in typing_events))
+        self.assertTrue(
+            any(
+                bool((event.get("data") or {}).get("active")) is True
+                and str((event.get("data") or {}).get("reason") or "") == "orchestration_running"
+                for event in thread_work_events
+            )
+        )
+        self.assertFalse(
+            any(
+                bool((event.get("data") or {}).get("active")) is False
+                and str((event.get("data") or {}).get("reason") or "") == "assistant_response"
+                for event in thread_work_events
+            )
+        )
+
+    def test_append_log_assistant_clears_thread_work_when_request_is_terminal(self):
+        ts = now_iso()
+        topic_id = "topic-assistant-terminal"
+        session_key = f"clawboard:topic:{topic_id}"
+        request_id = "occhat-assistant-terminal"
+
+        with get_session() as session:
+            session.add(
+                Topic(
+                    id=topic_id,
+                    name="Assistant Terminal",
+                    color="#4EA1FF",
+                    description="test",
+                    priority="medium",
+                    status="active",
+                    tags=[],
+                    parentId=None,
+                    pinned=False,
+                    createdAt=ts,
+                    updatedAt=ts,
+                )
+            )
+            session.commit()
+
+            published: list[dict[str, object]] = []
+            with patch.object(main_module, "publish_live_event", side_effect=published.append):
+                main_module.append_log_entry(
+                    session,
+                    LogAppend(
+                        type="conversation",
+                        topicId=topic_id,
+                        content="Final answer.",
+                        summary="Final answer.",
+                        raw="Final answer.",
+                        createdAt=ts,
+                        agentId="assistant",
+                        agentLabel="Assistant",
+                        classificationStatus="classified",
+                        source={
+                            "channel": "direct",
+                            "sessionKey": session_key,
+                            "requestId": request_id,
+                            "messageId": "oc:assistant-terminal-1",
+                        },
+                    ),
+                    idempotency_key="assistant-terminal-thread-work",
+                )
+
+        thread_work_events = [event for event in published if str(event.get("type") or "") == "openclaw.thread_work"]
+        self.assertTrue(
+            any(
+                bool((event.get("data") or {}).get("active")) is False
+                and str((event.get("data") or {}).get("reason") or "") == "assistant_response"
+                for event in thread_work_events
+            )
+        )

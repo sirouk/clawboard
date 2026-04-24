@@ -5093,14 +5093,15 @@ if [ "$SKIP_DOCKER" = false ]; then
     log_error "Docker Compose not found. Install docker compose v2 or docker-compose."
   fi
 
-  log_info "Building and starting ClawBoard via docker compose (rerun-safe; no pre-emptive teardown)..."
+  COMPOSE_PARALLEL_LIMIT_VALUE="${COMPOSE_PARALLEL_LIMIT:-${CLAWBOARD_COMPOSE_PARALLEL_LIMIT:-1}}"
+  log_info "Building and starting ClawBoard via docker compose (rerun-safe; no pre-emptive teardown, parallel limit=${COMPOSE_PARALLEL_LIMIT_VALUE})..."
   WEB_HOT_RELOAD="$(read_env_value_from_file "$INSTALL_DIR/.env" "CLAWBOARD_WEB_HOT_RELOAD" || true)"
   case "$WEB_HOT_RELOAD" in
     1|true|TRUE|yes|YES)
-      (cd "$INSTALL_DIR" && $COMPOSE --profile dev up -d --build api classifier qdrant web-dev)
+      (cd "$INSTALL_DIR" && COMPOSE_PARALLEL_LIMIT="$COMPOSE_PARALLEL_LIMIT_VALUE" $COMPOSE --profile dev up -d --build api classifier qdrant web-dev)
       ;;
     *)
-      (cd "$INSTALL_DIR" && $COMPOSE up -d --build)
+      (cd "$INSTALL_DIR" && COMPOSE_PARALLEL_LIMIT="$COMPOSE_PARALLEL_LIMIT_VALUE" $COMPOSE up -d --build)
       ;;
   esac
   log_success "ClawBoard services running."

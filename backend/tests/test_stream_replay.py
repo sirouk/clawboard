@@ -22,7 +22,7 @@ try:
     from app.db import init_db, get_session
     from app.main import app, _ingest_openclaw_history_messages  # noqa: E402
     from app.events import EventHub, event_hub
-    from app.models import LogEntry, OpenClawChatDispatchQueue
+    from app.models import LogEntry, OpenClawChatDispatchQueue, OrchestrationItem, OrchestrationRun
     _API_TESTS_AVAILABLE = True
 except Exception:
     TestClient = None  # type: ignore[assignment]
@@ -33,6 +33,8 @@ except Exception:
     _ingest_openclaw_history_messages = None  # type: ignore[assignment]
     LogEntry = None  # type: ignore[assignment]
     OpenClawChatDispatchQueue = None  # type: ignore[assignment]
+    OrchestrationItem = None  # type: ignore[assignment]
+    OrchestrationRun = None  # type: ignore[assignment]
     _API_TESTS_AVAILABLE = False
 
 
@@ -166,6 +168,183 @@ class StreamReplayTests(unittest.TestCase):
         self.assertTrue(any(str(item.get("sessionKey") or "") == session_key for item in thread_work))
         self.assertTrue(any(str(item.get("requestId") or "") == request_id for item in thread_work))
         self.assertGreaterEqual(str(payload.get("cursor") or ""), stamp)
+
+    def test_changes_reconcile_returns_orchestration_thread_work_details(self):
+        read_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
+        session_key = "clawboard:task:topic-thread-work-rich:task-thread-work-rich"
+        request_id = "occhat-thread-work-rich"
+        run_id = "ocrun-thread-work-rich"
+        started_at = "2026-04-01T17:20:00.000Z"
+        updated_at = "2026-04-01T17:25:00.000Z"
+        last_activity_at = "2026-04-01T17:34:56.000Z"
+        waiting_item_key = "subagent:worker-agent:rich"
+
+        with get_session() as session:
+            session.add(
+                OrchestrationRun(
+                    runId=run_id,
+                    requestId=request_id,
+                    sessionKey=session_key,
+                    baseSessionKey=session_key,
+                    spaceId="general",
+                    topicId="topic-thread-work-rich",
+                    mode="single",
+                    status="running",
+                    objective="Keep streaming progress visible.",
+                    agentId="main",
+                    leaseUntil=None,
+                    startedAt=started_at,
+                    completedAt=None,
+                    version=0,
+                    meta={"lastActivityAt": last_activity_at},
+                    createdAt=started_at,
+                    updatedAt=updated_at,
+                )
+            )
+            session.add(
+                OrchestrationItem(
+                    runId=run_id,
+                    itemKey="main.response",
+                    parentItemKey=None,
+                    requestId=request_id,
+                    agentId="main",
+                    kind="main",
+                    goal="Coordinate the worker.",
+                    sessionKey=session_key,
+                    status="running",
+                    attempts=1,
+                    nextCheckAt=last_activity_at,
+                    startedAt=started_at,
+                    completedAt=None,
+                    lastError=None,
+                    meta={"lastActivityAt": last_activity_at},
+                    createdAt=started_at,
+                    updatedAt=updated_at,
+                )
+            )
+            session.add(
+                OrchestrationItem(
+                    runId=run_id,
+                    itemKey=waiting_item_key,
+                    parentItemKey="main.response",
+                    requestId=request_id,
+                    agentId="worker",
+                    kind="subagent",
+                    goal="Do the substantive work.",
+                    sessionKey="agent:worker:subagent:thread-work-rich",
+                    status="running",
+                    attempts=0,
+                    nextCheckAt=last_activity_at,
+                    startedAt=started_at,
+                    completedAt=None,
+                    lastError=None,
+                    meta={"lastActivityAt": last_activity_at},
+                    createdAt=started_at,
+                    updatedAt=updated_at,
+                )
+            )
+            session.commit()
+
+        changes = self.client.get("/api/changes", headers=read_headers)
+        self.assertEqual(changes.status_code, 200, changes.text)
+        payload = changes.json()
+
+        thread_work = payload.get("openclawThreadWork") or []
+        rich_row = next((item for item in thread_work if str(item.get("sessionKey") or "") == session_key), None)
+        self.assertIsNotNone(rich_row, "expected orchestration-backed thread work snapshot")
+        self.assertTrue(bool(rich_row.get("active")))
+        self.assertEqual(str(rich_row.get("requestId") or ""), request_id)
+        self.assertEqual(str(rich_row.get("runId") or ""), run_id)
+        self.assertEqual(int(rich_row.get("activeItems") or 0), 1)
+        self.assertEqual(rich_row.get("waitingItemKeys"), [waiting_item_key])
+        self.assertEqual(str(rich_row.get("lastActivityAt") or ""), last_activity_at)
+        self.assertEqual(str(rich_row.get("reason") or ""), "orchestration_running")
+        self.assertGreaterEqual(str(rich_row.get("updatedAt") or ""), last_activity_at)
+
+    def test_changes_reconcile_marks_signal_snapshots_authoritative_when_terminal_events_clear_them(self):
+        write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
+        read_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}
+        suffix = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+        topic_id = f"topic-signal-authoritative-{suffix}"
+        session_key = f"clawboard:topic:{topic_id}"
+        request_id = f"occhat-signal-authoritative-{suffix}"
+        stamp = now_iso()
+
+        topic_res = self.client.post(
+            "/api/topics",
+            json={"id": topic_id, "name": f"Signal Authoritative {suffix}"},
+            headers=write_headers,
+        )
+        self.assertEqual(topic_res.status_code, 200, topic_res.text)
+
+        with get_session() as session:
+            session.add(
+                OpenClawChatDispatchQueue(
+                    requestId=request_id,
+                    sessionKey=session_key,
+                    agentId="main",
+                    sentAt=stamp,
+                    message="Signal authoritative smoke",
+                    attachmentIds=[],
+                    status="pending",
+                    attempts=0,
+                    nextAttemptAt=stamp,
+                    claimedAt=None,
+                    completedAt=None,
+                    lastError=None,
+                    createdAt=stamp,
+                    updatedAt=stamp,
+                )
+            )
+            session.commit()
+
+        initial = self.client.get("/api/changes", headers=read_headers)
+        self.assertEqual(initial.status_code, 200, initial.text)
+        initial_payload = initial.json()
+        initial_cursor = str(initial_payload.get("cursor") or "").strip()
+        self.assertTrue(initial_cursor)
+        self.assertTrue(
+            any(str(item.get("sessionKey") or "") == session_key for item in (initial_payload.get("openclawThreadWork") or []))
+        )
+
+        terminal_stamp = now_iso()
+        with get_session() as session:
+            row = session.exec(select(OpenClawChatDispatchQueue).where(OpenClawChatDispatchQueue.requestId == request_id)).first()
+            self.assertIsNotNone(row)
+            row.status = "failed"
+            row.lastError = "assistant_response"
+            row.completedAt = terminal_stamp
+            row.updatedAt = terminal_stamp
+            session.add(row)
+            session.commit()
+
+        assistant_log = self.client.post(
+            "/api/log",
+            json={
+                "topicId": topic_id,
+                "type": "conversation",
+                "content": f"assistant-finished-{suffix}",
+                "summary": f"assistant-finished-{suffix}",
+                "agentId": "assistant",
+                "agentLabel": "OpenClaw",
+                "source": {
+                    "sessionKey": session_key,
+                    "channel": "clawboard",
+                    "requestId": request_id,
+                },
+            },
+            headers=write_headers,
+        )
+        self.assertEqual(assistant_log.status_code, 200, assistant_log.text)
+
+        changes = self.client.get("/api/changes", params={"since": initial_cursor}, headers=read_headers)
+        self.assertEqual(changes.status_code, 200, changes.text)
+        payload = changes.json()
+
+        self.assertTrue(bool(payload.get("authoritativeOpenclawTyping")))
+        self.assertTrue(bool(payload.get("authoritativeOpenclawThreadWork")))
+        self.assertFalse(any(str(item.get("sessionKey") or "") == session_key for item in (payload.get("openclawTyping") or [])))
+        self.assertFalse(any(str(item.get("sessionKey") or "") == session_key for item in (payload.get("openclawThreadWork") or [])))
 
     def test_log_chat_counts_exclude_internal_noise_and_cron_rows(self):
         write_headers = {"Host": "localhost:8010", "X-ClawBoard-Token": "test-token"}

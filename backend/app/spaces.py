@@ -474,6 +474,29 @@ def _space_id_from_label(label: str | None) -> str:
     return f"space-{slug}"
 
 
+_OPERATIONAL_TOPIC_TAG_PREFIXES = (
+    "agent:",
+    "session:",
+    "request:",
+    "run:",
+    "subagent:",
+    "delegate:",
+    "delegation:",
+    "worker:",
+    "orchestration:",
+)
+_OPERATIONAL_TOPIC_TAG_VALUES = {"delegating"}
+
+
+def _is_operational_topic_tag(label: str | None) -> bool:
+    lowered = " ".join(str(label or "").split()).strip().lower()
+    if not lowered:
+        return False
+    if lowered in _OPERATIONAL_TOPIC_TAG_VALUES:
+        return True
+    return any(lowered.startswith(prefix) for prefix in _OPERATIONAL_TOPIC_TAG_PREFIXES)
+
+
 # ---------------------------------------------------------------------------
 # Space row persistence
 # ---------------------------------------------------------------------------
@@ -527,6 +550,11 @@ def _topic_space_candidates_from_tags(tags: list[str] | None) -> list[tuple[str,
         if lowered.startswith("space:"):
             tag = tag.split(":", 1)[1].strip()
             if not tag:
+                continue
+        else:
+            if _is_operational_topic_tag(tag):
+                continue
+            if ":" in lowered:
                 continue
         label = " ".join(tag.split()).strip()
         if not label:

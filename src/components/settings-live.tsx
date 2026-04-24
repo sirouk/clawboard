@@ -18,6 +18,7 @@ import { randomId } from "@/lib/id";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { getSpaceDefaultVisibility } from "@/lib/space-visibility";
 import { setPwaBadge, showPwaNotification, usePwaNotifications, usePwaBadging } from "@/lib/pwa-utils";
+import { spaceIdFromTopicTagLabel } from "@/lib/topic-tags";
 import type { IntegrationLevel, Space, Topic } from "@/lib/types";
 import { normalizeHexColor, pickVibrantDistinctColor, TOPIC_FALLBACK_COLORS } from "@/components/unified-view";
 
@@ -75,20 +76,19 @@ function displaySpaceName(space: Pick<Space, "id" | "name">) {
   return friendly || deriveSpaceName(id);
 }
 
-function spaceIdFromTagLabel(value: string) {
-  let text = String(value ?? "").trim().toLowerCase();
-  if (!text) return null;
-  if (text.startsWith("system:")) return null;
-  if (text.startsWith("space:")) text = text.split(":", 2)[1]?.trim() ?? "";
-  const slugged = text
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9-]/g, "")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (!slugged || slugged === "default" || slugged === "global" || slugged === "all" || slugged === "all-spaces") {
-    return null;
+async function readApiErrorMessage(response: Response, fallback: string) {
+  try {
+    const payload = await response.json();
+    const detail = typeof payload?.detail === "string" ? payload.detail.trim() : "";
+    if (detail) return detail;
+  } catch {
+    // Ignore invalid JSON error payloads and fall back to the caller-provided message.
   }
-  return `space-${slugged}`;
+  return fallback;
+}
+
+function spaceIdFromTagLabel(value: string) {
+  return spaceIdFromTopicTagLabel(value);
 }
 
 function topicSpaceIds(topic: Pick<Topic, "spaceId" | "tags"> | null | undefined) {
@@ -766,19 +766,34 @@ export function SettingsLive() {
                   usageCount.set(normalized, (usageCount.get(normalized) ?? 0) + 1);
                   updates.push({ space, color: normalized });
                 }
+                const persisted = new Map<string, Space>();
                 for (const { space, color } of updates) {
-                  await apiFetch(
-                    `/api/spaces/${encodeURIComponent(space.id)}`,
-                    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ color }) },
+                  const res = await apiFetch(
+                    "/api/spaces",
+                    {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ id: space.id, name: space.name, color }),
+                    },
                     localToken.trim()
                   );
+                  if (!res.ok) {
+                    throw new Error(await readApiErrorMessage(res, `Failed to persist color for ${space.name}.`));
+                  }
+                  const saved = (await res.json().catch(() => null)) as Space | null;
+                  if (!saved || typeof saved.id !== "string" || !saved.id.trim()) {
+                    throw new Error(`API returned an invalid space payload for ${space.name}.`);
+                  }
+                  persisted.set(saved.id, saved);
                 }
-                setSpaces((prev) =>
-                  prev.map((s) => {
-                    const upd = updates.find((u) => u.space.id === s.id);
-                    return upd ? { ...s, color: upd.color } : s;
-                  })
-                );
+                setSpaces((prev) => {
+                  const next = prev.map((space) => persisted.get(space.id) ?? space);
+                  for (const saved of persisted.values()) {
+                    if (next.some((space) => space.id === saved.id)) continue;
+                    next.push(saved);
+                  }
+                  return next;
+                });
                 setMessage("Space colors updated.");
               } catch (err) {
                 setError(err instanceof Error ? err.message : "Failed to update space colors.");

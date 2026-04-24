@@ -21,6 +21,15 @@ compose() {
   "${COMPOSE_CMD[@]}" "$@"
 }
 
+compose_with_build_defaults() {
+  local parallel_limit="${COMPOSE_PARALLEL_LIMIT:-${CLAWBOARD_COMPOSE_PARALLEL_LIMIT:-1}}"
+  if [ -n "$parallel_limit" ]; then
+    COMPOSE_PARALLEL_LIMIT="$parallel_limit" compose "$@"
+    return
+  fi
+  compose "$@"
+}
+
 ensure_workspace_ide_services() {
   compose up -d "${WORKSPACE_IDE_SERVICES[@]}"
 }
@@ -279,7 +288,7 @@ rebuild() {
 
     # No build needed for web-dev (runs from node base image + bind mount), but --build
     # is harmless and keeps api/classifier up to date when requested.
-    compose --profile dev up -d --build --force-recreate "${services[@]}"
+    compose_with_build_defaults --profile dev up -d --build --force-recreate "${services[@]}"
     ensure_workspace_ide_services
     return
   fi
@@ -299,12 +308,12 @@ rebuild() {
         break
       fi
     done
-    compose up -d --build --force-recreate "${services[@]}"
+    compose_with_build_defaults up -d --build --force-recreate "${services[@]}"
     ensure_workspace_ide_services
     return
   fi
 
-  compose up -d --build --force-recreate
+  compose_with_build_defaults up -d --build --force-recreate
   ensure_workspace_ide_services
 }
 
@@ -315,11 +324,11 @@ fresh() {
   # Remove the Docker-managed .next cache volume used by web-dev.
   docker volume rm -f clawboard_clawboard_web_next_cache >/dev/null 2>&1 || true
   if is_web_hot_reload_enabled; then
-    compose --profile dev up -d --build --force-recreate api classifier qdrant web-dev
+    compose_with_build_defaults --profile dev up -d --build --force-recreate api classifier qdrant web-dev
     ensure_workspace_ide_services
     return
   fi
-  compose up -d --build --force-recreate
+  compose_with_build_defaults up -d --build --force-recreate
   ensure_workspace_ide_services
 }
 

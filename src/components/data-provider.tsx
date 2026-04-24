@@ -3,7 +3,12 @@
 import { createContext, startTransition, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Draft, LogEntry, Space, Task, Topic } from "@/lib/types";
 import { apiFetch } from "@/lib/api";
-import { loadBoardSnapshot, saveBoardSnapshot, type BoardSnapshot } from "@/lib/board-cache";
+import {
+  loadBoardSnapshot,
+  saveBoardSnapshot,
+  type BoardSnapshot,
+  type OpenClawThreadWorkSnapshot,
+} from "@/lib/board-cache";
 import { useLiveUpdates, type ConnectionInfo, type ReconcileCursor, type ReconcileResult } from "@/lib/use-live-updates";
 import { drainQueuedMutations } from "@/lib/write-queue";
 import { LiveEvent, mergeById, mergeLogs, maxTimestamp, removeById, upsertById } from "@/lib/live-utils";
@@ -19,6 +24,7 @@ import {
   parseStringMap,
 } from "@/lib/attention-state";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
+import { cleanTopicTagLabel, filterUserFacingTopicTagLabels } from "@/lib/topic-tags";
 import { buildLatestTopicTouchById, deriveAttentionTopicIds, topicLastTouchedAt } from "@/lib/topic-attention";
 import {
   CLAWBOARD_NOTIFICATION_CLICK_EVENT,
@@ -46,7 +52,7 @@ type DataContextValue = {
   attentionTopicCount: number;
   drafts: Record<string, Draft>;
   openclawTyping: Record<string, { typing: boolean; requestId?: string; updatedAt: string }>;
-  openclawThreadWork: Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }>;
+  openclawThreadWork: Record<string, OpenClawThreadWorkSnapshot>;
   hydrated: boolean;
   sseConnected: boolean;
   connectionStatus: "connected" | "reconnecting" | "offline";
@@ -78,10 +84,6 @@ function normalizeTagValue(value: string) {
   const withDashes = raw.replace(/\s+/g, "-");
   const stripped = withDashes.replace(/[^a-z0-9:_-]/g, "");
   return stripped.replace(/:{2,}/g, ":").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
-}
-
-function cleanTagLabel(value: string) {
-  return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
 function clipNotificationText(value: string, max = 140) {
@@ -248,6 +250,10 @@ type ThreadWorkSignalSnapshot = {
   active?: unknown;
   requestId?: unknown;
   reason?: unknown;
+  runId?: unknown;
+  activeItems?: unknown;
+  waitingItemKeys?: unknown;
+  lastActivityAt?: unknown;
   updatedAt?: unknown;
 };
 type ChangesPayload = {
@@ -261,6 +267,8 @@ type ChangesPayload = {
   deletedTopics?: unknown;
   openclawTyping?: unknown;
   openclawThreadWork?: unknown;
+  authoritativeOpenclawTyping?: unknown;
+  authoritativeOpenclawThreadWork?: unknown;
   resetAt?: unknown;
 };
 
@@ -325,7 +333,8 @@ function mergeDeletedTopicTimestamps(previous: Record<string, string>, tombstone
 function reconcileTypingSnapshot(
   previous: Record<string, { typing: boolean; requestId?: string; updatedAt: string }>,
   incoming: TypingSignalSnapshot[],
-  cursor: string | undefined
+  cursor: string | undefined,
+  options?: { replace?: boolean }
 ) {
   const next: Record<string, { typing: boolean; requestId?: string; updatedAt: string }> = {};
   for (const row of incoming) {
@@ -340,6 +349,9 @@ function reconcileTypingSnapshot(
       updatedAt,
     };
   }
+  if (options?.replace) {
+    return JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+  }
   if (cursor) {
     for (const [sessionKey, row] of Object.entries(previous)) {
       if (next[sessionKey]) continue;
@@ -351,23 +363,37 @@ function reconcileTypingSnapshot(
 }
 
 function reconcileThreadWorkSnapshot(
-  previous: Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }>,
+  previous: Record<string, OpenClawThreadWorkSnapshot>,
   incoming: ThreadWorkSignalSnapshot[],
-  cursor: string | undefined
+  cursor: string | undefined,
+  options?: { replace?: boolean }
 ) {
-  const next: Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }> = {};
+  const next: Record<string, OpenClawThreadWorkSnapshot> = {};
   for (const row of incoming) {
     const sessionKey = normalizeBoardSessionKey(String(row.sessionKey ?? "").trim());
     const updatedAt = String(row.updatedAt ?? "").trim();
     if (!sessionKey || !updatedAt) continue;
     const current = next[sessionKey];
     if (current && !isIncomingSignalNewer(current.updatedAt, updatedAt)) continue;
+    const waitingItemKeys = Array.isArray(row.waitingItemKeys)
+      ? row.waitingItemKeys.map((value) => String(value ?? "").trim()).filter(Boolean).slice(0, 6)
+      : undefined;
+    const activeItemsRaw = row.activeItems == null ? Number.NaN : Number(row.activeItems);
+    const activeItems = Number.isFinite(activeItemsRaw) ? Math.max(0, Math.floor(activeItemsRaw)) : undefined;
+    const lastActivityAt = String(row.lastActivityAt ?? "").trim() || undefined;
     next[sessionKey] = {
       active: Boolean(row.active ?? true),
       requestId: String(row.requestId ?? "").trim() || undefined,
       reason: String(row.reason ?? "").trim() || undefined,
+      runId: String(row.runId ?? "").trim() || undefined,
+      activeItems,
+      waitingItemKeys,
+      lastActivityAt,
       updatedAt,
     };
+  }
+  if (options?.replace) {
+    return JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
   }
   if (cursor) {
     for (const [sessionKey, row] of Object.entries(previous)) {
@@ -477,7 +503,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     Record<string, { typing: boolean; requestId?: string; updatedAt: string }>
   >({});
   const [openclawThreadWork, setOpenclawThreadWork] = useState<
-    Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }>
+    Record<string, OpenClawThreadWorkSnapshot>
   >({});
   const [hydrated, setHydrated] = useState(false);
   const [sseConnected, setSseConnected] = useState(false);
@@ -773,6 +799,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     const threadWorkSignals = Array.isArray(payload.openclawThreadWork)
       ? (payload.openclawThreadWork as ThreadWorkSignalSnapshot[])
       : [];
+    const authoritativeOpenclawTyping = Boolean(payload.authoritativeOpenclawTyping);
+    const authoritativeOpenclawThreadWork = Boolean(payload.authoritativeOpenclawThreadWork);
+    const replaceSignalSnapshots = typeof effectiveSinceSeq !== "number";
     // Full snapshot: replace to avoid keeping stale items when the stream resets or base/token changes.
     if (!incremental) {
       if (Array.isArray(payload.spaces)) {
@@ -807,8 +836,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           setLogs((prev) => prev.filter((row) => !deleted.has(row.id)));
         }
       }
-      setOpenclawTyping((prev) => reconcileTypingSnapshot(prev, typingSignals, responseCursor));
-      setOpenclawThreadWork((prev) => reconcileThreadWorkSnapshot(prev, threadWorkSignals, responseCursor));
+      setOpenclawTyping((prev) =>
+        reconcileTypingSnapshot(prev, typingSignals, responseCursor, {
+          replace: authoritativeOpenclawTyping && replaceSignalSnapshots,
+        })
+      );
+      setOpenclawThreadWork((prev) =>
+        reconcileThreadWorkSnapshot(prev, threadWorkSignals, responseCursor, {
+          replace: authoritativeOpenclawThreadWork && replaceSignalSnapshots,
+        })
+      );
       if (Array.isArray(payload.drafts)) {
         setDrafts((prev) => {
           const next: Record<string, Draft> = {};
@@ -840,8 +877,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         const deleted = new Set(payload.deletedLogIds.map((id: unknown) => String(id ?? "").trim()).filter(Boolean));
         if (deleted.size > 0) setLogs((prev) => prev.filter((row) => !deleted.has(row.id)));
       }
-      setOpenclawTyping((prev) => reconcileTypingSnapshot(prev, typingSignals, responseCursor));
-      setOpenclawThreadWork((prev) => reconcileThreadWorkSnapshot(prev, threadWorkSignals, responseCursor));
+      setOpenclawTyping((prev) =>
+        reconcileTypingSnapshot(prev, typingSignals, responseCursor, {
+          replace: authoritativeOpenclawTyping && replaceSignalSnapshots,
+        })
+      );
+      setOpenclawThreadWork((prev) =>
+        reconcileThreadWorkSnapshot(prev, threadWorkSignals, responseCursor, {
+          replace: authoritativeOpenclawThreadWork && replaceSignalSnapshots,
+        })
+      );
       if (Array.isArray(payload.drafts)) {
         setDrafts((prev) => {
           const next = { ...prev };
@@ -917,13 +962,20 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     if (event.type === "openclaw.thread_work" && event.data && typeof event.data === "object") {
-      const payload = event.data as { sessionKey?: unknown; active?: unknown; requestId?: unknown; reason?: unknown };
+      const payload = event.data as ThreadWorkSignalSnapshot;
       const sessionKey = String(payload.sessionKey ?? "").trim();
       const normalizedSessionKey = normalizeBoardSessionKey(sessionKey);
       if (!normalizedSessionKey) return;
       const active = Boolean(payload.active);
       const requestId = String(payload.requestId ?? "").trim();
       const reason = String(payload.reason ?? "").trim();
+      const runId = String(payload.runId ?? "").trim();
+      const waitingItemKeys = Array.isArray(payload.waitingItemKeys)
+        ? payload.waitingItemKeys.map((value) => String(value ?? "").trim()).filter(Boolean).slice(0, 6)
+        : undefined;
+      const activeItemsRaw = payload.activeItems == null ? Number.NaN : Number(payload.activeItems);
+      const activeItems = Number.isFinite(activeItemsRaw) ? Math.max(0, Math.floor(activeItemsRaw)) : undefined;
+      const lastActivityAt = String(payload.lastActivityAt ?? "").trim();
       const updatedAt = resolveLiveEventTimestamp(event);
       setOpenclawThreadWork((prev) => {
         const current = prev[normalizedSessionKey];
@@ -934,6 +986,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
             active,
             requestId: requestId || undefined,
             reason: reason || undefined,
+            runId: runId || undefined,
+            activeItems,
+            waitingItemKeys,
+            lastActivityAt: lastActivityAt || undefined,
             updatedAt,
           },
         };
@@ -1237,8 +1293,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const topicTags = useMemo(() => {
     const labels = new Map<string, string>();
     for (const topic of safeTopics) {
-      for (const rawTag of topic.tags ?? []) {
-        const label = cleanTagLabel(String(rawTag ?? ""));
+      for (const rawTag of filterUserFacingTopicTagLabels(topic.tags ?? [])) {
+        const label = cleanTopicTagLabel(rawTag);
         const normalized = normalizeTagValue(label);
         if (!normalized || labels.has(normalized)) continue;
         labels.set(normalized, label);

@@ -59,6 +59,11 @@ import { usePersistentDraft } from "@/lib/drafts";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { randomId } from "@/lib/id";
 import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
+import {
+  filterUserFacingTopicTagLabels,
+  mergeVisibleAndReservedTopicTagLabels,
+  spaceIdFromTopicTagLabel,
+} from "@/lib/topic-tags";
 import { SnoozeModal } from "@/components/snooze-modal";
 import { useUnifiedExpansionState } from "@/components/unified-view-state";
 import { getInitialUnifiedUrlState, parseUnifiedUrlState } from "@/components/unified-view-url-state";
@@ -80,8 +85,8 @@ import {
   normalizeOpenClawRequestId,
   parseIsoMs,
   requestIdForLogEntry,
-  resolveAuthoritativeSessionWorkState,
   resolveThreadWorkSignal,
+  threadWorkSignalFreshMs,
   type SessionWorkTtls,
 } from "@/components/unified-view/thread-state";
 import { SwipeRevealRow } from "@/components/unified-view/swipe-reveal-row";
@@ -155,6 +160,21 @@ function TypingDots({ className, dotClassName }: { className?: string; dotClassN
       <span className={cn(baseDot, "animate-pulse [animation-delay:240ms]")} />
     </span>
   );
+}
+
+function formatSessionWorkLabel(activeItems: number, reason?: string) {
+  const normalizedReason = String(reason ?? "").trim().toLowerCase();
+  if (normalizedReason === "orchestration_stalled") {
+    return activeItems > 0 ? `Recovering ${activeItems} item${activeItems === 1 ? "" : "s"}` : "Recovering";
+  }
+  if (normalizedReason === "sending") return "Sending";
+  if (normalizedReason === "queued") return "Queued";
+  if (normalizedReason === "retry") return "Retrying";
+  if (normalizedReason === "dispatch_started") return "Dispatching";
+  if (normalizedReason === "responding") return "Responding";
+  if (activeItems > 1) return `${activeItems} items in flight`;
+  if (activeItems === 1) return "1 item in flight";
+  return "Worker active";
 }
 
 function PaperclipIcon({ className }: { className?: string }) {
@@ -527,19 +547,7 @@ function tagSuggestionsForDraft(text: string, options: string[]) {
 }
 
 function spaceIdFromTagLabel(value: string) {
-  let text = String(value ?? "").trim().toLowerCase();
-  if (!text) return null;
-  if (text.startsWith("system:")) return null;
-  if (text.startsWith("space:")) text = text.split(":", 2)[1]?.trim() ?? "";
-  const slug = text
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9-]/g, "")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (!slug || slug === "default" || slug === "global" || slug === "all" || slug === "all-spaces") {
-    return null;
-  }
-  return `space-${slug}`;
+  return spaceIdFromTopicTagLabel(value);
 }
 
 function topicSpaceIds(topic: Pick<Topic, "spaceId" | "tags"> | null | undefined) {
@@ -1843,6 +1851,23 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
       debugHint?: string;
     }>
   >([]);
+  const latestPendingPreviewBySession = useMemo<Record<string, { full: string; clipped: string; createdAt: string }>>(() => {
+    const next: Record<string, { full: string; clipped: string; createdAt: string }> = {};
+    for (const pending of pendingMessages) {
+      if (pending.status === "failed") continue;
+      const sessionKey = normalizeBoardSessionKey(pending.sessionKey);
+      if (!sessionKey) continue;
+      const full = String(pending.message ?? "").trim();
+      if (!full) continue;
+      const current = next[sessionKey];
+      if (current && String(current.createdAt ?? "") > String(pending.createdAt ?? "")) continue;
+      next[sessionKey] = {
+        ...formatChatHeaderBlurb(full),
+        createdAt: String(pending.createdAt ?? "").trim(),
+      };
+    }
+    return next;
+  }, [pendingMessages]);
   const composerHandlesRef = useRef<Map<string, BoardChatComposerHandle>>(new Map());
   const prevPendingAttachmentsRef = useRef<Map<string, AttachmentLike[]>>(new Map());
   const [chatTopFade, setChatTopFade] = useState<Record<string, boolean>>({});
@@ -2385,45 +2410,6 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     [logs]
   );
 
-  const hasAuthoritativeSessionWork = useCallback(
-    (sessionKey: string) => {
-      const key = normalizeBoardSessionKey(sessionKey);
-      if (!key) return false;
-      const nowMs = Date.now();
-      const directResponding = resolveAuthoritativeSessionWorkState({
-        nowMs,
-        typing: openclawTyping[key],
-        threadWorkSignal: openclawThreadWork[key],
-        orchestrationWork: orchestrationThreadWorkBySession[key],
-        recentNonUserActivity: recentNonUserActivityBySession[key],
-      }, SESSION_WORK_TTLS);
-      if (directResponding) return true;
-
-      const alias = typingAliasRef.current.get(key);
-      if (!alias) return false;
-      const sourceKey = alias.sourceSessionKey;
-      const sourceResponding = resolveAuthoritativeSessionWorkState({
-        nowMs,
-        typing: openclawTyping[sourceKey],
-        threadWorkSignal: openclawThreadWork[sourceKey],
-        orchestrationWork: orchestrationThreadWorkBySession[sourceKey],
-        recentNonUserActivity: recentNonUserActivityBySession[sourceKey],
-      }, SESSION_WORK_TTLS);
-      if (sourceResponding) return true;
-
-      if (Date.now() - alias.createdAt > OPENCLAW_TYPING_ALIAS_INACTIVE_RETENTION_MS) {
-        typingAliasRef.current.delete(key);
-      }
-      return false;
-    },
-    [
-      openclawTyping,
-      openclawThreadWork,
-      orchestrationThreadWorkBySession,
-      recentNonUserActivityBySession,
-    ]
-  );
-
   const isSessionResponding = useCallback(
     (sessionKey: string) => {
       const key = normalizeBoardSessionKey(sessionKey);
@@ -2446,7 +2432,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         nowMs - recentNonUserActivityMs >= 0 &&
         nowMs - recentNonUserActivityMs <= OPENCLAW_NON_USER_ACTIVITY_TTL_MS;
       const threadWorkSignal = openclawThreadWork[key];
-      const threadWorkSignalMs = parseIsoMs(threadWorkSignal?.updatedAt);
+      const threadWorkSignalMs = threadWorkSignalFreshMs(threadWorkSignal);
       const latestOtherSignalMs = Math.max(
         parseIsoMs(typing?.updatedAt),
         parseIsoMs(awaiting?.sentAt),
@@ -2507,7 +2493,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         nowMs - sourceRecentNonUserActivityMs >= 0 &&
         nowMs - sourceRecentNonUserActivityMs <= OPENCLAW_NON_USER_ACTIVITY_TTL_MS;
       const sourceThreadWorkSignal = openclawThreadWork[sourceKey];
-      const sourceThreadWorkSignalMs = parseIsoMs(sourceThreadWorkSignal?.updatedAt);
+      const sourceThreadWorkSignalMs = threadWorkSignalFreshMs(sourceThreadWorkSignal);
       const sourceLatestOtherSignalMs = Math.max(
         parseIsoMs(sourceTyping?.updatedAt),
         parseIsoMs(sourceAwaiting?.sentAt),
@@ -2569,6 +2555,113 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
       orchestrationThreadWorkBySession,
       recentNonUserActivityBySession,
     ]
+  );
+
+  const sessionWorkSummary = useCallback(
+    (sessionKey: string) => {
+      const key = normalizeBoardSessionKey(sessionKey);
+      if (!key) return null;
+      const nowMs = Date.now();
+      const pickSignal = (candidateKey: string | undefined) => {
+        const normalizedKey = normalizeBoardSessionKey(candidateKey);
+        if (!normalizedKey) return null;
+        const signal = openclawThreadWork[normalizedKey];
+        if (!signal?.active) return null;
+        const signalMs = threadWorkSignalFreshMs(signal);
+        if (!Number.isFinite(signalMs) || nowMs - signalMs < 0 || nowMs - signalMs > OPENCLAW_THREAD_WORK_ACTIVE_TTL_MS) {
+          return null;
+        }
+        return signal;
+      };
+      const pickOrchestration = (candidateKey: string | undefined) => {
+        const normalizedKey = normalizeBoardSessionKey(candidateKey);
+        if (!normalizedKey) return null;
+        const work = orchestrationThreadWorkBySession[normalizedKey];
+        if (!work?.active) return null;
+        const workMs = Math.max(parseIsoMs(work.updatedAt), parseIsoMs(work.lastActivityAt));
+        if (!Number.isFinite(workMs) || nowMs - workMs < 0 || nowMs - workMs > OPENCLAW_ORCHESTRATION_ACTIVE_TTL_MS) {
+          return null;
+        }
+        return work;
+      };
+      const buildSummary = (
+        activeItems: number,
+        reason: string | undefined,
+        waitingItemKeys: string[],
+        lastActivityAt: string | undefined
+      ) => {
+        const label = formatSessionWorkLabel(activeItems, reason);
+        const titleParts = [label];
+        if (reason === "orchestration_stalled") {
+          titleParts.push("Stall recovery is in progress");
+        } else if (reason === "queued") {
+          titleParts.push("Waiting for dispatch");
+        } else if (reason === "retry") {
+          titleParts.push("Dispatch retry in progress");
+        } else if (reason === "dispatch_started") {
+          titleParts.push("Dispatch is starting");
+        } else if (reason === "sending") {
+          titleParts.push("Sending your message to OpenClaw");
+        } else if (reason === "responding") {
+          titleParts.push("OpenClaw is composing a reply");
+        }
+        if (waitingItemKeys.length > 0) {
+          titleParts.push(`Waiting on: ${waitingItemKeys.join(", ")}`);
+        }
+        if (lastActivityAt) {
+          titleParts.push(`Last activity ${formatRelativeTime(lastActivityAt)}`);
+        }
+        return {
+          activeItems,
+          label,
+          title: titleParts.join(" · "),
+          waitingItemKeys,
+        };
+      };
+
+      const direct = pickSignal(key);
+      const alias = direct ? null : typingAliasRef.current.get(key);
+      const signal = direct ?? pickSignal(alias?.sourceSessionKey);
+      if (signal) {
+        const waitingItemKeys = Array.isArray(signal.waitingItemKeys)
+          ? signal.waitingItemKeys.map((value) => String(value ?? "").trim()).filter(Boolean).slice(0, 6)
+          : [];
+        const activeItems =
+          typeof signal.activeItems === "number" && Number.isFinite(signal.activeItems)
+            ? Math.max(0, Math.floor(signal.activeItems))
+            : waitingItemKeys.length;
+        return buildSummary(activeItems, signal.reason, waitingItemKeys, signal.lastActivityAt);
+      }
+
+      const orchestration = pickOrchestration(key) ?? pickOrchestration(alias?.sourceSessionKey);
+      if (orchestration) {
+        const waitingItemKeys = Array.isArray(orchestration.waitingItemKeys)
+          ? orchestration.waitingItemKeys.map((value) => String(value ?? "").trim()).filter(Boolean).slice(0, 6)
+          : [];
+        const activeItems =
+          typeof orchestration.activeItems === "number" && Number.isFinite(orchestration.activeItems)
+            ? Math.max(0, Math.floor(orchestration.activeItems))
+            : waitingItemKeys.length;
+        return buildSummary(activeItems, orchestration.reason, waitingItemKeys, orchestration.lastActivityAt ?? orchestration.updatedAt);
+      }
+
+      const candidateKeys = [key, alias?.sourceSessionKey];
+      for (const candidate of candidateKeys) {
+        const normalizedKey = normalizeBoardSessionKey(candidate);
+        if (!normalizedKey) continue;
+        const typing = openclawTyping[normalizedKey];
+        if (typing?.typing) {
+          return buildSummary(0, "responding", [], typing.updatedAt);
+        }
+        const awaiting = effectiveAwaitingAssistant[normalizedKey];
+        if (awaiting) {
+          return buildSummary(0, awaiting.requestId ? "queued" : "sending", [], awaiting.sentAt);
+        }
+      }
+
+      return null;
+    },
+    [effectiveAwaitingAssistant, openclawThreadWork, openclawTyping, orchestrationThreadWorkBySession]
   );
 
   const prevExpandedTaskIdsRef = useRef<Set<string>>(new Set());
@@ -4405,9 +4498,11 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     const nextColor = normalizeHexColor(topicColorDraft) ?? currentColor;
     const nextTags = parseTags(topicTagsDraft);
     const currentTags = (topic.tags ?? []).map((t) => String(t || "").trim()).filter(Boolean);
+    const currentVisibleTags = filterUserFacingTopicTagLabels(currentTags);
+    const mergedNextTags = mergeVisibleAndReservedTopicTagLabels(currentTags, nextTags);
     const nameChanged = nextName !== topic.name;
     const colorChanged = nextColor !== normalizeHexColor(topic.color);
-    const tagsChanged = nextTags.join("|") !== currentTags.join("|");
+    const tagsChanged = nextTags.join("|") !== currentVisibleTags.join("|");
     if (readOnly) return;
     if (!nextName) {
       setRenameError(renameKey, "Topic name cannot be empty.");
@@ -4419,7 +4514,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         setTopicEditMode("name");
         setTopicNameDraft("");
         setTopicColorDraft(currentColor);
-        setTopicTagsDraft(formatTags(currentTags));
+        setTopicTagsDraft(formatTags(currentVisibleTags));
         setTopicTagsPendingEntry(false);
         setDeleteArmedKey(null);
       }
@@ -4439,7 +4534,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
             id: topic.id,
             name: nameChanged ? nextName : topic.name,
             color: nextColor,
-            tags: tagsChanged ? nextTags : currentTags,
+            tags: tagsChanged ? mergedNextTags : currentTags,
           }),
         },
         {
@@ -4449,7 +4544,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
             id: topic.id,
             name: nameChanged ? nextName : topic.name,
             color: nextColor,
-            tags: tagsChanged ? nextTags : currentTags,
+            tags: tagsChanged ? mergedNextTags : currentTags,
             updatedAt: queuedUpdatedAt,
             queued: true,
           },
@@ -4467,7 +4562,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
           ...updated,
           name: (updated.name || "").trim() || (nameChanged ? nextName : topic.name),
           color: normalizeHexColor(updated.color) ?? nextColor,
-          tags: Array.isArray(updated.tags) ? updated.tags : tagsChanged ? nextTags : currentTags,
+          tags: Array.isArray(updated.tags) ? updated.tags : tagsChanged ? mergedNextTags : currentTags,
           updatedAt: updated.updatedAt ?? new Date().toISOString(),
         };
         followTopicAcrossSpacesRef.current(nextTopic);
@@ -4493,7 +4588,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
           ...topic,
           name: nameChanged ? nextName : topic.name,
           color: nextColor,
-          tags: tagsChanged ? nextTags : currentTags,
+          tags: tagsChanged ? mergedNextTags : currentTags,
           updatedAt: new Date().toISOString(),
         };
         followTopicAcrossSpacesRef.current(nextTopic);
@@ -4547,9 +4642,11 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
     const nextColor = normalizeHexColor(taskColorDraft) ?? currentColor;
     const nextTags = parseTags(taskTagsDraft);
     const currentTags = (task.tags ?? []).map((t) => String(t || "").trim()).filter(Boolean);
+    const currentVisibleTags = filterUserFacingTopicTagLabels(currentTags);
+    const mergedNextTags = mergeVisibleAndReservedTopicTagLabels(currentTags, nextTags);
     const titleChanged = nextTitle !== task.title;
     const colorChanged = nextColor !== normalizeHexColor(task.color);
-    const tagsChanged = nextTags.join("|") !== currentTags.join("|");
+    const tagsChanged = nextTags.join("|") !== currentVisibleTags.join("|");
     if (readOnly) return;
     if (!nextTitle) {
       setRenameError(renameKey, "Name cannot be empty.");
@@ -4560,7 +4657,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
         setEditingTaskId(null);
         setTaskNameDraft("");
         setTaskColorDraft(currentColor);
-        setTaskTagsDraft(formatTags(currentTags));
+        setTaskTagsDraft(formatTags(currentVisibleTags));
         setTaskTagsPendingEntry(false);
         setActiveTaskTagField(null);
         setMoveTaskId(null);
@@ -4582,7 +4679,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
             id: task.id,
             name: titleChanged ? nextTitle : task.title ?? task.name,
             color: nextColor,
-            tags: tagsChanged ? nextTags : currentTags,
+            tags: tagsChanged ? mergedNextTags : currentTags,
           }),
         },
         {
@@ -4593,7 +4690,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
             name: titleChanged ? nextTitle : task.title ?? task.name,
             title: titleChanged ? nextTitle : task.title ?? task.name,
             color: nextColor,
-            tags: tagsChanged ? nextTags : currentTags,
+            tags: tagsChanged ? mergedNextTags : currentTags,
             updatedAt: queuedUpdatedAt,
             queued: true,
           },
@@ -4615,7 +4712,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                   title: (updated.title || "").trim() || (titleChanged ? nextTitle : item.title),
                   color: normalizeHexColor(updated.color) ?? nextColor,
                   topicId: updated.topicId ?? item.topicId,
-                  tags: Array.isArray(updated.tags) ? updated.tags : tagsChanged ? nextTags : item.tags,
+                  tags: Array.isArray(updated.tags) ? updated.tags : tagsChanged ? mergedNextTags : item.tags,
                   updatedAt: updated.updatedAt ?? new Date().toISOString(),
                 }
               : item
@@ -4636,7 +4733,9 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
               ? {
                   ...item,
                   title: titleChanged ? nextTitle : task.title,
+                  name: titleChanged ? nextTitle : task.name,
                   color: nextColor,
+                  tags: tagsChanged ? mergedNextTags : item.tags,
                   updatedAt: new Date().toISOString(),
                 }
               : item
@@ -4707,7 +4806,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
       setTopicEditMode(focusTarget);
       setTopicNameDraft(topic.name);
       setTopicColorDraft(currentColor);
-      setTopicTagsDraft(formatTags(topic.tags));
+      setTopicTagsDraft(formatTags(filterUserFacingTopicTagLabels(topic.tags ?? [])));
       setTopicTagsPendingEntry(false);
       setActiveTopicTagField(focusTarget === "tags" ? "rename-topic" : null);
       setDeleteArmedKey(null);
@@ -6255,13 +6354,16 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
           const topicToolingOrSystemCallCount = countToolingOrSystemChatLogEntries(topicChatAllLogs);
           const topicToolingOrSystemCallCountLabel = formatToolingOrSystemCallCountLabel(topicToolingOrSystemCallCount);
           const topicChatMetricsLabel = `${topicChatEntryCountLabel} · ${topicToolingOrSystemCallCountLabel}`;
-          const topicChatBlurb = deriveTopicHeaderBlurb(topic, topicChatAllLogs);
+          const topicChatBlurb =
+            latestPendingPreviewBySession[normalizeBoardSessionKey(topicSessionKey(topicId))] ??
+            deriveTopicHeaderBlurb(topic, topicChatAllLogs);
           const topicChatKey = chatKeyForTask(topicId);
           const topicChatSessionKey = topicSessionKey(topicId);
 
           const topicHiddenToolCallCount = hiddenToolCallCountForSession(topicChatSessionKey);
           const topicResponding = isSessionResponding(topicChatSessionKey);
-          const topicTypingVisible = hasAuthoritativeSessionWork(topicChatSessionKey);
+          const topicTypingVisible = topicResponding;
+          const topicWorkSummary = sessionWorkSummary(topicChatSessionKey);
           const normalizedTopicStatus = String(topic.status ?? "active").trim().toLowerCase();
           const topicStatusTone: "muted" | "accent" | "accent2" | "warning" | "success" = topicResponding
             ? "accent"
@@ -6308,7 +6410,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
           const limitedTopicLogs = topicChatAllLogs.slice(topicChatStart);
           const topicChatTruncated = topicChatStart > 0;
           const topicSpaceIdList = topicSpaceIds(topic).filter((id) => id !== "space-default");
-          const visibleTopicTags = dedupeTagLabels(topic.tags ?? []);
+          const visibleTopicTags = filterUserFacingTopicTagLabels(topic.tags ?? []);
           const primaryTopicSpaceId = (() => {
             const direct = String(topic.spaceId ?? "").trim();
             if (direct && direct !== "space-default") return direct;
@@ -6912,6 +7014,15 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                           Topic chat
                         </span>
                         {topicTypingVisible ? <TypingDots /> : null}
+                        {topicWorkSummary ? (
+                          <span
+                            data-testid={`topic-work-summary-${topic.id}`}
+                            title={topicWorkSummary.title}
+                            className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.88)]"
+                          >
+                            {topicWorkSummary.label}
+                          </span>
+                        ) : null}
                         <span className="text-[rgba(var(--claw-muted),0.55)]">·</span>
                         <div
                           className={cn(
@@ -6926,8 +7037,19 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                     ) : (
                       <div className="flex min-w-0 flex-1 items-center gap-2">
                         {!isExpanded && topicTypingVisible ? (
-                          <span title="OpenClaw responding" className="inline-flex items-center">
+                          <span
+                            title={topicWorkSummary?.title ?? "OpenClaw responding"}
+                            className="inline-flex items-center gap-2"
+                          >
                             <TypingDots />
+                            {topicWorkSummary ? (
+                              <span
+                                data-testid={`topic-work-summary-${topic.id}`}
+                                className="text-[10px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.88)]"
+                              >
+                                {topicWorkSummary.label}
+                              </span>
+                            ) : null}
                           </span>
                         ) : null}
                       </div>
@@ -7269,8 +7391,19 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                               {topicTypingVisible ? (
                                 <div className="py-1">
                                   <div className="flex justify-start">
-                                    <div className="w-full max-w-[78%] px-4 py-2" title="OpenClaw responding">
+                                    <div
+                                      className="w-full max-w-[78%] px-4 py-2"
+                                      title={topicWorkSummary?.title ?? "OpenClaw responding"}
+                                    >
                                       <TypingDots />
+                                      {topicWorkSummary ? (
+                                        <span
+                                          data-testid={`topic-work-summary-chat-${topic.id}`}
+                                          className="ml-2 text-[11px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.9)]"
+                                        >
+                                          {topicWorkSummary.label}
+                                        </span>
+                                      ) : null}
                                       {topicHiddenToolCallCount > 0 ? (
                                         <span
                                           data-testid={`topic-chat-hidden-tool-count-${topic.id}`}
@@ -7430,7 +7563,9 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                       const taskToolingOrSystemCallCount = countToolingOrSystemChatLogEntries(taskChatAllLogs);
                       const taskToolingOrSystemCallCountLabel = formatToolingOrSystemCallCountLabel(taskToolingOrSystemCallCount);
                       const taskChatMetricsLabel = `${taskChatEntryCountLabel} · ${taskToolingOrSystemCallCountLabel}`;
-                      const taskChatBlurb = deriveChatHeaderBlurb(taskChatAllLogs);
+                      const taskChatBlurb =
+                        latestPendingPreviewBySession[normalizeBoardSessionKey(taskSessionKey(topicId, task.id))] ??
+                        deriveChatHeaderBlurb(taskChatAllLogs);
                       const taskChatSessionKey = taskSessionKey(topicId, task.id);
                       const taskWorkspaceAttention = deriveTaskWorkspaceAttention(
                         taskChatAllLogs,
@@ -7443,7 +7578,8 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                         : "";
 	                      const taskChatKey = chatKeyForTask(task.id);
                       const taskHiddenToolCallCount = hiddenToolCallCountForSession(taskChatSessionKey);
-                      const taskTypingVisible = hasAuthoritativeSessionWork(taskChatSessionKey);
+                      const taskTypingVisible = isSessionResponding(taskChatSessionKey);
+                      const taskWorkSummary = sessionWorkSummary(taskChatSessionKey);
                       const taskSelectedForSend = topicSelectedForSend;
                       const limitedLogs = taskChatAllLogs;
                       const truncated = false;
@@ -7885,7 +8021,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                       setEditingTaskId(task.id);
                                       setTaskNameDraft(task.title ?? task.name);
                                       setTaskColorDraft(taskColor);
-                                      setTaskTagsDraft(formatTags(task.tags));
+                                      setTaskTagsDraft(formatTags(filterUserFacingTopicTagLabels(task.tags ?? [])));
                                       setTaskTagsPendingEntry(false);
                                       setMoveTaskId(null);
                                       setDeleteArmedKey(null);
@@ -8121,7 +8257,7 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                         setEditingTaskId(task.id);
                                         setTaskNameDraft(task.title ?? task.name);
                                         setTaskColorDraft(taskColor);
-                                        setTaskTagsDraft(formatTags(task.tags));
+                                        setTaskTagsDraft(formatTags(filterUserFacingTopicTagLabels(task.tags ?? [])));
                                         setTaskTagsPendingEntry(false);
                                         setMoveTaskId(null);
                                         setDeleteArmedKey(null);
@@ -8153,6 +8289,15 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                                   CHAT
                                                 </div>
                                                 {taskTypingVisible ? <TypingDots /> : null}
+                                                {taskWorkSummary ? (
+                                                  <span
+                                                    data-testid={`task-work-summary-${task.id}`}
+                                                    title={taskWorkSummary.title}
+                                                    className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.88)]"
+                                                  >
+                                                    {taskWorkSummary.label}
+                                                  </span>
+                                                ) : null}
                                               </div>
                                               <nav
                                                 aria-label="Topic chat context"
@@ -8194,6 +8339,15 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                               TASK CHAT
                                             </div>
                                             {taskTypingVisible ? <TypingDots /> : null}
+                                            {taskWorkSummary ? (
+                                              <span
+                                                data-testid={`task-work-summary-${task.id}`}
+                                                title={taskWorkSummary.title}
+                                                className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.88)]"
+                                              >
+                                                {taskWorkSummary.label}
+                                              </span>
+                                            ) : null}
                                             {taskChatBlurb ? (
                                               <>
                                                 <span className="text-xs text-[rgba(var(--claw-muted),0.55)]">·</span>
@@ -8407,8 +8561,19 @@ export function UnifiedView({ basePath = "/u", active = true }: { basePath?: str
                                       {!isUnassigned && taskTypingVisible ? (
                                         <div className="py-1">
                                           <div className="flex justify-start">
-                                            <div className="w-full max-w-[78%] px-4 py-2" title="OpenClaw responding">
+                                            <div
+                                              className="w-full max-w-[78%] px-4 py-2"
+                                              title={taskWorkSummary?.title ?? "OpenClaw responding"}
+                                            >
                                               <TypingDots />
+                                              {taskWorkSummary ? (
+                                                <span
+                                                  data-testid={`task-work-summary-chat-${task.id}`}
+                                                  className="ml-2 text-[11px] uppercase tracking-[0.16em] text-[rgba(148,163,184,0.9)]"
+                                                >
+                                                  {taskWorkSummary.label}
+                                                </span>
+                                              ) : null}
                                               {taskHiddenToolCallCount > 0 ? (
                                                 <span
                                                   data-testid={`task-chat-hidden-tool-count-${task.id}`}

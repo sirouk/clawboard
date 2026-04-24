@@ -19,6 +19,7 @@ import type { Space, Topic } from "@/lib/types";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { setLocalStorageItem, useLocalStorageItem } from "@/lib/local-storage";
 import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
+import { spaceIdFromTopicTagLabel } from "@/lib/topic-tags";
 
 const EDGE_COLORS: Record<string, string> = {
   mentions: "rgba(86,214,178,0.66)",
@@ -173,19 +174,7 @@ function displaySpaceName(space: Pick<Space, "id" | "name">) {
 }
 
 function spaceIdFromTagLabel(value: string) {
-  let text = String(value ?? "").trim().toLowerCase();
-  if (!text) return null;
-  if (text.startsWith("system:")) return null;
-  if (text.startsWith("space:")) text = text.split(":", 2)[1]?.trim() ?? "";
-  const slugged = text
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9-]/g, "")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (!slugged || slugged === "default" || slugged === "global" || slugged === "all" || slugged === "all-spaces") {
-    return null;
-  }
-  return `space-${slugged}`;
+  return spaceIdFromTopicTagLabel(value);
 }
 
 function topicSpaceIds(topic: Pick<Topic, "spaceId" | "tags"> | null | undefined) {

@@ -13,10 +13,21 @@ export type BoardSnapshot = {
   logs: LogEntry[];
   drafts: Record<string, Draft>;
   openclawTyping: Record<string, { typing: boolean; requestId?: string; updatedAt: string }>;
-  openclawThreadWork: Record<string, { active: boolean; requestId?: string; reason?: string; updatedAt: string }>;
+  openclawThreadWork: Record<string, OpenClawThreadWorkSnapshot>;
   cursor?: string;
   cursorSeq?: number;
   cachedAt: string;
+};
+
+export type OpenClawThreadWorkSnapshot = {
+  active: boolean;
+  requestId?: string;
+  reason?: string;
+  runId?: string;
+  activeItems?: number;
+  waitingItemKeys?: string[];
+  lastActivityAt?: string;
+  updatedAt: string;
 };
 
 function sanitizeSnapshotCursor(value: unknown) {

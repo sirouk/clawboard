@@ -8,7 +8,7 @@ Keep memory capture, classification, and UI access continuously available for no
 
 ## End-State Acceptance Criteria
 
-- `docker compose up -d --build` starts `web`, `api`, `classifier`, and `qdrant` without manual edits.
+- `COMPOSE_PARALLEL_LIMIT=1 docker compose up -d --build` starts `web`, `api`, `classifier`, and `qdrant` without manual edits.
 - `http://localhost:3010` loads and users can open `/u`, `/log`, `/graph`, `/stats`, and `/setup`.
 - New messages appear in `/log` and are classified into topic/task state within normal classifier cadence.
 - Operators can create, edit, snooze, and complete tasks in `/u` using only UI actions.
@@ -27,7 +27,7 @@ openssl rand -hex 32
 ```
 3. Start services:
 ```bash
-docker compose up -d --build
+COMPOSE_PARALLEL_LIMIT=1 docker compose up -d --build
 ```
 4. Verify:
 - UI: `http://localhost:3010`

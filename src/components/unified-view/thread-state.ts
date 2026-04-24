@@ -8,6 +8,10 @@ export const ORCHESTRATION_KNOWN_RUN_STATUSES = new Set(["running", "stalled", "
 export type SessionOrchestrationWork = {
   active: boolean;
   requestId?: string;
+  reason?: string;
+  activeItems?: number;
+  waitingItemKeys?: string[];
+  lastActivityAt?: string;
   updatedAt: string;
 };
 
@@ -15,6 +19,10 @@ export type SessionThreadWorkSignal = {
   active: boolean;
   requestId?: string;
   reason?: string;
+  runId?: string;
+  activeItems?: number;
+  waitingItemKeys?: string[];
+  lastActivityAt?: string;
   updatedAt: string;
 };
 
@@ -91,6 +99,37 @@ function isNonUserActivityChatLog(entry: LogEntry) {
   return String(entry.type ?? "").trim().toLowerCase() === "conversation";
 }
 
+function parseOrchestrationActiveItems(value: unknown) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  return Math.max(0, Math.floor(parsed));
+}
+
+function parseOrchestrationWaitingItemKeys(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item ?? "").trim()).filter(Boolean).slice(0, 6);
+  }
+
+  const text = String(value ?? "").trim();
+  if (!text) return [];
+
+  const quoted = Array.from(text.matchAll(/['"]([^'"]+)['"]/g))
+    .map((match) => String(match[1] ?? "").trim())
+    .filter(Boolean);
+  if (quoted.length > 0) return quoted.slice(0, 6);
+
+  if (text.startsWith("[") && text.endsWith("]")) {
+    return text
+      .slice(1, -1)
+      .split(",")
+      .map((part) => part.replace(/^['"]|['"]$/g, "").trim())
+      .filter(Boolean)
+      .slice(0, 6);
+  }
+
+  return [text];
+}
+
 export function buildRecentNonUserActivityIndex(logs: LogEntry[]): Record<string, SessionNonUserActivity> {
   const out: Record<string, SessionNonUserActivity> = {};
   for (const entry of logs) {
@@ -141,9 +180,14 @@ export function buildOrchestrationThreadWorkIndex(logs: LogEntry[]): Record<stri
     {
       status: string;
       requestId?: string;
+      reason?: string;
+      activeItems?: number;
+      waitingItemKeys: string[];
+      lastActivityAt?: string;
       updatedAt: string;
       updatedAtMs: number;
       sessionKeys: Set<string>;
+      activeItemKeys: Set<string>;
     }
   >();
   const ascending = [...logs].sort(compareLogCreatedAtAsc);
@@ -157,13 +201,20 @@ export function buildOrchestrationThreadWorkIndex(logs: LogEntry[]): Record<stri
     const next = byRun.get(runId) ?? {
       status: "running",
       requestId: undefined,
+      reason: "orchestration_running",
+      activeItems: undefined,
+      waitingItemKeys: [],
+      lastActivityAt: undefined,
       updatedAt: "",
       updatedAtMs: Number.NEGATIVE_INFINITY,
       sessionKeys: new Set<string>(),
+      activeItemKeys: new Set<string>(),
     };
 
     const sourceSessionKey = normalizeBoardSessionKey(String(source.sessionKey ?? ""));
     if (sourceSessionKey) next.sessionKeys.add(sourceSessionKey);
+    const scopedBoardSessionKey = normalizeBoardSessionKey(String(source.boardScopeSessionKey ?? ""));
+    if (scopedBoardSessionKey) next.sessionKeys.add(scopedBoardSessionKey);
 
     const boardTopicId = String(source.boardScopeTopicId ?? entry.topicId ?? "").trim();
     const boardTaskId = String(source.boardScopeTaskId ?? "").trim();
@@ -175,6 +226,36 @@ export function buildOrchestrationThreadWorkIndex(logs: LogEntry[]): Record<stri
     if (requestId) next.requestId = requestId;
 
     next.status = inferOrchestrationRunStatus(entry, source, next.status);
+    next.reason = next.status === "stalled" ? "orchestration_stalled" : "orchestration_running";
+    const eventType = String(source.eventType ?? "").trim().toLowerCase();
+    const itemKey = String(source.itemKey ?? "").trim();
+    const tracksItem = itemKey && itemKey.toLowerCase() !== "main.response";
+    if (tracksItem && (eventType === "item_created" || eventType === "item_stalled" || eventType === "item_resumed")) {
+      next.activeItemKeys.add(itemKey);
+    }
+    if (tracksItem && (eventType === "item_done" || eventType === "item_failed" || eventType === "item_cancelled")) {
+      next.activeItemKeys.delete(itemKey);
+    }
+
+    const eventPayload =
+      source.eventPayload && typeof source.eventPayload === "object"
+        ? (source.eventPayload as Record<string, unknown>)
+        : {};
+    const payloadWaitingKeys = parseOrchestrationWaitingItemKeys(eventPayload.waitingItemKeys);
+    const payloadActiveItems = parseOrchestrationActiveItems(eventPayload.activeItems);
+    if (payloadWaitingKeys.length > 0) {
+      next.waitingItemKeys = payloadWaitingKeys;
+      next.activeItemKeys = new Set(payloadWaitingKeys);
+      next.activeItems = payloadActiveItems ?? payloadWaitingKeys.length;
+    } else {
+      next.waitingItemKeys = Array.from(next.activeItemKeys).slice(0, 6);
+      if (payloadActiveItems !== undefined) {
+        next.activeItems = payloadActiveItems;
+      } else if (next.activeItemKeys.size > 0 || tracksItem || eventType.startsWith("item_")) {
+        next.activeItems = next.activeItemKeys.size;
+      }
+    }
+
     const stamp = String(entry.createdAt ?? "").trim();
     const stampMs = Date.parse(stamp);
     const normalizedStampMs = Number.isFinite(stampMs) ? stampMs : Number.NEGATIVE_INFINITY;
@@ -182,6 +263,7 @@ export function buildOrchestrationThreadWorkIndex(logs: LogEntry[]): Record<stri
       next.updatedAt = stamp;
       next.updatedAtMs = normalizedStampMs;
     }
+    if (stamp) next.lastActivityAt = stamp;
 
     byRun.set(runId, next);
   }
@@ -193,6 +275,10 @@ export function buildOrchestrationThreadWorkIndex(logs: LogEntry[]): Record<stri
     latestAnyRequestId?: string;
     latestActiveMs: number;
     latestActiveRequestId?: string;
+    latestActiveReason?: string;
+    latestActiveItems?: number;
+    latestActiveWaitingItemKeys?: string[];
+    latestActiveAt?: string;
   };
 
   const bySession = new Map<string, SessionAgg>();
@@ -208,6 +294,10 @@ export function buildOrchestrationThreadWorkIndex(logs: LogEntry[]): Record<stri
         latestAnyRequestId: undefined,
         latestActiveMs: Number.NEGATIVE_INFINITY,
         latestActiveRequestId: undefined,
+        latestActiveReason: undefined,
+        latestActiveItems: undefined,
+        latestActiveWaitingItemKeys: undefined,
+        latestActiveAt: undefined,
       };
 
       agg.active = agg.active || active;
@@ -219,6 +309,10 @@ export function buildOrchestrationThreadWorkIndex(logs: LogEntry[]): Record<stri
       if (active && runState.updatedAtMs >= agg.latestActiveMs) {
         agg.latestActiveMs = runState.updatedAtMs;
         agg.latestActiveRequestId = runState.requestId || agg.latestActiveRequestId;
+        agg.latestActiveReason = runState.reason || agg.latestActiveReason;
+        agg.latestActiveItems = runState.activeItems;
+        agg.latestActiveWaitingItemKeys = runState.waitingItemKeys;
+        agg.latestActiveAt = runState.lastActivityAt || runState.updatedAt;
       }
       bySession.set(key, agg);
     }
@@ -229,6 +323,10 @@ export function buildOrchestrationThreadWorkIndex(logs: LogEntry[]): Record<stri
     out[sessionKey] = {
       active: agg.active,
       requestId: agg.latestActiveRequestId || agg.latestAnyRequestId,
+      reason: agg.latestActiveReason,
+      activeItems: agg.latestActiveItems,
+      waitingItemKeys: agg.latestActiveWaitingItemKeys,
+      lastActivityAt: agg.latestActiveAt,
       updatedAt: agg.latestAnyAt,
     };
   }
@@ -242,13 +340,17 @@ export function resolveThreadWorkSignal(
 ): boolean | undefined {
   if (!signal) return undefined;
   const { latestOtherSignalMs, nowMs } = params;
-  const signalMs = parseIsoMs(signal.updatedAt);
+  const signalMs = threadWorkSignalFreshMs(signal);
   if (!Number.isFinite(signalMs)) return undefined;
   const ageMs = nowMs - signalMs;
   const ttlMs = signal.active ? ttls.threadWorkActiveTtlMs : ttls.threadWorkInactiveOverrideTtlMs;
   if (ageMs < 0 || ageMs > ttlMs) return undefined;
   if (!signal.active && Number.isFinite(latestOtherSignalMs) && latestOtherSignalMs > signalMs) return undefined;
   return signal.active;
+}
+
+export function threadWorkSignalFreshMs(signal: SessionThreadWorkSignal | undefined) {
+  return Math.max(parseIsoMs(signal?.updatedAt), parseIsoMs(signal?.lastActivityAt));
 }
 
 export function resolveAuthoritativeSessionWorkState(
@@ -273,7 +375,7 @@ export function resolveAuthoritativeSessionWorkState(
     Number.isFinite(recentNonUserActivityMs) &&
     nowMs - recentNonUserActivityMs >= 0 &&
     nowMs - recentNonUserActivityMs <= ttls.nonUserActivityTtlMs;
-  const threadWorkSignalMs = parseIsoMs(threadWorkSignal?.updatedAt);
+  const threadWorkSignalMs = threadWorkSignalFreshMs(threadWorkSignal);
   const latestOtherSignalMs = Math.max(
     parseIsoMs(typing?.updatedAt),
     hasFreshOrchestrationWork ? orchestrationWorkMs : Number.NaN,

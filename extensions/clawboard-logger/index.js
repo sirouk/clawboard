@@ -141,6 +141,23 @@ export default function register(api) {
         parseBoardSessionKey,
         boardSessionRouteToSessionKeys,
     });
+    const ownershipSessionKeysFor = (sessionKey) => {
+        const normalized = normalizeId(sessionKey);
+        if (!normalized)
+            return [];
+        const keys = new Set();
+        keys.add(normalized);
+        const base = normalized.split("|", 1)[0]?.trim() || normalized;
+        if (base)
+            keys.add(base);
+        const route = parseBoardSessionKey(normalized);
+        if (route) {
+            const canonical = normalizeId(boardSessionRouteToSessionKeys(route)[0]);
+            if (canonical)
+                keys.add(canonical);
+        }
+        return Array.from(keys);
+    };
     const boardScopeFromCurrentSessionKey = (sessionKey) => boardScopeFromSessionKey(sessionKey, {
         parseBoardSessionKey,
         nowMs,
@@ -1550,6 +1567,7 @@ export default function register(api) {
     const agentEndCursorBySession = new Map();
     const openclawRequestBySession = new Map();
     const toolScopeByRunId = new Map();
+    const toolScopeByCallId = new Map();
     const toolScopeByFingerprint = new Map();
     const toolScopeByName = new Map();
     const TOOL_SCOPE_MEMORY_TTL_MS = 15 * 60_000;
@@ -1579,7 +1597,7 @@ export default function register(api) {
         if (!normalizedRequestId)
             return;
         const ts = nowMs();
-        for (const key of requestSessionKeysFor(sessionKey)) {
+        for (const key of ownershipSessionKeysFor(sessionKey)) {
             openclawRequestBySession.set(key, { requestId: normalizedRequestId, ts });
         }
         pruneOpenclawRequestMap(ts, openclawRequestBySession.size > OPENCLAW_REQUEST_ID_MAX_ENTRIES);
@@ -1589,7 +1607,7 @@ export default function register(api) {
         if (openclawRequestBySession.size > OPENCLAW_REQUEST_ID_MAX_ENTRIES) {
             pruneOpenclawRequestMap(ts, true);
         }
-        for (const key of requestSessionKeysFor(sessionKey)) {
+        for (const key of ownershipSessionKeysFor(sessionKey)) {
             const row = openclawRequestBySession.get(key);
             if (!row)
                 continue;
@@ -1617,7 +1635,8 @@ export default function register(api) {
     const canonicalBoardScopeSessionKeys = (scope) => {
         if (!scope?.topicId)
             return [];
-        return boardSessionRouteToSessionKeys(scope);
+        const canonical = normalizeId(boardSessionRouteToSessionKeys(scope)[0]);
+        return canonical ? [canonical] : [];
     };
     const resolveOpenclawRequestIdForBoardScope = async (params) => {
         const explicitRequestId = normalizeRequestId(params.requestId);
@@ -1627,17 +1646,17 @@ export default function register(api) {
         const candidates = new Set();
         const sessionKey = normalizeId(params.sessionKey);
         if (sessionKey) {
-            for (const key of requestSessionKeysFor(sessionKey))
+            for (const key of ownershipSessionKeysFor(sessionKey))
                 candidates.add(key);
         }
         const scopeSessionKey = normalizeId(params.boardScope?.sessionKey);
         if (scopeSessionKey) {
-            for (const key of requestSessionKeysFor(scopeSessionKey))
+            for (const key of ownershipSessionKeysFor(scopeSessionKey))
                 candidates.add(key);
         }
         const canonicalScopeSessionKeys = canonicalBoardScopeSessionKeys(params.boardScope ?? boardScopeFromCurrentSessionKey(sessionKey));
         for (const canonicalScopeSessionKey of canonicalScopeSessionKeys) {
-            for (const key of requestSessionKeysFor(canonicalScopeSessionKey))
+            for (const key of ownershipSessionKeysFor(canonicalScopeSessionKey))
                 candidates.add(key);
         }
         for (const candidate of candidates) {
@@ -1655,7 +1674,7 @@ export default function register(api) {
             const route = parseBoardSessionKey(candidate);
             if (!route)
                 continue;
-            for (const lookupSessionKey of boardSessionRouteToSessionKeys(route)) {
+            for (const lookupSessionKey of canonicalBoardScopeSessionKeys(route)) {
                 lookupSessionKeys.add(lookupSessionKey);
             }
         }
@@ -1702,6 +1721,11 @@ export default function register(api) {
                 toolScopeByRunId.delete(key);
             }
         }
+        for (const [key, value] of toolScopeByCallId.entries()) {
+            if (ts - value.ts > TOOL_SCOPE_MEMORY_TTL_MS) {
+                toolScopeByCallId.delete(key);
+            }
+        }
         for (const [key, rows] of toolScopeByFingerprint.entries()) {
             const freshRows = rows.filter((row) => ts - row.ts <= TOOL_SCOPE_MEMORY_TTL_MS);
             if (freshRows.length > 0) {
@@ -1722,13 +1746,16 @@ export default function register(api) {
         }
         const fingerprintEntryCount = Array.from(toolScopeByFingerprint.values()).reduce((acc, rows) => acc + rows.length, 0);
         const nameEntryCount = Array.from(toolScopeByName.values()).reduce((acc, rows) => acc + rows.length, 0);
-        const totalEntries = toolScopeByRunId.size + fingerprintEntryCount + nameEntryCount;
+        const totalEntries = toolScopeByRunId.size + toolScopeByCallId.size + fingerprintEntryCount + nameEntryCount;
         if (!forceTrim && totalEntries <= TOOL_SCOPE_MEMORY_MAX_ENTRIES)
             return;
         if (totalEntries <= TOOL_SCOPE_MEMORY_MAX_ENTRIES)
             return;
         const runEntries = Array.from(toolScopeByRunId.entries())
             .map(([key, value]) => ({ kind: "run", key, ts: value.ts }))
+            .sort((a, b) => a.ts - b.ts);
+        const callEntries = Array.from(toolScopeByCallId.entries())
+            .map(([key, value]) => ({ kind: "call", key, ts: value.ts }))
             .sort((a, b) => a.ts - b.ts);
         const fingerprintEntries = Array.from(toolScopeByFingerprint.entries())
             .flatMap(([fingerprint, rows]) => rows.map((row, idx) => ({
@@ -1747,16 +1774,28 @@ export default function register(api) {
             .sort((a, b) => a.ts - b.ts);
         let overflow = totalEntries - TOOL_SCOPE_MEMORY_MAX_ENTRIES;
         let runCursor = 0;
+        let callCursor = 0;
         let fpCursor = 0;
         let nameCursor = 0;
         while (overflow > 0) {
             const nextRun = runEntries[runCursor];
+            const nextCall = callEntries[callCursor];
             const nextFp = fingerprintEntries[fpCursor];
             const nextName = nameEntries[nameCursor];
-            const pickRun = nextRun && (!nextFp || nextRun.ts <= nextFp.ts) && (!nextName || nextRun.ts <= nextName.ts);
+            const pickRun = nextRun &&
+                (!nextCall || nextRun.ts <= nextCall.ts) &&
+                (!nextFp || nextRun.ts <= nextFp.ts) &&
+                (!nextName || nextRun.ts <= nextName.ts);
             if (pickRun && nextRun) {
                 toolScopeByRunId.delete(nextRun.key);
                 runCursor += 1;
+                overflow -= 1;
+                continue;
+            }
+            const pickCall = nextCall && (!nextFp || nextCall.ts <= nextFp.ts) && (!nextName || nextCall.ts <= nextName.ts);
+            if (pickCall && nextCall) {
+                toolScopeByCallId.delete(nextCall.key);
+                callCursor += 1;
                 overflow -= 1;
                 continue;
             }
@@ -1797,6 +1836,9 @@ export default function register(api) {
     const toolScopeNameKey = (toolName) => {
         return normalizeId(typeof toolName === "string" ? toolName : undefined)?.toLowerCase();
     };
+    const toolScopeCallIdKey = (toolCallId) => {
+        return normalizeId(typeof toolCallId === "string" ? toolCallId : undefined);
+    };
     const toolScopeFingerprint = (toolName, params) => {
         const normalizedToolName = toolScopeNameKey(toolName);
         if (!normalizedToolName)
@@ -1811,6 +1853,55 @@ export default function register(api) {
         const digest = crypto.createHash("sha1").update(`${normalizedToolName}|${serialized}`).digest("hex").slice(0, 24);
         return `${normalizedToolName}:${digest}`;
     };
+    const toolScopeMatchesSession = (entrySessionKey, preferSessionKey) => {
+        const preferredKeys = ownershipSessionKeysFor(preferSessionKey);
+        const entryKeys = ownershipSessionKeysFor(entrySessionKey);
+        if (preferredKeys.length === 0 || entryKeys.length === 0)
+            return false;
+        const preferred = new Set(preferredKeys);
+        return entryKeys.some((key) => preferred.has(key));
+    };
+    const selectRecentToolScopeEntry = (rows, options) => {
+        const ts = nowMs();
+        const freshRows = rows.filter((row) => ts - row.ts <= TOOL_SCOPE_MEMORY_TTL_MS);
+        if (freshRows.length === 0) {
+            return { row: undefined, remaining: freshRows };
+        }
+        const preferSessionKey = normalizeId(options?.preferSessionKey);
+        let selectedIndex = -1;
+        if (preferSessionKey) {
+            for (let i = freshRows.length - 1; i >= 0; i -= 1) {
+                if (toolScopeMatchesSession(freshRows[i]?.sessionKey, preferSessionKey)) {
+                    selectedIndex = i;
+                    break;
+                }
+            }
+            if (selectedIndex < 0 && options?.allowCrossSessionFallback === false) {
+                return { row: undefined, remaining: freshRows };
+            }
+        }
+        if (selectedIndex < 0) {
+            selectedIndex = freshRows.length - 1;
+        }
+        const [row] = freshRows.splice(selectedIndex, 1);
+        return { row, remaining: freshRows };
+    };
+    const preferPinnedSubagentRequestId = (sessionKey, candidateRequestId) => {
+        const candidate = normalizeRequestId(candidateRequestId);
+        if (!candidate)
+            return undefined;
+        const normalizedSessionKey = normalizeId(sessionKey);
+        if (!parseSubagentSession(normalizedSessionKey))
+            return candidate;
+        const existing = inferOpenclawRequestIdFromMessageId(recentOpenclawRequestId(normalizedSessionKey));
+        if (existing &&
+            existing !== candidate &&
+            existing.toLowerCase().startsWith(OPENCLAW_REQUEST_ID_PREFIX) &&
+            candidate.toLowerCase().startsWith(OPENCLAW_REQUEST_ID_PREFIX)) {
+            return existing;
+        }
+        return candidate;
+    };
     const rememberToolScopeForRun = (runId, value) => {
         const key = normalizeId(typeof runId === "string" ? runId : undefined);
         if (!key)
@@ -1823,6 +1914,19 @@ export default function register(api) {
             routing: value.routing,
         });
         pruneToolScopeMap(ts, toolScopeByRunId.size > TOOL_SCOPE_MEMORY_MAX_ENTRIES);
+    };
+    const rememberToolScopeForCallId = (toolCallId, value) => {
+        const key = toolScopeCallIdKey(toolCallId);
+        if (!key)
+            return;
+        const ts = nowMs();
+        toolScopeByCallId.set(key, {
+            ts,
+            sessionKey: normalizeId(value.sessionKey),
+            requestId: normalizeRequestId(value.requestId),
+            routing: value.routing,
+        });
+        pruneToolScopeMap(ts, toolScopeByCallId.size > TOOL_SCOPE_MEMORY_MAX_ENTRIES);
     };
     const rememberToolScopeForFingerprint = (toolName, params, value) => {
         const key = toolScopeFingerprint(toolName, params);
@@ -1877,7 +1981,27 @@ export default function register(api) {
         }
         return row;
     };
-    const recentToolScopeForFingerprint = (toolName, params) => {
+    const recentToolScopeForCallId = (toolCallId, preferSessionKey) => {
+        const key = toolScopeCallIdKey(toolCallId);
+        if (!key)
+            return undefined;
+        const ts = nowMs();
+        if (toolScopeByCallId.size > TOOL_SCOPE_MEMORY_MAX_ENTRIES) {
+            pruneToolScopeMap(ts, true);
+        }
+        const row = toolScopeByCallId.get(key);
+        if (!row)
+            return undefined;
+        if (ts - row.ts > TOOL_SCOPE_MEMORY_TTL_MS) {
+            toolScopeByCallId.delete(key);
+            return undefined;
+        }
+        if (preferSessionKey && !toolScopeMatchesSession(row.sessionKey, preferSessionKey)) {
+            return undefined;
+        }
+        return row;
+    };
+    const recentToolScopeForFingerprint = (toolName, params, options) => {
         const key = toolScopeFingerprint(toolName, params);
         if (!key)
             return undefined;
@@ -1888,21 +2012,25 @@ export default function register(api) {
         const rows = toolScopeByFingerprint.get(key);
         if (!rows || rows.length === 0)
             return undefined;
-        const freshRows = rows.filter((row) => ts - row.ts <= TOOL_SCOPE_MEMORY_TTL_MS);
-        if (freshRows.length === 0) {
-            toolScopeByFingerprint.delete(key);
+        const selected = selectRecentToolScopeEntry(rows, options);
+        if (!selected.row) {
+            if (selected.remaining.length > 0) {
+                toolScopeByFingerprint.set(key, selected.remaining);
+            }
+            else {
+                toolScopeByFingerprint.delete(key);
+            }
             return undefined;
         }
-        const row = freshRows.pop();
-        if (freshRows.length > 0) {
-            toolScopeByFingerprint.set(key, freshRows);
-        }
-        else {
+        if (selected.remaining.length === 0) {
             toolScopeByFingerprint.delete(key);
         }
-        return row;
+        else {
+            toolScopeByFingerprint.set(key, selected.remaining);
+        }
+        return selected.row;
     };
-    const recentToolScopeForName = (toolName) => {
+    const recentToolScopeForName = (toolName, options) => {
         const key = toolScopeNameKey(toolName);
         if (!key)
             return undefined;
@@ -1913,19 +2041,23 @@ export default function register(api) {
         const rows = toolScopeByName.get(key);
         if (!rows || rows.length === 0)
             return undefined;
-        const freshRows = rows.filter((row) => ts - row.ts <= TOOL_SCOPE_MEMORY_TTL_MS);
-        if (freshRows.length === 0) {
-            toolScopeByName.delete(key);
+        const selected = selectRecentToolScopeEntry(rows, options);
+        if (!selected.row) {
+            if (selected.remaining.length > 0) {
+                toolScopeByName.set(key, selected.remaining);
+            }
+            else {
+                toolScopeByName.delete(key);
+            }
             return undefined;
         }
-        const row = freshRows.pop();
-        if (freshRows.length > 0) {
-            toolScopeByName.set(key, freshRows);
-        }
-        else {
+        if (selected.remaining.length === 0) {
             toolScopeByName.delete(key);
         }
-        return row;
+        else {
+            toolScopeByName.set(key, selected.remaining);
+        }
+        return selected.row;
     };
     const resolveSessionKey = (meta, ctx2) => {
         const ctxSession = normalizeId(ctx2.sessionKey);
@@ -2274,6 +2406,11 @@ export default function register(api) {
             requestId,
             routing,
         });
+        rememberToolScopeForCallId(hints.toolCallId, {
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            requestId,
+            routing,
+        });
         rememberToolScopeForName(hints.toolName, {
             sessionKey: effectiveSessionKey ?? ctx.sessionKey,
             requestId,
@@ -2326,13 +2463,18 @@ export default function register(api) {
             event.input ??
             {};
         const redacted = redact(toolParamsRaw);
+        const toolEvent = asRecord(event);
         const toolMeta = normalizeEventMeta(event.metadata, event.sessionKey);
+        const hints = hookSourceHints({
+            hookName: "before_tool_call",
+            event: toolEvent,
+            meta: toolMeta,
+            ctx,
+        });
         const effectiveSessionKey = resolveSessionKey(toolMeta, ctx);
         let requestId = resolveOpenclawRequestId({
             sessionKey: effectiveSessionKey ?? ctx.sessionKey,
-            explicitRequestId: event.requestId ??
-                event.runId ??
-                toolMeta?.requestId,
+            explicitRequestId: hints.requestId,
         });
         if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES))
             return;
@@ -2344,7 +2486,12 @@ export default function register(api) {
         });
         if (!hasSpecificSessionAnchor(effectiveSessionKey, ctx) && !hasToolRoutingAnchor(routing))
             return;
-        rememberToolScopeForRun(event.runId, {
+        rememberToolScopeForRun(hints.runId, {
+            sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+            requestId,
+            routing,
+        });
+        rememberToolScopeForCallId(hints.toolCallId, {
             sessionKey: effectiveSessionKey ?? ctx.sessionKey,
             requestId,
             routing,
@@ -2373,9 +2520,7 @@ export default function register(api) {
                 sessionKey: effectiveSessionKey,
                 requestId,
                 boardScope: routing.boardScope,
-                extra: {
-                    hook: "before_tool_call",
-                },
+                extra: hints.extra,
             }),
         });
     });
@@ -2390,17 +2535,33 @@ export default function register(api) {
             ? { error: event.error }
             : { result: redact(toolResult), durationMs: event.durationMs };
         const toolMeta = normalizeEventMeta(event.metadata, event.sessionKey);
-        const remembered = recentToolScopeForRun(event.runId) ??
-            recentToolScopeForFingerprint(event.toolName, toolParamsRaw) ??
-            recentToolScopeForName(event.toolName);
         const resolvedSessionKey = resolveSessionKey(toolMeta, ctx);
+        const hints = hookSourceHints({
+            hookName: "after_tool_call",
+            event: asRecord(event),
+            meta: toolMeta,
+            ctx,
+        });
+        const allowCrossSessionToolScopeFallback = !Boolean(parseSubagentSession(resolvedSessionKey ?? ctx.sessionKey)) &&
+            !hasSpecificSessionAnchor(resolvedSessionKey, ctx);
+        const remembered = recentToolScopeForRun(hints.runId) ??
+            recentToolScopeForCallId(hints.toolCallId, resolvedSessionKey ?? ctx.sessionKey) ??
+            recentToolScopeForFingerprint(event.toolName, toolParamsRaw, {
+                preferSessionKey: resolvedSessionKey ?? ctx.sessionKey,
+                allowCrossSessionFallback: allowCrossSessionToolScopeFallback,
+            }) ??
+            recentToolScopeForName(event.toolName, {
+                preferSessionKey: resolvedSessionKey ?? ctx.sessionKey,
+                allowCrossSessionFallback: allowCrossSessionToolScopeFallback,
+            });
         const effectiveSessionKey = hasSpecificSessionAnchor(resolvedSessionKey, ctx) || !remembered?.sessionKey
             ? resolvedSessionKey
             : remembered.sessionKey;
+        const rememberedRequestId = preferPinnedSubagentRequestId(effectiveSessionKey ?? resolvedSessionKey ?? ctx.sessionKey, remembered?.requestId);
         const explicitRequestId = event.requestId ??
             event.runId ??
             toolMeta?.requestId ??
-            remembered?.requestId;
+            rememberedRequestId;
         let requestId = resolveOpenclawRequestId({
             sessionKey: effectiveSessionKey ?? ctx.sessionKey,
             explicitRequestId,

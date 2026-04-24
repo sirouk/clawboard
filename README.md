@@ -161,8 +161,10 @@ CLAWBOARD_TOKEN=<your-token>
 3. Start stack:
 
 ```bash
-docker compose up -d --build
+COMPOSE_PARALLEL_LIMIT=1 docker compose up -d --build
 ```
+
+If Docker Desktop is provisioned with more CPU and memory and builds are stable, you can raise `COMPOSE_PARALLEL_LIMIT` to speed this up.
 
 4. Open:
 

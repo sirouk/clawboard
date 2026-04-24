@@ -798,10 +798,27 @@ def _signal_snapshot_upsert(
     typing: bool | None = None,
     active: bool | None = None,
     reason: str | None = None,
+    run_id: str | None = None,
+    active_items: int | None = None,
+    waiting_item_keys: Iterable[str] | None = None,
+    last_activity_at: str | None = None,
 ) -> None:
     stamp = str(updated_at or "").strip() or now_iso()
     request_base = _openclaw_request_id_base(request_id)
     reason_text = str(reason or "").strip() or None
+    run_id_text = str(run_id or "").strip() or None
+    last_activity_text = normalize_iso(str(last_activity_at or "").strip()) or None
+    waiting_keys: list[str] = []
+    if waiting_item_keys is not None:
+        seen_waiting: set[str] = set()
+        for value in waiting_item_keys:
+            key = str(value or "").strip()
+            if not key or key in seen_waiting:
+                continue
+            seen_waiting.add(key)
+            waiting_keys.append(key)
+            if len(waiting_keys) >= 6:
+                break
     for session_key in _openclaw_event_session_keys(session_keys):
         key = str(session_key or "").strip()
         if not key:
@@ -821,6 +838,14 @@ def _signal_snapshot_upsert(
             payload["active"] = bool(active)
         if reason_text:
             payload["reason"] = reason_text
+        if run_id_text:
+            payload["runId"] = run_id_text
+        if active_items is not None:
+            payload["activeItems"] = max(0, int(active_items))
+        if waiting_keys:
+            payload["waitingItemKeys"] = waiting_keys
+        if last_activity_text:
+            payload["lastActivityAt"] = last_activity_text
         current[key] = payload
 
 
@@ -855,17 +880,31 @@ def _build_openclaw_live_signal_snapshots(session: Any) -> tuple[list[dict[str, 
     active_runs = session.exec(
         select(OrchestrationRun).where(OrchestrationRun.status.in_(list(_ORCHESTRATION_ACTIVE_RUN_STATUSES) + ["running"]))
     ).all()
+    active_run_ids = [str(getattr(run, "runId", "") or "").strip() for run in active_runs if str(getattr(run, "runId", "") or "").strip()]
+    items_by_run: dict[str, list[OrchestrationItem]] = {}
+    if active_run_ids:
+        active_items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId.in_(active_run_ids))).all()
+        for item in active_items:
+            run_id = str(getattr(item, "runId", "") or "").strip()
+            if not run_id:
+                continue
+            items_by_run.setdefault(run_id, []).append(item)
     for run in active_runs:
         session_keys = [
             str(getattr(run, "sessionKey", "") or "").strip(),
             str(getattr(run, "baseSessionKey", "") or "").strip(),
         ]
         request_id = str(getattr(run, "requestId", "") or "").strip() or None
+        details = _orchestration_thread_work_details(
+            run,
+            items_by_run.get(str(getattr(run, "runId", "") or "").strip(), []),
+        )
         stamp = (
             str(getattr(run, "updatedAt", "") or "").strip()
             or str(getattr(run, "startedAt", "") or "").strip()
             or now_iso()
         )
+        stamp = _iso_text_max(stamp, details.get("lastActivityAt"))
         status = str(getattr(run, "status", "") or "").strip().lower()
         _signal_snapshot_upsert(
             thread_work_by_session,
@@ -874,6 +913,10 @@ def _build_openclaw_live_signal_snapshots(session: Any) -> tuple[list[dict[str, 
             request_id=request_id,
             active=True,
             reason="orchestration_stalled" if status == "stalled" else "orchestration_running",
+            run_id=details.get("runId"),
+            active_items=details.get("activeItems"),
+            waiting_item_keys=details.get("waitingItemKeys"),
+            last_activity_at=details.get("lastActivityAt"),
         )
 
     typing = sorted(typing_by_session.values(), key=lambda item: (str(item.get("updatedAt") or ""), str(item.get("sessionKey") or "")))
@@ -882,6 +925,88 @@ def _build_openclaw_live_signal_snapshots(session: Any) -> tuple[list[dict[str, 
         key=lambda item: (str(item.get("updatedAt") or ""), str(item.get("sessionKey") or "")),
     )
     return typing, thread_work
+
+
+def _lookup_active_request_thread_work(
+    session: Any,
+    *,
+    session_key: str | None,
+    request_id: str | None,
+) -> dict[str, Any] | None:
+    request_base = _openclaw_request_id_base(request_id)
+    raw_session_key = str(session_key or "").strip()
+    base_session_key = _base_session_key(raw_session_key)
+    session_keys = [key for key in [raw_session_key, base_session_key] if key]
+
+    queue_query = select(OpenClawChatDispatchQueue).where(
+        OpenClawChatDispatchQueue.status.in_(["pending", "retry", "processing"])
+    )
+    if request_base:
+        queue_query = queue_query.where(OpenClawChatDispatchQueue.requestId == request_base)
+    elif session_keys:
+        queue_query = queue_query.where(OpenClawChatDispatchQueue.sessionKey.in_(session_keys))
+    else:
+        queue_query = None
+
+    if queue_query is not None:
+        queue_row = session.exec(
+            queue_query.order_by(OpenClawChatDispatchQueue.updatedAt.desc(), OpenClawChatDispatchQueue.id.desc()).limit(1)
+        ).first()
+        if queue_row is not None:
+            queue_status = str(getattr(queue_row, "status", "") or "").strip().lower()
+            return {
+                "sessionKeys": [str(getattr(queue_row, "sessionKey", "") or "").strip()],
+                "requestId": str(getattr(queue_row, "requestId", "") or "").strip() or None,
+                "reason": "queued" if queue_status == "pending" else ("retry" if queue_status == "retry" else "dispatch_started"),
+                "runId": None,
+                "activeItems": None,
+                "waitingItemKeys": None,
+                "lastActivityAt": None,
+            }
+
+    run_statuses = list(_ORCHESTRATION_ACTIVE_RUN_STATUSES)
+    if "running" not in run_statuses:
+        run_statuses.append("running")
+    run_query = select(OrchestrationRun).where(OrchestrationRun.status.in_(run_statuses))
+    if request_base:
+        run_query = run_query.where(OrchestrationRun.requestId == request_base)
+    elif session_keys:
+        run_query = run_query.where(
+            or_(
+                OrchestrationRun.sessionKey.in_(session_keys),
+                OrchestrationRun.baseSessionKey.in_(session_keys),
+            )
+        )
+    else:
+        run_query = None
+
+    if run_query is None:
+        return None
+
+    run = session.exec(
+        run_query.order_by(OrchestrationRun.updatedAt.desc(), OrchestrationRun.id.desc()).limit(1)
+    ).first()
+    if run is None:
+        return None
+
+    run_id = str(getattr(run, "runId", "") or "").strip()
+    items: list[OrchestrationItem] = []
+    if run_id:
+        items = session.exec(select(OrchestrationItem).where(OrchestrationItem.runId == run_id)).all()
+    details = _orchestration_thread_work_details(run, items)
+    run_status = str(getattr(run, "status", "") or "").strip().lower()
+    return {
+        "sessionKeys": [
+            str(getattr(run, "sessionKey", "") or "").strip(),
+            str(getattr(run, "baseSessionKey", "") or "").strip(),
+        ],
+        "requestId": str(getattr(run, "requestId", "") or "").strip() or None,
+        "reason": "orchestration_stalled" if run_status == "stalled" else "orchestration_running",
+        "runId": details.get("runId"),
+        "activeItems": details.get("activeItems"),
+        "waitingItemKeys": details.get("waitingItemKeys"),
+        "lastActivityAt": details.get("lastActivityAt"),
+    }
 SLASH_COMMANDS = {
     "/new",
     "/topic",
@@ -4000,29 +4125,54 @@ def append_log_entry(session, payload: LogAppend, idempotency_key: str | None = 
 
     # raw payloads can be large; keep log events lightweight for SSE + in-memory buffer safety.
     publish_live_event({"type": "log.appended", "data": entry.model_dump(exclude={"raw"}), "eventTs": entry.updatedAt})
-    # If this is an assistant log entry, publish a stop typing event to clear the typing indicator
+    # Assistant turns should always clear typing, but they should only clear thread-work when
+    # the request is actually terminal. Interim handoff replies ("dispatched to worker") must
+    # not collapse the topic/task status back to idle.
     if entry.agentId and entry.agentId.lower() == "assistant" and entry.source:
         session_key = entry.source.get("sessionKey") if isinstance(entry.source, dict) else None
         if session_key:
+            request_id = entry.source.get("requestId") if isinstance(entry.source, dict) else None
+            active_thread_work = None
+            try:
+                active_thread_work = _lookup_active_request_thread_work(
+                    session,
+                    session_key=str(session_key or "").strip() or None,
+                    request_id=str(request_id or "").strip() or None,
+                )
+            except Exception:
+                active_thread_work = None
             publish_live_event({
                 "type": "openclaw.typing",
                 "data": {
                     "sessionKey": session_key,
                     "typing": False,
-                    "requestId": entry.source.get("requestId") if isinstance(entry.source, dict) else None
-                },
-                "eventTs": entry.updatedAt
-            })
-            publish_live_event({
-                "type": "openclaw.thread_work",
-                "data": {
-                    "sessionKey": session_key,
-                    "active": False,
-                    "requestId": entry.source.get("requestId") if isinstance(entry.source, dict) else None,
-                    "reason": "assistant_response",
+                    "requestId": request_id,
                 },
                 "eventTs": entry.updatedAt,
             })
+            if active_thread_work:
+                _publish_openclaw_thread_work_state(
+                    session_keys=active_thread_work.get("sessionKeys") or [str(session_key or "").strip()],
+                    active=True,
+                    request_id=active_thread_work.get("requestId"),
+                    reason=active_thread_work.get("reason"),
+                    event_ts=entry.updatedAt,
+                    run_id=active_thread_work.get("runId"),
+                    active_items=active_thread_work.get("activeItems"),
+                    waiting_item_keys=active_thread_work.get("waitingItemKeys"),
+                    last_activity_at=active_thread_work.get("lastActivityAt"),
+                )
+            else:
+                publish_live_event({
+                    "type": "openclaw.thread_work",
+                    "data": {
+                        "sessionKey": session_key,
+                        "active": False,
+                        "requestId": request_id,
+                        "reason": "assistant_response",
+                    },
+                    "eventTs": entry.updatedAt,
+                })
     scoped_seen_ids: set[str] = set()
     for scoped in retro_scoped_rows:
         scoped_id = str(getattr(scoped, "id", "") or "").strip()
@@ -4124,10 +4274,27 @@ def _publish_openclaw_thread_work_state(
     request_id: str | None = None,
     reason: str | None = None,
     event_ts: str | None = None,
+    run_id: str | None = None,
+    active_items: int | None = None,
+    waiting_item_keys: Iterable[str] | None = None,
+    last_activity_at: str | None = None,
 ) -> None:
     rid = _openclaw_request_id_base(request_id)
     stamp = str(event_ts or "").strip() or now_iso()
     reason_text = str(reason or "").strip()
+    run_id_text = str(run_id or "").strip()
+    last_activity_text = normalize_iso(str(last_activity_at or "").strip())
+    waiting_keys: list[str] = []
+    if waiting_item_keys is not None:
+        seen_waiting: set[str] = set()
+        for value in waiting_item_keys:
+            key = str(value or "").strip()
+            if not key or key in seen_waiting:
+                continue
+            seen_waiting.add(key)
+            waiting_keys.append(key)
+            if len(waiting_keys) >= 6:
+                break
     for session_key in _openclaw_event_session_keys(session_keys):
         data: dict[str, Any] = {
             "sessionKey": session_key,
@@ -4137,6 +4304,14 @@ def _publish_openclaw_thread_work_state(
             data["requestId"] = rid
         if reason_text:
             data["reason"] = reason_text
+        if run_id_text:
+            data["runId"] = run_id_text
+        if active_items is not None:
+            data["activeItems"] = max(0, int(active_items))
+        if waiting_keys:
+            data["waitingItemKeys"] = waiting_keys
+        if last_activity_text:
+            data["lastActivityAt"] = last_activity_text
         publish_live_event(
             {
                 "type": "openclaw.thread_work",
@@ -4864,6 +5039,34 @@ def _orchestration_convergence_state(run: OrchestrationRun, items: list[Orchestr
         "waitingItemKeys": waiting_item_keys[:6],
         "subagentsTotal": int(len(subagent_items)),
         "subagentsDone": int(subagent_done),
+    }
+
+
+def _orchestration_thread_work_details(run: OrchestrationRun, items: list[OrchestrationItem]) -> dict[str, Any]:
+    waiting_item_keys: list[str] = []
+    last_activity = normalize_iso(str((getattr(run, "meta", {}) or {}).get("lastActivityAt") or "")) or ""
+    last_activity = _iso_text_max(last_activity, getattr(run, "updatedAt", None))
+    last_activity = _iso_text_max(last_activity, getattr(run, "startedAt", None))
+
+    for item in items:
+        item_status = str(getattr(item, "status", "") or "").strip().lower()
+        item_key = str(getattr(item, "itemKey", "") or "").strip()
+        if item_status not in _ORCHESTRATION_TERMINAL_ITEM_STATUSES and item_key and item_key.lower() != "main.response":
+            waiting_item_keys.append(item_key)
+        item_meta = getattr(item, "meta", {}) or {}
+        if isinstance(item_meta, dict):
+            last_activity = _iso_text_max(
+                last_activity,
+                normalize_iso(str(item_meta.get("lastActivityAt") or "")) or "",
+            )
+        last_activity = _iso_text_max(last_activity, getattr(item, "updatedAt", None))
+        last_activity = _iso_text_max(last_activity, getattr(item, "startedAt", None))
+
+    return {
+        "runId": str(getattr(run, "runId", "") or "").strip() or None,
+        "activeItems": int(len(waiting_item_keys)),
+        "waitingItemKeys": waiting_item_keys[:6],
+        "lastActivityAt": last_activity or None,
     }
 
 
@@ -7220,6 +7423,33 @@ def _orchestration_tick_once(*, now_dt: datetime | None = None) -> dict[str, int
                                 ),
                                 created_at=current_iso,
                             )
+                            try:
+                                thread_work = _orchestration_thread_work_details(run, items)
+                                _publish_openclaw_thread_work_state(
+                                    session_keys=[
+                                        str(getattr(run, "sessionKey", "") or "").strip(),
+                                        str(getattr(run, "baseSessionKey", "") or "").strip(),
+                                    ],
+                                    active=True,
+                                    request_id=str(getattr(run, "requestId", "") or "").strip() or None,
+                                    reason=(
+                                        "orchestration_stalled"
+                                        if str(getattr(run, "status", "") or "").strip().lower() == "stalled"
+                                        else "orchestration_running"
+                                    ),
+                                    event_ts=current_iso,
+                                    run_id=thread_work.get("runId"),
+                                    active_items=thread_work.get("activeItems"),
+                                    waiting_item_keys=thread_work.get("waitingItemKeys"),
+                                    last_activity_at=thread_work.get("lastActivityAt"),
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "Failed to publish thread_work during supervision check-in run_id=%s session_key=%s",
+                                    str(getattr(run, "runId", "") or "").strip(),
+                                    str(getattr(run, "sessionKey", "") or "").strip(),
+                                    exc_info=True,
+                                )
                 last_activity = normalize_iso(str(meta.get("lastActivityAt") or ""))
                 if not last_activity:
                     fallback_activity = (
@@ -14098,6 +14328,8 @@ def _serialize_changes_payload(
     deleted_topics: list[dict[str, Any]],
     openclaw_typing: list[dict[str, Any]],
     openclaw_thread_work: list[dict[str, Any]],
+    authoritative_openclaw_typing: bool = False,
+    authoritative_openclaw_thread_work: bool = False,
     cursor: str | None,
     cursor_seq: int | None,
     reset_at: str | None = None,
@@ -14135,11 +14367,21 @@ def _serialize_changes_payload(
                 "active": bool(item.get("active")),
                 "requestId": str(item.get("requestId") or "").strip() or None,
                 "reason": str(item.get("reason") or "").strip() or None,
+                "runId": str(item.get("runId") or "").strip() or None,
+                "activeItems": max(0, int(item.get("activeItems") or 0)) if item.get("activeItems") is not None else None,
+                "waitingItemKeys": [
+                    str(value or "").strip()
+                    for value in (item.get("waitingItemKeys") or [])
+                    if str(value or "").strip()
+                ][:6],
+                "lastActivityAt": normalize_iso(str(item.get("lastActivityAt") or "").strip()) or None,
                 "updatedAt": str(item.get("updatedAt") or "").strip(),
             }
             for item in openclaw_thread_work
             if str(item.get("sessionKey") or "").strip() and str(item.get("updatedAt") or "").strip()
         ],
+        "authoritativeOpenclawTyping": bool(authoritative_openclaw_typing),
+        "authoritativeOpenclawThreadWork": bool(authoritative_openclaw_thread_work),
     }
 
 
@@ -14176,6 +14418,8 @@ def _build_changes_payload_from_seq(
             deleted_topics=[],
             openclaw_typing=[],
             openclaw_thread_work=[],
+            authoritative_openclaw_typing=False,
+            authoritative_openclaw_thread_work=False,
             cursor=None,
             cursor_seq=since_seq,
             reset_at=reset_at,
@@ -14293,6 +14537,8 @@ def _build_changes_payload_from_seq(
         deleted_topics=deleted_topics,
         openclaw_typing=openclaw_typing,
         openclaw_thread_work=openclaw_thread_work,
+        authoritative_openclaw_typing=typing_changed,
+        authoritative_openclaw_thread_work=thread_work_changed,
         cursor=cursor or None,
         cursor_seq=cursor_seq,
         reset_at=reset_at,
@@ -14441,6 +14687,8 @@ def _build_changes_payload(
         deleted_topics=deleted_topics,
         openclaw_typing=openclaw_typing,
         openclaw_thread_work=openclaw_thread_work,
+        authoritative_openclaw_typing=True,
+        authoritative_openclaw_thread_work=True,
         cursor=cursor or None,
         cursor_seq=None,
         reset_at=reset_at,

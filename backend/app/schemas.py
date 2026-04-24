@@ -577,6 +577,26 @@ class OpenClawThreadWorkSignalOut(BaseModel):
         description="Compact reason for the active work state.",
         examples=["queued"],
     )
+    runId: Optional[str] = Field(
+        default=None,
+        description="Associated orchestration run id when background work is being supervised.",
+        examples=["ocrun-123e4567-e89b-12d3-a456-426614174000"],
+    )
+    activeItems: Optional[int] = Field(
+        default=None,
+        description="Count of delegated work items that are still in-flight for the run.",
+        examples=[2],
+    )
+    waitingItemKeys: List[str] = Field(
+        default_factory=list,
+        description="Stable item keys the main agent is currently waiting on.",
+        examples=[["subagent:worker:1", "subagent:worker:2"]],
+    )
+    lastActivityAt: Optional[str] = Field(
+        default=None,
+        description="Most recent durable activity timestamp observed for this active work.",
+        examples=["2026-02-09T18:05:00.000Z"],
+    )
     updatedAt: str = Field(description="ISO timestamp of the latest signal update.", examples=["2026-02-09T18:05:00.000Z"])
 
 
@@ -611,6 +631,14 @@ class ChangesResponse(BaseModel):
     openclawThreadWork: List[OpenClawThreadWorkSignalOut] = Field(
         default_factory=list,
         description="Authoritative snapshot of sessions with active background OpenClaw work.",
+    )
+    authoritativeOpenclawTyping: bool = Field(
+        default=False,
+        description="When true, openclawTyping is a full authoritative snapshot for this response and clients should clear omitted rows.",
+    )
+    authoritativeOpenclawThreadWork: bool = Field(
+        default=False,
+        description="When true, openclawThreadWork is a full authoritative snapshot for this response and clients should clear omitted rows.",
     )
     resetAt: Optional[str] = Field(
         default=None,

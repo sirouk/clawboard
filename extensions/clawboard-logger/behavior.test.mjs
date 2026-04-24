@@ -1546,6 +1546,87 @@ test("before_tool_call recovers requestId from board session logs when in-memory
   }
 });
 
+test("before_tool_call keeps sibling task request ownership isolated within one topic", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const received = api.__handlers.get("message_received");
+    const toolCall = api.__handlers.get("before_tool_call");
+    assert.equal(typeof received, "function");
+    assert.equal(typeof toolCall, "function");
+
+    const topicId = "topic-sibling-request-1";
+    const taskA = "task-sibling-request-a";
+    const taskB = "task-sibling-request-b";
+    const sessionA = `clawboard:task:${topicId}:${taskA}`;
+    const sessionB = `clawboard:task:${topicId}:${taskB}`;
+    const wrappedSessionA = `agent:main:clawboard:task:${topicId}:${taskA}`;
+    const requestA = "occhat-sibling-request-a";
+    const requestB = "occhat-sibling-request-b";
+
+    await received(
+      {
+        content: "Work on task A",
+        metadata: {
+          sessionKey: sessionA,
+          messageId: requestA,
+          requestId: requestA,
+        },
+      },
+      {
+        channelId: "openclaw",
+        sessionKey: sessionA,
+        conversationId: sessionA,
+        agentId: "main",
+      }
+    );
+
+    await received(
+      {
+        content: "Work on task B",
+        metadata: {
+          sessionKey: sessionB,
+          messageId: requestB,
+          requestId: requestB,
+        },
+      },
+      {
+        channelId: "openclaw",
+        sessionKey: sessionB,
+        conversationId: sessionB,
+        agentId: "main",
+      }
+    );
+
+    await toolCall(
+      {
+        toolName: "sessions_spawn",
+        params: { agentId: "coding" },
+      },
+      {
+        sessionKey: wrappedSessionA,
+        channelId: "openclaw",
+        agentId: "main",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 1);
+    const payload = meaningfulCalls(calls).map((call) => parseBody(call)).find((item) => item?.content === "Tool call: sessions_spawn");
+
+    assert.ok(payload, "expected task-scoped tool call log");
+    assert.equal(payload.source.requestId, requestA);
+    assert.equal(payload.topicId, topicId);
+    assert.equal(payload.taskId, taskA);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("before_tool_call prefers canonical occhat requestId over non-occhat runId", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -2142,6 +2223,205 @@ test("after_tool_call reuses before scope via tool fingerprint when runId is abs
     assert.equal(childCall.source.boardScopeTopicId, "topic-fp-fallback-1");
     assert.equal(childCall.source.boardScopeTaskId, "task-fp-fallback-1");
     assert.equal(childCall.source.boardScopeInherited, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("after_tool_call prefers same-session tool name scope over newer cross-session entries", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const beforeHandler = api.__handlers.get("before_tool_call");
+    const afterHandler = api.__handlers.get("after_tool_call");
+    assert.equal(typeof beforeHandler, "function");
+    assert.equal(typeof afterHandler, "function");
+
+    const sessionA = "agent:worker:clawboard:task:topic-same-session-a:task-same-session-a";
+    const sessionB = "agent:worker:clawboard:task:topic-same-session-b:task-same-session-b";
+
+    await beforeHandler(
+      {
+        toolName: "exec",
+        params: { command: "pwd" },
+      },
+      {
+        sessionKey: sessionA,
+        channelId: "openclaw",
+        agentId: "worker",
+      }
+    );
+
+    await beforeHandler(
+      {
+        toolName: "exec",
+        params: { command: "ls" },
+      },
+      {
+        sessionKey: sessionB,
+        channelId: "openclaw",
+        agentId: "worker",
+      }
+    );
+
+    await afterHandler(
+      {
+        toolName: "exec",
+        result: { stdout: "/tmp/project\n" },
+        durationMs: 14,
+      },
+      {
+        sessionKey: sessionA,
+        channelId: "openclaw",
+        agentId: "worker",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 3);
+    const payloads = meaningfulCalls(calls).map((call) => parseBody(call));
+    const resultPayload = payloads.find(
+      (payload) => payload?.content === "Tool result: exec" && payload?.source?.sessionKey === sessionA
+    );
+
+    assert.ok(resultPayload, "expected same-session tool result log");
+    assert.equal(resultPayload.topicId, "topic-same-session-a");
+    assert.equal(resultPayload.taskId, "task-same-session-a");
+    assert.equal(resultPayload.source.boardScopeTopicId, "topic-same-session-a");
+    assert.equal(resultPayload.source.boardScopeTaskId, "task-same-session-a");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("after_tool_call keeps sibling task tool scope isolated within one topic", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const beforeHandler = api.__handlers.get("before_tool_call");
+    const afterHandler = api.__handlers.get("after_tool_call");
+    assert.equal(typeof beforeHandler, "function");
+    assert.equal(typeof afterHandler, "function");
+
+    const topicId = "topic-sibling-tool-1";
+    const sessionA = `agent:worker:clawboard:task:${topicId}:task-sibling-tool-a`;
+    const sessionB = `agent:worker:clawboard:task:${topicId}:task-sibling-tool-b`;
+
+    await beforeHandler(
+      {
+        toolName: "exec",
+        params: { command: "pwd" },
+      },
+      {
+        sessionKey: sessionA,
+        channelId: "openclaw",
+        agentId: "worker",
+      }
+    );
+
+    await beforeHandler(
+      {
+        toolName: "exec",
+        params: { command: "ls" },
+      },
+      {
+        sessionKey: sessionB,
+        channelId: "openclaw",
+        agentId: "worker",
+      }
+    );
+
+    await afterHandler(
+      {
+        toolName: "exec",
+        result: { stdout: "/tmp/task-a\n" },
+        durationMs: 9,
+      },
+      {
+        sessionKey: sessionA,
+        channelId: "openclaw",
+        agentId: "worker",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 3);
+    const payloads = meaningfulCalls(calls).map((call) => parseBody(call));
+    const resultPayload = payloads.find(
+      (payload) => payload?.content === "Tool result: exec" && payload?.source?.sessionKey === sessionA
+    );
+
+    assert.ok(resultPayload, "expected same-task tool result log");
+    assert.equal(resultPayload.topicId, topicId);
+    assert.equal(resultPayload.taskId, "task-sibling-tool-a");
+    assert.equal(resultPayload.source.boardScopeTopicId, topicId);
+    assert.equal(resultPayload.source.boardScopeTaskId, "task-sibling-tool-a");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("after_tool_call recovers exact scope from toolCallId when session metadata is absent", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const { fn, calls } = createFetchMock([]);
+    globalThis.fetch = fn;
+
+    const api = makeApi();
+    register(api);
+
+    const beforeHandler = api.__handlers.get("before_tool_call");
+    const afterHandler = api.__handlers.get("after_tool_call");
+    assert.equal(typeof beforeHandler, "function");
+    assert.equal(typeof afterHandler, "function");
+
+    const sessionKey = "agent:worker:clawboard:task:topic-callid-fallback:task-callid-fallback";
+    const toolCallId = "call-scope-fallback-1";
+
+    await beforeHandler(
+      {
+        toolName: "exec",
+        toolCallId,
+        params: { command: "pwd" },
+      },
+      {
+        sessionKey,
+        channelId: "openclaw",
+        agentId: "worker",
+      }
+    );
+
+    await afterHandler(
+      {
+        toolName: "exec",
+        toolCallId,
+        result: { stdout: "/repo\n" },
+        durationMs: 11,
+      },
+      {
+        channelId: "openclaw",
+        agentId: "worker",
+      }
+    );
+
+    await waitFor(() => meaningfulCalls(calls).length >= 2);
+    const payloads = meaningfulCalls(calls).map((call) => parseBody(call));
+    const resultPayload = payloads.find((payload) => payload?.content === "Tool result: exec");
+
+    assert.ok(resultPayload, "expected call-id recovered tool result log");
+    assert.equal(resultPayload.topicId, "topic-callid-fallback");
+    assert.equal(resultPayload.taskId, "task-callid-fallback");
+    assert.equal(resultPayload.source.sessionKey, sessionKey);
+    assert.equal(resultPayload.source.boardScopeTopicId, "topic-callid-fallback");
+    assert.equal(resultPayload.source.boardScopeTaskId, "task-callid-fallback");
   } finally {
     globalThis.fetch = originalFetch;
   }

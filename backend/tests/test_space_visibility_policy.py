@@ -20,6 +20,7 @@ try:
     from app.db import get_session, init_db  # noqa: E402
     from app.main import app  # noqa: E402
     from app.models import LogEntry, Space, Task, Topic  # noqa: E402
+    from app.spaces import DEFAULT_SPACE_ID, _resolve_space_id_from_topic_tags, _topic_space_candidates_from_tags  # noqa: E402
 
     _API_TESTS_AVAILABLE = True
 except Exception:
@@ -109,6 +110,68 @@ class SpaceVisibilityPolicyTests(unittest.TestCase):
         alpha = next((item for item in spaces if item.get("id") == "space-alpha"), None)
         self.assertIsNotNone(alpha)
         self.assertFalse((alpha or {}).get("defaultVisible", True))
+
+    def test_space_upsert_persists_color_for_existing_space(self):
+        self._create_space("space-brand", "Brand")
+
+        res = self.client.post(
+            "/api/spaces",
+            json={"id": "space-brand", "name": "Brand", "color": "#4EA1FF"},
+            headers=self.auth_headers,
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertEqual(payload["id"], "space-brand")
+        self.assertEqual(payload["color"], "#4EA1FF")
+
+        spaces_res = self.client.get("/api/spaces")
+        self.assertEqual(spaces_res.status_code, 200, spaces_res.text)
+        spaces = spaces_res.json()
+        brand = next((item for item in spaces if item.get("id") == "space-brand"), None)
+        self.assertIsNotNone(brand)
+        self.assertEqual((brand or {}).get("color"), "#4EA1FF")
+
+    def test_operational_tags_do_not_resolve_to_spaces(self):
+        candidates = _topic_space_candidates_from_tags(
+            ["delegating", "agent:worker", "session:agent:worker:subagent:abc", "Chutes", "space:Ops"]
+        )
+        self.assertEqual(candidates, [("space-chutes", "Chutes"), ("space-ops", "Ops")])
+
+        with get_session() as session:
+            resolved = _resolve_space_id_from_topic_tags(
+                session,
+                ["delegating", "agent:worker", "session:agent:worker:subagent:abc", "Chutes"],
+                fallback_space_id=DEFAULT_SPACE_ID,
+            )
+            self.assertEqual(resolved, "space-chutes")
+            self.assertIsNotNone(session.get(Space, "space-chutes"))
+            self.assertIsNone(session.get(Space, "space-agentworker"))
+
+    def test_topic_upsert_ignores_operational_tags_for_space_selection(self):
+        res = self.client.post(
+            "/api/topics",
+            json={
+                "id": "topic-operational-tags-1",
+                "name": "Delegated topic",
+                "tags": [
+                    "delegating",
+                    "agent:worker",
+                    "session:agent:worker:subagent:abc",
+                    "Chutes",
+                ],
+            },
+            headers=self.auth_headers,
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertEqual(payload["spaceId"], "space-chutes")
+        self.assertEqual(payload["tags"], ["delegating", "agent:worker", "session:agent:worker:subagent:abc", "Chutes"])
+
+        spaces_res = self.client.get("/api/spaces")
+        self.assertEqual(spaces_res.status_code, 200, spaces_res.text)
+        space_ids = {item.get("id") for item in spaces_res.json()}
+        self.assertIn("space-chutes", space_ids)
+        self.assertNotIn("space-agentworker", space_ids)
 
 
 if __name__ == "__main__":

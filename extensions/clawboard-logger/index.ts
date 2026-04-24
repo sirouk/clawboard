@@ -273,6 +273,20 @@ export default function register(api: OpenClawPluginApi) {
       parseBoardSessionKey,
       boardSessionRouteToSessionKeys,
     });
+  const ownershipSessionKeysFor = (sessionKey: string | undefined | null) => {
+    const normalized = normalizeId(sessionKey);
+    if (!normalized) return [];
+    const keys = new Set<string>();
+    keys.add(normalized);
+    const base = normalized.split("|", 1)[0]?.trim() || normalized;
+    if (base) keys.add(base);
+    const route = parseBoardSessionKey(normalized);
+    if (route) {
+      const canonical = normalizeId(boardSessionRouteToSessionKeys(route)[0]);
+      if (canonical) keys.add(canonical);
+    }
+    return Array.from(keys);
+  };
   const boardScopeFromCurrentSessionKey = (sessionKey: string | undefined | null) =>
     boardScopeFromSessionKey(sessionKey, {
       parseBoardSessionKey,
@@ -1758,6 +1772,7 @@ export default function register(api: OpenClawPluginApi) {
     routing?: RoutingScope;
   };
   const toolScopeByRunId = new Map<string, ToolScopeMemoryEntry>();
+  const toolScopeByCallId = new Map<string, ToolScopeMemoryEntry>();
   const toolScopeByFingerprint = new Map<string, ToolScopeMemoryEntry[]>();
   const toolScopeByName = new Map<string, ToolScopeMemoryEntry[]>();
   const TOOL_SCOPE_MEMORY_TTL_MS = 15 * 60_000;
@@ -1785,7 +1800,7 @@ export default function register(api: OpenClawPluginApi) {
     const normalizedRequestId = normalizeRequestId(requestId);
     if (!normalizedRequestId) return;
     const ts = nowMs();
-    for (const key of requestSessionKeysFor(sessionKey)) {
+    for (const key of ownershipSessionKeysFor(sessionKey)) {
       openclawRequestBySession.set(key, { requestId: normalizedRequestId, ts });
     }
     pruneOpenclawRequestMap(ts, openclawRequestBySession.size > OPENCLAW_REQUEST_ID_MAX_ENTRIES);
@@ -1796,7 +1811,7 @@ export default function register(api: OpenClawPluginApi) {
     if (openclawRequestBySession.size > OPENCLAW_REQUEST_ID_MAX_ENTRIES) {
       pruneOpenclawRequestMap(ts, true);
     }
-    for (const key of requestSessionKeysFor(sessionKey)) {
+    for (const key of ownershipSessionKeysFor(sessionKey)) {
       const row = openclawRequestBySession.get(key);
       if (!row) continue;
       if (ts - row.ts > OPENCLAW_REQUEST_ID_TTL_MS) {
@@ -1826,9 +1841,23 @@ export default function register(api: OpenClawPluginApi) {
     return recentOpenclawRequestId(params.sessionKey);
   };
 
-  const canonicalBoardScopeSessionKeys = (scope: BoardScope | undefined) => {
+  const canonicalBoardScopeSessionKeys = (
+    scope:
+      | BoardScope
+      | {
+          kind: "topic";
+          topicId: string;
+        }
+      | {
+          kind: "task";
+          topicId: string;
+          taskId: string;
+        }
+      | undefined
+  ) => {
     if (!scope?.topicId) return [];
-    return boardSessionRouteToSessionKeys(scope);
+    const canonical = normalizeId(boardSessionRouteToSessionKeys(scope)[0]);
+    return canonical ? [canonical] : [];
   };
 
   const resolveOpenclawRequestIdForBoardScope = async (params: {
@@ -1843,17 +1872,17 @@ export default function register(api: OpenClawPluginApi) {
     const candidates = new Set<string>();
     const sessionKey = normalizeId(params.sessionKey);
     if (sessionKey) {
-      for (const key of requestSessionKeysFor(sessionKey)) candidates.add(key);
+      for (const key of ownershipSessionKeysFor(sessionKey)) candidates.add(key);
     }
     const scopeSessionKey = normalizeId(params.boardScope?.sessionKey);
     if (scopeSessionKey) {
-      for (const key of requestSessionKeysFor(scopeSessionKey)) candidates.add(key);
+      for (const key of ownershipSessionKeysFor(scopeSessionKey)) candidates.add(key);
     }
     const canonicalScopeSessionKeys = canonicalBoardScopeSessionKeys(
       params.boardScope ?? boardScopeFromCurrentSessionKey(sessionKey),
     );
     for (const canonicalScopeSessionKey of canonicalScopeSessionKeys) {
-      for (const key of requestSessionKeysFor(canonicalScopeSessionKey)) candidates.add(key);
+      for (const key of ownershipSessionKeysFor(canonicalScopeSessionKey)) candidates.add(key);
     }
     for (const candidate of candidates) {
       const candidateRequestId = inferOpenclawRequestIdFromMessageId(recentOpenclawRequestId(candidate));
@@ -1868,7 +1897,7 @@ export default function register(api: OpenClawPluginApi) {
     for (const candidate of candidates) {
       const route = parseBoardSessionKey(candidate);
       if (!route) continue;
-      for (const lookupSessionKey of boardSessionRouteToSessionKeys(route)) {
+      for (const lookupSessionKey of canonicalBoardScopeSessionKeys(route)) {
         lookupSessionKeys.add(lookupSessionKey);
       }
     }
@@ -1915,6 +1944,11 @@ export default function register(api: OpenClawPluginApi) {
         toolScopeByRunId.delete(key);
       }
     }
+    for (const [key, value] of toolScopeByCallId.entries()) {
+      if (ts - value.ts > TOOL_SCOPE_MEMORY_TTL_MS) {
+        toolScopeByCallId.delete(key);
+      }
+    }
     for (const [key, rows] of toolScopeByFingerprint.entries()) {
       const freshRows = rows.filter((row) => ts - row.ts <= TOOL_SCOPE_MEMORY_TTL_MS);
       if (freshRows.length > 0) {
@@ -1933,12 +1967,15 @@ export default function register(api: OpenClawPluginApi) {
     }
     const fingerprintEntryCount = Array.from(toolScopeByFingerprint.values()).reduce((acc, rows) => acc + rows.length, 0);
     const nameEntryCount = Array.from(toolScopeByName.values()).reduce((acc, rows) => acc + rows.length, 0);
-    const totalEntries = toolScopeByRunId.size + fingerprintEntryCount + nameEntryCount;
+    const totalEntries = toolScopeByRunId.size + toolScopeByCallId.size + fingerprintEntryCount + nameEntryCount;
     if (!forceTrim && totalEntries <= TOOL_SCOPE_MEMORY_MAX_ENTRIES) return;
     if (totalEntries <= TOOL_SCOPE_MEMORY_MAX_ENTRIES) return;
 
     const runEntries = Array.from(toolScopeByRunId.entries())
       .map(([key, value]) => ({ kind: "run" as const, key, ts: value.ts }))
+      .sort((a, b) => a.ts - b.ts);
+    const callEntries = Array.from(toolScopeByCallId.entries())
+      .map(([key, value]) => ({ kind: "call" as const, key, ts: value.ts }))
       .sort((a, b) => a.ts - b.ts);
     const fingerprintEntries = Array.from(toolScopeByFingerprint.entries())
       .flatMap(([fingerprint, rows]) =>
@@ -1962,16 +1999,29 @@ export default function register(api: OpenClawPluginApi) {
 
     let overflow = totalEntries - TOOL_SCOPE_MEMORY_MAX_ENTRIES;
     let runCursor = 0;
+    let callCursor = 0;
     let fpCursor = 0;
     let nameCursor = 0;
     while (overflow > 0) {
       const nextRun = runEntries[runCursor];
+      const nextCall = callEntries[callCursor];
       const nextFp = fingerprintEntries[fpCursor];
       const nextName = nameEntries[nameCursor];
-      const pickRun = nextRun && (!nextFp || nextRun.ts <= nextFp.ts) && (!nextName || nextRun.ts <= nextName.ts);
+      const pickRun =
+        nextRun &&
+        (!nextCall || nextRun.ts <= nextCall.ts) &&
+        (!nextFp || nextRun.ts <= nextFp.ts) &&
+        (!nextName || nextRun.ts <= nextName.ts);
       if (pickRun && nextRun) {
         toolScopeByRunId.delete(nextRun.key);
         runCursor += 1;
+        overflow -= 1;
+        continue;
+      }
+      const pickCall = nextCall && (!nextFp || nextCall.ts <= nextFp.ts) && (!nextName || nextCall.ts <= nextName.ts);
+      if (pickCall && nextCall) {
+        toolScopeByCallId.delete(nextCall.key);
+        callCursor += 1;
         overflow -= 1;
         continue;
       }
@@ -2012,6 +2062,10 @@ export default function register(api: OpenClawPluginApi) {
     return normalizeId(typeof toolName === "string" ? toolName : undefined)?.toLowerCase();
   };
 
+  const toolScopeCallIdKey = (toolCallId: unknown) => {
+    return normalizeId(typeof toolCallId === "string" ? toolCallId : undefined);
+  };
+
   const toolScopeFingerprint = (toolName: unknown, params: unknown) => {
     const normalizedToolName = toolScopeNameKey(toolName);
     if (!normalizedToolName) return undefined;
@@ -2023,6 +2077,60 @@ export default function register(api: OpenClawPluginApi) {
     }
     const digest = crypto.createHash("sha1").update(`${normalizedToolName}|${serialized}`).digest("hex").slice(0, 24);
     return `${normalizedToolName}:${digest}`;
+  };
+
+  const toolScopeMatchesSession = (entrySessionKey: string | undefined, preferSessionKey: string | undefined) => {
+    const preferredKeys = ownershipSessionKeysFor(preferSessionKey);
+    const entryKeys = ownershipSessionKeysFor(entrySessionKey);
+    if (preferredKeys.length === 0 || entryKeys.length === 0) return false;
+    const preferred = new Set(preferredKeys);
+    return entryKeys.some((key) => preferred.has(key));
+  };
+
+  const selectRecentToolScopeEntry = (
+    rows: ToolScopeMemoryEntry[],
+    options?: { preferSessionKey?: string; allowCrossSessionFallback?: boolean }
+  ) => {
+    const ts = nowMs();
+    const freshRows = rows.filter((row) => ts - row.ts <= TOOL_SCOPE_MEMORY_TTL_MS);
+    if (freshRows.length === 0) {
+      return { row: undefined, remaining: freshRows };
+    }
+    const preferSessionKey = normalizeId(options?.preferSessionKey);
+    let selectedIndex = -1;
+    if (preferSessionKey) {
+      for (let i = freshRows.length - 1; i >= 0; i -= 1) {
+        if (toolScopeMatchesSession(freshRows[i]?.sessionKey, preferSessionKey)) {
+          selectedIndex = i;
+          break;
+        }
+      }
+      if (selectedIndex < 0 && options?.allowCrossSessionFallback === false) {
+        return { row: undefined, remaining: freshRows };
+      }
+    }
+    if (selectedIndex < 0) {
+      selectedIndex = freshRows.length - 1;
+    }
+    const [row] = freshRows.splice(selectedIndex, 1);
+    return { row, remaining: freshRows };
+  };
+
+  const preferPinnedSubagentRequestId = (sessionKey: string | undefined, candidateRequestId: string | undefined) => {
+    const candidate = normalizeRequestId(candidateRequestId);
+    if (!candidate) return undefined;
+    const normalizedSessionKey = normalizeId(sessionKey);
+    if (!parseSubagentSession(normalizedSessionKey)) return candidate;
+    const existing = inferOpenclawRequestIdFromMessageId(recentOpenclawRequestId(normalizedSessionKey));
+    if (
+      existing &&
+      existing !== candidate &&
+      existing.toLowerCase().startsWith(OPENCLAW_REQUEST_ID_PREFIX) &&
+      candidate.toLowerCase().startsWith(OPENCLAW_REQUEST_ID_PREFIX)
+    ) {
+      return existing;
+    }
+    return candidate;
   };
 
   const rememberToolScopeForRun = (
@@ -2039,6 +2147,22 @@ export default function register(api: OpenClawPluginApi) {
       routing: value.routing,
     });
     pruneToolScopeMap(ts, toolScopeByRunId.size > TOOL_SCOPE_MEMORY_MAX_ENTRIES);
+  };
+
+  const rememberToolScopeForCallId = (
+    toolCallId: unknown,
+    value: { sessionKey?: string; requestId?: string; routing?: RoutingScope }
+  ) => {
+    const key = toolScopeCallIdKey(toolCallId);
+    if (!key) return;
+    const ts = nowMs();
+    toolScopeByCallId.set(key, {
+      ts,
+      sessionKey: normalizeId(value.sessionKey),
+      requestId: normalizeRequestId(value.requestId),
+      routing: value.routing,
+    });
+    pruneToolScopeMap(ts, toolScopeByCallId.size > TOOL_SCOPE_MEMORY_MAX_ENTRIES);
   };
 
   const rememberToolScopeForFingerprint = (
@@ -2100,7 +2224,30 @@ export default function register(api: OpenClawPluginApi) {
     return row;
   };
 
-  const recentToolScopeForFingerprint = (toolName: unknown, params: unknown) => {
+  const recentToolScopeForCallId = (toolCallId: unknown, preferSessionKey?: string) => {
+    const key = toolScopeCallIdKey(toolCallId);
+    if (!key) return undefined;
+    const ts = nowMs();
+    if (toolScopeByCallId.size > TOOL_SCOPE_MEMORY_MAX_ENTRIES) {
+      pruneToolScopeMap(ts, true);
+    }
+    const row = toolScopeByCallId.get(key);
+    if (!row) return undefined;
+    if (ts - row.ts > TOOL_SCOPE_MEMORY_TTL_MS) {
+      toolScopeByCallId.delete(key);
+      return undefined;
+    }
+    if (preferSessionKey && !toolScopeMatchesSession(row.sessionKey, preferSessionKey)) {
+      return undefined;
+    }
+    return row;
+  };
+
+  const recentToolScopeForFingerprint = (
+    toolName: unknown,
+    params: unknown,
+    options?: { preferSessionKey?: string; allowCrossSessionFallback?: boolean }
+  ) => {
     const key = toolScopeFingerprint(toolName, params);
     if (!key) return undefined;
     const ts = nowMs();
@@ -2109,21 +2256,27 @@ export default function register(api: OpenClawPluginApi) {
     }
     const rows = toolScopeByFingerprint.get(key);
     if (!rows || rows.length === 0) return undefined;
-    const freshRows = rows.filter((row) => ts - row.ts <= TOOL_SCOPE_MEMORY_TTL_MS);
-    if (freshRows.length === 0) {
-      toolScopeByFingerprint.delete(key);
+    const selected = selectRecentToolScopeEntry(rows, options);
+    if (!selected.row) {
+      if (selected.remaining.length > 0) {
+        toolScopeByFingerprint.set(key, selected.remaining);
+      } else {
+        toolScopeByFingerprint.delete(key);
+      }
       return undefined;
     }
-    const row = freshRows.pop();
-    if (freshRows.length > 0) {
-      toolScopeByFingerprint.set(key, freshRows);
-    } else {
+    if (selected.remaining.length === 0) {
       toolScopeByFingerprint.delete(key);
+    } else {
+      toolScopeByFingerprint.set(key, selected.remaining);
     }
-    return row;
+    return selected.row;
   };
 
-  const recentToolScopeForName = (toolName: unknown) => {
+  const recentToolScopeForName = (
+    toolName: unknown,
+    options?: { preferSessionKey?: string; allowCrossSessionFallback?: boolean }
+  ) => {
     const key = toolScopeNameKey(toolName);
     if (!key) return undefined;
     const ts = nowMs();
@@ -2132,18 +2285,21 @@ export default function register(api: OpenClawPluginApi) {
     }
     const rows = toolScopeByName.get(key);
     if (!rows || rows.length === 0) return undefined;
-    const freshRows = rows.filter((row) => ts - row.ts <= TOOL_SCOPE_MEMORY_TTL_MS);
-    if (freshRows.length === 0) {
-      toolScopeByName.delete(key);
+    const selected = selectRecentToolScopeEntry(rows, options);
+    if (!selected.row) {
+      if (selected.remaining.length > 0) {
+        toolScopeByName.set(key, selected.remaining);
+      } else {
+        toolScopeByName.delete(key);
+      }
       return undefined;
     }
-    const row = freshRows.pop();
-    if (freshRows.length > 0) {
-      toolScopeByName.set(key, freshRows);
-    } else {
+    if (selected.remaining.length === 0) {
       toolScopeByName.delete(key);
+    } else {
+      toolScopeByName.set(key, selected.remaining);
     }
-    return row;
+    return selected.row;
   };
 
   const resolveSessionKey = (meta: { sessionKey?: string } | undefined, ctx2: PluginHookContextBase) => {
@@ -2530,6 +2686,11 @@ export default function register(api: OpenClawPluginApi) {
       requestId,
       routing,
     });
+    rememberToolScopeForCallId(hints.toolCallId, {
+      sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+      requestId,
+      routing,
+    });
     rememberToolScopeForName(hints.toolName, {
       sessionKey: effectiveSessionKey ?? ctx.sessionKey,
       requestId,
@@ -2586,17 +2747,21 @@ export default function register(api: OpenClawPluginApi) {
       (event as unknown as { input?: unknown }).input ??
       {};
     const redacted = redact(toolParamsRaw);
+    const toolEvent = asRecord(event);
     const toolMeta = normalizeEventMeta(
       (event as unknown as { metadata?: Record<string, unknown> }).metadata as Record<string, unknown> | undefined,
       (event as unknown as { sessionKey?: unknown }).sessionKey,
     );
+    const hints = hookSourceHints({
+      hookName: "before_tool_call",
+      event: toolEvent,
+      meta: toolMeta,
+      ctx,
+    });
     const effectiveSessionKey = resolveSessionKey(toolMeta as { sessionKey?: string } | undefined, ctx);
     let requestId = resolveOpenclawRequestId({
       sessionKey: effectiveSessionKey ?? ctx.sessionKey,
-      explicitRequestId:
-        (event as unknown as { requestId?: unknown }).requestId ??
-        (event as unknown as { runId?: unknown }).runId ??
-        toolMeta?.requestId,
+      explicitRequestId: hints.requestId,
     });
     if (shouldIgnoreSessionKey(effectiveSessionKey ?? ctx?.sessionKey, IGNORE_SESSION_PREFIXES)) return;
     const routing = await resolveRoutingScope(effectiveSessionKey, ctx, toolMeta);
@@ -2606,7 +2771,12 @@ export default function register(api: OpenClawPluginApi) {
       boardScope: routing.boardScope,
     });
     if (!hasSpecificSessionAnchor(effectiveSessionKey, ctx) && !hasToolRoutingAnchor(routing)) return;
-    rememberToolScopeForRun((event as unknown as { runId?: unknown }).runId, {
+    rememberToolScopeForRun(hints.runId, {
+      sessionKey: effectiveSessionKey ?? ctx.sessionKey,
+      requestId,
+      routing,
+    });
+    rememberToolScopeForCallId(hints.toolCallId, {
       sessionKey: effectiveSessionKey ?? ctx.sessionKey,
       requestId,
       routing,
@@ -2635,9 +2805,7 @@ export default function register(api: OpenClawPluginApi) {
         sessionKey: effectiveSessionKey,
         requestId,
         boardScope: routing.boardScope,
-        extra: {
-          hook: "before_tool_call",
-        },
+        extra: hints.extra,
       }),
     });
   });
@@ -2659,20 +2827,40 @@ export default function register(api: OpenClawPluginApi) {
       (event as unknown as { metadata?: Record<string, unknown> }).metadata as Record<string, unknown> | undefined,
       (event as unknown as { sessionKey?: unknown }).sessionKey,
     );
-    const remembered =
-      recentToolScopeForRun((event as unknown as { runId?: unknown }).runId) ??
-      recentToolScopeForFingerprint(event.toolName, toolParamsRaw) ??
-      recentToolScopeForName(event.toolName);
     const resolvedSessionKey = resolveSessionKey(toolMeta as { sessionKey?: string } | undefined, ctx);
+    const hints = hookSourceHints({
+      hookName: "after_tool_call",
+      event: asRecord(event),
+      meta: toolMeta,
+      ctx,
+    });
+    const allowCrossSessionToolScopeFallback =
+      !Boolean(parseSubagentSession(resolvedSessionKey ?? ctx.sessionKey)) &&
+      !hasSpecificSessionAnchor(resolvedSessionKey, ctx);
+    const remembered =
+      recentToolScopeForRun(hints.runId) ??
+      recentToolScopeForCallId(hints.toolCallId, resolvedSessionKey ?? ctx.sessionKey) ??
+      recentToolScopeForFingerprint(event.toolName, toolParamsRaw, {
+        preferSessionKey: resolvedSessionKey ?? ctx.sessionKey,
+        allowCrossSessionFallback: allowCrossSessionToolScopeFallback,
+      }) ??
+      recentToolScopeForName(event.toolName, {
+        preferSessionKey: resolvedSessionKey ?? ctx.sessionKey,
+        allowCrossSessionFallback: allowCrossSessionToolScopeFallback,
+      });
     const effectiveSessionKey =
       hasSpecificSessionAnchor(resolvedSessionKey, ctx) || !remembered?.sessionKey
         ? resolvedSessionKey
         : remembered.sessionKey;
+    const rememberedRequestId = preferPinnedSubagentRequestId(
+      effectiveSessionKey ?? resolvedSessionKey ?? ctx.sessionKey,
+      remembered?.requestId,
+    );
     const explicitRequestId =
       (event as unknown as { requestId?: unknown }).requestId ??
       (event as unknown as { runId?: unknown }).runId ??
       toolMeta?.requestId ??
-      remembered?.requestId;
+      rememberedRequestId;
     let requestId = resolveOpenclawRequestId({
       sessionKey: effectiveSessionKey ?? ctx.sessionKey,
       explicitRequestId,

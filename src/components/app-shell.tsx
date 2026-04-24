@@ -30,6 +30,7 @@ import {
 } from "@/lib/openclaw-workspaces";
 import { useSemanticSearch } from "@/lib/use-semantic-search";
 import { buildSpaceVisibilityRevision, resolveSpaceVisibilityFromViewer } from "@/lib/space-visibility";
+import { filterUserFacingTopicTagLabels, spaceIdFromTopicTagLabel } from "@/lib/topic-tags";
 import { buildTopicUrl, withFocusParam, withRevealParam } from "@/lib/url";
 import { getApiBase } from "@/lib/api";
 import { queueableApiMutation } from "@/lib/write-queue";
@@ -182,19 +183,7 @@ function displaySpaceName(space: Pick<Space, "id" | "name">) {
 }
 
 function spaceIdFromTagLabel(value: string) {
-  let text = String(value ?? "").trim().toLowerCase();
-  if (!text) return null;
-  if (text.startsWith("system:")) return null;
-  if (text.startsWith("space:")) text = text.split(":", 2)[1]?.trim() ?? "";
-  const slugged = text
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9-]/g, "")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (!slugged || slugged === "default" || slugged === "global" || slugged === "all" || slugged === "all-spaces") {
-    return null;
-  }
-  return `space-${slugged}`;
+  return spaceIdFromTopicTagLabel(value);
 }
 
 function topicSpaceIds(topic: Pick<Topic, "spaceId" | "tags"> | null | undefined) {
@@ -1194,7 +1183,7 @@ function AppShellLayout({ children }: { children: React.ReactNode }) {
         const name = (topic.name ?? "").toLowerCase();
         const id = (topic.id ?? "").toLowerCase();
         const description = (topic.description ?? "").toLowerCase();
-        const tags = (topic.tags ?? []).join(" ").toLowerCase();
+        const tags = filterUserFacingTopicTagLabels(topic.tags ?? []).join(" ").toLowerCase();
         const matchesQuery = name.includes(q) || id.includes(q) || description.includes(q) || tags.includes(q);
         return matchesQuery && filterDone(topic);
       });
